@@ -1,0 +1,24 @@
+# OS command injection: untrusted request input flowing into a shell command
+# execution.
+rules:
+  - id: js-command-injection
+    languages: [javascript]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted request input (query string, route params, or body) flows
+      into a shell command execution without sanitization, which may allow
+      OS command injection. Avoid passing user-controlled data to a shell
+      (child_process.exec/execSync/spawn with shell:true); use execFile or
+      spawn with an argument array instead.
+    sources:
+      - "js:*req.query*"
+      - "js:*req.params*"
+      - "js:*req.body*"
+    sinks:
+      - "js:*child_process.exec*"
+      - "js:*.exec"
+      - "js:*.execSync"
+      - "js:*.spawn"
+    sanitizers: []
+    propagators: []

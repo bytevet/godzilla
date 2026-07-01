@@ -1,0 +1,39 @@
+# Path traversal: untrusted HTTP/URL input flowing into filesystem access
+# without path normalization/containment.
+rules:
+  - id: go-path-traversal
+    languages: [go]
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input flows into a filesystem path without being cleaned or
+      validated, which may allow path traversal (e.g. "../" sequences) to
+      read or write files outside the intended directory.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PostFormValue"
+    # The filesystem path is logical arg 0 for all of these (os.WriteFile's
+    # data/perm args, for instance, are not path-traversal injection points).
+    sinks:
+      - "go:os.Open*#0"
+      - "go:os.ReadFile#0"
+      - "go:os.WriteFile#0"
+      - "go:os.Create#0"
+      - "go:*ioutil.ReadFile#0"
+    # filepath.Base strips the directory component, so it genuinely prevents
+    # traversal. filepath.Clean / filepath.Join do NOT contain input to a base
+    # directory ("/data" + "../../etc" cleans to "/etc"), so they are treated
+    # as propagators, not sanitizers.
+    sanitizers:
+      - "go:*filepath.Base"
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:fmt.Sprintf*"
+      - "go:strings.Join"
+      - "go:strings.Replace*"
+      - "go:path/filepath.Join"
+      - "go:*filepath.Join"
+      - "go:path/filepath.Clean"
+      - "go:*filepath.Clean"

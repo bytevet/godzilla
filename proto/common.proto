@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package godzilla.ir.v1;
+
+option go_package = "godzilla/pkg/ir/v1;ir";
+
+// Position represents a source code location.
+message Position {
+  string filename = 1;
+  int32 line = 2;
+  int32 column = 3;
+}
+
+// TypeKind defines the high-level category of a type.
+enum TypeKind {
+  TYPE_KIND_UNSPECIFIED = 0;
+  TYPE_KIND_BASIC = 1;      // int, float, bool, string, etc.
+  TYPE_KIND_POINTER = 2;
+  TYPE_KIND_STRUCT = 3;
+  TYPE_KIND_ARRAY = 4;
+  TYPE_KIND_SLICE = 5;
+  TYPE_KIND_MAP = 6;
+  TYPE_KIND_INTERFACE = 7;
+  TYPE_KIND_FUNC = 8;
+  TYPE_KIND_CHAN = 9;
+  TYPE_KIND_TUPLE = 10;     // Multiple return values
+  TYPE_KIND_NAMED = 11;     // Defined type (e.g. type MyInt int)
+}
+
+// BasicTypeKind refines TYPE_KIND_BASIC.
+enum BasicTypeKind {
+  BASIC_TYPE_KIND_UNSPECIFIED = 0;
+  BASIC_TYPE_KIND_BOOL = 1;
+  BASIC_TYPE_KIND_INT = 2;
+  BASIC_TYPE_KIND_INT8 = 3;
+  BASIC_TYPE_KIND_INT16 = 4;
+  BASIC_TYPE_KIND_INT32 = 5;
+  BASIC_TYPE_KIND_INT64 = 6;
+  BASIC_TYPE_KIND_UINT = 7;
+  BASIC_TYPE_KIND_UINT8 = 8;
+  BASIC_TYPE_KIND_UINT16 = 9;
+  BASIC_TYPE_KIND_UINT32 = 10;
+  BASIC_TYPE_KIND_UINT64 = 11;
+  BASIC_TYPE_KIND_UINTPTR = 12;
+  BASIC_TYPE_KIND_FLOAT32 = 13;
+  BASIC_TYPE_KIND_FLOAT64 = 14;
+  BASIC_TYPE_KIND_COMPLEX64 = 15;
+  BASIC_TYPE_KIND_COMPLEX128 = 16;
+  BASIC_TYPE_KIND_STRING = 17;
+  BASIC_TYPE_KIND_UNSAFE_POINTER = 18;
+  BASIC_TYPE_KIND_UNTYPED_BOOL = 19;
+  BASIC_TYPE_KIND_UNTYPED_INT = 20;
+  BASIC_TYPE_KIND_UNTYPED_RUNE = 21;
+  BASIC_TYPE_KIND_UNTYPED_FLOAT = 22;
+  BASIC_TYPE_KIND_UNTYPED_COMPLEX = 23;
+  BASIC_TYPE_KIND_UNTYPED_STRING = 24;
+  BASIC_TYPE_KIND_UNTYPED_NIL = 25;
+}
+
+// Type represents a type in the IR.
+message Type {
+  TypeKind kind = 1;
+  
+  // Only set if kind == TYPE_KIND_BASIC
+  BasicTypeKind basic_kind = 2;
+
+  // Only set if kind == TYPE_KIND_POINTER, ARRAY, SLICE, CHAN, MAP (key/elem)
+  Type elem_type = 3;
+  Type key_type = 4; // For maps
+
+  // Only set if kind == TYPE_KIND_ARRAY
+  int64 array_len = 5;
+
+  // Only set if kind == TYPE_KIND_STRUCT
+  repeated Field fields = 6;
+
+  // Only set if kind == TYPE_KIND_INTERFACE
+  repeated Method methods = 7;
+
+  // Only set if kind == TYPE_KIND_FUNC
+  Signature signature = 8;
+
+  // Only set if kind == TYPE_KIND_NAMED
+  string name = 9;
+  Type underlying_type = 10; // The underlying type definition
+  repeated Method method_set = 11; // Methods associated with this named type
+  Position pos = 12; // Definition position for named types
+}
+
+// Field represents a struct field.
+message Field {
+  string name = 1;
+  Type type = 2;
+  string tag = 3; // Struct tag (e.g. for Go/JSON)
+  bool embedded = 4; // Anonymous field
+}
+
+// Method represents a method in an interface or named type.
+message Method {
+  string name = 1;
+  Type signature = 2; // Must be TYPE_KIND_FUNC
+}
+
+// Signature represents a function signature.
+message Signature {
+  repeated Type params = 1;
+  repeated Type results = 2;
+  bool variadic = 3;
+  Type recv = 4; // Receiver type (for methods), optional
+}
+
+// Constant represents a literal value.
+message Constant {
+  Type type = 1;
+  oneof value {
+    bool bool_val = 2;
+    int64 int_val = 3;   // Store all integers as 64-bit
+    double float_val = 4; // Store all floats as double
+    string string_val = 5;
+    // Complex numbers can be stored as real/imag parts if needed, omitting for brevity
+  }
+  bool is_nil = 6;
+}
+
+// Global represents a global variable.
+message Global {
+  string name = 1;
+  Type type = 2;
+  Constant init_value = 3; // Optional initialization value
+  Position pos = 4;
+}

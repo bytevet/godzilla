@@ -1,0 +1,28 @@
+# Command injection: untrusted HTTP/URL input flowing into os/exec command
+# construction.
+rules:
+  - id: go-command-injection
+    languages: [go]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input flows into os/exec command construction, which may
+      allow arbitrary command execution. Avoid building shell commands from
+      user input; if unavoidable, pass arguments individually and never via
+      a shell interpreter.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PostFormValue"
+    sinks:
+      - "go:*os/exec.Command"
+      - "go:*os/exec.CommandContext"
+    # No built-in sanitizer neutralizes tainted input for shell command
+    # construction; avoid passing tainted data to exec entirely.
+    sanitizers: []
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:fmt.Sprintf*"
+      - "go:strings.Join"
+      - "go:strings.Replace*"

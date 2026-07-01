@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package godzilla.ir.v1;
+
+option go_package = "godzilla/pkg/ir/v1;ir";
+
+import "proto/common.proto";
+
+// OpCode defines the operation to perform.
+//
+// gIR v2 keeps a deliberately SMALL, language-neutral core. Anything specific to
+// a source language (Go channels/defer/goroutines/select, Python magic methods,
+// JS dynamic property access, language builtins, ...) is expressed as an
+// OP_CODE_INTRINSIC carrying a canonical `intrinsic` name that the analysis
+// engine and rules interpret. Adding a language must NOT require new opcodes.
+enum OpCode {
+  OP_CODE_UNSPECIFIED = 0;
+
+  // Basic Block Terminators
+  OP_CODE_RET = 1;
+  OP_CODE_JUMP = 2;
+  OP_CODE_IF = 3;
+  OP_CODE_SWITCH = 4;
+  OP_CODE_PANIC = 5;        // abnormal termination / throw
+  OP_CODE_UNREACHABLE = 6;
+
+  // Memory Operations
+  OP_CODE_ALLOC = 10;
+  OP_CODE_LOAD = 11;
+  OP_CODE_STORE = 12;
+
+  // Aggregate access
+  OP_CODE_FIELD = 13;       // struct/object field read (by index)
+  OP_CODE_FIELD_ADDR = 14;  // address of a struct/object field
+  OP_CODE_INDEX = 15;       // array/slice/string element read
+  OP_CODE_INDEX_ADDR = 16;  // address of an array/slice element
+
+  // Arithmetic / Logic
+  OP_CODE_BIN_OP = 20;
+  OP_CODE_UN_OP = 21;
+  OP_CODE_PHI = 22;         // SSA phi node
+
+  // Calls
+  OP_CODE_CALL = 30;        // statically-resolved call
+  OP_CODE_INVOKE = 31;      // dynamic / virtual dispatch (interface, vtable)
+
+  // Type operations
+  OP_CODE_CONVERT = 40;     // numeric/string conversion, cast, change-type/interface
+  OP_CODE_TYPE_ASSERT = 41;
+  OP_CODE_MAKE_INTERFACE = 42; // box a concrete value into an interface / any
+  OP_CODE_EXTRACT = 43;     // extract element i from a tuple (multi-value result)
+
+  // Escape hatch: any language-specific operation, named by `intrinsic`.
+  // e.g. "go.chan.send", "go.defer", "go.map.update", "builtin.make_closure",
+  //      "py.attr.get", "js.property.get". Operands/call carry its arguments.
+  OP_CODE_INTRINSIC = 50;
+}
+
+// BinOpKind defines binary operators.
+enum BinOpKind {
+  BIN_OP_UNSPECIFIED = 0;
+  BIN_OP_ADD = 1;
+  BIN_OP_SUB = 2;
+  BIN_OP_MUL = 3;
+  BIN_OP_QUO = 4;
+  BIN_OP_REM = 5;
+  BIN_OP_AND = 6;
+  BIN_OP_OR = 7;
+  BIN_OP_XOR = 8;
+  BIN_OP_SHL = 9;
+  BIN_OP_SHR = 10;
+  BIN_OP_AND_NOT = 11;
+  BIN_OP_EQL = 12;
+  BIN_OP_NEQ = 13;
+  BIN_OP_LSS = 14;
+  BIN_OP_LEQ = 15;
+  BIN_OP_GTR = 16;
+  BIN_OP_GEQ = 17;
+}
+
+// UnOpKind defines unary operators.
+enum UnOpKind {
+  UN_OP_UNSPECIFIED = 0;
+  UN_OP_NOT = 1;      // !x
+  UN_OP_BIT_NOT = 2;  // ^x
+  UN_OP_NEG = 3;      // -x
+  UN_OP_POS = 4;      // +x
+  UN_OP_ADDR = 5;     // &x
+  UN_OP_DEREF = 6;    // *x
+  UN_OP_ARROW = 7;    // <-x
+}
+
+// Value represents an operand: a register (SSA result), a constant, a global,
+// or a direct function reference (by canonical name).
+message Value {
+  oneof kind {
+    string reg_name = 1;    // result of another instruction in this function
+    Constant constant = 2;
+    string global_name = 3; // a Global variable by name
+    string func_name = 4;   // direct function reference (canonical name)
+  }
+}
+
+// Instruction represents a single SSA instruction.
+message Instruction {
+  string name = 1; // Result register name (if any), e.g. "t0". Empty for void.
+  OpCode op = 2;
+  Type type = 3;   // Result type
+  Position pos = 4;
+  string comment = 5;
+
+  // Generic operands.
+  repeated Value operands = 6;
+
+  // For BIN_OP / UN_OP.
+  BinOpKind bin_op = 7;
+  UnOpKind un_op = 8;
+
+  // For FIELD / FIELD_ADDR / EXTRACT (element index).
+  int32 field_index = 9;
+
+  // For CALL / INVOKE, and for call-carrying intrinsics (go.defer, go.goroutine).
+  CallCommon call = 10;
+
+  // For PHI: predecessor block ids, parallel to `operands`.
+  repeated string blocks = 11;
+
+  // For IF.
+  string true_block = 12;
+  string false_block = 13;
+
+  // For JUMP.
+  string jump_block = 14;
+
+  // For ALLOC: hint that the allocation escapes to the heap.
+  bool heap = 15;
+
+  reserved 16; // was 'blocking' (select is now the "go.select" intrinsic)
+
+  // For SWITCH.
+  repeated Case cases = 17;
+
+  // For OP_CODE_INTRINSIC: the canonical intrinsic name, e.g. "go.chan.send".
+  string intrinsic = 18;
+}
+
+message Case {
+  Value value = 1; // Case value (constant)
+  string block = 2; // Target block
+}
+
+message CallCommon {
+  Value value = 1;         // Function to call (func_name for static, receiver reg for invoke)
+  repeated Value args = 2;
+  bool is_invoke = 3;      // True if dynamic dispatch (interface method)
+  string method_name = 4;  // Only for is_invoke=true
+  string callee = 5;       // Resolved canonical callee name when statically known
+                           // (e.g. "go:net/http.HandleFunc", "builtin.append"); empty if fully dynamic.
+}

@@ -1,0 +1,31 @@
+# Reflected XSS: untrusted request input flowing into an HTTP response body
+# without encoding/escaping.
+rules:
+  - id: js-xss
+    languages: [javascript]
+    # Align with go-xss (same CWE-79) so the CI gate treats reflected XSS
+    # identically regardless of source language.
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted request input (query string, route params, or body) flows
+      into an HTTP response body without encoding/escaping, which may allow
+      reflected Cross-Site Scripting (XSS). Escape or encode user-controlled
+      data before writing it into the response (e.g. an HTML-escaping
+      template engine) instead of concatenating it directly into the
+      response body.
+    sources:
+      - "js:*req.query*"
+      - "js:*req.params*"
+      - "js:*req.body*"
+    # Broad `*.send`/`*.write`/`*.end` (not `*res.send`) so chained responses
+    # like res.status(200).send(x) — which lower to callee "js:<dynamic>.send" —
+    # are still caught, mirroring js-command-injection's broad `js:*.exec`.
+    sinks:
+      - "js:*.send"
+      - "js:*.write"
+      - "js:*.end"
+    # No built-in sanitizer neutralizes tainted input for raw HTML string
+    # construction; the fix is output encoding, not string concatenation.
+    sanitizers: []
+    propagators: []

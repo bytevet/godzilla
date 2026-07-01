@@ -1,0 +1,35 @@
+# Path traversal: untrusted HTTP/URL input flowing into filesystem access
+# without path normalization/containment.
+rules:
+  - id: py-path-traversal
+    languages: [python]
+    # Align with go-path-traversal (same CWE-22) so the CI gate treats path
+    # traversal identically regardless of source language.
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input flows into a filesystem path without being cleaned or
+      validated, which may allow path traversal (e.g. "../" sequences) to
+      read or write files outside the intended directory.
+    sources:
+      - "py:*request.args.get"
+      - "py:*request.form.get"
+      - "py:*request.values.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.__getitem__"
+    sinks:
+      # Broad "*open" (matches builtin open(), io.open, codecs.open, ...) plus
+      # the common filesystem-mutation and Flask file-serving primitives.
+      - "py:*open"
+      - "py:os.remove"
+      - "py:*send_file"
+    # os.path.join does NOT contain input to a base directory ("/data" +
+    # "../../etc" joins to "/data/../../etc", which still escapes "/data"),
+    # so it is a propagator, not a sanitizer -- mirroring go-path-traversal's
+    # identical treatment of filepath.Join/Clean.
+    sanitizers: []
+    propagators:
+      - "py:*.join"
+      - "py:os.path.join"
+      - "py:*os.path.join"

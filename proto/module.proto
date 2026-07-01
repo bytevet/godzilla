@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package godzilla.ir.v1;
+
+option go_package = "godzilla/pkg/ir/v1;ir";
+
+import "proto/common.proto";
+import "proto/function.proto";
+
+// Module represents a compilation unit (e.g. Go package).
+message Module {
+  string name = 1; // Package path/name
+
+  repeated Function functions = 2; // All functions (methods, init, main)
+  repeated Type types = 3;         // Named types defined in this module
+  repeated Global globals = 4;     // Global variables
+
+  // Dependency information
+  repeated string imports = 5;     // Imported module names/paths
+
+  // Source language that produced this module: "go", "python", "javascript".
+  string language = 6;
+}
+
+// Program represents the entire application (multiple modules).
+message Program {
+  repeated Module modules = 1;
+  Function main_pkg = 2; // Entry point package/function
+  string mode = 3; // e.g., "ssa", "source"
+}
