@@ -343,6 +343,13 @@ func (fs *funcState) lowerStmt(s ast.Statement) {
 // are a documented limitation: the initializer is still lowered for its side
 // effects / taint discovery, but no bindings are introduced.
 func (fs *funcState) lowerBinding(b *ast.Binding) {
+	// Object destructuring: `const { id } = req.query` / `const { user } =
+	// req.body` is the common Express idiom, so bind each destructured name to a
+	// field read off the initializer, propagating the initializer's taint.
+	if op, ok := b.Target.(*ast.ObjectPattern); ok {
+		fs.lowerObjectPatternBinding(op, b.Initializer)
+		return
+	}
 	name := bindingName(b.Target)
 	if b.Initializer == nil {
 		if name != "" {
@@ -354,6 +361,54 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 	if name != "" {
 		fs.env[name] = val
 	}
+}
+
+// lowerObjectPatternBinding binds each name in an object-destructuring pattern
+// (const { a, b: c, ...rest } = init) to a field read off the initializer, so
+// taint carried by the initializer (typically req.query / req.body) reaches the
+// destructured names. Array destructuring remains a documented limitation.
+func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.Expression) {
+	if init == nil {
+		return
+	}
+	base := fs.lowerExpr(init)
+	bindField := func(localName, field string) {
+		if localName == "" {
+			return
+		}
+		inst := fs.newValueInst(op.LeftBrace)
+		inst.Op = ir.OpCode_OP_CODE_FIELD
+		inst.Operands = []*ir.Value{base}
+		inst.Comment = "field:" + field
+		fs.emit(inst)
+		fs.env[localName] = regValue(inst.Name)
+	}
+	for _, p := range op.Properties {
+		switch prop := p.(type) {
+		case *ast.PropertyShort:
+			bindField(string(prop.Name.Name), string(prop.Name.Name))
+		case *ast.PropertyKeyed:
+			if id, ok := prop.Value.(*ast.Identifier); ok {
+				bindField(string(id.Name), propertyKeyName(prop.Key))
+			}
+		}
+	}
+	// `const { ...rest } = init`: the rest object carries the initializer's taint.
+	if id, ok := op.Rest.(*ast.Identifier); ok {
+		fs.env[string(id.Name)] = base
+	}
+}
+
+// propertyKeyName extracts the static field name of a destructuring property
+// key (an identifier or string literal); other computed keys yield "".
+func propertyKeyName(key ast.Expression) string {
+	switch k := key.(type) {
+	case *ast.Identifier:
+		return string(k.Name)
+	case *ast.StringLiteral:
+		return string(k.Value)
+	}
+	return ""
 }
 
 // lowerExpr lowers an expression to a gIR Value, emitting whatever
