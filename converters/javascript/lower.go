@@ -529,6 +529,15 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 	case *ast.ArrowFunctionLiteral:
 		return fs.funcRefValue(v, e)
 
+	case *ast.OptionalChain:
+		// `a?.b` — optional chaining short-circuits on null/undefined but
+		// otherwise yields the same value as `a.b`, so lower the wrapped
+		// expression directly; taint flows identically.
+		return fs.lowerExpr(v.Expression)
+
+	case *ast.Optional:
+		return fs.lowerExpr(v.Expression)
+
 	default:
 		inst := fs.newValueInst(e.Idx0())
 		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
