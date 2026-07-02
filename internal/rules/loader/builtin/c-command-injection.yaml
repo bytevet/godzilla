@@ -1,0 +1,35 @@
+# OS command injection (C/C++): untrusted input flowing into a shell execution.
+rules:
+  - id: c-command-injection
+    languages: [c, cpp]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input (environment, stdin, socket, etc.) flows into a shell
+      command execution (system/popen/exec*), which may allow OS command
+      injection. Avoid passing user-controlled data to a shell; use an argument
+      vector (execv) with a fixed program and validate inputs.
+    sources:
+      - "c*:getenv"
+      - "c*:*scanf"
+      - "c*:fgets"
+      - "c*:gets"
+      - "c*:read"
+      - "c*:recv"
+    sinks:
+      - "c*:system"
+      - "c*:popen"
+      - "c*:execl"
+      - "c*:execlp"
+      - "c*:execle"
+      - "c*:execvp"
+    sanitizers: []
+    propagators:
+      - "c*:strcpy"
+      - "c*:strncpy"
+      - "c*:strcat"
+      - "c*:strncat"
+      - "c*:sprintf"
+      - "c*:snprintf"
+      - "c*:memcpy"
+      - "c*:strdup"

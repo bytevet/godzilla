@@ -29,6 +29,8 @@ func TestCorpus(t *testing.T) {
 	pythonAvailable := pyErr == nil
 	_, javaErr := exec.LookPath("java")
 	javaAvailable := javaErr == nil
+	_, clangErr := exec.LookPath("clang")
+	clangAvailable := clangErr == nil
 
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
@@ -42,6 +44,14 @@ func TestCorpus(t *testing.T) {
 			}
 			if strings.HasPrefix(name, "java/") && !javaAvailable {
 				t.Skip("java not on PATH; skipping Java sample")
+			}
+			if strings.HasPrefix(name, "c/") || strings.HasPrefix(name, "cpp/") {
+				if !llvmBuilt {
+					t.Skip("built without -tags llvm; the C/C++ frontend is a stub")
+				}
+				if !clangAvailable {
+					t.Skip("clang not on PATH; skipping C/C++ sample")
+				}
 			}
 
 			res, err := scan.Scan(dir, rs)

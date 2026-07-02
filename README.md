@@ -100,9 +100,21 @@ files with the standard `java.lang.classfile` API, and Godzilla simulates the
 operand stack to recover SSA values. Needs a **JDK 24+** `java` on `PATH`;
 sources that require a classpath are best scanned as compiled `.class`/`.jar`.
 
-**C/C++ and Rust** are planned via LLVM IR (clang/rustc → gIR) behind an opt-in
-cgo build (`-tags llvm`, links libLLVM); they are not in the default pure-Go
-build. See [ARCHITECTURE.md](ARCHITECTURE.md).
+**C/C++ and Rust** are analyzed via **LLVM IR**: clang/rustc compile each unit to
+IR (`-O1 -g`), which is parsed with libLLVM and lowered to gIR. This is an opt-in
+**cgo** build — `make build-llvm` (or `go build -tags "llvm byollvm"` with libLLVM
+CGO flags) — and is *not* in the default pure-Go binary; the default build ships a
+stub for these languages. Needs libLLVM + clang (and rustc for Rust).
+
+- **C / C++**: command injection (`system`/`popen`/`exec*`) is detected today;
+  taint flows through primitive (`char*`) values. C++ code that routes untrusted
+  data through heap aggregates (`std::string`) is not yet tracked.
+- **Rust**: the frontend compiles and lowers rustc IR, but Rust returns
+  `String`/`Result` via caller out-pointers (sret) and threads values through
+  stack memory, so taint tracking through those aggregates is **not yet modeled**
+  — Rust detection is experimental.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md).
 | Hardcoded secrets | ✅ (all languages, via gIR string constants) |
 
 ## Writing rules

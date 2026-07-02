@@ -1,0 +1,4 @@
+# Expected findings.
+findings:
+    - rule: c-command-injection
+      min: 1

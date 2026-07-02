@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	cpp_converter "godzilla/converters/cpp"
 	go_converter "godzilla/converters/go"
 	java_converter "godzilla/converters/java"
 	js_converter "godzilla/converters/javascript"
 	py_converter "godzilla/converters/python"
+	rust_converter "godzilla/converters/rust"
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -63,8 +65,12 @@ func Convert(path string) (*ir.Program, error) {
 			return js_converter.NewConverter().ConvertFile(path)
 		case strings.HasSuffix(path, ".java"), strings.HasSuffix(path, ".class"):
 			return java_converter.NewConverter().ConvertFile(path)
+		case isCppFile(path):
+			return cpp_converter.NewConverter().ConvertFile(path)
+		case strings.HasSuffix(path, ".rs"):
+			return rust_converter.NewConverter().ConvertFile(path)
 		default:
-			return nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, or .java)", path)
+			return nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, or .rs)", path)
 		}
 	}
 
@@ -79,6 +85,8 @@ func Convert(path string) (*ir.Program, error) {
 		{"python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }},
 		{"javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }},
 		{"java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }},
+		{"cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }},
+		{"rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }},
 	}
 	for _, fe := range frontends {
 		if !present[fe.name] {
@@ -98,6 +106,20 @@ func Convert(path string) (*ir.Program, error) {
 		return nil, fmt.Errorf("no analyzable Go/Python/JavaScript source found under %s", path)
 	}
 	return merged, nil
+}
+
+// isCppFile reports whether path is a C or C++ translation unit (not a header,
+// which clang can't compile to a standalone module).
+func isCppFile(path string) bool {
+	switch {
+	case strings.HasSuffix(path, ".c"),
+		strings.HasSuffix(path, ".cc"),
+		strings.HasSuffix(path, ".cpp"),
+		strings.HasSuffix(path, ".cxx"),
+		strings.HasSuffix(path, ".c++"):
+		return true
+	}
+	return false
 }
 
 // detectLanguages walks dir and reports which supported languages have source
@@ -125,6 +147,10 @@ func detectLanguages(dir string) map[string]bool {
 			present["javascript"] = true
 		case strings.HasSuffix(p, ".java"), strings.HasSuffix(p, ".class"):
 			present["java"] = true
+		case isCppFile(p):
+			present["cpp"] = true
+		case strings.HasSuffix(p, ".rs"):
+			present["rust"] = true
 		}
 		return nil
 	})

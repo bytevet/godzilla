@@ -1,0 +1,28 @@
+# OS command injection (Rust): untrusted input flowing into std::process::Command.
+rules:
+  - id: rust-command-injection
+    languages: [rust]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input (environment, args, stdin) flows into a std::process
+      command, which may allow OS command injection. Validate/allow-list the
+      program and arguments instead of passing user-controlled data.
+    sources:
+      - "rust:std::env::var"
+      - "rust:std::env::var_os"
+    sinks:
+      - "rust:*Command::arg"
+      - "rust:*Command::args"
+      - "rust:*Command::new"
+    sanitizers: []
+    propagators:
+      - "rust:*unwrap"
+      - "rust:*unwrap_or_default"
+      - "rust:*to_string"
+      - "rust:*as_str"
+      - "rust:*as_ref"
+      - "rust:*to_owned"
+      - "rust:*clone"
+      - "rust:*deref"
+      - "rust:*into"

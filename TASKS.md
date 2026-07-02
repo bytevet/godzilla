@@ -20,13 +20,13 @@ languages are additive via `<lang>:` canonical names + `OP_CODE_INTRINSIC`.
 - [x] Rules `internal/rules/loader/builtin/java-*.yaml` (command injection, SQLi + safe variants).
 - [x] Corpus `test/java/<case>/` + `expected.yaml`; converter unit test (no `java.unsupported`).
 
-## C/C++ + Rust (cgo `-tags llvm`; CI-verified, not here)
-- [ ] `converters/llvm/`: neutral IR view + `provider_cgo.go` (`//go:build llvm`, go-llvm + mem2reg).
-- [ ] `converters/cpp/` (clang driver + Itanium demangle), `converters/rust/` (rustc + Rust demangle).
-- [ ] Rules `{c,cpp,rust}-*.yaml` + corpus (toolchain-gated skips).
+## C/C++ + Rust (cgo `-tags llvm`) — env has libLLVM 22 + rustc; VERIFIED
+- [x] `converters/llvm/`: go-llvm parser + IR->gIR lowering + demangling (`//go:build llvm`).
+- [x] `converters/cpp/` (works: C & C++ command injection), `converters/rust/` (parses; aggregate/sret taint = documented limitation). Stubs for the default build.
+- [x] Rules c/rust-command-injection + corpus test/{c,cpp} (gated on `llvm` tag + clang).
 
 ## Build / CI / docs
-- [ ] `go.mod` deps; CI default job (pure-Go) + `-tags llvm` job (libLLVM).
+- [x] go.mod deps (go-llvm, demangle); Makefile (build/test + build-llvm/test-llvm). [ ] CI `-tags llvm` job.
 - [ ] README/CLAUDE/ARCHITECTURE: build modes, toolchain deps, detection matrix.
 
 ## Completion gate
