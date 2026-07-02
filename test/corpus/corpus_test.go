@@ -25,8 +25,10 @@ func TestCorpus(t *testing.T) {
 		t.Fatalf("enumerate samples: %v", err)
 	}
 
-	_, lookErr := exec.LookPath("python3")
-	pythonAvailable := lookErr == nil
+	_, pyErr := exec.LookPath("python3")
+	pythonAvailable := pyErr == nil
+	_, javaErr := exec.LookPath("java")
+	javaAvailable := javaErr == nil
 
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
@@ -37,6 +39,9 @@ func TestCorpus(t *testing.T) {
 			}
 			if strings.HasPrefix(name, "python/") && !pythonAvailable {
 				t.Skip("python3 not on PATH; skipping Python sample")
+			}
+			if strings.HasPrefix(name, "java/") && !javaAvailable {
+				t.Skip("java not on PATH; skipping Java sample")
 			}
 
 			res, err := scan.Scan(dir, rs)

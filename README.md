@@ -82,17 +82,27 @@ $ godzilla scan ./test/go/sql_injection
 
 ## Supported languages & detections
 
-| | Go | Python | JavaScript |
-|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) |
-| SQL injection | ✅ | ✅ | ✅ |
-| Command injection | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ |
-| SSRF | ✅ | ✅ | ✅ |
-| Reflected XSS | ✅ | ✅ | ✅ |
-| Open redirect | ✅ | ✅ | ✅ |
-| Insecure deserialization | — | ✅ | — |
-| Code injection (`eval`) | — | — | ✅ |
+| | Go | Python | JavaScript | Java |
+|---|---|---|---|---|
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) | JVM bytecode (`java.lang.classfile`) |
+| SQL injection | ✅ | ✅ | ✅ | ✅ |
+| Command injection | ✅ | ✅ | ✅ | ✅ |
+| Path traversal | ✅ | ✅ | ✅ | — |
+| SSRF | ✅ | ✅ | ✅ | — |
+| Reflected XSS | ✅ | ✅ | ✅ | — |
+| Open redirect | ✅ | ✅ | ✅ | — |
+| Insecure deserialization | — | ✅ | — | — |
+| Code injection (`eval`) | — | — | ✅ | — |
+
+**Java** is analyzed at the JVM-bytecode level: an embedded single-file helper
+(`java JavaDump.java`) compiles `.java` sources in-process and reads `.class`
+files with the standard `java.lang.classfile` API, and Godzilla simulates the
+operand stack to recover SSA values. Needs a **JDK 24+** `java` on `PATH`;
+sources that require a classpath are best scanned as compiled `.class`/`.jar`.
+
+**C/C++ and Rust** are planned via LLVM IR (clang/rustc → gIR) behind an opt-in
+cgo build (`-tags llvm`, links libLLVM); they are not in the default pure-Go
+build. See [ARCHITECTURE.md](ARCHITECTURE.md).
 | Hardcoded secrets | ✅ (all languages, via gIR string constants) |
 
 ## Writing rules

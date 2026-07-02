@@ -1,0 +1,4 @@
+# Expected findings for this sample (see test/README.md).
+findings:
+    - rule: java-sql-injection
+      min: 1

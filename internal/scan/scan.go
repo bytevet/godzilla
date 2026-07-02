@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	go_converter "godzilla/converters/go"
+	java_converter "godzilla/converters/java"
 	js_converter "godzilla/converters/javascript"
 	py_converter "godzilla/converters/python"
 	"godzilla/internal/analysis"
@@ -60,8 +61,10 @@ func Convert(path string) (*ir.Program, error) {
 			return py_converter.NewConverter().ConvertFile(path)
 		case strings.HasSuffix(path, ".js"):
 			return js_converter.NewConverter().ConvertFile(path)
+		case strings.HasSuffix(path, ".java"), strings.HasSuffix(path, ".class"):
+			return java_converter.NewConverter().ConvertFile(path)
 		default:
-			return nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, or .js)", path)
+			return nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, or .java)", path)
 		}
 	}
 
@@ -75,6 +78,7 @@ func Convert(path string) (*ir.Program, error) {
 		{"go", func(p string) (*ir.Program, error) { return go_converter.NewConverter().ConvertFile(p) }},
 		{"python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }},
 		{"javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }},
+		{"java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }},
 	}
 	for _, fe := range frontends {
 		if !present[fe.name] {
@@ -119,6 +123,8 @@ func detectLanguages(dir string) map[string]bool {
 			present["python"] = true
 		case strings.HasSuffix(p, ".js"):
 			present["javascript"] = true
+		case strings.HasSuffix(p, ".java"), strings.HasSuffix(p, ".class"):
+			present["java"] = true
 		}
 		return nil
 	})

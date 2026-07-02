@@ -63,6 +63,12 @@ proto schema is authoritative — change it first, then `go generate`.
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
   off an opaque base (`req.query`) become a synthetic source CALL so taint seeds correctly; chained calls
   (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`.
+- `converters/java/` — analyzes **JVM bytecode**. An embedded single-file helper (`JavaDump.java`, run
+  via `java`, JDK 24+) compiles `.java` in-process (compiler API) and reads `.class` with the standard
+  `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to
+  recover SSA values. Instance calls → `OP_CODE_INVOKE` (receiver in `Call.Value`, so a sink `#0` and the
+  engine's arg→param mapping both line up); string concat (`makeConcatWithConstants`) → BIN_OP. Canonical
+  names `java:<owner>.<method>`.
 - Both Python and JS name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
 

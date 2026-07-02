@@ -17,7 +17,7 @@ import (
 
 // sampleLangs are the language subtrees under test/ scanned by the corpus,
 // relative to this package's directory (Go tests run with CWD = package dir).
-var sampleLangs = []string{"go", "python", "js"}
+var sampleLangs = []string{"go", "python", "js", "java"}
 
 // sampleDirs returns every immediate sample directory under test/{go,python,js},
 // as paths relative to this package (e.g. "../go/sql_injection").
