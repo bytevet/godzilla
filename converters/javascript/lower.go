@@ -350,6 +350,10 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 		fs.lowerObjectPatternBinding(op, b.Initializer)
 		return
 	}
+	if ap, ok := b.Target.(*ast.ArrayPattern); ok {
+		fs.lowerArrayPatternBinding(ap, b.Initializer)
+		return
+	}
 	name := bindingName(b.Target)
 	if b.Initializer == nil {
 		if name != "" {
@@ -395,6 +399,26 @@ func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.E
 	}
 	// `const { ...rest } = init`: the rest object carries the initializer's taint.
 	if id, ok := op.Rest.(*ast.Identifier); ok {
+		fs.env[string(id.Name)] = base
+	}
+}
+
+// lowerArrayPatternBinding binds each name in an array-destructuring pattern
+// (const [a, b, ...rest] = init) to the initializer's value, so taint carried by
+// the initializer reaches the destructured names (element taint == container
+// taint, mirroring tuple unpacking). Elisions and per-element defaults / nested
+// patterns are not modeled.
+func (fs *funcState) lowerArrayPatternBinding(ap *ast.ArrayPattern, init ast.Expression) {
+	if init == nil {
+		return
+	}
+	base := fs.lowerExpr(init)
+	for _, el := range ap.Elements {
+		if id, ok := el.(*ast.Identifier); ok {
+			fs.env[string(id.Name)] = base
+		}
+	}
+	if id, ok := ap.Rest.(*ast.Identifier); ok {
 		fs.env[string(id.Name)] = base
 	}
 }

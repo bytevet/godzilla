@@ -165,12 +165,12 @@ Godzilla is functional and covered by tests, but deliberately scoped:
 - The **Python and JavaScript frontends lower straight-line code** — control flow
   is flattened into one conceptual pass. Taint still flows through the common
   expression forms: f-strings / template literals, `or`/`and` and the ternary
-  (`a if c else b` / `?:`), the walrus operator, object destructuring
-  (`const { id } = req.query`), optional chaining (`req.body?.user?.name`),
-  `await`, loop variables bound from a tainted iterable, and sources/sinks inside
-  comprehensions. The main remaining gaps are **classes/methods** (Python
-  `self.`-based flows) and **array/tuple destructuring**. This favors recall for
-  the common web-handler shape.
+  (`a if c else b` / `?:`), the walrus operator, object and array destructuring
+  (`const { id } = req.query`, `const [x] = arr`, `a, b = ...`), optional chaining
+  (`req.body?.user?.name`), `await`, loop variables bound from a tainted iterable,
+  and sources/sinks inside comprehensions. The main remaining gap is
+  **classes/methods** (Python `self.`-based flows). This favors recall for the
+  common web-handler shape.
 - Taint is **inter-procedural but context-insensitive**. Interface/dynamic
   dispatch *is* threaded through the taint transfer: class-hierarchy analysis
   (CHA) maps an interface call to its concrete implementations, so taint crosses

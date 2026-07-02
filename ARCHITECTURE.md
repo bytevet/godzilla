@@ -290,9 +290,9 @@ the languages that have samples). See `CLAUDE.md` for the package-level map.
 
 **Known frontend limitations** (documented in each converter's package doc): Python and JS lowering is
 straight-line (control flow flattened into one conceptual iteration). Taint flows through the common
-expression forms — f-strings/template literals, `or`/`and`, ternary, walrus, object destructuring, optional
-chaining, `await`, tainted-iterable loop variables, and sources/sinks inside comprehensions — so the main
-remaining gaps are classes/methods (`self.`-based flows) and array/tuple destructuring. This maximizes taint
+expression forms — f-strings/template literals, `or`/`and`, ternary, walrus, object/array destructuring and
+tuple unpacking, optional chaining, `await`, tainted-iterable loop variables, and sources/sinks inside
+comprehensions — so the main remaining gap is classes/methods (`self.`-based flows). This maximizes taint
 recall for the common web-handler vulnerability shape at the cost of path precision — consistent with the
 "recall-oriented analysis + LLM/confidence backstop" design.
 
