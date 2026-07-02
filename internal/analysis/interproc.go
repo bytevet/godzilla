@@ -334,6 +334,29 @@ func analyzeFunc(
 			if inst.Call != nil {
 				handleCall(inst)
 			}
+			// builtin.make_closure captures free variables: operands are
+			// [Fn, binding0, binding1, ...]. The frontend appends the closure's
+			// free vars as its trailing params, so a tainted binding must flow
+			// into the closure's matching free-var param — this is how taint
+			// reaches a `go func(){ ...captured... }()` goroutine body.
+			if inst.GetIntrinsic() == "builtin.make_closure" {
+				ops := inst.GetOperands()
+				if len(ops) >= 2 {
+					if closureName := ops[0].GetFuncName(); closureName != "" {
+						if closure := byKey[closureName]; closure != nil {
+							bindings := ops[1:]
+							base := len(closure.Params) - len(bindings)
+							if base >= 0 {
+								for i, b := range bindings {
+									if p, ok := isTainted(tainted, b); ok {
+										addEffect(closureName, base+i, p)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:
 			if pos, ok := firstTaintedOrigin(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {

@@ -143,6 +143,16 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 			Kind: &ir.Value_RegName{RegName: p.Name()},
 		})
 	}
+	// Append captured free variables as trailing parameters (after the real
+	// params) so the analysis can flow taint from a `builtin.make_closure`
+	// binding into the closure's use of that captured variable — e.g. a request
+	// value captured by a `go func(){ db.Query(id) }()` goroutine. The engine
+	// maps the K make_closure bindings to the last K params.
+	for _, fv := range f.FreeVars {
+		irFunc.Params = append(irFunc.Params, &ir.Value{
+			Kind: &ir.Value_RegName{RegName: fv.Name()},
+		})
+	}
 
 	for _, b := range f.Blocks {
 		irFunc.Blocks = append(irFunc.Blocks, c.convertBlock(b))
