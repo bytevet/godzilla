@@ -1,0 +1,4 @@
+# env::args() -> Vec collect -> index -> Command::arg. Fires once.
+findings:
+  - rule: rust-command-injection
+    min: 1
