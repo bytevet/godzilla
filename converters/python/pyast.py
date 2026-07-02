@@ -139,6 +139,7 @@ def conv_stmt(node):
     if isinstance(node, ast.If):
         return {
             "kind": "If",
+            "test": conv_expr(node.test),
             "body": conv_body(node.body),
             "orelse": conv_body(node.orelse),
             "pos": p,
@@ -146,6 +147,8 @@ def conv_stmt(node):
     if isinstance(node, (ast.For, ast.AsyncFor)):
         return {
             "kind": "For",
+            "target": conv_expr(node.target),
+            "iter": conv_expr(node.iter),
             "body": conv_body(node.body),
             "orelse": conv_body(node.orelse),
             "pos": p,
@@ -153,6 +156,7 @@ def conv_stmt(node):
     if isinstance(node, ast.While):
         return {
             "kind": "While",
+            "test": conv_expr(node.test),
             "body": conv_body(node.body),
             "orelse": conv_body(node.orelse),
             "pos": p,
@@ -256,6 +260,22 @@ def conv_expr(node):
         # any operand can reach it. Emit all operands for the lowerer to model
         # as a taint-merging BIN_OP.
         return {"kind": "BoolOp", "values": [conv_expr(v) for v in node.values], "pos": p}
+
+    if isinstance(node, ast.IfExp):
+        # ternary `a if cond else b`: the result is a or b, so taint from either
+        # branch can reach it. `test` is emitted for its side effects only.
+        return {
+            "kind": "IfExp",
+            "test": conv_expr(node.test),
+            "body": conv_expr(node.body),
+            "orelse": conv_expr(node.orelse),
+            "pos": p,
+        }
+
+    if isinstance(node, ast.NamedExpr):
+        # walrus `target := value`: the expression's value is `value`, and it
+        # also binds `target`.
+        return {"kind": "NamedExpr", "target": conv_expr(node.target), "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, ast.JoinedStr):
         return {"kind": "JoinedStr", "values": [conv_expr(v) for v in node.values], "pos": p}

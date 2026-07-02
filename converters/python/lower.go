@@ -259,9 +259,31 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 		case "FunctionDef", "ClassDef":
 			// Converted separately; do not inline.
 		case "If":
+			// Lower the condition for its side effects: a source bound by a
+			// walrus (if (x := request.args.get(...)):) or a sink/source call in
+			// the test would otherwise be dropped.
+			if t := s.node("test"); t != nil {
+				fs.lowerExpr(t)
+			}
 			fs.lowerBody(s.list("body"))
 			fs.lowerBody(s.list("orelse"))
-		case "For", "While":
+		case "While":
+			if t := s.node("test"); t != nil {
+				fs.lowerExpr(t)
+			}
+			fs.lowerBody(s.list("body"))
+			fs.lowerBody(s.list("orelse"))
+		case "For":
+			// `for x in iter:` — lower the iterable and bind the loop target to
+			// it, so taint in the iterable reaches the loop variable
+			// (conservative: element taint == container taint), and a source in
+			// the iterable is not dropped.
+			if it := s.node("iter"); it != nil {
+				iterVal := fs.lowerExpr(it)
+				if tgt := s.node("target"); tgt != nil {
+					fs.assign(tgt, iterVal)
+				}
+			}
 			fs.lowerBody(s.list("body"))
 			fs.lowerBody(s.list("orelse"))
 		case "With":
@@ -459,6 +481,28 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 			return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
 		}
 		return acc
+
+	case "IfExp":
+		// ternary `a if cond else b`: the result is a or b, so taint from either
+		// branch can reach it. Lower `test` for its side effects (it may contain
+		// a call), then merge the two value branches with BIN_OP_OR so taint
+		// propagates from either.
+		fs.lowerExpr(n.node("test"))
+		body := fs.lowerExpr(n.node("body"))
+		orelse := fs.lowerExpr(n.node("orelse"))
+		inst := fs.newValueInst(n)
+		inst.Op = ir.OpCode_OP_CODE_BIN_OP
+		inst.BinOp = ir.BinOpKind_BIN_OP_OR
+		inst.Operands = []*ir.Value{body, orelse}
+		fs.emit(inst)
+		return regValue(inst.Name)
+
+	case "NamedExpr":
+		// walrus `target := value`: the expression evaluates to `value` and also
+		// binds `target`, so both the result and the bound name carry taint.
+		val := fs.lowerExpr(n.node("value"))
+		fs.assign(n.node("target"), val)
+		return val
 
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
