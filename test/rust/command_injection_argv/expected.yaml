@@ -1,0 +1,4 @@
+# env::var(ARG) passed through an array into Command::args. Fires once.
+findings:
+  - rule: rust-command-injection
+    min: 1
