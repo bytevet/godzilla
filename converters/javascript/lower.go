@@ -27,15 +27,22 @@ type funcState struct {
 	env       map[string]*ir.Value
 	paramRegs map[string]bool
 	instrs    []*ir.Instruction
+
+	// localFuncs maps a top-level function name to its canonical name so
+	// lowerCall can qualify a bare call (helper(x)) to "js:<module>.helper" and
+	// match the callee function's CanonicalName; otherwise byKey never resolves
+	// it and inter-procedural taint through the local helper is lost.
+	localFuncs map[string]string
 }
 
-func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string) *funcState {
+func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
 	return &funcState{
-		filename:  filename,
-		fset:      fset,
-		nameOf:    nameOf,
-		env:       map[string]*ir.Value{},
-		paramRegs: map[string]bool{},
+		filename:   filename,
+		fset:       fset,
+		nameOf:     nameOf,
+		env:        map[string]*ir.Value{},
+		paramRegs:  map[string]bool{},
+		localFuncs: localFuncs,
 	}
 }
 
@@ -91,7 +98,7 @@ func nilValue() *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -99,7 +106,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 		CanonicalName: "js:" + moduleName + "." + pf.qualname,
 	}
 
-	fs := newFuncState(filename, fset, nameOf)
+	fs := newFuncState(filename, fset, nameOf, localFuncs)
 
 	switch node := pf.node.(type) {
 	case *ast.FunctionLiteral:
@@ -704,6 +711,15 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
 	callee := "js:" + syntacticCallee(v.Callee)
+	// A bare call to a top-level function (helper(x)) must carry the module
+	// name so its callee matches the function's CanonicalName; otherwise byKey
+	// never resolves it and taint does not flow through the local helper.
+	// Member calls (obj.method) and unknown/global names are left unqualified.
+	if id, ok := v.Callee.(*ast.Identifier); ok {
+		if canonical, found := fs.localFuncs[string(id.Name)]; found {
+			callee = canonical
+		}
+	}
 	cc := &ir.CallCommon{
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
 		Callee: callee,

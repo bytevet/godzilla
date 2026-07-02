@@ -2,6 +2,7 @@ package js_converter
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
@@ -327,9 +328,21 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	c := newCollector(filename, moduleName)
 	c.collectStmts(prog.Body, "")
 
+	// Top-level named functions: a bare call to one (helper(x)) must resolve to
+	// its canonical name so byKey matches and taint flows through the local
+	// helper. Nested functions (qualname contains ".") and anonymous ones
+	// ("$anon") are excluded — the straight-line lowering does not model JS
+	// lexical scoping.
+	localFuncs := map[string]string{}
+	for _, pf := range c.order {
+		if !strings.Contains(pf.qualname, ".") && !strings.Contains(pf.qualname, "$anon") {
+			localFuncs[pf.qualname] = "js:" + moduleName + "." + pf.qualname
+		}
+	}
+
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf))
+		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs))
 	}
 
 	moduleFn := &ir.Function{
@@ -339,7 +352,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		CanonicalName: "js:" + moduleName + ".<module>",
 		Synthetic:     true,
 	}
-	fs := newFuncState(filename, fset, c.nameOf)
+	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 
