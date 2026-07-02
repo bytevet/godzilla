@@ -18,13 +18,26 @@ rules:
       - "js:*req.query*"
       - "js:*req.params*"
       - "js:*req.body*"
-    # Broad `*.send`/`*.write`/`*.end` (not `*res.send`) so chained responses
-    # like res.status(200).send(x) — which lower to callee "js:<dynamic>.send" —
-    # are still caught, mirroring js-command-injection's broad `js:*.exec`.
+    # Restrict to HTTP-response receivers (Express `res`, Fastify `reply`,
+    # `response`) plus chained responses like res.status(200).send(x), which
+    # lower to callee "js:<dynamic>.send". A bare `*.send`/`*.write`/`*.end` is
+    # deliberately NOT used: it collides with benign, non-response calls such as
+    # mailer.send / stream.write / socket.write / connection.end and fires XSS
+    # false positives — the same over-broad-sink mistake avoided in
+    # js-command-injection (RegExp.prototype.exec). The cost is missing an
+    # exotically named response object (e.g. `myRes.send`), which is rare next to
+    # the `res`/`reply` conventions.
     sinks:
-      - "js:*.send"
-      - "js:*.write"
-      - "js:*.end"
+      - "js:res.send"
+      - "js:res.write"
+      - "js:res.end"
+      - "js:reply.send"
+      - "js:*response.send"
+      - "js:*response.write"
+      - "js:*response.end"
+      - "js:<dynamic>.send"
+      - "js:<dynamic>.write"
+      - "js:<dynamic>.end"
     # No built-in sanitizer neutralizes tainted input for raw HTML string
     # construction; the fix is output encoding, not string concatenation.
     sanitizers: []
