@@ -251,6 +251,12 @@ def conv_expr(node):
             "pos": p,
         }
 
+    if isinstance(node, ast.BoolOp):
+        # `a or b` / `a and b`: the result is one of the operands, so taint from
+        # any operand can reach it. Emit all operands for the lowerer to model
+        # as a taint-merging BIN_OP.
+        return {"kind": "BoolOp", "values": [conv_expr(v) for v in node.values], "pos": p}
+
     if isinstance(node, ast.JoinedStr):
         return {"kind": "JoinedStr", "values": [conv_expr(v) for v in node.values], "pos": p}
 

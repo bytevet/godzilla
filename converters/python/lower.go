@@ -434,6 +434,32 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		fs.emit(inst)
 		return regValue(inst.Name)
 
+	case "BoolOp":
+		// `a or b` / `a and b`: the result is one of the operands, so taint from
+		// any operand can reach it. Fold the operands with BIN_OP_OR so the
+		// engine's BIN_OP propagation taints the result if any operand is
+		// tainted (mirrors JS lowering `||`/`&&` as a BIN_OP). This is what makes
+		// the common `request.args.get("x") or default` defaulting idiom carry
+		// taint.
+		var acc *ir.Value
+		for _, v := range n.list("values") {
+			cur := fs.lowerExpr(v)
+			if acc == nil {
+				acc = cur
+				continue
+			}
+			inst := fs.newValueInst(n)
+			inst.Op = ir.OpCode_OP_CODE_BIN_OP
+			inst.BinOp = ir.BinOpKind_BIN_OP_OR
+			inst.Operands = []*ir.Value{acc, cur}
+			fs.emit(inst)
+			acc = regValue(inst.Name)
+		}
+		if acc == nil {
+			return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+		}
+		return acc
+
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
 		// concatenation) so taint carried by any {expr} slot propagates to
