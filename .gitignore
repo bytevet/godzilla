@@ -30,3 +30,13 @@ bin/
 
 # OS
 .DS_Store
+
+# Compiled binaries a bare `go build` leaves inside a Go sample dir (named after
+# the dir, e.g. test/go/gin_gorm/gin_gorm). Samples are scanned as source, never
+# built, so allow-list the sources and ignore anything else that lands in them.
+/test/go/*/*
+!/test/go/*/*.go
+!/test/go/*/go.mod
+!/test/go/*/go.sum
+!/test/go/*/expected.yaml
+!/test/go/*/.gitignore
