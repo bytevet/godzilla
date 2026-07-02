@@ -101,6 +101,32 @@ func (c *collector) addArrow(fn *ast.ArrowFunctionLiteral, qualname string) {
 	}
 }
 
+// collectClass registers each method of a class body as its own function under
+// "<qualPrefix><ClassName>.<method>", so class-based handlers are analyzed at all
+// and `this.method(x)` can resolve to a sibling method (see lowerCall). The class
+// name comes from the literal, or fallbackName for an anonymous class bound to a
+// name (const C = class {}).
+func (c *collector) collectClass(cl *ast.ClassLiteral, qualPrefix, fallbackName string) {
+	if cl == nil {
+		return
+	}
+	className := fallbackName
+	if cl.Name != nil {
+		className = string(cl.Name.Name)
+	}
+	prefix := qualPrefix
+	if className != "" {
+		prefix = qualPrefix + className + "."
+	}
+	for _, el := range cl.Body {
+		if md, ok := el.(*ast.MethodDefinition); ok && md.Body != nil {
+			if name := propertyKeyName(md.Key); name != "" {
+				c.addFunctionLiteral(md.Body, prefix+name)
+			}
+		}
+	}
+}
+
 func leafName(qualname string) string {
 	for i := len(qualname) - 1; i >= 0; i-- {
 		if qualname[i] == '.' {
@@ -185,10 +211,11 @@ func (c *collector) collectStmt(s ast.Statement, qualPrefix string) {
 	case *ast.WithStatement:
 		c.collectExpr(v.Object, qualPrefix, "")
 		c.collectStmts(stmtList(v.Body), qualPrefix)
+	case *ast.ClassDeclaration:
+		c.collectClass(v.Class, qualPrefix, "")
 	default:
-		// ClassDeclaration, EmptyStatement, BranchStatement,
-		// DebuggerStatement, BadStatement: nothing to collect (classes are a
-		// documented limitation; see package doc).
+		// EmptyStatement, BranchStatement, DebuggerStatement, BadStatement:
+		// nothing to collect.
 	}
 }
 
@@ -214,6 +241,8 @@ func (c *collector) collectExpr(e ast.Expression, qualPrefix, preferredName stri
 		return
 	}
 	switch v := e.(type) {
+	case *ast.ClassLiteral:
+		c.collectClass(v, qualPrefix, preferredName)
 	case *ast.FunctionLiteral:
 		name := qualPrefix
 		switch {
@@ -353,6 +382,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		Synthetic:     true,
 	}
 	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
+	fs.moduleName = moduleName
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 

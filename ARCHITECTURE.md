@@ -292,8 +292,9 @@ the languages that have samples). See `CLAUDE.md` for the package-level map.
 straight-line (control flow flattened into one conceptual iteration). Taint flows through the common
 expression forms — f-strings/template literals, `or`/`and`, ternary, walrus, object/array destructuring and
 tuple unpacking, optional chaining, `await`, tainted-iterable loop variables, and sources/sinks inside
-comprehensions, and `self.method(x)` cross-method calls — so the main remaining gap is taint carried across
-methods via instance attributes (`self.attr`). This maximizes taint
+comprehensions, and class-based handlers with cross-method calls (`self.method(x)` / `this.method(x)`) —
+so the main remaining gap is taint carried across methods via instance attributes (`self.attr` /
+`this.attr`). This maximizes taint
 recall for the common web-handler vulnerability shape at the cost of path precision — consistent with the
 "recall-oriented analysis + LLM/confidence backstop" design.
 

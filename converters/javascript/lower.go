@@ -2,6 +2,7 @@ package js_converter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
@@ -33,6 +34,13 @@ type funcState struct {
 	// match the callee function's CanonicalName; otherwise byKey never resolves
 	// it and inter-procedural taint through the local helper is lost.
 	localFuncs map[string]string
+
+	// moduleName and methodClass let lowerCall qualify a `this.method(x)` call
+	// inside a class method to the sibling method's canonical name
+	// ("js:<module>.<Class>.method"). methodClass is the class qualname prefix
+	// (e.g. "UserController."), empty for non-methods.
+	moduleName  string
+	methodClass string
 }
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
@@ -107,6 +115,12 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 	}
 
 	fs := newFuncState(filename, fset, nameOf, localFuncs)
+	fs.moduleName = moduleName
+	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
+	// prefix so `this.method(x)` resolves to the sibling method.
+	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
+		fs.methodClass = pf.qualname[:i+1]
+	}
 
 	switch node := pf.node.(type) {
 	case *ast.FunctionLiteral:
@@ -806,6 +820,15 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	if id, ok := v.Callee.(*ast.Identifier); ok {
 		if canonical, found := fs.localFuncs[string(id.Name)]; found {
 			callee = canonical
+		}
+	}
+	// `this.method(x)` inside a class method: qualify to the sibling method's
+	// canonical name so byKey resolves it. Optimistic — a non-method `this.x`
+	// matches no function and stays unresolved (harmless). JS methods take no
+	// explicit receiver param, so the arguments already align.
+	if dot, ok := v.Callee.(*ast.DotExpression); ok && fs.methodClass != "" {
+		if _, isThis := dot.Left.(*ast.ThisExpression); isThis {
+			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
 		}
 	}
 	cc := &ir.CallCommon{
