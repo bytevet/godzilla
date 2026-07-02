@@ -9,12 +9,12 @@ detection rule once and it applies across every supported language**.
 
 ```mermaid
 flowchart LR
-    GO[Go]:::src --> FE
-    PY[Python]:::src --> FE
-    JS[JavaScript]:::src --> FE
-    JV[Java]:::src --> FE
-    RS[Rust]:::src --> FE
-    CC["C / C++"]:::src --> FE
+    GO[Go] --> FE
+    PY[Python] --> FE
+    JS[JavaScript] --> FE
+    JV[Java] --> FE
+    RS[Rust] --> FE
+    CC["C / C++"] --> FE
 
     FE["Language<br/>frontends"] --> IR["gIR<br/>language-neutral SSA"]
     IR --> ENG["Taint engine<br/>+ YAML rules"]
@@ -22,8 +22,6 @@ flowchart LR
     FD --> OUT["Report · JSON · SARIF<br/>severity-gated exit code"]
     FD -. optional .-> LLM["LLM review"]
     LLM -.-> OUT
-
-    classDef src fill:#e6f2ff,stroke:#4a90d9;
 ```
 
 <sub>All six languages lower to the same gIR; a single engine and rule set run over it.</sub>
