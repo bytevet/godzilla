@@ -31,6 +31,7 @@ var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_BIN_OP:         true,
 	ir.OpCode_OP_CODE_UN_OP:          true,
 	ir.OpCode_OP_CODE_CONVERT:        true,
+	ir.OpCode_OP_CODE_TYPE_ASSERT:    true, // v := x.(T): the result is x's value with a narrower static type
 	ir.OpCode_OP_CODE_FIELD:          true,
 	ir.OpCode_OP_CODE_FIELD_ADDR:     true,
 	ir.OpCode_OP_CODE_INDEX:          true,

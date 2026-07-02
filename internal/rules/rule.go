@@ -111,6 +111,32 @@ func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
 	return nil, false
 }
 
+// InvalidSinkSpec reports whether a sink entry carries a "#" injection-point
+// spec that names no valid argument index — an empty spec ("...Query#") or one
+// whose tokens are not all non-negative integers ("...Query#x", "...Query#-1",
+// "...Query#0,"). Such an entry parses (leniently, at runtime) to zero indices,
+// which is indistinguishable from a bare pattern and so silently widens the
+// sink to "every argument is an injection point" — the false-positive-prone
+// default an author who bothered to write "#" almost certainly did NOT intend
+// (it reintroduces the parameterized-query false positive). The loader rejects
+// it so a typo fails loud at load time instead of quietly weakening the sink.
+func InvalidSinkSpec(entry string) bool {
+	_, spec, ok := strings.Cut(entry, "#")
+	if !ok {
+		return false // bare pattern legitimately means "all arguments"
+	}
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return true // "#" with nothing after it
+	}
+	for _, f := range strings.Split(spec, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(f)); err != nil || n < 0 {
+			return true // a token that is not a non-negative integer
+		}
+	}
+	return false
+}
+
 // parseSink splits a sink entry "pattern#i,j,..." into its glob pattern and the
 // injection-point indices. A bare pattern (no "#") yields nil indices (all args).
 func parseSink(entry string) (pattern string, args []int32) {

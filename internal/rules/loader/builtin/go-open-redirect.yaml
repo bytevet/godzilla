@@ -1,0 +1,23 @@
+# Open redirect: untrusted input flowing into an HTTP redirect target.
+rules:
+  - id: go-open-redirect
+    languages: [go]
+    severity: medium
+    cwe: CWE-601
+    message: >-
+      Untrusted input flows into an HTTP redirect destination, which allows an
+      open redirect. Validate the target against an allowlist of known hosts/paths
+      instead of redirecting to a user-controlled URL.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
+      - "go:*net/http*.Request*.PostFormValue"
+    # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
+    sinks:
+      - "go:*net/http.Redirect#2"
+    sanitizers: []
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:strings.Join"

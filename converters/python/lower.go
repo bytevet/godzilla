@@ -41,6 +41,38 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 	}
 	collect(root.list("body"), "")
 
+	// Module-level constant bindings (NAME = <literal>) are Python module
+	// globals. The env-based lowering keeps such a literal only in the
+	// <module> function's register map (a bare-Name assign emits no
+	// instruction), so a constant referenced from another function — or never
+	// referenced at all — is invisible to passes that inspect the IR for
+	// literals, most importantly the hardcoded-secret scanner. Surface each as
+	// a gIR Global with an init value (the proto's intended home for a module
+	// constant), mirroring how package-level vars appear in the Go frontend.
+	for _, s := range root.list("body") {
+		if s.kind() != "Assign" {
+			continue
+		}
+		val := s.node("value")
+		if val.kind() != "Constant" {
+			continue
+		}
+		c := constantValue(val).GetConstant()
+		if c == nil {
+			continue
+		}
+		for _, target := range s.list("targets") {
+			if target.kind() != "Name" {
+				continue
+			}
+			mod.Globals = append(mod.Globals, &ir.Global{
+				Name:      target.str("id"),
+				InitValue: c,
+				Pos:       posFromNode(filename, val),
+			})
+		}
+	}
+
 	moduleFn := convertModuleInit(root, filename, moduleName)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 

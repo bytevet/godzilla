@@ -50,3 +50,25 @@ func TestSinkInjectionArgs(t *testing.T) {
 		t.Errorf("IsSink should match Query with the suffix stripped")
 	}
 }
+
+func TestInvalidSinkSpec(t *testing.T) {
+	cases := []struct {
+		entry string
+		want  bool
+	}{
+		{"go:*Query", false},         // bare pattern: legitimately all args
+		{"go:*Query#0", false},       // single valid index
+		{"go:*Query#0,2", false},     // multiple valid indices
+		{"go:*Query# 0 , 2 ", false}, // whitespace tolerated
+		{"go:*Query#", true},         // "#" with nothing after it
+		{"go:*Query#x", true},        // non-numeric token
+		{"go:*Query#-1", true},       // negative index
+		{"go:*Query#0,", true},       // trailing comma -> empty token
+		{"go:*Query#0,x", true},      // one good, one bad -> reject (likely a typo)
+	}
+	for _, c := range cases {
+		if got := InvalidSinkSpec(c.entry); got != c.want {
+			t.Errorf("InvalidSinkSpec(%q) = %v, want %v", c.entry, got, c.want)
+		}
+	}
+}

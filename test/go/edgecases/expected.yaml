@@ -1,0 +1,7 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings:
+    - rule: go-command-injection
+      min: 1
+    - rule: go-sql-injection
+      min: 1

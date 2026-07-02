@@ -1,0 +1,4 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Safe variant: the benign parser must NOT be flagged (false-positive guard).
+findings: []

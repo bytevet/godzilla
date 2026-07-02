@@ -56,9 +56,13 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if len(initial) == 0 {
 		return nil, fmt.Errorf("no Go packages found under %s", dir)
 	}
-	// Warning but continue
+	// Some packages failed to load cleanly (type/parse errors). PrintErrors
+	// dumps the specifics to stderr; conversion continues on whatever built so
+	// partial/vulnerable code still converts. Route our summary line to stderr
+	// too — a stdout write would corrupt machine-readable output when the user
+	// pipes findings (e.g. `godzilla scan > out.txt`).
 	if packages.PrintErrors(initial) > 0 {
-		fmt.Printf("Warning: packages contains errors\n")
+		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
 	prog, pkgs := ssautil.AllPackages(initial, ssa.InstantiateGenerics)

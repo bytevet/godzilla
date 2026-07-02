@@ -1,0 +1,5 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings:
+    - rule: js-path-traversal
+      min: 3

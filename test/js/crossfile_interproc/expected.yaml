@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Cross-file inter-procedural taint: source in app.js -> sink in db.js.
+findings:
+    - rule: js-sqli
+      min: 1

@@ -134,6 +134,37 @@ func TestLoadFileRejectsBadSeverity(t *testing.T) {
 	}
 }
 
+// TestLoadFileRejectsMalformedSinkSpec locks in that a sink whose "#"
+// injection-point spec names no valid argument index is rejected at load time,
+// rather than silently widening to "all arguments" (which reintroduces the
+// parameterized-query false positive the "#" mechanism exists to prevent).
+func TestLoadFileRejectsMalformedSinkSpec(t *testing.T) {
+	dir := t.TempDir()
+	reject := map[string]string{
+		"empty.yaml":    "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#\"]\n",
+		"nonnum.yaml":   "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#x\"]\n",
+		"negative.yaml": "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#-1\"]\n",
+	}
+	for name, doc := range reject {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Errorf("LoadFile(%s): want error for malformed sink spec, got nil", name)
+		}
+	}
+
+	// A well-formed "#0" sink must still load cleanly.
+	ok := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(ok, []byte("rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#0\"]\n"), 0o644); err != nil {
+		t.Fatalf("writing ok.yaml: %v", err)
+	}
+	if _, err := LoadFile(ok); err != nil {
+		t.Errorf("LoadFile(ok.yaml) with a valid #0 sink: unexpected error: %v", err)
+	}
+}
+
 func TestLoadDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "extra.yaml")

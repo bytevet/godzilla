@@ -14,6 +14,8 @@ rules:
       the request.
     sources:
       - "py:*request.args.get"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
       - "py:*request.form.get"
       - "py:*request.values.get"
       - "py:*request.args.__getitem__"

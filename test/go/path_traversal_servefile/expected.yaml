@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Guards http.ServeFile as a path-traversal sink (path is logical arg 2).
+findings:
+    - rule: go-path-traversal
+      min: 1

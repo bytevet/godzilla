@@ -1,0 +1,26 @@
+# Insecure deserialization: untrusted data deserialized with an unsafe loader,
+# which can lead to remote code execution.
+rules:
+  - id: py-insecure-deserialization
+    languages: [python]
+    severity: critical
+    cwe: CWE-502
+    message: >-
+      Untrusted input is deserialized with an unsafe loader (pickle / yaml.load /
+      marshal), which allows arbitrary code execution. Use a safe format (JSON) or
+      a safe loader (e.g. yaml.safe_load) for untrusted data.
+    sources:
+      - "py:*request.args.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.form.get"
+      - "py:*request.values.get"
+      - "py:*request.get_data"
+      - "py:*request.get_json"
+    sinks:
+      - "py:*pickle.loads"
+      - "py:*pickle.load"
+      - "py:*yaml.load"
+      - "py:*marshal.loads"
+      - "py:*jsonpickle.decode"
+    sanitizers: []
+    propagators: []

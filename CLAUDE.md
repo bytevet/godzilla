@@ -83,11 +83,13 @@ its injection point with a `#<idx>` suffix (`"go:*database/sql*.Query#0"`): only
 LOGICAL (receiver-excluded) argument fires — this is what prevents parameterized-query false positives
 (`db.Query("... = ?", taintedParam)` binds a safe placeholder). A bare pattern means all args.
 `loader/` — YAML loader (`LoadFile`/`LoadDir`/`Builtin`/`LoadDefault`) with built-in rules embedded via
-`//go:embed builtin/*.yaml` (Go/Python/JS rules for SQLi, command injection, path traversal, SSRF, XSS);
+`//go:embed builtin/*.yaml` (Go/Python/JS rules for SQLi, command injection, path traversal, SSRF, XSS,
+open redirect, plus Python insecure deserialization / CWE-502 and JS code injection / CWE-95);
 `validate` rejects rules with an empty ID or an unrecognized severity.
 
 **Report & LLM (`internal/report/`, `internal/llm/`).** `report.WriteHTML` renders a self-contained,
-auto-escaped HTML report with code snippets. `llm` is the pluggable reviewer: `review.go` is
+auto-escaped HTML report with code snippets; `WriteJSON` and `WriteSARIF` (SARIF 2.1.0, severity→level) emit
+machine-readable output for tooling / GitHub code scanning. `llm` is the pluggable reviewer: `review.go` is
 dependency-free (interface, confidence-gated `Filter` with fail-open semantics, prompt builder, verdict
 parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-opus-4-8`, override via
 `GODZILLA_LLM_MODEL`).

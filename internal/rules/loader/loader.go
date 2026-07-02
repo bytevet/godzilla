@@ -132,6 +132,14 @@ func validate(rs *rules.RuleSet) error {
 		if r.Severity.Rank() == 0 {
 			problems = append(problems, fmt.Sprintf("rule %q has missing or unrecognized severity %q (want info|low|medium|high|critical)", r.ID, r.Severity))
 		}
+		// A sink with a "#" injection-point spec that names no valid argument
+		// index silently widens to "all arguments" (a false-positive-prone
+		// footgun); reject the typo instead of quietly weakening the sink.
+		for _, s := range r.Sinks {
+			if rules.InvalidSinkSpec(s) {
+				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s))
+			}
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid rules: %s", strings.Join(problems, "; "))

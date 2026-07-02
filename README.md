@@ -27,9 +27,11 @@ source (Go / Python / JS) ─▶ frontend ─▶ gIR ─▶ rule engine + taint 
   (`"go:*database/sql*.Query#0"`), so a parameterized query
   `db.Query("... = ?", userInput)` is **not** a false positive.
 - **Built-in rule packs** for SQL injection, command injection, path traversal,
-  SSRF, and reflected XSS, plus a regex-based **hardcoded-secrets** scanner.
-- **CI-friendly.** Human-readable findings, a self-contained **HTML report**, and
-  a severity-gated **exit code**.
+  SSRF, reflected XSS, open redirect, insecure deserialization (Python), and
+  code injection (JS `eval`), plus a regex-based **hardcoded-secrets** scanner.
+- **CI-friendly.** Human-readable findings, a self-contained **HTML report**,
+  **JSON** and **SARIF 2.1.0** output (for GitHub code scanning / custom tooling),
+  and a severity-gated **exit code**.
 - **Optional LLM review.** A pluggable stage sends low-confidence findings to
   Claude to trim false positives; it fails open and is off by default.
 - **Single self-contained binary.** No language runtimes required to run, except
@@ -52,6 +54,9 @@ godzilla scan ./path/to/project
 
 # Write an HTML report and fail the build only on high+ severity
 godzilla scan --html report.html --fail-on high ./path/to/project
+
+# Machine-readable output: JSON for tooling, SARIF for GitHub code scanning
+godzilla scan --sarif results.sarif --json results.json ./path/to/project
 
 # Add your own rules on top of the built-ins, and print the gIR summary
 godzilla scan --rules myrules.yaml --summary ./path/to/project
@@ -85,6 +90,9 @@ $ godzilla scan ./test/go/sql_injection
 | Path traversal | ✅ | ✅ | ✅ |
 | SSRF | ✅ | ✅ | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ |
+| Open redirect | ✅ | ✅ | ✅ |
+| Insecure deserialization | — | ✅ | — |
+| Code injection (`eval`) | — | — | ✅ |
 | Hardcoded secrets | ✅ (all languages, via gIR string constants) |
 
 ## Writing rules
@@ -133,9 +141,10 @@ The full design rationale is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```bash
 go build ./...          # build everything
-go test ./...           # run the full test suite (Python tests need python3)
+go test ./...           # unit tests + the sample corpus + isolated-module builds
+go test -short ./...    # same, skipping the slow isolated-module (cgo) builds
 go vet ./...
-gofmt -l cmd converters internal
+gofmt -l cmd converters internal test/corpus
 
 # Regenerate gIR bindings after editing proto/*.proto (needs protoc + protoc-gen-go)
 export PATH=$PATH:$(go env GOPATH)/bin
@@ -143,7 +152,11 @@ go generate ./...
 ```
 
 Vulnerable samples live under `test/{go,python,js}/`, each in its own isolated
-module so sample dependencies never touch the root `go.mod`.
+module so sample dependencies never touch the root `go.mod`. Every sample is an
+asserted test case: it carries an `expected.yaml` and `go test ./...` checks that
+the scanner reproduces exactly those findings (no misses, no new false
+positives). See [test/README.md](test/README.md) for the corpus and how to add a
+sample. Python tests need `python3` on `PATH`.
 
 ## Status & limitations
 

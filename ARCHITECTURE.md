@@ -293,12 +293,14 @@ straight-line (control flow flattened, one conceptual iteration; classes/compreh
 This maximizes taint recall for the common web-handler vulnerability shape at the cost of path precision —
 consistent with the "recall-oriented analysis + LLM/confidence backstop" design.
 
+**Interface / dynamic dispatch — crossed inter-procedurally (CHA).** An `OP_CODE_INVOKE` call names the
+abstract interface method, so the taint transfer resolves it to every concrete method of that name
+(class-hierarchy analysis) and flows taint into each — with the receiver offset (invoke args exclude the
+receiver, which is `Call.Value`). This catches taint through interfaces (`http.Handler`, custom
+service/repository interfaces). It over-approximates (any same-named method matches), so such findings stay
+Medium confidence and lean on the confidence/LLM backstop. See `interproc.go` (`methodImpls`).
+
 **Known analysis limitations** (surfaced by review, tracked here):
-- **Interface / dynamic dispatch is not crossed inter-procedurally.** `OP_CODE_INVOKE` calls resolve to the
-  abstract interface method name, so taint does not flow into concrete implementations of an interface
-  method (CHA gives the call-graph edges, but the taint transfer doesn't yet consume them per call site).
-  Direct and static-method calls are fully inter-procedural. Fixing this means resolving invoke targets via
-  the call graph in the taint transfer — a future precision upgrade (with FP care, since CHA over-approximates).
 - **Go field-access sources aren't matchable.** A source read as a struct field (`r.URL.Path`,
   `r.Header[...]`) lowers to `FIELD`/`INDEX` with no `Callee`, so rules (which match `Call.Callee`) can't
   flag it. Method-call sources (`FormValue`, `Query().Get`, `Header.Get`, …) cover the common Go cases;

@@ -120,6 +120,22 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 		}
 	}
 
+	// Class-hierarchy index for interface dynamic dispatch: a Go bare method name
+	// -> every lowered concrete method that implements it. An INVOKE call names an
+	// abstract interface method (not a concrete function), so this lets taint flow
+	// through the interface into the concrete implementations. It over-approximates
+	// (any same-named method matches), which is why such findings stay Medium
+	// confidence.
+	methodImpls := map[string][]string{}
+	for name := range byKey {
+		if strings.HasPrefix(name, "go:(") { // a Go method (receiver-type syntax)
+			if i := strings.LastIndex(name, "."); i >= 0 {
+				bare := name[i+1:]
+				methodImpls[bare] = append(methodImpls[bare], name)
+			}
+		}
+	}
+
 	queued := map[string]bool{}
 	var queue []string
 	enqueue := func(name string) {
@@ -156,7 +172,7 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, byKey, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -192,6 +208,7 @@ func analyzeFunc(
 	seeds map[int]*ir.Position,
 	returnTaint map[string]*ir.Position,
 	byKey map[string]*ir.Function,
+	methodImpls map[string][]string,
 	reported map[*ir.Instruction]bool,
 ) funcResult {
 	tainted := map[string]*ir.Position{}
@@ -269,11 +286,9 @@ func analyzeFunc(
 			}
 		}
 
-		// Inter-procedural: if the callee is a function we lowered, pass
-		// tainted arguments into its parameters and pull back its return
-		// taint. (Argument/parameter positions align for direct calls to
-		// package-level functions; method-receiver offsets and interface
-		// dynamic dispatch are known limitations.)
+		// Inter-procedural, direct/static call: if the callee is a function we
+		// lowered, pass tainted arguments into its parameters and pull back its
+		// return taint. (Args[0]==Params[0]==receiver for a static method call.)
 		if byKey[callee] != nil {
 			for j, a := range args {
 				if p, ok := isTainted(tainted, a); ok {
@@ -282,6 +297,27 @@ func analyzeFunc(
 			}
 			if ro := returnTaint[callee]; ro != nil && inst.Name != "" {
 				markTainted(tainted, inst.Name, ro)
+			}
+		}
+
+		// Inter-procedural, interface dynamic dispatch: an INVOKE call's callee is
+		// the abstract interface method, so resolve to concrete implementations by
+		// method name (CHA) and flow taint into each. INVOKE args exclude the
+		// receiver (it lives in Call.Value), so they map to a concrete method's
+		// params shifted by one — param 0 is the receiver.
+		if inst.Call.GetIsInvoke() {
+			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
+				if p, ok := isTainted(tainted, inst.Call.GetValue()); ok {
+					addEffect(impl, 0, p)
+				}
+				for j, a := range args {
+					if p, ok := isTainted(tainted, a); ok {
+						addEffect(impl, j+1, p)
+					}
+				}
+				if ro := returnTaint[impl]; ro != nil && inst.Name != "" {
+					markTainted(tainted, inst.Name, ro)
+				}
 			}
 		}
 	}

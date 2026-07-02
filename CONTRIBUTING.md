@@ -12,12 +12,15 @@ Thanks for your interest! This guide covers the essentials.
 
 ```bash
 go build ./...
-go test ./...
+go test ./...                              # unit tests + sample corpus + isolated-module builds
+go test -short ./...                       # faster: skips the isolated-module builds
 go vet ./...
-gofmt -l cmd converters internal      # must print nothing
+gofmt -l cmd converters internal test/corpus   # must print nothing
 ```
 
-All four must pass before a PR is merged; CI runs the same checks.
+All must pass before a PR is merged; CI runs the same checks. `go test ./...`
+also asserts every sample under `test/` against its `expected.yaml` — see
+[test/README.md](test/README.md).
 
 ## Project layout
 
@@ -38,7 +41,8 @@ for a concise map of the codebase. In short:
 `internal/rules/loader/builtin/`. Sources/sinks/sanitizers/propagators are
 canonical-name globs; a sink may pin its injection-point argument with `#<index>`
 (e.g. `"go:*database/sql*.Query#0"`). Add a vulnerable sample under `test/<lang>/`
-and a test that asserts it fires — and, ideally, that a safe variant does not.
+with an `expected.yaml` — the corpus test then asserts it (see
+[test/README.md](test/README.md)) — and, ideally, a safe variant that stays clean.
 
 **Add a language frontend.** Mirror the structure of `converters/python` or
 `converters/javascript`: parse, then lower to gIR with stable `<lang>:` canonical

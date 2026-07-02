@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Guards taint reaching a VARIADIC argument (sh -c <tainted>).
+findings:
+    - rule: go-command-injection
+      min: 1

@@ -19,7 +19,9 @@ go.work
 
 # Godzilla specific
 bin/
-godzilla
+# The compiled CLI binary at the repo root (anchored, so it does NOT match the
+# cmd/godzilla/ source directory).
+/godzilla
 
 # IDEs
 .idea/

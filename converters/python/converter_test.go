@@ -350,3 +350,32 @@ func TestConvertFile_SingleUnparseableFileErrors(t *testing.T) {
 		t.Fatal("ConvertFile on a single unparseable file: expected an error, got nil")
 	}
 }
+
+// TestConvertFile_ModuleConstantBecomesGlobal proves that a module-level
+// constant binding (NAME = "literal") is surfaced as a gIR Global with its
+// string init value. Without this, the literal lives only in the <module>
+// function's env and is invisible to constant-inspecting passes such as the
+// hardcoded-secret scanner — the false-negative this regression-guards.
+func TestConvertFile_ModuleConstantBecomesGlobal(t *testing.T) {
+	requirePython3(t)
+
+	conv := NewConverter()
+	prog, err := conv.ConvertFile("../../test/python/secrets/app.py")
+	if err != nil {
+		t.Fatalf("failed to convert file: %v", err)
+	}
+	if len(prog.Modules) != 1 {
+		t.Fatalf("expected 1 module, got %d", len(prog.Modules))
+	}
+
+	const want = "AKIAIOSFODNN7EXAMPLE"
+	var found bool
+	for _, g := range prog.Modules[0].Globals {
+		if g.GetName() == "AWS_ACCESS_KEY_ID" && g.GetInitValue().GetStringVal() == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a global AWS_ACCESS_KEY_ID with init value %q; globals = %v", want, prog.Modules[0].Globals)
+	}
+}

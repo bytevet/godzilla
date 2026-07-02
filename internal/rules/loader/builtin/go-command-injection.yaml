@@ -13,6 +13,7 @@ rules:
     sources:
       - "go:*net/url*.Get"
       - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
     sinks:
       - "go:*os/exec.Command"

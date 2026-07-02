@@ -15,10 +15,16 @@ rules:
       - "js:*req.query*"
       - "js:*req.params*"
       - "js:*req.body*"
+    # A bare "js:*.exec" sink is deliberately NOT used: it matches
+    # RegExp.prototype.exec (regex.exec(userInput)), an extremely common,
+    # benign validation call, producing a critical false positive. child_process
+    # is matched by its qualified name instead; execSync/spawn have no common
+    # benign namesake, so a member match on those is safe.
     sinks:
       - "js:*child_process.exec*"
-      - "js:*.exec"
+      - "js:*child_process.spawn*"
       - "js:*.execSync"
+      - "js:*.execFileSync"
       - "js:*.spawn"
     sanitizers: []
     propagators: []

@@ -12,15 +12,19 @@ rules:
     sources:
       - "go:*net/url*.Get"
       - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
-    # The filesystem path is logical arg 0 for all of these (os.WriteFile's
+    # The filesystem path is logical arg 0 for the os/ioutil sinks (os.WriteFile's
     # data/perm args, for instance, are not path-traversal injection points).
+    # http.ServeFile(w, r, name) serves the file at `name` over HTTP — the
+    # textbook path-traversal sink — and its path is logical arg 2.
     sinks:
       - "go:os.Open*#0"
       - "go:os.ReadFile#0"
       - "go:os.WriteFile#0"
       - "go:os.Create#0"
       - "go:*ioutil.ReadFile#0"
+      - "go:*net/http.ServeFile#2"
     # filepath.Base strips the directory component, so it genuinely prevents
     # traversal. filepath.Clean / filepath.Join do NOT contain input to a base
     # directory ("/data" + "../../etc" cleans to "/etc"), so they are treated
