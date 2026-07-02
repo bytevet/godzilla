@@ -1,0 +1,4 @@
+# Expected findings.
+findings:
+    - rule: c-path-traversal
+      min: 1

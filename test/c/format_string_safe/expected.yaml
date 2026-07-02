@@ -1,0 +1,2 @@
+# FP guard: user input as a printf ARGUMENT (constant format) is safe.
+findings: []

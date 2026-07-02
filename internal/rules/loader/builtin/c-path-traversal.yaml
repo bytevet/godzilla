@@ -1,0 +1,35 @@
+# Path traversal (C/C++): untrusted input used as a filesystem path.
+rules:
+  - id: c-path-traversal
+    languages: [c, cpp]
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input is used as a filesystem path without normalization or
+      containment, which may allow path traversal (e.g. "../" sequences) to
+      access files outside the intended directory. Canonicalize the path and
+      verify it stays within an allowed base directory.
+    sources:
+      - "c*:getenv"
+      - "c*:*scanf"
+      - "c*:fgets"
+      - "c*:read"
+      - "c*:recv"
+    sinks:
+      - "c*:fopen#0"
+      - "c*:open#0"
+      - "c*:open64#0"
+      - "c*:opendir#0"
+      - "c*:unlink#0"
+      - "c*:remove#0"
+      - "c*:rename#0"
+    sanitizers:
+      - "c*:realpath"
+      - "c*:basename"
+    propagators:
+      - "c*:strcpy"
+      - "c*:strncpy"
+      - "c*:strcat"
+      - "c*:snprintf"
+      - "c*:sprintf"
+      - "c*:strdup"

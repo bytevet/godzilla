@@ -1,0 +1,33 @@
+# Format-string vulnerability (C/C++): untrusted input used as a printf-family
+# format string.
+rules:
+  - id: c-format-string
+    languages: [c, cpp]
+    severity: high
+    cwe: CWE-134
+    message: >-
+      Untrusted input is used as the format string of a printf-family function,
+      which may allow memory disclosure or corruption via format specifiers
+      (e.g. %n, %s). Pass user input as an argument to a fixed format string
+      (printf("%s", user)) instead of as the format itself.
+    sources:
+      - "c*:getenv"
+      - "c*:*scanf"
+      - "c*:fgets"
+      - "c*:read"
+      - "c*:recv"
+    # The format argument index differs per function (receiver-excluded, which
+    # for C is the actual arg index): printf(fmt), fprintf(stream, fmt),
+    # sprintf(buf, fmt), snprintf(buf, size, fmt), syslog(pri, fmt).
+    sinks:
+      - "c*:printf#0"
+      - "c*:fprintf#1"
+      - "c*:dprintf#1"
+      - "c*:sprintf#1"
+      - "c*:snprintf#2"
+      - "c*:syslog#1"
+    sanitizers: []
+    propagators:
+      - "c*:strcpy"
+      - "c*:strncpy"
+      - "c*:strdup"

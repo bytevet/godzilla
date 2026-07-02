@@ -106,13 +106,18 @@ IR (`-O1 -g`), which is parsed with libLLVM and lowered to gIR. This is an opt-i
 CGO flags) — and is *not* in the default pure-Go binary; the default build ships a
 stub for these languages. Needs libLLVM + clang (and rustc for Rust).
 
-- **C / C++**: command injection (`system`/`popen`/`exec*`) is detected today;
-  taint flows through primitive (`char*`) values. C++ code that routes untrusted
-  data through heap aggregates (`std::string`) is not yet tracked.
-- **Rust**: the frontend compiles and lowers rustc IR, but Rust returns
-  `String`/`Result` via caller out-pointers (sret) and threads values through
-  stack memory, so taint tracking through those aggregates is **not yet modeled**
-  — Rust detection is experimental.
+- **C / C++**: command injection (`system`/`popen`/`exec*`), path traversal
+  (`fopen`/`open`), and format-string (`printf`-family) are detected today; taint
+  flows through primitive (`char*`) values. C++ code that routes untrusted data
+  through heap aggregates (`std::string`) is not yet tracked (see Rust, below).
+- **Rust**: the frontend compiles and lowers rustc IR, but two properties of Rust
+  at the LLVM-IR level make taint tracking impractical here: values pass through
+  caller out-pointers (`sret`) and stack memory (needs memory-precise flow), and
+  demangled symbols are *internal, monomorphized* names (`std::env::var` inlines
+  to `std::env::_var`, `Command::new` to `std::sys::process::unix::common::…`),
+  which are unstable across compiler versions and awkward to write rules against.
+  Robust Rust analysis wants **MIR** (source-level names), not LLVM IR — a future
+  frontend. Rust detection is therefore **experimental / not yet effective**.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).
 | Hardcoded secrets | ✅ (all languages, via gIR string constants) |
