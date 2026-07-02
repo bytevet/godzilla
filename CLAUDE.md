@@ -52,7 +52,8 @@ every language-specific construct (Go `defer`/channels/`go`/`select`, map ops, c
 intrinsic with a canonical name (e.g. `go.chan.send`, `builtin.make_closure`) that the engine interprets.
 Functions carry a **canonical FQN** (`go:net/http.HandleFunc`, `py:flask.request.args.get`,
 `js:res.send`); `CallCommon.Callee` holds the callee's canonical name; modules carry a `language` tag. The
-proto schema is authoritative — change it first, then `go generate`.
+proto schema is authoritative — change it first, then `go generate`. **Treat gIR as a frozen contract and
+avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 
 **Frontends (all in-process, single binary).**
 - `converters/go/` — uses `golang.org/x/tools` SSA. `ConvertFile` accepts a file or directory and
@@ -121,8 +122,15 @@ and sets a severity-gated exit code.
 
 ## Conventions
 
-- **The proto schema is authoritative.** Any IR change starts in `proto/*.proto`, then `go generate`.
-  Never hand-edit `pkg/ir/v1/*.pb.go`.
+- **Avoid touching gIR unless really necessary.** The gIR schema (`proto/*.proto` → `pkg/ir/v1/`) is a
+  frozen cross-language contract: all frontends emit it and the single engine consumes it, so any schema
+  change ripples across every frontend + the analyzer and risks regressions. Treat it as a **last
+  resort**. Prefer, in order: (1) model the construct as an `OP_CODE_INTRINSIC` with a canonical name and
+  teach the engine/rules about it; (2) add the source/sink/propagator/sanitizer as a YAML rule edit;
+  (3) handle it in the frontend's lowering. Only change the proto when a genuinely new *structural*
+  concept truly cannot be expressed by the existing opcodes + intrinsics — and say why in the change.
+- **The proto schema is authoritative.** If a gIR change is unavoidable, start in `proto/*.proto`, then
+  `go generate`. Never hand-edit `pkg/ir/v1/*.pb.go`.
 - **Small core + intrinsics.** Do NOT add an opcode for a language-specific construct — model it as an
   `OP_CODE_INTRINSIC` with a canonical name and teach the engine/rules about that name.
 - **Canonical names are the cross-language join.** Frontends must emit stable `<lang>:...` FQNs; rules match
