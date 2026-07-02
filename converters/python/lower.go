@@ -24,12 +24,24 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 	// (at any nesting depth reachable via defs/classes) and lowers each into
 	// its own ir.Function, tracking a dotted qualname prefix as it descends
 	// (e.g. "MyClass." for methods, "outer." for a closure nested in outer).
+	// Top-level `def` names: a bare call to one of these (helper(x)) resolves to
+	// the module-level function, so lowerCall qualifies its callee with the
+	// module name to match the function's CanonicalName. (Nested defs called by
+	// bare name are a documented limitation — the straight-line lowering does not
+	// model Python's lexical scoping.)
+	localFuncs := map[string]bool{}
+	for _, s := range root.list("body") {
+		if s.kind() == "FunctionDef" {
+			localFuncs[s.str("name")] = true
+		}
+	}
+
 	var collect func(stmts []astNode, qualPrefix string)
 	collect = func(stmts []astNode, qualPrefix string) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
-				fn := convertFunction(s, filename, moduleName, qualPrefix)
+				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs)
 				functions = append(functions, fn)
 				collect(s.list("body"), qualPrefix+s.str("name")+".")
 			case "ClassDef":
@@ -73,7 +85,7 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 		}
 	}
 
-	moduleFn := convertModuleInit(root, filename, moduleName)
+	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 
 	return mod
@@ -83,7 +95,7 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 // (skipping nested def/class bodies, which become their own functions) into a
 // synthetic entry-point function, analogous to converters/go treating
 // package-level init code as part of the SSA program.
-func convertModuleInit(root astNode, filename, moduleName string) *ir.Function {
+func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool) *ir.Function {
 	fn := &ir.Function{
 		Name:          moduleName + ".<module>",
 		ObjectName:    "<module>",
@@ -92,6 +104,8 @@ func convertModuleInit(root astNode, filename, moduleName string) *ir.Function {
 		Synthetic:     true,
 	}
 	fs := newFuncState(filename)
+	fs.moduleName = moduleName
+	fs.localFuncs = localFuncs
 	fs.lowerBody(root.list("body"))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
@@ -99,7 +113,7 @@ func convertModuleInit(root astNode, filename, moduleName string) *ir.Function {
 
 // convertFunction lowers a single `def` (module-level, nested, or method)
 // into an ir.Function containing one straight-line basic block.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string) *ir.Function {
+func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
@@ -112,6 +126,8 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string) *ir.
 	}
 
 	fs := newFuncState(filename)
+	fs.moduleName = moduleName
+	fs.localFuncs = localFuncs
 	for _, p := range node.strList("params") {
 		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
 		fn.Params = append(fn.Params, v)
@@ -136,6 +152,13 @@ type funcState struct {
 	env       map[string]*ir.Value
 	paramRegs map[string]bool
 	instrs    []*ir.Instruction
+
+	// moduleName and localFuncs let lowerCall qualify a bare local call
+	// (helper(x)) with the module name so its callee "py:<module>.helper"
+	// matches the callee function's CanonicalName — without this the call is
+	// unresolved and inter-procedural taint through the local helper is lost.
+	moduleName string
+	localFuncs map[string]bool
 }
 
 func newFuncState(filename string) *funcState {
@@ -464,6 +487,14 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	}
 
 	callee := "py:" + dottedName(funcNode)
+	// A bare call to a module-level function (helper(x)) must carry the module
+	// name so its callee matches the function's CanonicalName
+	// ("py:<module>.helper"); otherwise byKey never resolves it and taint does
+	// not flow through the local helper. Builtins (open, print) and imported
+	// names are not in localFuncs, so they are left unqualified.
+	if funcNode != nil && funcNode.kind() == "Name" && fs.localFuncs[funcNode.str("id")] {
+		callee = "py:" + fs.moduleName + "." + funcNode.str("id")
+	}
 	cc := &ir.CallCommon{
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
 		Callee: callee,
