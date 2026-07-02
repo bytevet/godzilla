@@ -1,28 +1,54 @@
 # OS command injection (Rust): untrusted input flowing into std::process::Command.
+#
+# Names match the Rust frontend's canonical form, which is rustc's source-level
+# MIR path with generics stripped and a "rust:" prefix (e.g. std::env::var()
+# prints as the bare free function `var`; Command::arg() as `Command::arg`).
+# Method calls carry the receiver as operand 0, so a sink pins the tainted
+# argument with `#1` (and Command::new, an associated fn with no receiver, uses
+# `#0`) to keep the fixed program/flags from being flagged.
 rules:
   - id: rust-command-injection
     languages: [rust]
     severity: critical
     cwe: CWE-78
     message: >-
-      Untrusted input (environment, args, stdin) flows into a std::process
-      command, which may allow OS command injection. Validate/allow-list the
-      program and arguments instead of passing user-controlled data.
+      Untrusted input (environment, args) flows into a std::process command,
+      which may allow OS command injection. Validate/allow-list the program and
+      arguments instead of passing user-controlled data to a shell.
     sources:
-      - "rust:std::env::var"
-      - "rust:std::env::var_os"
+      - "rust:var"
+      - "rust:var_os"
+      - "rust:*env::var"
+      - "rust:*env::var_os"
+      - "rust:args"
+      - "rust:args_os"
+      - "rust:*env::args"
+      - "rust:*env::args_os"
     sinks:
-      - "rust:*Command::arg"
-      - "rust:*Command::args"
-      - "rust:*Command::new"
+      - "rust:*Command::new#0"
+      - "rust:*Command::arg#1"
+      - "rust:*Command::args#1"
     sanitizers: []
     propagators:
       - "rust:*unwrap"
+      - "rust:*unwrap_or"
       - "rust:*unwrap_or_default"
+      - "rust:*expect"
       - "rust:*to_string"
+      - "rust:*to_owned"
       - "rust:*as_str"
       - "rust:*as_ref"
-      - "rust:*to_owned"
+      - "rust:*as_bytes"
       - "rust:*clone"
       - "rust:*deref"
       - "rust:*into"
+      - "rust:*trim"
+      - "rust:*collect"
+      - "rust:*join"
+      - "rust:*concat"
+      - "rust:*push_str"
+      - "rust:format"
+      - "rust:*must_use"
+      - "rust:*new_display"
+      - "rust:*new_debug"
+      - "rust:*Arguments::new"

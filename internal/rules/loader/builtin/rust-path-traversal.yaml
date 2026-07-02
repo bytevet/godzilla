@@ -1,0 +1,60 @@
+# Path traversal (Rust): untrusted input flowing into a std::fs filesystem path.
+#
+# Sink argument indices follow the MIR calling convention (receiver first):
+# free functions take the path at operand 0 (fs::read_to_string#0), while
+# OpenOptions::open is a method so the path is operand 1 (#1). fs::write's path
+# is operand 0 (its contents are operand 1, deliberately not an injection point).
+rules:
+  - id: rust-path-traversal
+    languages: [rust]
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input (environment, args) flows into a filesystem path without
+      validation, which may allow path traversal (reading or writing files
+      outside the intended directory). Canonicalize the path and confirm it
+      stays within an allowed base directory.
+    sources:
+      - "rust:var"
+      - "rust:var_os"
+      - "rust:*env::var"
+      - "rust:*env::var_os"
+      - "rust:args"
+      - "rust:args_os"
+      - "rust:*env::args"
+      - "rust:*env::args_os"
+    sinks:
+      - "rust:*fs::read_to_string#0"
+      - "rust:*fs::read#0"
+      - "rust:*fs::write#0"
+      - "rust:*fs::copy#0"
+      - "rust:*fs::rename#0"
+      - "rust:*fs::remove_file#0"
+      - "rust:*fs::remove_dir_all#0"
+      - "rust:*File::open#0"
+      - "rust:*File::create#0"
+      - "rust:*OpenOptions::open#1"
+    sanitizers: []
+    propagators:
+      - "rust:*unwrap"
+      - "rust:*unwrap_or"
+      - "rust:*unwrap_or_default"
+      - "rust:*expect"
+      - "rust:*to_string"
+      - "rust:*to_owned"
+      - "rust:*as_str"
+      - "rust:*as_ref"
+      - "rust:*as_path"
+      - "rust:*as_bytes"
+      - "rust:*clone"
+      - "rust:*deref"
+      - "rust:*into"
+      - "rust:*trim"
+      - "rust:*push_str"
+      - "rust:*Path::join"
+      - "rust:*PathBuf::from"
+      - "rust:format"
+      - "rust:*must_use"
+      - "rust:*new_display"
+      - "rust:*new_debug"
+      - "rust:*Arguments::new"

@@ -1,0 +1,3 @@
+findings:
+  - rule: rust-command-injection
+    min: 1

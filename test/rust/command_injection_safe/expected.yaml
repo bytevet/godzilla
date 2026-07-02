@@ -1,0 +1,2 @@
+# No findings expected: untrusted input never reaches a command execution.
+findings: []

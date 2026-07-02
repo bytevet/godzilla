@@ -8,16 +8,17 @@ engine over it. Write a detection rule once and it applies across every supporte
 language.
 
 ```
-source (Go / Python / JS) ─▶ frontend ─▶ gIR ─▶ rule engine + taint analysis ─▶ findings ─▶ report / exit code
-                                                                                    └▶ optional LLM review
+source (Go / Python / JS / Java / Rust / C·C++) ─▶ frontend ─▶ gIR ─▶ rule engine + taint analysis ─▶ findings ─▶ report / exit code
+                                                                                              └▶ optional LLM review
 ```
 
 > Status: usable and tested, but young. See [Status & limitations](#status--limitations).
 
 ## Features
 
-- **Multi-language, one engine.** Go, Python, and JavaScript frontends emit the
-  same gIR; the taint engine and rules are language-agnostic.
+- **Multi-language, one engine.** Go, Python, JavaScript, Java, and Rust frontends
+  (plus C/C++ in the opt-in cgo build) all emit the same gIR; the taint engine and
+  rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
   calls (source → sanitizer → sink) with a call graph and function summaries.
   Each finding carries a **confidence** (High for intra-procedural, Medium for
@@ -34,8 +35,11 @@ source (Go / Python / JS) ─▶ frontend ─▶ gIR ─▶ rule engine + taint 
   and a severity-gated **exit code**.
 - **Optional LLM review.** A pluggable stage sends low-confidence findings to
   Claude to trim false positives; it fails open and is off by default.
-- **Single self-contained binary.** No language runtimes required to run, except
-  `python3` for the highest-fidelity Python parsing (it degrades gracefully).
+- **Single self-contained binary.** The Go and JavaScript frontends are pure Go;
+  Python, Java, and Rust shell out to the toolchain already on `PATH` (`python3`,
+  a JDK `java`, `rustc`) and degrade gracefully when it is absent. C/C++ is an
+  opt-in cgo build (libLLVM). No frontend adds a runtime dependency to *run* the
+  binary — only to analyze that language.
 
 ## Install
 
@@ -82,17 +86,17 @@ $ godzilla scan ./test/go/sql_injection
 
 ## Supported languages & detections
 
-| | Go | Python | JavaScript | Java |
-|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) | JVM bytecode (`java.lang.classfile`) |
-| SQL injection | ✅ | ✅ | ✅ | ✅ |
-| Command injection | ✅ | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ | — |
-| SSRF | ✅ | ✅ | ✅ | — |
-| Reflected XSS | ✅ | ✅ | ✅ | — |
-| Open redirect | ✅ | ✅ | ✅ | — |
-| Insecure deserialization | — | ✅ | — | — |
-| Code injection (`eval`) | — | — | ✅ | — |
+| | Go | Python | JavaScript | Java | Rust |
+|---|---|---|---|---|---|
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) | JVM bytecode (`java.lang.classfile`) | rustc MIR |
+| SQL injection | ✅ | ✅ | ✅ | ✅ | — |
+| Command injection | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Path traversal | ✅ | ✅ | ✅ | — | ✅ |
+| SSRF | ✅ | ✅ | ✅ | — | — |
+| Reflected XSS | ✅ | ✅ | ✅ | — | — |
+| Open redirect | ✅ | ✅ | ✅ | — | — |
+| Insecure deserialization | — | ✅ | — | — | — |
+| Code injection (`eval`) | — | — | ✅ | — | — |
 
 **Java** is analyzed at the JVM-bytecode level: an embedded single-file helper
 (`java JavaDump.java`) compiles `.java` sources in-process and reads `.class`
@@ -100,24 +104,25 @@ files with the standard `java.lang.classfile` API, and Godzilla simulates the
 operand stack to recover SSA values. Needs a **JDK 24+** `java` on `PATH`;
 sources that require a classpath are best scanned as compiled `.class`/`.jar`.
 
-**C/C++ and Rust** are analyzed via **LLVM IR**: clang/rustc compile each unit to
-IR (`-O1 -g`), which is parsed with libLLVM and lowered to gIR. This is an opt-in
-**cgo** build — `make build-llvm` (or `go build -tags "llvm byollvm"` with libLLVM
-CGO flags) — and is *not* in the default pure-Go binary; the default build ships a
-stub for these languages. Needs libLLVM + clang (and rustc for Rust).
+**Rust** is analyzed via **rustc MIR** (Mid-level IR), in the **default pure-Go
+binary** — only `rustc` is needed at scan time (like Python needs `python3`).
+Godzilla runs `rustc --emit=mir` and lowers the textual MIR with a straight-line
+value-forwarding pass. MIR, unlike Rust's LLVM IR, names the source-level public
+API (`std::env::var`, `Command::arg` — not the internal, version-unstable
+`std::env::__var`) and assigns call results directly to locals (no `sret`
+out-pointer indirection), so command injection and path traversal are detected
+today, with taint flowing through `format!`. Emitting MIR skips codegen, so it is
+fast (~40 ms/file). SQL injection and web-framework sources live in third-party
+crates, which must be present at scan time (a follow-up drives Cargo crates).
 
-- **C / C++**: command injection (`system`/`popen`/`exec*`), path traversal
-  (`fopen`/`open`), and format-string (`printf`-family) are detected today; taint
-  flows through primitive (`char*`) values. C++ code that routes untrusted data
-  through heap aggregates (`std::string`) is not yet tracked (see Rust, below).
-- **Rust**: the frontend compiles and lowers rustc IR, but two properties of Rust
-  at the LLVM-IR level make taint tracking impractical here: values pass through
-  caller out-pointers (`sret`) and stack memory (needs memory-precise flow), and
-  demangled symbols are *internal, monomorphized* names (`std::env::var` inlines
-  to `std::env::_var`, `Command::new` to `std::sys::process::unix::common::…`),
-  which are unstable across compiler versions and awkward to write rules against.
-  Robust Rust analysis wants **MIR** (source-level names), not LLVM IR — a future
-  frontend. Rust detection is therefore **experimental / not yet effective**.
+**C / C++** are analyzed via **LLVM IR**: clang compiles each unit to IR
+(`-O1 -g`), parsed with libLLVM and lowered to gIR. This is an opt-in **cgo**
+build — `make build-llvm` (or `go build -tags "llvm byollvm"` with libLLVM CGO
+flags) — *not* in the default binary, which ships a stub for C/C++. Needs libLLVM
++ clang. Command injection (`system`/`popen`/`exec*`), path traversal
+(`fopen`/`open`), and format-string (`printf`-family) are detected; taint flows
+through primitive (`char*`) values. C++ code that routes untrusted data through
+heap aggregates (`std::string`) is not yet tracked.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).
 | Hardcoded secrets | ✅ (all languages, via gIR string constants) |

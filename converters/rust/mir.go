@@ -1,0 +1,581 @@
+package rust_converter
+
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+
+	ir "godzilla/pkg/ir/v1"
+)
+
+// This file lowers rustc's textual MIR (Mid-level IR) to gIR. MIR is the right
+// substrate for Rust taint analysis — unlike LLVM IR it names the source-level
+// public API (`std::env::var`, `Command::arg`, not the internal monomorphized
+// `std::env::__var`) and assigns call results directly to locals (no `sret`
+// out-pointer indirection), so a straight-line value-forwarding pass recovers
+// clean SSA. See converter.go for how the MIR text is produced.
+//
+// The lowering flattens control flow into one block (like the Python/JS
+// frontends): it walks a function's basic blocks in order and forwards each
+// MIR local to its current gIR value. That is exact for the straight-line
+// source→sink handler shape that matters for taint.
+
+// lowerMIR parses the MIR dump `text` for source file `filename` into a module.
+func lowerMIR(text, filename string) *ir.Module {
+	mod := &ir.Module{Name: filename, Language: "rust"}
+	for _, body := range splitFns(text) {
+		if fn := lowerFn(body, filename); fn != nil {
+			mod.Functions = append(mod.Functions, fn)
+		}
+	}
+	return mod
+}
+
+// splitFns returns the line groups of every top-level `fn` item in a MIR dump.
+// A fn item starts with a line beginning `fn ` (column 0) and runs until the
+// matching closing brace at column 0. Brace counting ignores `//` comments,
+// whose braces (e.g. in the `// + const_: Const { ty: fn() {...} }` annotation
+// lines) would otherwise unbalance it.
+func splitFns(text string) [][]string {
+	var out [][]string
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !strings.HasPrefix(lines[i], "fn ") {
+			continue
+		}
+		var body []string
+		depth := 0
+		for ; i < len(lines); i++ {
+			code, _ := splitCodeComment(lines[i])
+			depth += strings.Count(code, "{") - strings.Count(code, "}")
+			body = append(body, lines[i])
+			if depth <= 0 && len(body) > 1 {
+				break
+			}
+		}
+		out = append(out, body)
+	}
+	return out
+}
+
+// lowerState carries the per-function value-forwarding environment.
+type lowerState struct {
+	filename string
+	counter  int
+	env      map[string]*ir.Value   // MIR local ("_5") -> current gIR value
+	agg      map[string][]*ir.Value // MIR local -> aggregate element values (for field folding)
+	instrs   []*ir.Instruction
+	firstPos *ir.Position
+}
+
+var (
+	localRe = regexp.MustCompile(`^_\d+$`)
+	fieldRe = regexp.MustCompile(`^\(\*?_(\d+)\.(\d+):`) // (_6.0: T) or (*_6.0: T)
+	indexRe = regexp.MustCompile(`^\(?\*?_(\d+)\[`)      // _3[_4] or (_3[_4])
+	derefRe = regexp.MustCompile(`^\(\*_(\d+)\)`)        // (*_9)
+	spanRe  = regexp.MustCompile(`at ([^ ]+\.rs):(\d+):(\d+)`)
+	// binOps are MIR BinaryOp/UnaryOp names; matched to distinguish an operator
+	// rvalue like `Add(copy _a, copy _b)` from an enum-variant constructor.
+	binOps = map[string]bool{
+		"Add": true, "Sub": true, "Mul": true, "Div": true, "Rem": true,
+		"BitXor": true, "BitAnd": true, "BitOr": true, "Shl": true, "Shr": true,
+		"Eq": true, "Lt": true, "Le": true, "Ne": true, "Ge": true, "Gt": true,
+		"Cmp": true, "Offset": true,
+		"AddWithOverflow": true, "SubWithOverflow": true, "MulWithOverflow": true,
+		"AddUnchecked": true, "SubUnchecked": true, "MulUnchecked": true,
+	}
+	unOps = map[string]bool{"Neg": true, "Not": true, "PtrMetadata": true}
+)
+
+func lowerFn(body []string, filename string) *ir.Function {
+	name, params := parseHeader(body[0])
+	if name == "" {
+		return nil
+	}
+	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}}
+	fn := &ir.Function{
+		Name:          name,
+		ObjectName:    name,
+		CanonicalName: "rust:" + name,
+	}
+	for i, p := range params {
+		v := regValue(fmt.Sprintf("p%d", i))
+		fn.Params = append(fn.Params, v)
+		st.env[p] = v
+	}
+	for _, ln := range body[1:] {
+		st.line(ln)
+	}
+	fn.Pos = st.firstPos
+	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: st.instrs}}
+	return fn
+}
+
+// parseHeader extracts a function's normalized name and its parameter locals
+// from a MIR header line, e.g. `fn build_cmd(_1: &str, _2: i32) -> String {`.
+func parseHeader(h string) (name string, params []string) {
+	h = strings.TrimSpace(h)
+	h = strings.TrimPrefix(h, "fn ")
+	open := indexAtDepth0(h, '(')
+	if open < 0 {
+		return normalizeName(strings.TrimSuffix(strings.TrimSpace(h), "{")), nil
+	}
+	name = normalizeName(h[:open])
+	close := matchParen(h, open)
+	if close < 0 {
+		return name, nil
+	}
+	for _, part := range splitTop(h[open+1:close], ',') {
+		if id, _, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
+			if id = strings.TrimSpace(id); localRe.MatchString(id) {
+				params = append(params, id)
+			}
+		}
+	}
+	return name, params
+}
+
+func (st *lowerState) line(raw string) {
+	code, comment := splitCodeComment(raw)
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return
+	}
+	pos := st.span(comment)
+
+	// Terminators & non-assignment statements we flatten away or ignore.
+	switch {
+	case code == "return;":
+		st.emit("", ir.OpCode_OP_CODE_RET, valueSlice(st.env["_0"]), pos)
+		return
+	case strings.HasPrefix(code, "bb"), strings.HasPrefix(code, "let "),
+		strings.HasPrefix(code, "debug "), strings.HasPrefix(code, "scope "),
+		strings.HasPrefix(code, "StorageLive"), strings.HasPrefix(code, "StorageDead"),
+		strings.HasPrefix(code, "drop("), strings.HasPrefix(code, "goto"),
+		strings.HasPrefix(code, "switchInt"), strings.HasPrefix(code, "assert"),
+		strings.HasPrefix(code, "_0 = const"), code == "unreachable;",
+		code == "resume;", code == "{", code == "}":
+		return
+	}
+
+	code = strings.TrimSuffix(code, ";")
+	// A call is a terminator of the form `_dst = callee(args) -> [return: ..]`.
+	isCall := false
+	if idx := strings.Index(code, " -> ["); idx >= 0 {
+		code = strings.TrimSpace(code[:idx])
+		isCall = true
+	}
+
+	dst, expr, ok := strings.Cut(code, " = ")
+	if !ok {
+		return
+	}
+	dst = strings.TrimSpace(dst)
+	if !localRe.MatchString(dst) { // e.g. `discriminant(_x) = ..`, `(*_p) = ..`
+		return
+	}
+	st.assign(dst, strings.TrimSpace(expr), pos, isCall)
+}
+
+// assign lowers a single MIR assignment `_dst = <rvalue>` (or a call
+// terminator) into gIR, updating the value-forwarding environment.
+func (st *lowerState) assign(dst, expr string, pos *ir.Position, isCall bool) {
+	if isCall {
+		st.emitCall(dst, expr, pos)
+		return
+	}
+	switch {
+	case strings.HasPrefix(expr, "&"): // reference rvalue: & / &mut / &raw <place>
+		st.env[dst] = st.place(refPlace(expr), pos)
+	case fieldRe.MatchString(expr), derefRe.MatchString(expr), indexRe.MatchString(expr):
+		st.env[dst] = st.place(expr, pos)
+	case strings.HasPrefix(expr, "("): // tuple aggregate: (a, b,) — unit () is empty
+		st.setAgg(dst, splitTop(insideDelims(expr, '(', ')'), ','), "builtin.aggregate", pos)
+	case strings.HasPrefix(expr, "["): // array aggregate: [a, b] or [a; N]
+		body := insideDelims(expr, '[', ']')
+		if semi := indexAtDepth0(body, ';'); semi >= 0 {
+			body = body[:semi]
+		}
+		st.setAgg(dst, splitTop(body, ','), "builtin.aggregate", pos)
+	case strings.HasPrefix(expr, "move "), strings.HasPrefix(expr, "copy "), localRe.MatchString(expr):
+		st.env[dst] = st.place(placeOf(expr), pos)
+	case strings.HasPrefix(expr, "const "):
+		st.env[dst] = constFromLiteral(strings.TrimPrefix(expr, "const "))
+	default:
+		st.assignOperator(dst, expr, pos)
+	}
+}
+
+// assignOperator handles the remaining rvalue forms: binary/unary operators,
+// casts, and constructor-shaped rvalues (`Name(args)` / `Name { .. }`), which
+// are modeled as aggregates so taint flows through any operand.
+func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
+	if op, argStr, ok := callShape(expr); ok {
+		args := splitTop(argStr, ',')
+		switch {
+		case binOps[op]:
+			st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_BIN_OP, st.operands(args), pos)
+			return
+		case unOps[op]:
+			st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_UN_OP, st.operands(args), pos)
+			return
+		case op == "Len" || op == "discriminant" || op == "NullaryOp":
+			st.env[dst] = constString("")
+			return
+		default: // enum-variant / tuple-struct constructor: taint if any field is
+			st.setAgg(dst, args, "builtin.aggregate", pos)
+			return
+		}
+	}
+	if before, _, ok := cutCast(expr); ok { // `<operand> as T (Kind)`
+		st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_CONVERT, st.operands([]string{before}), pos)
+		return
+	}
+	if brace := strings.IndexByte(expr, '{'); brace >= 0 { // struct literal Name { f: op, .. }
+		st.setAgg(dst, structFields(expr[brace:]), "builtin.aggregate", pos)
+		return
+	}
+	st.env[dst] = constString("")
+}
+
+// emitCall lowers a MIR call terminator. Method and free-function calls alike
+// become OP_CODE_CALL with every operand (receiver first, for a method) in Args,
+// so a sink's `#idx` injection point counts from operand 0 — the convention the
+// Rust rule pack is written against.
+func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
+	callee, argStr, ok := callShape(expr)
+	name := st.reg()
+	if !ok { // indirect call through a fn-pointer local: `(move _f)(args)`
+		st.env[dst] = regValue(name)
+		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{}, Pos: pos})
+		return
+	}
+	canonical := "rust:" + normalizeName(callee)
+	cc := &ir.CallCommon{
+		Callee: canonical,
+		Args:   st.operands(splitTop(argStr, ',')),
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}},
+	}
+	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos})
+	st.env[dst] = regValue(name)
+}
+
+// setAgg records an aggregate construction: it both emits a builtin.aggregate
+// intrinsic (so a whole-aggregate use propagates taint from any element) and
+// remembers the element values so a later field read `(_dst.i)` folds directly
+// to element i (precise field-sensitive flow through tuples/arrays/structs).
+func (st *lowerState) setAgg(dst string, operandToks []string, intrinsic string, pos *ir.Position) {
+	vals := st.operands(operandToks)
+	name := st.reg()
+	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC, Intrinsic: intrinsic, Operands: vals, Pos: pos})
+	st.env[dst] = regValue(name)
+	st.agg[dst] = vals
+}
+
+// place resolves a MIR place expression to a gIR value, folding tuple/array
+// field reads to the stored element when the aggregate is known.
+func (st *lowerState) place(p string, pos *ir.Position) *ir.Value {
+	p = strings.TrimSpace(p)
+	if m := fieldRe.FindStringSubmatch(p); m != nil {
+		base, field := "_"+m[1], atoi(m[2])
+		if elts, ok := st.agg[base]; ok && field < len(elts) {
+			return elts[field]
+		}
+		return st.emit(st.reg(), ir.OpCode_OP_CODE_FIELD, valueSlice(st.local(base)), pos)
+	}
+	if m := derefRe.FindStringSubmatch(p); m != nil {
+		return st.local("_" + m[1]) // deref forwards the referent's taint
+	}
+	if m := indexRe.FindStringSubmatch(p); m != nil {
+		return st.emit(st.reg(), ir.OpCode_OP_CODE_INDEX, valueSlice(st.local("_"+m[1])), pos)
+	}
+	if localRe.MatchString(p) {
+		return st.local(p)
+	}
+	return constString("")
+}
+
+// local returns the current gIR value bound to a MIR local, or an untainted
+// placeholder for one not yet seen (e.g. defined in an unvisited block).
+func (st *lowerState) local(name string) *ir.Value {
+	if v, ok := st.env[name]; ok {
+		return v
+	}
+	return constString("")
+}
+
+func (st *lowerState) operands(toks []string) []*ir.Value {
+	out := make([]*ir.Value, 0, len(toks))
+	for _, t := range toks {
+		if t = strings.TrimSpace(t); t == "" {
+			continue
+		}
+		out = append(out, st.operand(t, nil))
+	}
+	return out
+}
+
+// operand resolves a single MIR operand token (`move _x` / `copy _x` /
+// `const ..` / `_x`) to a gIR value.
+func (st *lowerState) operand(tok string, pos *ir.Position) *ir.Value {
+	tok = strings.TrimSpace(tok)
+	if strings.HasPrefix(tok, "const ") {
+		return constFromLiteral(strings.TrimPrefix(tok, "const "))
+	}
+	return st.place(placeOf(tok), pos)
+}
+
+func (st *lowerState) emit(name string, op ir.OpCode, operands []*ir.Value, pos *ir.Position) *ir.Value {
+	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: op, Operands: operands, Pos: pos})
+	if name == "" {
+		return nil
+	}
+	return regValue(name)
+}
+
+func (st *lowerState) reg() string {
+	st.counter++
+	return fmt.Sprintf("%%%d", st.counter)
+}
+
+func (st *lowerState) span(comment string) *ir.Position {
+	m := spanRe.FindStringSubmatch(comment)
+	if m == nil {
+		return nil
+	}
+	pos := &ir.Position{Filename: st.filename, Line: int32(atoi(m[2])), Column: int32(atoi(m[3]))}
+	if st.firstPos == nil {
+		st.firstPos = pos
+	}
+	return pos
+}
+
+// --- text helpers ---
+
+// splitCodeComment splits a MIR line into its code and trailing `//` comment,
+// honoring double-quoted string/byte-string literals so a `//` inside a literal
+// is not mistaken for a comment.
+func splitCodeComment(line string) (code, comment string) {
+	inStr := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c == '"' && (i == 0 || line[i-1] != '\\') {
+			inStr = !inStr
+		}
+		if !inStr && c == '/' && i+1 < len(line) && line[i+1] == '/' {
+			return line[:i], line[i+2:]
+		}
+	}
+	return line, ""
+}
+
+// normalizeName strips generic/type/lifetime groups (`<...>`, including
+// turbofish `::<...>`) from a MIR path and collapses the resulting `::` runs,
+// e.g. `Result::<String, VarError>::unwrap` → `Result::unwrap`,
+// `Command::arg::<&str>` → `Command::arg`.
+func normalizeName(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	out := regexp.MustCompile(`:{3,}`).ReplaceAllString(b.String(), "::")
+	return strings.Trim(strings.TrimSpace(out), ":")
+}
+
+// callShape splits `callee(args)` into the callee text and the raw argument
+// string, where the arg list opens at the first `(` outside any `<...>` group
+// (so a generic like `arg::<&str>(..)` is handled). It reports ok=false when
+// there is no callee before the parens (a tuple/indirect form).
+func callShape(expr string) (callee, args string, ok bool) {
+	open := indexAtDepth0(expr, '(')
+	if open <= 0 {
+		return "", "", false
+	}
+	close := matchParen(expr, open)
+	if close < 0 {
+		return "", "", false
+	}
+	callee = strings.TrimSpace(expr[:open])
+	// An indirect call through a fn value prints the callee as an operand
+	// (`move _f(..)`, `copy _f(..)`, `(_f)(..)`) or a bare local; a direct call
+	// names a path, which may carry generics with spaces (`Result::<A, B>::x`).
+	if strings.HasPrefix(callee, "move ") || strings.HasPrefix(callee, "copy ") ||
+		strings.HasPrefix(callee, "(") || localRe.MatchString(callee) {
+		return "", "", false
+	}
+	return callee, expr[open+1 : close], true
+}
+
+// placeOf strips a leading move/copy qualifier from an operand, yielding the
+// bare place.
+func placeOf(tok string) string {
+	tok = strings.TrimSpace(tok)
+	tok = strings.TrimPrefix(tok, "move ")
+	tok = strings.TrimPrefix(tok, "copy ")
+	return strings.TrimSpace(tok)
+}
+
+// refPlace strips a reference rvalue's borrow prefix to the borrowed place:
+// `&_1`, `&mut _1`, `&raw const _1`, `&raw mut _1` → `_1`.
+func refPlace(expr string) string {
+	p := strings.TrimPrefix(expr, "&")
+	p = strings.TrimPrefix(p, "raw ")
+	p = strings.TrimPrefix(p, "mut ")
+	p = strings.TrimPrefix(p, "const ")
+	return strings.TrimSpace(p)
+}
+
+// cutCast splits a MIR cast rvalue `<operand> as <type> (<kind>)` into the
+// operand and type, ignoring the parenthesized cast-kind suffix.
+func cutCast(expr string) (before, typ string, ok bool) {
+	i := strings.LastIndex(expr, " as ")
+	if i < 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(expr[:i]), strings.TrimSpace(expr[i+4:]), true
+}
+
+// structFields extracts the field operand tokens from a struct-literal tail
+// `{ f0: op0, f1: op1 }`, returning [op0, op1].
+func structFields(brace string) []string {
+	inner := insideDelims(brace, '{', '}')
+	var out []string
+	for _, f := range splitTop(inner, ',') {
+		if _, v, ok := strings.Cut(f, ":"); ok {
+			out = append(out, strings.TrimSpace(v))
+		}
+	}
+	return out
+}
+
+// insideDelims returns the content between the first `open` and its matching
+// `close`, respecting nesting of ()/[]/<>/{} and quotes.
+func insideDelims(s string, open, close byte) string {
+	i := strings.IndexByte(s, open)
+	if i < 0 {
+		return ""
+	}
+	j := matchDelim(s, i, open, close)
+	if j < 0 {
+		return ""
+	}
+	return s[i+1 : j]
+}
+
+// splitTop splits s on the separator byte at bracket/quote depth 0.
+func splitTop(s string, sep byte) []string {
+	var out []string
+	depth, start, inStr := 0, 0, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' && (i == 0 || s[i-1] != '\\'):
+			inStr = !inStr
+		case inStr:
+		case c == '(' || c == '[' || c == '<' || c == '{':
+			depth++
+		case c == ')' || c == ']' || c == '>' || c == '}':
+			if depth > 0 {
+				depth--
+			}
+		case c == sep && depth == 0:
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start <= len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+// indexAtDepth0 finds the first `target` byte outside any <...> group and
+// outside string literals (used to locate a call's arg-list `(`).
+func indexAtDepth0(s string, target byte) int {
+	angle, inStr := 0, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' && (i == 0 || s[i-1] != '\\'):
+			inStr = !inStr
+		case inStr:
+		case c == '<':
+			angle++
+		case c == '>':
+			if angle > 0 {
+				angle--
+			}
+		case c == target && angle == 0:
+			return i
+		}
+	}
+	return -1
+}
+
+func matchParen(s string, open int) int { return matchDelim(s, open, '(', ')') }
+
+// matchDelim returns the index of the delimiter matching the opener at index
+// `open`, honoring nesting and string literals.
+func matchDelim(s string, open int, oc, cc byte) int {
+	depth, inStr := 0, false
+	for i := open; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' && (i == 0 || s[i-1] != '\\'):
+			inStr = !inStr
+		case inStr:
+		case c == oc:
+			depth++
+		case c == cc:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func valueSlice(v *ir.Value) []*ir.Value {
+	if v == nil {
+		return nil
+	}
+	return []*ir.Value{v}
+}
+
+func atoi(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
+
+func regValue(name string) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
+}
+
+func constString(v string) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v}}}}
+}
+
+// constFromLiteral models a MIR constant. String literals are preserved (so the
+// secrets scanner can see them and taint stays constant-free); every other
+// constant becomes an empty string constant — untainted, which is correct since
+// compile-time constants are never attacker-controlled.
+func constFromLiteral(lit string) *ir.Value {
+	lit = strings.TrimSpace(lit)
+	if strings.HasPrefix(lit, `"`) {
+		if end := strings.LastIndexByte(lit, '"'); end > 0 {
+			return constString(lit[1:end])
+		}
+	}
+	return constString("")
+}

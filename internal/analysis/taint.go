@@ -20,9 +20,14 @@ func NewEngine(rs *rules.RuleSet) *Engine {
 // operations that pass taint from operand to result register.
 var intrinsicPropagators = map[string]bool{
 	"builtin.slice": true,
-	"go.map.lookup": true,
-	"go.next":       true,
-	"go.range":      true,
+	// builtin.aggregate models a tuple/array/struct/enum-variant construction
+	// (used by the Rust frontend): taint on any constructed element flows to the
+	// aggregate value, so a later whole-aggregate use (e.g. a format! argument
+	// pack) observes it. Field-precise reads are folded at lowering time.
+	"builtin.aggregate": true,
+	"go.map.lookup":     true,
+	"go.next":           true,
+	"go.range":          true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted

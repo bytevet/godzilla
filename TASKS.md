@@ -20,15 +20,24 @@ languages are additive via `<lang>:` canonical names + `OP_CODE_INTRINSIC`.
 - [x] Rules `internal/rules/loader/builtin/java-*.yaml` (command injection, SQLi + safe variants).
 - [x] Corpus `test/java/<case>/` + `expected.yaml`; converter unit test (no `java.unsupported`).
 
-## C/C++ + Rust (cgo `-tags llvm`) — env has libLLVM 22 + rustc; VERIFIED
+## C/C++ (cgo `-tags llvm`) — env has libLLVM 22; VERIFIED
 - [x] `converters/llvm/`: go-llvm parser + IR->gIR lowering + demangling (`//go:build llvm`).
-- [x] `converters/cpp/` (works: C & C++ command injection), `converters/rust/` (parses; aggregate/sret taint = documented limitation). Stubs for the default build.
-- [x] Rules c/rust-command-injection + corpus test/{c,cpp} (gated on `llvm` tag + clang).
+- [x] `converters/cpp/` (C & C++ command injection, path traversal, format string). Stub for default build.
+- [x] Rules c-* + corpus test/{c,cpp} (gated on `llvm` tag + clang).
+
+## Rust — rebuilt on rustc MIR (pure Go, DEFAULT build); VERIFIED
+- [x] LLVM-IR approach abandoned (sret out-pointers, stack-memory flow, internal v0 names).
+- [x] `converters/rust/{converter.go,mir.go}`: `rustc --emit=mir -Zmir-include-spans=on` (RUSTC_BOOTSTRAP=1)
+      → straight-line value-forwarding → gIR SSA. Source-level names (`rust:var`, `rust:Command::arg`),
+      receiver = operand 0, `format!` via `builtin.aggregate` intrinsic + field-read folding. No cgo.
+- [x] Rules rust-{command-injection,path-traversal}; samples test/rust/{command_injection,
+      command_injection_safe,path_traversal} + expected.yaml; converter unit tests; corpus wired
+      (`sampleLangs` + rustc-gated skip). End-to-end: cmd-injection + path-traversal fire, safe = 0. ~40 ms/file.
 
 ## Build / CI / docs
 - [x] go.mod deps (go-llvm, demangle); Makefile (build/test + build-llvm/test-llvm). [ ] CI `-tags llvm` job.
-- [ ] README/CLAUDE/ARCHITECTURE: build modes, toolchain deps, detection matrix.
+- [x] README/CLAUDE: build modes, toolchain deps, detection matrix (incl. Rust=MIR/default, Java, C/C++). [ ] ARCHITECTURE.
 
 ## Completion gate
-- [ ] Default: `gofmt`/`go vet`/`go build`/`go test ./...` green (no cgo).
-- [ ] cgo: `go build -tags llvm ./...` + tests in a libLLVM env.
+- [x] Default: `gofmt`/`go vet`/`go build`/`go test ./...` green (no cgo) — incl. Java + Rust.
+- [x] cgo: `go build -tags "llvm byollvm" ./...` + corpus green in the libLLVM env (c/cpp + rust).

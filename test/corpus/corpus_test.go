@@ -31,6 +31,8 @@ func TestCorpus(t *testing.T) {
 	javaAvailable := javaErr == nil
 	_, clangErr := exec.LookPath("clang")
 	clangAvailable := clangErr == nil
+	_, rustcErr := exec.LookPath("rustc")
+	rustcAvailable := rustcErr == nil
 
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
@@ -52,6 +54,9 @@ func TestCorpus(t *testing.T) {
 				if !clangAvailable {
 					t.Skip("clang not on PATH; skipping C/C++ sample")
 				}
+			}
+			if strings.HasPrefix(name, "rust/") && !rustcAvailable {
+				t.Skip("rustc not on PATH; skipping Rust sample")
 			}
 
 			res, err := scan.Scan(dir, rs)

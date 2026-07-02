@@ -69,6 +69,21 @@ proto schema is authoritative — change it first, then `go generate`.
   recover SSA values. Instance calls → `OP_CODE_INVOKE` (receiver in `Call.Value`, so a sink `#0` and the
   engine's arg→param mapping both line up); string concat (`makeConcatWithConstants`) → BIN_OP. Canonical
   names `java:<owner>.<method>`.
+- `converters/rust/` — analyzes **rustc MIR** (Mid-level IR). Shells out to `rustc --emit=mir
+  -Zmir-include-spans=on` (`RUSTC_BOOTSTRAP=1` unlocks the span flag; the MIR text format is itself
+  unstable, so this adds no new assumption), then `mir.go` runs a **straight-line value-forwarding**
+  pass over the textual MIR. MIR — not LLVM IR — is the right substrate: it names the source-level
+  public API (`std::env::var`, `Command::arg`, not the internal monomorphized `std::env::__var`) and
+  assigns call results directly to locals (no `sret` out-pointer indirection), so no cgo/libLLVM and
+  no memory modeling are needed. Method calls → `OP_CODE_CALL` with the receiver as operand 0 (rules
+  pin the tainted arg with `#1`); tuple/array/struct construction → `builtin.aggregate` intrinsic and
+  field reads fold to the stored element, so taint flows through `format!`. Canonical names
+  `rust:<normalized-path>` (generics stripped). Pure Go, in the default binary; only `rustc` is needed
+  at scan time (std-only flows compile standalone; crate-based sources/sinks need the crate present).
+- `converters/cpp/` + `converters/llvm/` — C/C++ via **LLVM IR** (clang `-O1 -g -emit-llvm`), lowered
+  by the shared `converters/llvm` package. This is the opt-in **cgo** backend (`-tags "llvm byollvm"`
+  + libLLVM), NOT in the default build; see the Makefile `*-llvm` targets. (Rust was formerly on this
+  path too but moved to the pure-Go MIR frontend above.)
 - Both Python and JS name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
 
