@@ -486,6 +486,12 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		return fs.lowerFormatCall(n, funcNode)
 	}
 
+	// Lower any call embedded in the callee chain first, so a chained call like
+	// requests.get(url).json() still emits the inner requests.get call (an SSRF
+	// sink) even though the outer call is `.json()`. Mirrors JS's
+	// lowerNestedCallees.
+	fs.lowerNestedCallees(funcNode)
+
 	callee := "py:" + dottedName(funcNode)
 	// A bare call to a module-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName
@@ -511,6 +517,24 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	inst.Call = cc
 	fs.emit(inst)
 	return regValue(inst.Name)
+}
+
+// lowerNestedCallees lowers any call embedded in a callee's base chain (the
+// `value` side of an Attribute), so the inner call in a chained expression like
+// requests.get(u).json() is emitted as its own instruction — and can match a
+// source/sink glob — even though only the outermost call reaches lowerCall
+// directly. Recursion through lowerExpr -> lowerCall handles deeper chains
+// (a.b(x).c(y).d()).
+func (fs *funcState) lowerNestedCallees(funcNode astNode) {
+	if funcNode == nil {
+		return
+	}
+	switch funcNode.kind() {
+	case "Attribute":
+		fs.lowerNestedCallees(funcNode.node("value"))
+	case "Call":
+		fs.lowerExpr(funcNode) // emits the inner call; its result is unused here
+	}
 }
 
 func (fs *funcState) lowerFormatCall(n, funcNode astNode) *ir.Value {
