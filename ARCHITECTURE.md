@@ -1,9 +1,11 @@
 # Godzilla Architecture & Design
 
-> Status: **design** — this document is the agreed target architecture, not a description of
-> current code. As of writing, only the Go frontend exists; the Rule Engine, Analysis Engine,
-> Report module, LLM module, and CLI are stubs. See `CLAUDE.md` for the current implementation state
-> and `spec.md` for the original product brief.
+> Status: **implemented.** This document is the design/target architecture *and its rationale*; the
+> pipeline described here is now built and tested end-to-end — six frontends (Go, Python, JavaScript,
+> Java, Rust, C/C++), the Rule Engine, Analysis Engine, Report module, LLM reviewer, and CLI all exist.
+> §10 records the as-built status per component (including where the implementation diverged from the
+> original design intent — e.g. JS uses goja and Python uses `python3 ast`, not tree-sitter). See
+> `CLAUDE.md` for the concise package map and `spec.md` for the original product brief.
 
 Godzilla is a **rapid, multi-language SAST tool** built for CI/CD quality gates. Source code in any
 supported language is lowered to a single language-neutral IR (**gIR**), and one set of analysis
@@ -46,17 +48,19 @@ Locked via a design interview. Each row records the choice and the primary reaso
 
 ```
           ┌───────── Frontends (in-process Go, one binary) ─────────┐
- Go  ─────► x/tools SSA ──┐
- Python ──► python3 dis  ─┤─► SSA construction ─► gIR v2 (core + intrinsics, canonical FQNs)
-         └► tree-sitter  ─┤                              │
- JS  ─────► tree-sitter  ─┘                              ▼
+ Go   ────► x/tools SSA ───┐
+ Python ──► python3 ast  ──┤
+ JS   ────► goja AST     ──┤─► lower ─► gIR v2 (core + intrinsics, canonical FQNs)
+ Java ────► JVM bytecode ──┤                            │
+ Rust ────► rustc MIR    ──┤                            │
+ C/C++ ───► LLVM IR (cgo) ─┘                            ▼
                                     ┌──────────── Analysis Engine ────────────┐
-   YAML rules ──► Rule Engine ─────►│ call graph → tree-shake → inter-proc     │
-   (FQN globs)   (taint + pattern)  │ taint w/ demand-driven pointer analysis  │
+   YAML rules ──► Rule Engine ─────►│ call graph → (tree-shake) → inter-proc   │
+   (FQN globs)   (taint + pattern)  │ taint w/ value-flow + CHA alias tracking │
                                     │ + confidence scoring                     │
                                     └───────────────────┬──────────────────────┘
                                                         ▼
-                              Findings ──► (later: LLM reviewer) ──► HTML report + exit code
+                              Findings ──► (optional LLM reviewer) ──► HTML/JSON/SARIF report + exit code
 ```
 
 The pipeline is a straight line: **Frontend → gIR → Rule Engine + Analysis Engine → Findings →
@@ -195,20 +199,30 @@ is deliberately distinct from taint so the dataflow engine stays focused.
 ## 6. Frontends
 
 All frontends run **in-process** and emit gIR v2 with canonical FQNs and SSA. The tool ships as a
-single Go binary.
+single Go binary. (Parsing choices below are **as built**; where they diverge from the original design
+intent — Python bytecode/tree-sitter, JS tree-sitter — see §10.)
 
-- **Go** — refactor the existing `converters/go/` (built on `golang.org/x/tools` SSA, already SSA) to
-  emit the core+intrinsics schema and `go:` canonical names. Go-specific opcodes collapse into
-  intrinsics.
-- **Python** — **prefer a local `python3`**: compile to CPython bytecode (`dis`), then lower bytecode
-  → SSA. When no compatible `python3` is on `PATH`, **fall back to pure-Go tree-sitter** AST → SSA.
-  Bytecode gives higher fidelity on dynamic dispatch and magic methods; the fallback keeps the tool
-  usable everywhere. Emits `py:` names.
-- **JavaScript** — tree-sitter (embedded) → AST → SSA. Handles CommonJS and ESM. Emits `js:` names.
+- **Go** — `converters/go/`, built on `golang.org/x/tools` SSA (already SSA). Emits the core+intrinsics
+  schema and `go:` canonical names; Go-specific opcodes collapse into intrinsics. Enumerates all
+  functions incl. closures via `ssautil.AllFunctions`.
+- **Python** — shells out to a local **`python3`** for an `ast` JSON dump, then lowers it (straight-line).
+  Emits `py:` names; errors if no `python3` is on `PATH` (the tree-sitter fallback was not built).
+- **JavaScript** — pure-Go parse via **goja** → AST → lower (straight-line). Emits `js:` names. (No
+  tree-sitter, so no cgo for JS.)
+- **Java** — `converters/java/`. An embedded single-file helper (`JavaDump.java`, run via a **JDK 24+**
+  `java`) compiles `.java` in-process and reads `.class` with the standard `java.lang.classfile` API,
+  emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to recover SSA. Analyzes JVM
+  **bytecode**, so it also scans `.class`/`.jar`. Emits `java:<owner>.<method>`.
+- **Rust** — `converters/rust/`. Shells out to **`rustc --emit=mir`** and lowers the textual MIR with a
+  straight-line value-forwarding pass. MIR (not LLVM IR) is used because it names the source-level API
+  (`std::env::var`, `Command::arg`) and assigns call results directly to locals — no `sret` indirection.
+  Pure Go, in the default binary. Emits `rust:<normalized-path>`.
+- **C / C++** — `converters/cpp/` + shared `converters/llvm/`. clang compiles each unit to **LLVM IR**
+  (`-O1 -g`), parsed via libLLVM (`tinygo.org/x/go-llvm`) and lowered. This is the **opt-in cgo backend**
+  (`-tags "llvm byollvm"`), *not* in the default binary — the default ships a stub. Emits `c:`/`cpp:`.
 
-**Note on cgo:** tree-sitter is a C library, so the JS frontend and Python fallback pull in cgo. This
-slightly complicates the "single static binary" story (a C toolchain is needed to build, and fully
-static linking needs care). Accepted trade-off; flagged here as a build-time constraint.
+**Note on cgo:** only the C/C++ frontend needs cgo (libLLVM). Go/Python/JS/Java/Rust are all pure Go and
+ship in the default single static binary; Python/Java/Rust merely shell out to a toolchain on `PATH`.
 
 ---
 
@@ -219,10 +233,10 @@ static linking needs care). Accepted trade-off; flagged here as a build-time con
 - **LLM reviewer (build later):** a pluggable stage that sends uncertain findings to Claude
   (Anthropic API) for adjudication, discarding false positives. Optional and off the hot path — the
   precision backstop for the "perfect signal/noise" goal.
-- **Report module:** **HTML first** — findings with severity, confidence, code snippets (via
-  `Position`), and source→sink path visualization. The CLI sets a process **exit code** based on a
-  severity threshold so CI can gate on it. JSON and SARIF outputs come later (SARIF unlocks GitHub
-  code scanning).
+- **Report module:** **HTML** — findings with severity, confidence, code snippets (via `Position`), and
+  source→sink path visualization. The CLI sets a process **exit code** based on a severity threshold so
+  CI can gate on it. **JSON and SARIF 2.1.0** outputs are also implemented (`--json`/`--sarif`; SARIF
+  unlocks GitHub code scanning).
 
 ---
 
@@ -278,14 +292,17 @@ the languages that have samples). See `CLAUDE.md` for the package-level map.
 | Go frontend (x/tools SSA; funcs + methods + closures) | ✅ Done |
 | Python frontend (`python3` `ast` → gIR) | ✅ Done (straight-line lowering; tree-sitter fallback not built — errors if `python3` absent) |
 | JavaScript frontend (goja → gIR) | ✅ Done (straight-line lowering) |
-| Rule engine (YAML, FQN globs, built-in rules) | ✅ Done — SQLi/command-injection/path-traversal/SSRF/XSS for Go, plus Python & JS packs |
+| Java frontend (JVM bytecode → gIR) | ✅ Done — embedded `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ `java` |
+| Rust frontend (rustc MIR → gIR) | ✅ Done — value-forwarding over MIR; pure Go, default binary; needs `rustc` |
+| C/C++ frontend (LLVM IR → gIR) | ✅ Done — **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
+| Rule engine (YAML, FQN globs, built-in rules) | ✅ Done — Go/Python/JS packs (SQLi, command injection, path traversal, SSRF, XSS, open redirect, + Py CWE-502 / JS CWE-95); Java (SQLi, command injection); Rust (command injection, path traversal); C/C++ (command injection, path traversal, format string) |
 | Intra-procedural taint | ✅ Done |
 | Inter-procedural taint (call graph + summaries) | ✅ Done |
 | Tree-shaking (reachability pruning primitive) | ✅ `CallGraph.Reachable`/`Roots` implemented; not yet used to prune the analysis set |
 | Pointer analysis | ⚠️ Approximated — CHA for dynamic dispatch + value-flow alias tracking (def-use + container taint). A full **demand-driven Andersen points-to** (the interview's stated goal) is a documented future precision upgrade; the current approach is sound and sufficient for the target vuln classes |
 | Confidence scoring | ✅ Done — intra = High, cross-function = Medium |
 | Secrets (pattern) scanning | ✅ Done — regex over gIR string constants (CWE-798) |
-| HTML report + exit-code gating | ✅ Done |
+| HTML report + exit-code gating | ✅ Done — plus JSON and SARIF 2.1.0 output (`--json`/`--sarif`) for tooling / GitHub code scanning |
 | LLM reviewer (pluggable) | ✅ Done — Anthropic-backed, confidence-gated, fail-open; off by default (`--llm-review`) |
 
 **Known frontend limitations** (documented in each converter's package doc): Python and JS lowering is

@@ -212,12 +212,14 @@ export PATH=$PATH:$(go env GOPATH)/bin
 go generate ./...
 ```
 
-Vulnerable samples live under `test/{go,python,js}/`, each in its own isolated
-module so sample dependencies never touch the root `go.mod`. Every sample is an
-asserted test case: it carries an `expected.yaml` and `go test ./...` checks that
-the scanner reproduces exactly those findings (no misses, no new false
-positives). See [test/README.md](test/README.md) for the corpus and how to add a
-sample. Python tests need `python3` on `PATH`.
+Vulnerable samples live under `test/{go,python,js,java,rust,c,cpp}/` (Go samples
+are each their own isolated module so sample dependencies never touch the root
+`go.mod`). Every sample is an asserted test case: it carries an `expected.yaml`
+and `go test ./...` checks that the scanner reproduces exactly those findings (no
+misses, no new false positives). The corpus **skips** a language whose toolchain
+is absent (`python3`/`java`/`rustc`, or `-tags llvm`+clang for C/C++), so the
+default run stays green anywhere. See [test/README.md](test/README.md) for the
+corpus and how to add a sample.
 
 ## Status & limitations
 

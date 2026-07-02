@@ -5,8 +5,12 @@ Thanks for your interest! This guide covers the essentials.
 ## Development setup
 
 - **Go 1.25+** is required.
-- **`python3`** on `PATH` is needed to run the Python frontend's tests (and for
-  highest-fidelity Python scanning).
+- Optional per-language toolchains (their frontend tests **skip** when absent):
+  **`python3`** (Python), a **JDK 24+ `java`** (Java), **`rustc`** (Rust). The Go
+  and JavaScript frontends are pure Go and need nothing extra.
+- **C/C++** is the opt-in cgo backend: it needs **libLLVM + clang** and builds only
+  under `-tags "llvm byollvm"` — use the Makefile `*-llvm` targets. The default
+  build/test path does not touch it.
 - **`protoc` + `protoc-gen-go`** are only needed if you change the gIR schema
   (`proto/*.proto`) and regenerate bindings.
 
@@ -28,12 +32,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [CLAUDE.md](CLAUDE.md)
 for a concise map of the codebase. In short:
 
 - `proto/`, `pkg/ir/v1/` — the gIR schema (source of truth) and generated bindings.
-- `converters/{go,python,javascript}/` — language frontends (source → gIR).
+- `converters/{go,python,javascript,java,rust,cpp,llvm}/` — language frontends
+  (source → gIR); `cpp`/`llvm` are the opt-in cgo backend.
 - `internal/analysis/` — call graph + inter-procedural taint + secrets scan.
 - `internal/rules/` — rule model, glob matcher, YAML loader, built-in rule packs.
-- `internal/report/`, `internal/llm/` — HTML report and optional LLM reviewer.
+- `internal/report/`, `internal/llm/` — HTML/JSON/SARIF report and optional LLM reviewer.
 - `cmd/godzilla/` — the CLI.
-- `test/{go,python,js}/` — vulnerable samples, each its own isolated module.
+- `test/{go,python,js,java,rust,c,cpp}/` — vulnerable samples (Go ones are isolated modules).
 
 ## Common contributions
 
@@ -49,8 +54,12 @@ with an `expected.yaml` — the corpus test then asserts it (see
 names. Emit `OP_CODE_INTRINSIC` (with a canonical intrinsic name) for
 language-specific constructs rather than adding new opcodes.
 
-**Change the gIR schema.** Edit `proto/*.proto` first (it is authoritative), then
-`go generate ./...`. Never hand-edit `pkg/ir/v1/*.pb.go`.
+**Change the gIR schema — a last resort.** gIR is the frozen contract every
+frontend emits and the single engine consumes, so a schema change ripples across
+all of them. First try to model the construct as an `OP_CODE_INTRINSIC` (with a
+canonical name), a YAML rule, or frontend lowering. If a change is genuinely
+unavoidable, edit `proto/*.proto` first (it is authoritative), then
+`go generate ./...` — never hand-edit `pkg/ir/v1/*.pb.go`.
 
 ## Conventions
 

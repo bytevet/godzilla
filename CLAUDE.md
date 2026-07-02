@@ -9,12 +9,13 @@ code is lowered to a language-neutral SSA IR called **gIR** (a Protobuf schema),
 engine runs over that IR regardless of source language. The full pipeline is implemented and working:
 
 ```
-source (Go / Python / JS) → frontend → gIR v2 → rule engine + taint analysis → findings → report / gate
-                                                                                    └→ optional LLM review
+source (Go / Python / JS / Java / Rust / C·C++) → frontend → gIR v2 → rule engine + taint analysis → findings → report / gate
+                                                                                              └→ optional LLM review
 ```
 
-Three frontends (Go, Python, JavaScript), an inter-procedural taint engine, a YAML rule engine, a
-secrets scanner, an HTML report, and a pluggable LLM reviewer all exist and are tested.
+Six frontends — Go, Python, JavaScript, Java (JVM bytecode), Rust (rustc MIR), and C/C++ (LLVM IR, an
+opt-in cgo build) — plus an inter-procedural taint engine, a YAML rule engine, a secrets scanner, an
+HTML/JSON/SARIF report, and a pluggable LLM reviewer all exist and are tested.
 
 ## Commands
 
@@ -29,19 +30,24 @@ go test ./...
 go test ./internal/analysis/
 go test ./converters/go/ -run TestGIRv2Metadata
 
-# Scan a project (directory or single .go/.py/.js file). Exit codes: 0 clean, 1 error,
-# 2 usage, 3 findings at/above -fail-on (default: medium).
+# Scan a project (directory or single .go/.py/.js/.java/.rs/.c/.cpp file). Exit codes:
+# 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
 go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>
 go run ./cmd/godzilla scan --llm-review <path>          # needs ANTHROPIC_API_KEY (or `ant auth`)
+
+# Java scanning needs a JDK 24+ `java`; Rust needs `rustc`; both degrade gracefully if absent.
+# C/C++ is the opt-in cgo backend — build/test it via the Makefile *-llvm targets (needs libLLVM):
+make build-llvm && make test-llvm    # LLVM_CONFIG=/path/to/llvm-config if not on PATH
 
 # Regenerate gIR Go bindings after editing any proto/*.proto file (requires protoc + protoc-gen-go).
 export PATH=$PATH:$(go env GOPATH)/bin
 go generate ./...
 ```
 
-Note: the vulnerable samples under `test/{go,python,js}/*` are each their own isolated module (own
-`go.mod` for Go) — never add their dependencies to the root `go.mod`.
+Note: the vulnerable samples under `test/{go,python,js,java,rust,c,cpp}/*` are asserted test cases
+(each carries an `expected.yaml`). The Go samples are each their own isolated module (own `go.mod`) —
+never add their dependencies to the root `go.mod`.
 
 ## Architecture
 
@@ -105,8 +111,14 @@ its injection point with a `#<idx>` suffix (`"go:*database/sql*.Query#0"`): only
 LOGICAL (receiver-excluded) argument fires — this is what prevents parameterized-query false positives
 (`db.Query("... = ?", taintedParam)` binds a safe placeholder). A bare pattern means all args.
 `loader/` — YAML loader (`LoadFile`/`LoadDir`/`Builtin`/`LoadDefault`) with built-in rules embedded via
-`//go:embed builtin/*.yaml` (Go/Python/JS rules for SQLi, command injection, path traversal, SSRF, XSS,
-open redirect, plus Python insecure deserialization / CWE-502 and JS code injection / CWE-95);
+`//go:embed builtin/*.yaml`:
+- **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
+  insecure deserialization (CWE-502) and JS code injection (CWE-95).
+- **Java** — SQLi, command injection.
+- **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`).
+- **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
+  (CWE-134).
+
 `validate` rejects rules with an empty ID or an unrecognized severity.
 
 **Report & LLM (`internal/report/`, `internal/llm/`).** `report.WriteHTML` renders a self-contained,
@@ -136,8 +148,8 @@ and sets a severity-gated exit code.
 - **Canonical names are the cross-language join.** Frontends must emit stable `<lang>:...` FQNs; rules match
   them with globs. Adding a sink/source is usually a YAML edit, not code.
 - **Source mapping is mandatory** — every instruction/function/global populates `Pos`; it drives reporting.
-- **Isolated sample modules.** Vulnerable test code lives under `test/{go,python,js}/`; never pollute the
-  root `go.mod`.
+- **Isolated sample modules.** Vulnerable test code lives under `test/{go,python,js,java,rust,c,cpp}/`;
+  Go samples are isolated modules — never pollute the root `go.mod` with sample dependencies.
 - **Instruction coverage is tested by absence of fallback comments** — an unhandled SSA/AST node yields a
   `comment`/intrinsic like `unsupported instruction`; converter tests fail if one appears.
 - **Confidence drives triage.** Intra-procedural findings are High; cross-function are Medium. The LLM
