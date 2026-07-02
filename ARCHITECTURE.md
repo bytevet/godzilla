@@ -289,9 +289,12 @@ the languages that have samples). See `CLAUDE.md` for the package-level map.
 | LLM reviewer (pluggable) | ✅ Done — Anthropic-backed, confidence-gated, fail-open; off by default (`--llm-review`) |
 
 **Known frontend limitations** (documented in each converter's package doc): Python and JS lowering is
-straight-line (control flow flattened, one conceptual iteration; classes/comprehensions/async partial).
-This maximizes taint recall for the common web-handler vulnerability shape at the cost of path precision —
-consistent with the "recall-oriented analysis + LLM/confidence backstop" design.
+straight-line (control flow flattened into one conceptual iteration). Taint flows through the common
+expression forms — f-strings/template literals, `or`/`and`, ternary, walrus, object destructuring, optional
+chaining, `await`, tainted-iterable loop variables, and sources/sinks inside comprehensions — so the main
+remaining gaps are classes/methods (`self.`-based flows) and array/tuple destructuring. This maximizes taint
+recall for the common web-handler vulnerability shape at the cost of path precision — consistent with the
+"recall-oriented analysis + LLM/confidence backstop" design.
 
 **Interface / dynamic dispatch — crossed inter-procedurally (CHA).** An `OP_CODE_INVOKE` call names the
 abstract interface method, so the taint transfer resolves it to every concrete method of that name
