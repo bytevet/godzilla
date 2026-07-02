@@ -168,9 +168,10 @@ Godzilla is functional and covered by tests, but deliberately scoped:
   (`a if c else b` / `?:`), the walrus operator, object and array destructuring
   (`const { id } = req.query`, `const [x] = arr`, `a, b = ...`), optional chaining
   (`req.body?.user?.name`), `await`, loop variables bound from a tainted iterable,
-  and sources/sinks inside comprehensions. The main remaining gap is
-  **classes/methods** (Python `self.`-based flows). This favors recall for the
-  common web-handler shape.
+  and sources/sinks inside comprehensions. Cross-method calls within a class
+  (`self.method(x)`) resolve too; the main remaining gap is taint carried across
+  methods through **instance attributes** (`self.attr`). This favors recall for
+  the common web-handler shape.
 - Taint is **inter-procedural but context-insensitive**. Interface/dynamic
   dispatch *is* threaded through the taint transfer: class-hierarchy analysis
   (CHA) maps an interface call to its concrete implementations, so taint crosses

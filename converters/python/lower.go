@@ -128,11 +128,20 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	fs := newFuncState(filename)
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
-	for _, p := range node.strList("params") {
+	params := node.strList("params")
+	for _, p := range params {
 		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
 		fn.Params = append(fn.Params, v)
 		fs.env[p] = v
 		fs.paramRegs[p] = true
+	}
+	// A method's first parameter is conventionally `self` (or `cls`); record it
+	// and the class qualname prefix so `self.method(x)` calls resolve to the
+	// sibling method. Guarding on the self/cls name keeps this from misfiring in
+	// ordinary functions.
+	if len(params) > 0 && (params[0] == "self" || params[0] == "cls") {
+		fs.selfName = params[0]
+		fs.methodPrefix = qualPrefix
 	}
 
 	fs.lowerBody(node.list("body"))
@@ -159,6 +168,14 @@ type funcState struct {
 	// unresolved and inter-procedural taint through the local helper is lost.
 	moduleName string
 	localFuncs map[string]bool
+
+	// selfName and methodPrefix let lowerCall qualify a `self.method(x)` call
+	// inside a class method to the sibling method's canonical name
+	// ("py:<module>.<Class>.method"). selfName is the receiver param ("self" or
+	// "cls"); methodPrefix is the class qualname prefix (e.g. "UserAPI."). Both
+	// are empty for non-methods.
+	selfName     string
+	methodPrefix string
 }
 
 func newFuncState(filename string) *funcState {
@@ -626,9 +643,27 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	if funcNode != nil && funcNode.kind() == "Name" && fs.localFuncs[funcNode.str("id")] {
 		callee = "py:" + fs.moduleName + "." + funcNode.str("id")
 	}
+	// `self.method(x)` inside a class method: qualify to the sibling method's
+	// canonical name so byKey resolves it (like a local-function call). This is
+	// optimistic — if the attribute is not actually a method, the qualified name
+	// matches no function and the call simply stays unresolved (harmless).
+	isSelfMethod := false
+	if fs.selfName != "" && funcNode != nil && funcNode.kind() == "Attribute" {
+		if base := funcNode.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+			callee = "py:" + fs.moduleName + "." + fs.methodPrefix + funcNode.str("attr")
+			isSelfMethod = true
+		}
+	}
 	cc := &ir.CallCommon{
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
 		Callee: callee,
+	}
+	// For a resolved `self.method(x)` call, pass the receiver as the first
+	// argument so the call's arguments line up with the method's parameters
+	// (param[0] == self), matching how Go SSA passes a method receiver — without
+	// this the explicit args map one slot too low (x -> self) and taint is lost.
+	if isSelfMethod {
+		cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
 	}
 	for _, a := range n.list("args") {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
