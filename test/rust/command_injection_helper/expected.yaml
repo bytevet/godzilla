@@ -1,0 +1,5 @@
+# Inter-procedural: taint from env::var in main() reaches the Command sink in a
+# helper. Fires once (Medium confidence, cross-function).
+findings:
+  - rule: rust-command-injection
+    min: 1
