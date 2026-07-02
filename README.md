@@ -165,9 +165,11 @@ Godzilla is functional and covered by tests, but deliberately scoped:
 - The **Python and JavaScript frontends lower straight-line code** — control flow
   is flattened (one conceptual pass), and classes/async/comprehensions are only
   partially modeled. This favors recall for the common web-handler shape.
-- Taint is **inter-procedural but context-insensitive**; interface/dynamic
-  dispatch is resolved by class-hierarchy analysis for the call graph but not yet
-  threaded through the taint transfer.
+- Taint is **inter-procedural but context-insensitive**. Interface/dynamic
+  dispatch *is* threaded through the taint transfer: class-hierarchy analysis
+  (CHA) maps an interface call to its concrete implementations, so taint crosses
+  `iface.Method(userInput)`. Because CHA is an over-approximation, a call may be
+  resolved to more implementations than are reachable at runtime.
 - Pointer analysis is approximated (value-flow + CHA), not a full demand-driven
   points-to.
 
