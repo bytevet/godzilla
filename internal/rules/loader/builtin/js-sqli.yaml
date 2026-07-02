@@ -20,11 +20,14 @@ rules:
     # Broad `*.query`/`*.execute` (not e.g. `*db.query`) so any database
     # handle name/driver -- which lower to callee "js:db.query",
     # "js:pool.query", "js:connection.execute", or "js:<dynamic>.query" for a
-    # chained handle -- is still caught, mirroring js-command-injection's
-    # broad `js:*.exec`.
+    # chained handle -- is still caught. The `#0` pins the injection point to
+    # the query-string argument, so a PARAMETERIZED call
+    # `db.query("... = ?", [id])` -- where the untrusted value is a bound
+    # parameter (arg 1), not part of the query string -- is not a false
+    # positive. (JS method calls carry no receiver arg, so arg 0 is the query.)
     sinks:
-      - "js:*.query"
-      - "js:*.execute"
+      - "js:*.query#0"
+      - "js:*.execute#0"
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
     sanitizers: []
