@@ -504,6 +504,33 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		fs.assign(n.node("target"), val)
 		return val
 
+	case "Comprehension":
+		// [elt for t in iter if cond ...] and dict/set/generator forms. Lower
+		// each generator (bind the loop target to the iterable's taint, like a
+		// for-loop; lower filter conditions) then the element/key/value
+		// expression, so a source or sink INSIDE the comprehension
+		// (e.g. [cursor.execute(q) for q in ...]) is lowered and fires. The
+		// result is a freshly built container, so — like a list literal — it
+		// does not itself carry element taint (consistent, precise container
+		// handling; see subprocess_argv_safe).
+		for _, g := range n.list("generators") {
+			if it := g.node("iter"); it != nil {
+				iterVal := fs.lowerExpr(it)
+				if tgt := g.node("target"); tgt != nil {
+					fs.assign(tgt, iterVal)
+				}
+			}
+			for _, cond := range g.list("ifs") {
+				fs.lowerExpr(cond)
+			}
+		}
+		for _, key := range []string{"elt", "key", "value"} {
+			if e := n.node(key); e != nil {
+				fs.lowerExpr(e)
+			}
+		}
+		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
 		// concatenation) so taint carried by any {expr} slot propagates to

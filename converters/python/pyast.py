@@ -104,6 +104,15 @@ def conv_body(stmts):
     return [conv_stmt(s) for s in stmts]
 
 
+def conv_comprehension(g):
+    # One `for target in iter if cond ...` clause of a comprehension.
+    return {
+        "target": conv_expr(g.target),
+        "iter": conv_expr(g.iter),
+        "ifs": [conv_expr(i) for i in g.ifs],
+    }
+
+
 def conv_stmt(node):
     p = pos(node)
 
@@ -276,6 +285,17 @@ def conv_expr(node):
         # walrus `target := value`: the expression's value is `value`, and it
         # also binds `target`.
         return {"kind": "NamedExpr", "target": conv_expr(node.target), "value": conv_expr(node.value), "pos": p}
+
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        # [elt for t in iter if cond ...]: emit the element and each generator so
+        # a source/sink inside the comprehension is lowered and the loop target
+        # can inherit the iterable's taint.
+        return {"kind": "Comprehension", "elt": conv_expr(node.elt),
+                "generators": [conv_comprehension(g) for g in node.generators], "pos": p}
+
+    if isinstance(node, ast.DictComp):
+        return {"kind": "Comprehension", "key": conv_expr(node.key), "value": conv_expr(node.value),
+                "generators": [conv_comprehension(g) for g in node.generators], "pos": p}
 
     if isinstance(node, ast.JoinedStr):
         return {"kind": "JoinedStr", "values": [conv_expr(v) for v in node.values], "pos": p}
