@@ -4,13 +4,29 @@ A fast, multi-language **Static Application Security Testing (SAST)** analyzer f
 
 Godzilla lowers source code from several languages into one language-neutral SSA
 intermediate representation — **gIR** — and runs a single inter-procedural taint
-engine over it. Write a detection rule once and it applies across every supported
-language.
+engine over it. Every language funnels into the same IR, so you **write a
+detection rule once and it applies across every supported language**.
 
+```mermaid
+flowchart LR
+    GO[Go]:::src --> FE
+    PY[Python]:::src --> FE
+    JS[JavaScript]:::src --> FE
+    JV[Java]:::src --> FE
+    RS[Rust]:::src --> FE
+    CC["C / C++"]:::src --> FE
+
+    FE["Language<br/>frontends"] --> IR["gIR<br/>language-neutral SSA"]
+    IR --> ENG["Taint engine<br/>+ YAML rules"]
+    ENG --> FD["Findings<br/>with confidence"]
+    FD --> OUT["Report · JSON · SARIF<br/>severity-gated exit code"]
+    FD -. optional .-> LLM["LLM review"]
+    LLM -.-> OUT
+
+    classDef src fill:#e6f2ff,stroke:#4a90d9;
 ```
-source (Go / Python / JS / Java / Rust / C·C++) ─▶ frontend ─▶ gIR ─▶ rule engine + taint analysis ─▶ findings ─▶ report / exit code
-                                                                                              └▶ optional LLM review
-```
+
+<sub>All six languages lower to the same gIR; a single engine and rule set run over it.</sub>
 
 > Status: usable and tested, but young. See [Status & limitations](#status--limitations).
 
@@ -98,6 +114,11 @@ $ godzilla scan ./test/go/sql_injection
 | Insecure deserialization | — | ✅ | — | — | — |
 | Code injection (`eval`) | — | — | ✅ | — | — |
 
+> **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
+> scan over gIR string constants — independent of the taint engine.
+
+Notes on the compiled languages:
+
 **Java** is analyzed at the JVM-bytecode level: an embedded single-file helper
 (`java JavaDump.java`) compiles `.java` sources in-process and reads `.class`
 files with the standard `java.lang.classfile` API, and Godzilla simulates the
@@ -123,9 +144,6 @@ flags) — *not* in the default binary, which ships a stub for C/C++. Needs libL
 (`fopen`/`open`), and format-string (`printf`-family) are detected; taint flows
 through primitive (`char*`) values. C++ code that routes untrusted data through
 heap aggregates (`std::string`) is not yet tracked.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md).
-| Hardcoded secrets | ✅ (all languages, via gIR string constants) |
 
 ## Writing rules
 
@@ -160,12 +178,25 @@ Pass a file with `--rules`; it is merged with the built-in packs (see
 
 - **gIR** (`proto/`, generated into `pkg/ir/v1/`) is a small, language-neutral SSA
   opcode core plus an `INTRINSIC` escape hatch for language-specific constructs.
-  Functions carry stable canonical names so rules join across languages.
-- **Frontends** (`converters/{go,python,javascript}/`) lower each language to gIR.
+  Functions carry stable canonical names (`<lang>:module.Type.Member`) so rules
+  join across languages.
+- **Frontends** (`converters/{go,python,javascript,java,rust,cpp,llvm}/`) lower
+  each language to gIR.
 - **Analysis** (`internal/analysis/`) builds a call graph and runs inter-procedural
   taint, plus a pattern-based secrets scan.
 - **Rules** (`internal/rules/`), **report** (`internal/report/`), **LLM reviewer**
   (`internal/llm/`), and the **CLI** (`cmd/godzilla/`) sit on top.
+
+```mermaid
+flowchart TD
+    CLI["cmd/godzilla<br/>scan CLI · exit code"] --> CONV["converters/*<br/>frontends → gIR"]
+    CONV --> IRp["pkg/ir/v1<br/>gIR (generated from proto/)"]
+    IRp --> AN["internal/analysis<br/>call graph · taint · secrets"]
+    RULES["internal/rules<br/>YAML rule packs"] --> AN
+    AN --> REP["internal/report<br/>HTML · JSON · SARIF"]
+    AN --> REV["internal/llm<br/>optional review"]
+    REV --> REP
+```
 
 The full design rationale is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
