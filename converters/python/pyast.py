@@ -307,6 +307,16 @@ def conv_expr(node):
         # `await x` yields x's resolved value; for taint it is transparent.
         return {"kind": "Await", "value": conv_expr(node.value), "pos": p}
 
+    if isinstance(node, (ast.List, ast.Tuple)):
+        # As a VALUE: a list/tuple literal (lower elements so an inner source/sink
+        # fires; the container itself stays untainted). As an unpacking TARGET
+        # (a, b = ...): bind each element. Both are handled by the "Sequence"
+        # lowering, distinguished by context (lowerExpr vs assign).
+        return {"kind": "Sequence", "elts": [conv_expr(e) for e in node.elts], "pos": p}
+
+    if isinstance(node, ast.Starred):
+        return {"kind": "Starred", "value": conv_expr(node.value), "pos": p}
+
     return {"kind": "Unknown", "note": type(node).__name__, "pos": p}
 
 

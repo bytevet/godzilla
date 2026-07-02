@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Guards taint flow through tuple unpacking (a, b = <tainted>).
+findings:
+    - rule: py-sql-injection
+      min: 1

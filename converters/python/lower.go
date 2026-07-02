@@ -355,9 +355,18 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 		inst.Op = ir.OpCode_OP_CODE_STORE
 		inst.Operands = []*ir.Value{base, val}
 		fs.emit(inst)
+	case "Sequence":
+		// Unpacking `a, b = rhs` (or `[a, b] = rhs`): bind each target element to
+		// the RHS value (element taint == container taint, mirroring for-loop
+		// targets and conservative for recall). Nested unpacking recurses.
+		for _, elt := range target.list("elts") {
+			fs.assign(elt, val)
+		}
+	case "Starred":
+		// `a, *rest = rhs`: bind the starred target to the RHS value.
+		fs.assign(target.node("value"), val)
 	default:
-		// Unpacking assignment (Tuple/List target) or other unsupported
-		// target shape: dropped.
+		// Other unsupported target shape: dropped.
 	}
 }
 
@@ -506,6 +515,21 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 
 	case "Await":
 		// `await x` yields x's resolved value; transparent for taint.
+		return fs.lowerExpr(n.node("value"))
+
+	case "Sequence":
+		// List/tuple literal as a VALUE: lower each element so a source/sink
+		// inside it fires, but return an untainted placeholder — a freshly built
+		// container does not itself carry element taint (consistent with
+		// comprehensions and list literals; subprocess_argv_safe relies on this).
+		for _, e := range n.list("elts") {
+			fs.lowerExpr(e)
+		}
+		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+
+	case "Starred":
+		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
+		// the call, so lower to x.
 		return fs.lowerExpr(n.node("value"))
 
 	case "Comprehension":
