@@ -303,6 +303,10 @@ def conv_expr(node):
     if isinstance(node, ast.FormattedValue):
         return {"kind": "FormattedValue", "value": conv_expr(node.value), "pos": p}
 
+    if isinstance(node, ast.Await):
+        # `await x` yields x's resolved value; for taint it is transparent.
+        return {"kind": "Await", "value": conv_expr(node.value), "pos": p}
+
     return {"kind": "Unknown", "note": type(node).__name__, "pos": p}
 
 

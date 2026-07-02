@@ -504,6 +504,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		fs.assign(n.node("target"), val)
 		return val
 
+	case "Await":
+		// `await x` yields x's resolved value; transparent for taint.
+		return fs.lowerExpr(n.node("value"))
+
 	case "Comprehension":
 		// [elt for t in iter if cond ...] and dict/set/generator forms. Lower
 		// each generator (bind the loop target to the iterable's taint, like a
