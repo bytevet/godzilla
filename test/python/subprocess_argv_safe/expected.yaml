@@ -1,0 +1,4 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# FP sentinel: a direct-argv subprocess list (no shell) is not command injection.
+findings: []
