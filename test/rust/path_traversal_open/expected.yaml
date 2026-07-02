@@ -1,0 +1,4 @@
+# env::var(FILE) opened directly via File::open. Fires once.
+findings:
+  - rule: rust-path-traversal
+    min: 1
