@@ -1,0 +1,41 @@
+# Cross-site scripting: untrusted HTTP/URL input flowing into an HTTP
+# response body without escaping.
+rules:
+  - id: go-xss
+    languages: [go]
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input flows into an HTTP response body without being
+      HTML-escaped, which may allow cross-site scripting (XSS). Escape the
+      value (e.g. html.EscapeString) or render it through html/template,
+      which auto-escapes by context.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
+      - "go:*net/http*.Request*.PostFormValue"
+      # Web-framework request accessors (Gin, Echo, Chi).
+      - "go:*gin-gonic/gin.Context*.Query"
+      - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.Param"
+      - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.GetHeader"
+      - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.Param"
+      - "go:*labstack/echo*Context*.FormValue"
+      - "go:*go-chi/chi*.URLParam"
+    sinks:
+      - "go:*net/http*.ResponseWriter*.Write"
+      - "go:fmt.Fprintf"
+      - "go:fmt.Fprint*"
+      - "go:io.WriteString"
+    sanitizers:
+      - "go:*html.EscapeString"
+      - "go:*html/template*"
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:fmt.Sprintf*"
+      - "go:strings.Join"
+      - "go:strings.Replace*"

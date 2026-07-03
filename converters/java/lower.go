@@ -58,12 +58,63 @@ func convertMethod(className string, m dumpMethod, filename string) *ir.Function
 		v := regValue(name)
 		fn.Params = append(fn.Params, v)
 		s.locals[slot] = v
+		// A parameter carrying framework annotations (e.g. Spring's
+		// @RequestParam) is untrusted input read outside this program's own
+		// call graph. The engine only seeds taint at a CALL matching a source
+		// glob, so we synthesize one — the same trick the JS/Python frontends
+		// use for opaque-base member reads — and rebind the slot to its (now
+		// tainted) result so every LOAD of this parameter carries taint.
+		if i < len(m.ParamAnnotations) && len(m.ParamAnnotations[i]) > 0 {
+			s.locals[slot] = s.annotatedParamSource(m.ParamAnnotations[i], s.pos(entryLine(m)))
+		}
 		slot += slotWidth(pt)
 	}
 
 	s.run(m.Instrs)
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: s.instrs}}
 	return fn
+}
+
+// annotatedParamSource emits, at method entry, one synthetic source CALL per
+// annotation on a parameter (callee "java:<annotation-internal-name>", e.g.
+// "java:org/springframework/web/bind/annotation/RequestParam"), which a rule's
+// `sources` glob can match. It returns the value the parameter slot should
+// resolve to: the single call's result, or a PHI over all of them so the slot is
+// tainted iff any annotation is a source (a parameter may also carry unrelated
+// annotations like @Valid).
+func (s *methodState) annotatedParamSource(anns []string, pos *ir.Position) *ir.Value {
+	results := make([]*ir.Value, 0, len(anns))
+	for _, ann := range anns {
+		callee := "java:" + ann
+		r := s.reg()
+		s.instrs = append(s.instrs, &ir.Instruction{
+			Name: r,
+			Op:   ir.OpCode_OP_CODE_CALL,
+			Call: &ir.CallCommon{
+				Callee: callee,
+				Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
+			},
+			Pos: pos,
+		})
+		results = append(results, regValue(r))
+	}
+	if len(results) == 1 {
+		return results[0]
+	}
+	phi := s.reg()
+	s.instrs = append(s.instrs, &ir.Instruction{Name: phi, Op: ir.OpCode_OP_CODE_PHI, Operands: results, Pos: pos})
+	return regValue(phi)
+}
+
+// entryLine returns the first source line recorded in a method's bytecode, used
+// to position the synthesized parameter-source call for reporting.
+func entryLine(m dumpMethod) int {
+	for _, in := range m.Instrs {
+		if in.Line > 0 {
+			return in.Line
+		}
+	}
+	return 0
 }
 
 func (s *methodState) run(instrs []dumpInstr) {

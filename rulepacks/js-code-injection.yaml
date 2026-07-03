@@ -1,0 +1,26 @@
+# Code injection: untrusted input passed to a dynamic code evaluator, which can
+# lead to remote code execution.
+rules:
+  - id: js-code-injection
+    languages: [javascript]
+    severity: critical
+    cwe: CWE-95
+    message: >-
+      Untrusted request input flows into a dynamic code evaluator (eval / Function),
+      which allows arbitrary code execution. Never evaluate user-controlled strings;
+      parse/validate the input instead.
+    sources:
+      - "js:*req.query*"
+      - "js:*req.params*"
+      - "js:*req.body*"
+      # Koa request accessors (ctx.query, ctx.params, ctx.request.body/query).
+      - "js:*ctx.query*"
+      - "js:*ctx.params*"
+      - "js:*ctx.request*"
+    sinks:
+      - "js:eval"
+      - "js:*.eval"
+      - "js:Function"
+      - "js:*.Function"
+    sanitizers: []
+    propagators: []

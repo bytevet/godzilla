@@ -1,0 +1,41 @@
+# Server-Side Request Forgery: untrusted HTTP/URL input flowing into an
+# outbound HTTP request's target URL.
+rules:
+  - id: go-ssrf
+    languages: [go]
+    severity: high
+    cwe: CWE-918
+    message: >-
+      Untrusted input flows into an outbound HTTP request URL, which may
+      allow server-side request forgery (SSRF) to internal or unintended
+      hosts. Validate the destination against an allow-list before making
+      the request.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
+      - "go:*net/http*.Request*.PostFormValue"
+      # Web-framework request accessors (Gin, Echo, Chi).
+      - "go:*gin-gonic/gin.Context*.Query"
+      - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.Param"
+      - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.GetHeader"
+      - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.Param"
+      - "go:*labstack/echo*Context*.FormValue"
+      - "go:*go-chi/chi*.URLParam"
+    sinks:
+      - "go:*net/http.Get"
+      - "go:*net/http.Post"
+      - "go:*net/http*.Client*.Do"
+      - "go:*net/http.NewRequest*"
+    # No built-in sanitizer neutralizes tainted input for a request URL;
+    # the fix is allow-listing the destination host, not escaping.
+    sanitizers: []
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:fmt.Sprintf*"
+      - "go:strings.Join"
+      - "go:strings.Replace*"

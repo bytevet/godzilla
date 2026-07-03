@@ -1,0 +1,4 @@
+# Gradle build artifacts produced when the Godzilla Java frontend compiles this
+# sample; not checked in.
+build/
+.gradle/

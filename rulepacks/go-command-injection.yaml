@@ -1,0 +1,39 @@
+# Command injection: untrusted HTTP/URL input flowing into os/exec command
+# construction.
+rules:
+  - id: go-command-injection
+    languages: [go]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input flows into os/exec command construction, which may
+      allow arbitrary command execution. Avoid building shell commands from
+      user input; if unavoidable, pass arguments individually and never via
+      a shell interpreter.
+    sources:
+      - "go:*net/url*.Get"
+      - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http*.Request*.PathValue"
+      - "go:*net/http*.Request*.PostFormValue"
+      # Web-framework request accessors (Gin, Echo, Chi).
+      - "go:*gin-gonic/gin.Context*.Query"
+      - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.Param"
+      - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.GetHeader"
+      - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.Param"
+      - "go:*labstack/echo*Context*.FormValue"
+      - "go:*go-chi/chi*.URLParam"
+    sinks:
+      - "go:*os/exec.Command"
+      - "go:*os/exec.CommandContext"
+    # No built-in sanitizer neutralizes tainted input for shell command
+    # construction; avoid passing tainted data to exec entirely.
+    sanitizers: []
+    propagators:
+      - "go:fmt.Sprintf"
+      - "go:fmt.Sprint"
+      - "go:fmt.Sprintf*"
+      - "go:strings.Join"
+      - "go:strings.Replace*"

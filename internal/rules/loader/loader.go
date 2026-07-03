@@ -3,7 +3,6 @@
 package loader
 
 import (
-	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,13 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"godzilla/internal/rules"
+	"godzilla/rulepacks"
 )
-
-// builtinFS embeds Godzilla's shipped rule set so the binary works without
-// any external files on disk.
-//
-//go:embed builtin/*.yaml
-var builtinFS embed.FS
 
 // LoadFile reads a single YAML rule file and unmarshals it into a RuleSet.
 func LoadFile(path string) (*rules.RuleSet, error) {
@@ -57,9 +51,10 @@ func LoadDir(dir string) (*rules.RuleSet, error) {
 	return out, nil
 }
 
-// Builtin loads Godzilla's embedded, shipped-in-the-binary rule set.
+// Builtin loads Godzilla's embedded, shipped-in-the-binary rule set (the
+// top-level rulepacks/*.yaml).
 func Builtin() (*rules.RuleSet, error) {
-	entries, err := builtinFS.ReadDir("builtin")
+	entries, err := rulepacks.Builtin.ReadDir(".")
 	if err != nil {
 		return nil, fmt.Errorf("loader: read embedded builtin rules: %w", err)
 	}
@@ -69,12 +64,11 @@ func Builtin() (*rules.RuleSet, error) {
 		if entry.IsDir() || !isYAML(entry.Name()) {
 			continue
 		}
-		name := "builtin/" + entry.Name()
-		data, err := builtinFS.ReadFile(name)
+		data, err := rulepacks.Builtin.ReadFile(entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("loader: read embedded rule file %s: %w", name, err)
+			return nil, fmt.Errorf("loader: read embedded rule file %s: %w", entry.Name(), err)
 		}
-		rs, err := parse(name, data)
+		rs, err := parse(entry.Name(), data)
 		if err != nil {
 			return nil, err
 		}

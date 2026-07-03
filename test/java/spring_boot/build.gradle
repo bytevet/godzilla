@@ -1,0 +1,16 @@
+// Minimal Gradle build so the Godzilla Java frontend compiles this Spring
+// controller with Spring on the classpath, then analyzes the resulting bytecode.
+// Only the two Spring jars needed to compile the sample are pulled in (the plain
+// `java` plugin, not the Spring Boot plugin), to keep the build small.
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework:spring-web:6.2.1'
+    implementation 'org.springframework:spring-jdbc:6.2.1'
+}

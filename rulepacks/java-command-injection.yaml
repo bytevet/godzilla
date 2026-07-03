@@ -1,0 +1,34 @@
+# OS command injection: untrusted input flowing into a process execution.
+rules:
+  - id: java-command-injection
+    languages: [java]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input (request parameter/header, environment, etc.) flows into a
+      process execution (Runtime.exec / ProcessBuilder), which may allow OS
+      command injection. Avoid passing user-controlled data to a shell; use a
+      fixed argument list and validate inputs.
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getQueryString"
+      - "java:*ServletRequest.getParameter"
+      # Spring MVC controller parameter annotations (synthesized source CALLs;
+      # see converters/java/lower.go). Anchored on the annotation package so an
+      # ordinary method ending in the token (e.g. getRequestBody) is not a source.
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    sinks:
+      - "java:*Runtime.exec"
+      - "java:*ProcessBuilder.command"
+      - "java:java/lang/ProcessBuilder.<init>"
+    sanitizers: []
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"

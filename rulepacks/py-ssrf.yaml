@@ -1,0 +1,43 @@
+# Server-Side Request Forgery: untrusted HTTP/URL input flowing into an
+# outbound HTTP request's target URL.
+rules:
+  - id: py-ssrf
+    languages: [python]
+    # Align with go-ssrf (same CWE-918) so the CI gate treats SSRF
+    # identically regardless of source language.
+    severity: high
+    cwe: CWE-918
+    message: >-
+      Untrusted input flows into an outbound HTTP request URL, which may
+      allow server-side request forgery (SSRF) to internal or unintended
+      hosts. Validate the destination against an allow-list before making
+      the request.
+    sources:
+      - "py:*request.args.get"
+      # Django request accessors.
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      # FastAPI / Starlette request accessors.
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
+      - "py:*request.form.get"
+      - "py:*request.values.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.__getitem__"
+    sinks:
+      - "py:requests.get"
+      - "py:requests.post"
+      - "py:*urlopen"
+    # No built-in sanitizer neutralizes tainted input for a request URL;
+    # the fix is allow-listing the destination host, not escaping.
+    sanitizers: []
+    propagators:
+      - "py:*.join"

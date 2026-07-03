@@ -7,6 +7,7 @@ package corpus
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 
@@ -36,6 +37,36 @@ func sampleDirs() ([]string, error) {
 		}
 	}
 	return dirs, nil
+}
+
+// buildFiles are the Maven/Gradle project markers that make a Java sample
+// dependency-bearing (compiled by its own build tool rather than in-process).
+var buildFiles = []string{"pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"}
+
+// hasBuildFile reports whether dir is the root of a Maven/Gradle project.
+func hasBuildFile(dir string) bool {
+	for _, f := range buildFiles {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// buildToolAvailable reports whether a build tool can compile dir: a committed
+// wrapper, or mvn/gradle on PATH.
+func buildToolAvailable(dir string) bool {
+	for _, w := range []string{"mvnw", "gradlew"} {
+		if _, err := os.Stat(filepath.Join(dir, w)); err == nil {
+			return true
+		}
+	}
+	for _, tool := range []string{"mvn", "gradle"} {
+		if _, err := exec.LookPath(tool); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // Expectation is a sample's expected.yaml. An empty (or absent) Findings list
