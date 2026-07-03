@@ -103,6 +103,47 @@ func nilValue() *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
 }
 
+// emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
+// its result register. Shared by lowerCall and lowerNew, whose only difference
+// is how they build the callee name.
+func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
+	cc := &ir.CallCommon{
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
+		Callee: callee,
+	}
+	for _, a := range args {
+		cc.Args = append(cc.Args, fs.lowerExpr(a))
+	}
+	inst := fs.newValueInst(idx)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
+// emitStore emits an OP_CODE_STORE of val into the address computed from
+// baseExpr (`obj.attr = v` / `arr[i] = v`), so a tainted value written into a
+// container marks that container tainted (see visitStore in the taint engine).
+func (fs *funcState) emitStore(baseExpr ast.Expression, val *ir.Value, idx file.Idx) {
+	base := fs.lowerExpr(baseExpr)
+	inst := fs.newVoidInst(idx)
+	inst.Op = ir.OpCode_OP_CODE_STORE
+	inst.Operands = []*ir.Value{base, val}
+	fs.emit(inst)
+}
+
+// emitUnsupported emits the generic "js.unsupported" intrinsic placeholder for
+// an expression the converter does not model, returning its result register so
+// the parent expression still has a value to consume.
+func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
+	inst := fs.newValueInst(idx)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = "js.unsupported"
+	inst.Comment = comment
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
@@ -151,23 +192,22 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 // a synthetic "_argN" name so the parameter list stays positionally aligned,
 // but the pattern's own bindings are not modeled.
 func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
-	for i, b := range params.List {
-		name := bindingName(b.Target)
-		if name == "" {
-			name = fmt.Sprintf("_arg%d", i)
-		}
+	bind := func(name string) {
 		v := regValue(name)
 		fn.Params = append(fn.Params, v)
 		fs.env[name] = v
 		fs.paramRegs[name] = true
 	}
+	for i, b := range params.List {
+		name := bindingName(b.Target)
+		if name == "" {
+			name = fmt.Sprintf("_arg%d", i)
+		}
+		bind(name)
+	}
 	if params.Rest != nil {
 		if id, ok := params.Rest.(*ast.Identifier); ok {
-			name := string(id.Name)
-			v := regValue(name)
-			fn.Params = append(fn.Params, v)
-			fs.env[name] = v
-			fs.paramRegs[name] = true
+			bind(string(id.Name))
 		}
 	}
 }
@@ -561,11 +601,8 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		// Promises/async are not specially modeled: `await x` lowers to `x`.
 		return fs.lowerExpr(v.Argument)
 
-	case *ast.FunctionLiteral:
-		return fs.funcRefValue(v, e)
-
-	case *ast.ArrowFunctionLiteral:
-		return fs.funcRefValue(v, e)
+	case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+		return fs.funcRefValue(e)
 
 	case *ast.OptionalChain:
 		// `a?.b` — optional chaining short-circuits on null/undefined but
@@ -577,30 +614,20 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return fs.lowerExpr(v.Expression)
 
 	default:
-		inst := fs.newValueInst(e.Idx0())
-		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-		inst.Intrinsic = "js.unsupported"
-		inst.Comment = fmt.Sprintf("unsupported javascript expression: %T", e)
-		fs.emit(inst)
-		return regValue(inst.Name)
+		return fs.emitUnsupported(e.Idx0(), fmt.Sprintf("unsupported javascript expression: %T", e))
 	}
 }
 
 // funcRefValue resolves an inline function-literal/arrow expression (e.g. a
 // callback argument) to a FuncName reference to the ir.Function the
 // collector already created for it, rather than inlining its body again.
-func (fs *funcState) funcRefValue(node ast.Node, e ast.Expression) *ir.Value {
-	if canonical, ok := fs.nameOf[node]; ok {
+func (fs *funcState) funcRefValue(e ast.Expression) *ir.Value {
+	if canonical, ok := fs.nameOf[e]; ok {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}}
 	}
 	// Should not happen (the collector visits every expression tree lowering
 	// does), but stay defensive rather than panicking.
-	inst := fs.newValueInst(e.Idx0())
-	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-	inst.Intrinsic = "js.unsupported"
-	inst.Comment = "unresolved inline function literal"
-	fs.emit(inst)
-	return regValue(inst.Name)
+	return fs.emitUnsupported(e.Idx0(), "unresolved inline function literal")
 }
 
 // lowerDot lowers `a.b`. If the base is opaque (see isOpaqueBase), this hop
@@ -778,17 +805,9 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 	case *ast.Identifier:
 		fs.env[string(t.Name)] = val
 	case *ast.DotExpression:
-		base := fs.lowerExpr(t.Left)
-		inst := fs.newVoidInst(t.Idx0())
-		inst.Op = ir.OpCode_OP_CODE_STORE
-		inst.Operands = []*ir.Value{base, val}
-		fs.emit(inst)
+		fs.emitStore(t.Left, val, t.Idx0())
 	case *ast.BracketExpression:
-		base := fs.lowerExpr(t.Left)
-		inst := fs.newVoidInst(t.Idx0())
-		inst.Op = ir.OpCode_OP_CODE_STORE
-		inst.Operands = []*ir.Value{base, val}
-		fs.emit(inst)
+		fs.emitStore(t.Left, val, t.Idx0())
 	default:
 		// ArrayPattern/ObjectPattern (destructuring assignment) or other
 		// unsupported target shape: dropped.
@@ -831,19 +850,7 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
 		}
 	}
-	cc := &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
-	}
-	for _, a := range v.ArgumentList {
-		cc.Args = append(cc.Args, fs.lowerExpr(a))
-	}
-
-	inst := fs.newValueInst(v.Idx0())
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Call = cc
-	fs.emit(inst)
-	return regValue(inst.Name)
+	return fs.emitCall(callee, v.ArgumentList, v.Idx0())
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an
@@ -854,20 +861,7 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 // so e.g. `new (getCtor()).Client(url)` still lowers `getCtor()`.
 func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
-	callee := "js:new:" + syntacticCallee(v.Callee)
-	cc := &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
-	}
-	for _, a := range v.ArgumentList {
-		cc.Args = append(cc.Args, fs.lowerExpr(a))
-	}
-
-	inst := fs.newValueInst(v.Idx0())
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Call = cc
-	fs.emit(inst)
-	return regValue(inst.Name)
+	return fs.emitCall("js:new:"+syntacticCallee(v.Callee), v.ArgumentList, v.Idx0())
 }
 
 // lowerNestedCallees walks a call/new expression's callee along its

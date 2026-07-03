@@ -183,18 +183,18 @@ func (s *methodState) run(instrs []dumpInstr) {
 // args in Args, so a sink's `#0` injection point and the engine's arg→param
 // mapping both line up (receiver → param 0). invokestatic becomes a CALL.
 func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
-	params := parseParams(in.Mdesc)
-	args := s.popN(len(params))
+	args := s.popN(len(parseParams(in.Mdesc)))
 	callee := "java:" + in.Owner + "." + in.Mname
-	cc := &ir.CallCommon{Callee: callee}
+	cc := &ir.CallCommon{Callee: callee, Args: args}
 
-	static := in.Kind == "INVOKESTATIC"
-	if static {
-		cc.Args = args
+	op := ir.OpCode_OP_CODE_CALL
+	if in.Kind == "INVOKESTATIC" {
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}}
 	} else {
+		// virtual/interface/special: the receiver (popped after the args) becomes
+		// operand 0 via CallCommon.Value, so a sink's `#0` lines up with it.
+		op = ir.OpCode_OP_CODE_INVOKE
 		cc.Value = s.pop() // receiver
-		cc.Args = args
 		cc.IsInvoke = true
 		cc.MethodName = in.Mname
 	}
@@ -203,12 +203,7 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	if !returnsVoid(in.Mdesc) {
 		name = s.reg()
 	}
-	op := ir.OpCode_OP_CODE_CALL
-	if !static {
-		op = ir.OpCode_OP_CODE_INVOKE
-	}
-	inst := &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos}
-	s.instrs = append(s.instrs, inst)
+	s.instrs = append(s.instrs, &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos})
 	if name != "" {
 		s.push(regValue(name))
 	}

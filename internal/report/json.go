@@ -3,7 +3,6 @@ package report
 import (
 	"encoding/json"
 	"io"
-	"sort"
 
 	"godzilla/internal/analysis"
 	ir "godzilla/pkg/ir/v1"
@@ -41,15 +40,7 @@ type jsonLocation struct {
 // first, then by sink location, matching WriteHTML's ordering, so output is
 // deterministic across runs.
 func WriteJSON(w io.Writer, findings []analysis.Finding) error {
-	sorted := make([]analysis.Finding, len(findings))
-	copy(sorted, findings)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
-		if ri != rj {
-			return ri > rj // worst (highest rank) first
-		}
-		return sinkSortKey(sorted[i]) < sinkSortKey(sorted[j])
-	})
+	sorted := sortedFindings(findings)
 
 	doc := jsonDocument{
 		Tool:     "godzilla",

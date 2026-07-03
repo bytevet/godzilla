@@ -106,11 +106,20 @@ func emitMIR(src string) (string, error) {
 		"--emit=mir", "-Zmir-include-spans=on",
 		"--crate-type", "lib", "--cap-lints", "allow",
 		"-o", tmp.Name(), src)
+	return runMIR(cmd, tmp.Name(), "rustc")
+}
+
+// runMIR runs cmd — which must be configured to emit MIR to outPath — and returns
+// the emitted MIR text. It sets RUSTC_BOOTSTRAP=1, the escape hatch that unlocks
+// -Zmir-include-spans on the stable toolchain (the MIR text format is itself
+// unstable, so this adds no new stability assumption). label names the tool for
+// the error message.
+func runMIR(cmd *exec.Cmd, outPath, label string) (string, error) {
 	cmd.Env = append(os.Environ(), "RUSTC_BOOTSTRAP=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("rustc: %v: %s", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%s: %v: %s", label, err, strings.TrimSpace(string(out)))
 	}
-	data, err := os.ReadFile(tmp.Name())
+	data, err := os.ReadFile(outPath)
 	if err != nil {
 		return "", err
 	}
@@ -146,14 +155,10 @@ func convertCargo(dir string) (*ir.Program, error) {
 	cmd := exec.Command(cargo, "rustc", "--lib", "--",
 		"--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "RUSTC_BOOTSTRAP=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("cargo rustc in %s: %v: %s", dir, err, strings.TrimSpace(string(out)))
-	}
-	data, err := os.ReadFile(tmp.Name())
+	data, err := runMIR(cmd, tmp.Name(), fmt.Sprintf("cargo rustc in %s", dir))
 	if err != nil {
 		return nil, err
 	}
-	mod := lowerMIR(string(data), filepath.Join(dir, "src", "lib.rs"))
+	mod := lowerMIR(data, filepath.Join(dir, "src", "lib.rs"))
 	return &ir.Program{Mode: "mir", Modules: []*ir.Module{mod}}, nil
 }

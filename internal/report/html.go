@@ -47,15 +47,7 @@ const snippetContext = 3
 // context-escapes it, so the resulting report is safe to open in a browser
 // even when findings embed attacker-controlled strings.
 func WriteHTML(w io.Writer, findings []analysis.Finding) error {
-	sorted := make([]analysis.Finding, len(findings))
-	copy(sorted, findings)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
-		if ri != rj {
-			return ri > rj // worst (highest rank) first
-		}
-		return sinkSortKey(sorted[i]) < sinkSortKey(sorted[j])
-	})
+	sorted := sortedFindings(findings)
 
 	data := reportData{
 		Title:            "Godzilla SAST Report",
@@ -69,6 +61,22 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	}
 
 	return reportTemplate.Execute(w, data)
+}
+
+// sortedFindings returns a copy of findings ordered worst-severity-first, then
+// by sink location. All three report writers (HTML, JSON, SARIF) share this
+// ordering so their output is deterministic and mutually consistent.
+func sortedFindings(findings []analysis.Finding) []analysis.Finding {
+	sorted := make([]analysis.Finding, len(findings))
+	copy(sorted, findings)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
+		if ri != rj {
+			return ri > rj // worst (highest rank) first
+		}
+		return sinkSortKey(sorted[i]) < sinkSortKey(sorted[j])
+	})
+	return sorted
 }
 
 // sinkSortKey builds a comparable string key for ordering findings by sink

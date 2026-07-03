@@ -123,27 +123,36 @@ func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Posi
 }
 
 func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position) {
-	// A tainted value written into a map (m[k] = v) taints the map's register
-	// (and any enclosing container), so a later go.map.lookup read observes it.
-	// go.map.update is a void instruction, so there is no result register to
-	// taint — we taint the map operand instead, mirroring visitStore.
 	if inst.Intrinsic == "go.map.update" {
-		ops := inst.GetOperands()
-		if len(ops) >= 3 {
-			if pos, ok := isTainted(tainted, ops[2]); ok {
-				if reg := ops[0].GetRegName(); reg != "" {
-					markTainted(tainted, reg, pos)
-					taintContainer(defs, tainted, reg, pos)
-				}
-			}
-		}
+		visitMapUpdate(inst, defs, tainted)
 		return
 	}
-
 	if inst.Name == "" || !intrinsicPropagators[inst.Intrinsic] {
 		return
 	}
 	markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
+}
+
+// visitMapUpdate handles the go.map.update intrinsic (m[k] = v). A tainted
+// value taints the map's register (and any enclosing container), so a later
+// go.map.lookup read observes it. go.map.update is a void instruction, so
+// there is no result register to taint — we taint the map operand instead,
+// mirroring visitStore.
+func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position) {
+	ops := inst.GetOperands()
+	if len(ops) < 3 {
+		return
+	}
+	pos, ok := isTainted(tainted, ops[2])
+	if !ok {
+		return
+	}
+	reg := ops[0].GetRegName()
+	if reg == "" {
+		return
+	}
+	markTainted(tainted, reg, pos)
+	taintContainer(defs, tainted, reg, pos)
 }
 
 // isTainted reports whether operand v refers to a tainted register, and if
