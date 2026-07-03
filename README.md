@@ -131,8 +131,11 @@ API (`std::env::var`, `Command::arg` — not the internal, version-unstable
 `std::env::__var`) and assigns call results directly to locals (no `sret`
 out-pointer indirection), so command injection and path traversal are detected
 today, with taint flowing through `format!`. Emitting MIR skips codegen, so it is
-fast (~40 ms/file). SQL injection and web-framework sources live in third-party
-crates, which must be present at scan time (a follow-up drives Cargo crates).
+fast (~40 ms/file). A scan target with a `Cargo.toml` is built with `cargo` so a
+**web-framework** dependency resolves and its request accessors (an untrusted
+HTTP query param / header / body) are recognized as taint sources — the real
+attack surface. Samples that pull an external crate over the network are opt-in
+(`GODZILLA_RUST_E2E=1`), like Java's Spring build sample.
 
 **C / C++** are analyzed via **LLVM IR**: clang compiles each unit to IR
 (`-O1 -g`), parsed with libLLVM and lowered to gIR. This is an opt-in **cgo**
