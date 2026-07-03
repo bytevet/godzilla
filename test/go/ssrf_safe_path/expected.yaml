@@ -1,0 +1,2 @@
+# No findings: untrusted input reaches only the path of a fixed host, not the host.
+findings: []

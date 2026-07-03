@@ -265,22 +265,34 @@ func analyzeFunc(
 				markTainted(tainted, inst.Name, inst.Pos)
 			}
 		case isSink:
-			if pos, ok := firstTaintedOrigin(tainted, injectableArgs(sinkArgs, callee, args)); ok && !reported[inst] {
+			inj := injectableArgs(sinkArgs, callee, args)
+			if pos, ok := firstTaintedOrigin(tainted, inj); ok && !reported[inst] {
 				reported[inst] = true
-				res.findings = append(res.findings, Finding{
-					RuleID:     rule.ID,
-					Severity:   rule.Severity,
-					Confidence: confidenceFor(pos),
-					CWE:        rule.CWE,
-					Message:    rule.Message,
-					Language:   mod.Language,
-					Function:   fn.CanonicalName,
-					SourcePos:  pos,
-					SinkPos:    inst.Pos,
-					SinkCallee: callee,
-				})
+				// SSRF (CWE-918): keep the finding only if the taint can reach the
+				// request URL's host. Taint confined to the path/query of a fixed
+				// host cannot redirect the request and is a false positive; the
+				// check is structural/deterministic, so marking reported is safe.
+				if rule.CWE != "CWE-918" || urlHostControllable(inj, tainted, defs) {
+					res.findings = append(res.findings, Finding{
+						RuleID:     rule.ID,
+						Severity:   rule.Severity,
+						Confidence: confidenceFor(pos),
+						CWE:        rule.CWE,
+						Message:    rule.Message,
+						Language:   mod.Language,
+						Function:   fn.CanonicalName,
+						SourcePos:  pos,
+						SinkPos:    inst.Pos,
+						SinkCallee: callee,
+					})
+				}
 			}
-		case rule.IsPropagator(callee):
+		case rule.IsPropagator(callee) || isConcatAddCallee(callee):
+			// A concat-add call (Rust `String + &str`, lowered to an `Add::add`
+			// call) always carries taint from either operand to the result — the
+			// call-shaped analogue of the universal BIN_OP_ADD propagator that
+			// covers Go/JS/Python `+`. Without this, taint would drop at every
+			// Rust string concatenation.
 			if inst.Name != "" {
 				markTaintFromOperands(tainted, inst.Name, args)
 			}
