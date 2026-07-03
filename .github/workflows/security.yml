@@ -1,0 +1,63 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF to the code-scanning / Security tab
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Dogfood: build Godzilla and run it on its own source. A SAST tool that can't
+  # keep its own code clean shouldn't ship — so this both publishes results to the
+  # Security tab (SARIF) and proves the exit-code gate mechanism works end to end.
+  # ---------------------------------------------------------------------------
+  self-scan:
+    name: Godzilla scans itself
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build godzilla
+        run: go build -o godzilla ./cmd/godzilla
+
+      # Scan the tool's own Go logic (pure-Go, no external toolchain needed). It
+      # should be clean; a critical finding in our own core fails the build.
+      - name: Self-scan (SARIF)
+        run: ./godzilla scan -sarif godzilla.sarif -fail-on critical internal
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: godzilla.sarif
+          category: godzilla-self-scan
+
+      # Gate-mechanism smoke test: a known-vulnerable sample MUST fail the gate
+      # (exit 3), and a safe control MUST pass (exit 0). Guards against a
+      # regression that silently stops detecting or starts false-positiving.
+      - name: Gate smoke test
+        run: |
+          set +e
+          ./godzilla scan -fail-on medium test/go/sql_injection
+          vuln=$?
+          ./godzilla scan -fail-on medium test/go/complex_logic
+          safe=$?
+          set -e
+          if [ "$vuln" -ne 3 ]; then
+            echo "::error::vulnerable sample should exit 3 (findings), got $vuln"; exit 1
+          fi
+          if [ "$safe" -ne 0 ]; then
+            echo "::error::safe sample should exit 0 (clean), got $safe"; exit 1
+          fi
+          echo "gate mechanism OK: vulnerable=3, safe=0"
