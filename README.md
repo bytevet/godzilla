@@ -244,6 +244,16 @@ Godzilla is functional and covered by tests, but deliberately scoped:
   (CHA) maps an interface call to its concrete implementations, so taint crosses
   `iface.Method(userInput)`. Because CHA is an over-approximation, a call may be
   resolved to more implementations than are reachable at runtime.
+- **SSRF (CWE-918) is host-aware.** An SSRF finding is suppressed when the
+  untrusted value only reaches the **path or query of a fixed host** —
+  `http.Get("https://api.example.com/" + userPath)` or the `fmt.Sprintf`
+  equivalent — because the request cannot be redirected to an attacker host.
+  The check reconstructs the URL from concatenation and format strings and is
+  conservative: it drops a finding only when a constant `scheme://host/…` prefix
+  is *proven* to precede the taint. Constructions whose literal template is not
+  present in gIR — **Rust `format!`** and **Java string `+`**
+  (`makeConcatWithConstants`) — can't be introspected, so those keep firing
+  (potential false positive over a fixed host, never a false negative).
 - Pointer analysis is approximated (value-flow + CHA), not a full demand-driven
   points-to.
 

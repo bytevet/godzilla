@@ -109,10 +109,19 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 
 **Analysis (`internal/analysis/`).**
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
-  aliasing, intrinsic + opcode propagators).
+  aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
+  taint for Go/JS/Python; Rust models `+` as an `Add::add` **call**, so `interproc.go` treats a concat-add
+  call (`isConcatAddCallee`) as a built-in propagator too — otherwise taint would drop at every Rust concat.
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
+- `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
+  sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
+  `Add::add`, Python `%`, or a printf-style/format-string call) and **suppresses the finding when a constant
+  `scheme://host/…` prefix (`hostFixedRe`) precedes the first tainted segment** — i.e. the taint is confined
+  to the path/query of a fixed host and cannot redirect the request. Deliberately conservative: it suppresses
+  only when the fixed host is *proven*; an opaque or unrecoverable construction (Rust `format!`, Java `+`,
+  whose template is dropped from gIR) keeps firing, so no real SSRF is lost.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch) + `Reachable`/`Roots` (tree-shaking primitive).
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
   (CWE-798).
