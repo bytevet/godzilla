@@ -47,7 +47,7 @@ func TestConvertFile_CommandInjection(t *testing.T) {
 		t.Fatalf("want one rust module, got %+v", prog.Modules)
 	}
 	seen := callees(prog)
-	for _, want := range []string{"rust:var", "rust:Command::new", "rust:Command::arg"} {
+	for _, want := range []string{"rust:http::Request::query", "rust:Command::new", "rust:Command::arg"} {
 		if !seen[want] {
 			t.Errorf("expected callee %q in lowered IR; got %v", want, keys(seen))
 		}

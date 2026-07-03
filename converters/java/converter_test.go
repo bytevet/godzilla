@@ -28,7 +28,7 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 		t.Fatal("no modules produced")
 	}
 
-	var sawExec, sawGetenv bool
+	var sawExec, sawSource bool
 	for _, mod := range prog.Modules {
 		if mod.Language != "java" {
 			t.Errorf("module %q language = %q, want java", mod.Name, mod.Language)
@@ -42,15 +42,15 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 					switch inst.Call.GetCallee() {
 					case "java:java/lang/Runtime.exec":
 						sawExec = true
-					case "java:java/lang/System.getenv":
-						sawGetenv = true
+					case "java:javax/servlet/http/HttpServletRequest.getParameter":
+						sawSource = true
 					}
 				}
 			}
 		}
 	}
-	if !sawGetenv {
-		t.Error("expected a java:java/lang/System.getenv source call in the lowered IR")
+	if !sawSource {
+		t.Error("expected a java:javax/servlet/http/HttpServletRequest.getParameter source call in the lowered IR")
 	}
 	if !sawExec {
 		t.Error("expected a java:java/lang/Runtime.exec sink call in the lowered IR")

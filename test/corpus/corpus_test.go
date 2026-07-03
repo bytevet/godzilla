@@ -72,8 +72,26 @@ func TestCorpus(t *testing.T) {
 					t.Skip("clang not on PATH; skipping C/C++ sample")
 				}
 			}
-			if strings.HasPrefix(name, "rust/") && !rustcAvailable {
-				t.Skip("rustc not on PATH; skipping Rust sample")
+			if strings.HasPrefix(name, "rust/") {
+				if !rustcAvailable {
+					t.Skip("rustc not on PATH; skipping Rust sample")
+				}
+				// A Cargo project is built with cargo; one that declares external
+				// dependencies fetches crates over the network, so it is opt-in
+				// (kept hermetic by default), mirroring the Java build samples.
+				if isCargoProject(dir) {
+					if _, err := exec.LookPath("cargo"); err != nil {
+						t.Skip("cargo not on PATH; skipping Cargo-based Rust sample")
+					}
+					if cargoHasDeps(dir) {
+						if os.Getenv("GODZILLA_RUST_E2E") == "" {
+							t.Skip("set GODZILLA_RUST_E2E=1 to run the real-crate Rust sample (needs cargo + network)")
+						}
+						if testing.Short() {
+							t.Skip("-short: skipping real-crate Cargo sample")
+						}
+					}
+				}
 			}
 
 			res, err := scan.Scan(dir, rs)

@@ -40,3 +40,7 @@ bin/
 !/test/go/*/go.sum
 !/test/go/*/expected.yaml
 !/test/go/*/.gitignore
+
+# Cargo build artifacts left in Rust sample dirs by the frontend's cargo build.
+/test/rust/*/target/
+/test/rust/*/Cargo.lock
