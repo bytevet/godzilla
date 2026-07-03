@@ -1,0 +1,3 @@
+findings:
+  - rule: rust-ssrf
+    min: 1

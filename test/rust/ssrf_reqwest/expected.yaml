@@ -1,0 +1,4 @@
+# Real-crate (reqwest) sample — opt-in, needs cargo + network (GODZILLA_RUST_E2E=1).
+findings:
+  - rule: rust-ssrf
+    min: 1

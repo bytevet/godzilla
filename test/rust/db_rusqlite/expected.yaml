@@ -1,0 +1,4 @@
+# Real-crate (rusqlite) sample — opt-in, needs cargo + network (GODZILLA_RUST_E2E=1).
+findings:
+  - rule: rust-sql-injection
+    min: 1
