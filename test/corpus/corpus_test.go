@@ -1,6 +1,7 @@
 package corpus
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,8 +45,24 @@ func TestCorpus(t *testing.T) {
 			if strings.HasPrefix(name, "python/") && !pythonAvailable {
 				t.Skip("python3 not on PATH; skipping Python sample")
 			}
-			if strings.HasPrefix(name, "java/") && !javaAvailable {
-				t.Skip("java not on PATH; skipping Java sample")
+			if strings.HasPrefix(name, "java/") {
+				if !javaAvailable {
+					t.Skip("java not on PATH; skipping Java sample")
+				}
+				// A Java sample carrying a Maven/Gradle build is compiled by that
+				// build tool (fetching third-party deps over the network), so it is
+				// opt-in and skipped by default to keep the suite hermetic.
+				if hasBuildFile(dir) {
+					if os.Getenv("GODZILLA_SPRING_E2E") == "" {
+						t.Skip("set GODZILLA_SPRING_E2E=1 to run the Maven/Gradle build sample (needs a build tool + network)")
+					}
+					if testing.Short() {
+						t.Skip("-short: skipping Maven/Gradle build sample")
+					}
+					if !buildToolAvailable(dir) {
+						t.Skip("no Maven/Gradle wrapper or mvn/gradle on PATH; skipping build sample")
+					}
+				}
 			}
 			if strings.HasPrefix(name, "c/") || strings.HasPrefix(name, "cpp/") {
 				if !llvmBuilt {

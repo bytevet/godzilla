@@ -14,6 +14,16 @@ rules:
       - "go:*net/http*.Request*.FormValue"
       - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
+      # Web-framework request accessors (Gin, Echo, Chi).
+      - "go:*gin-gonic/gin.Context*.Query"
+      - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.Param"
+      - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.GetHeader"
+      - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.Param"
+      - "go:*labstack/echo*Context*.FormValue"
+      - "go:*go-chi/chi*.URLParam"
     # The filesystem path is logical arg 0 for the os/ioutil sinks (os.WriteFile's
     # data/perm args, for instance, are not path-traversal injection points).
     # http.ServeFile(w, r, name) serves the file at `name` over HTTP — the

@@ -1,0 +1,7 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# End-to-end Spring sample: opt-in (needs a Maven/Gradle build tool + network to
+# fetch Spring). The corpus skips it unless GODZILLA_SPRING_E2E=1 is set.
+findings:
+    - rule: java-sql-injection
+      min: 1

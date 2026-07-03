@@ -15,6 +15,17 @@ rules:
       directly into the response body.
     sources:
       - "py:*request.args.get"
+      # Django request accessors.
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      # FastAPI / Starlette request accessors.
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
       - "py:*request.get_json"
       - "py:*request.get_data"
       - "py:*request.form.get"

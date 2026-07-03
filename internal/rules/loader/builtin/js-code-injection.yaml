@@ -13,6 +13,10 @@ rules:
       - "js:*req.query*"
       - "js:*req.params*"
       - "js:*req.body*"
+      # Koa request accessors (ctx.query, ctx.params, ctx.request.body/query).
+      - "js:*ctx.query*"
+      - "js:*ctx.params*"
+      - "js:*ctx.request*"
     sinks:
       - "js:eval"
       - "js:*.eval"

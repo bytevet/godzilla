@@ -93,7 +93,40 @@ public class JavaDump {
                 sb.append(rec);
             }
         }
-        sb.append("]}");
+        sb.append("],\"paramAnnotations\":").append(paramAnnotationsJson(mm)).append("}");
+    }
+
+    // paramAnnotationsJson emits the runtime-visible annotations on each declared
+    // parameter, index-aligned with the method's source-level parameters (the
+    // implicit `this` is excluded, matching lower.go's p0/p1/... binding). This
+    // lets the Go frontend synthesize a taint source for framework-annotated
+    // parameters (e.g. Spring's @RequestParam). Annotation names are emitted as
+    // internal names (e.g. "org/springframework/web/bind/annotation/RequestParam").
+    static String paramAnnotationsJson(MethodModel mm) {
+        StringBuilder sb = new StringBuilder("[");
+        var opt = mm.findAttribute(Attributes.runtimeVisibleParameterAnnotations());
+        if (opt.isPresent()) {
+            var params = opt.get().parameterAnnotations();
+            for (int i = 0; i < params.size(); i++) {
+                if (i > 0) sb.append(',');
+                sb.append('[');
+                var anns = params.get(i);
+                for (int j = 0; j < anns.size(); j++) {
+                    if (j > 0) sb.append(',');
+                    sb.append(jstr(annotationName(anns.get(j))));
+                }
+                sb.append(']');
+            }
+        }
+        return sb.append(']').toString();
+    }
+
+    // annotationName turns an annotation's field descriptor ("Lpkg/Name;") into
+    // its internal name ("pkg/Name").
+    static String annotationName(Annotation a) {
+        String d = a.className().stringValue();
+        if (d.startsWith("L") && d.endsWith(";")) d = d.substring(1, d.length() - 1);
+        return d;
     }
 
     static String dumpInstr(Instruction instr, int line) {

@@ -21,6 +21,16 @@ rules:
       - "go:*net/http*.Request*.FormValue"
       - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
+      # Web-framework request accessors (Gin, Echo, Chi).
+      - "go:*gin-gonic/gin.Context*.Query"
+      - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.Param"
+      - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.GetHeader"
+      - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.Param"
+      - "go:*labstack/echo*Context*.FormValue"
+      - "go:*go-chi/chi*.URLParam"
     sinks:
       - "go:*database/sql*.Query#0"
       - "go:*database/sql*.QueryRow#0"
@@ -28,6 +38,12 @@ rules:
       - "go:*database/sql*.QueryContext#1"
       - "go:*database/sql*.QueryRowContext#1"
       - "go:*database/sql*.ExecContext#1"
+      # Gorm ORM query builders — the raw SQL string is logical arg 0, so a
+      # parameterized call like db.Where("id = ?", v) is not flagged.
+      - "go:*gorm*.DB*.Raw#0"
+      - "go:*gorm*.DB*.Exec#0"
+      - "go:*gorm*.DB*.Where#0"
+      - "go:*gorm*.DB*.Order#0"
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
     sanitizers: []

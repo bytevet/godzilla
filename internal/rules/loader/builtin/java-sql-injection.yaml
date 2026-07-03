@@ -15,6 +15,18 @@ rules:
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
       - "java:*ServletRequest.getParameter"
+      # Spring MVC controller parameter annotations. The Java frontend
+      # synthesizes a source CALL for each annotated parameter (see
+      # converters/java/lower.go), so untrusted request data bound to a
+      # controller method parameter is seeded as tainted. Anchored on the
+      # annotation package (internal name org/springframework/web/bind/annotation/*)
+      # so an ordinary method whose name ends in the token (e.g. getRequestBody)
+      # is NOT mistaken for a source.
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
     # The query string is the first (receiver-excluded) argument; a
     # PreparedStatement's bound parameters (set via setString/setInt) are not
     # injection points, so a parameterized query is not flagged.
@@ -23,6 +35,17 @@ rules:
       - "java:*Statement.execute#0"
       - "java:*Statement.executeUpdate#0"
       - "java:*Connection.prepareStatement#0"
+      # Spring JDBC / JPA query APIs — the SQL/JPQL string is logical arg 0, so a
+      # parameterized call like jdbcTemplate.query("... = ?", args, mapper) is
+      # not flagged. (JdbcTemplate globs also cover NamedParameterJdbcTemplate.)
+      - "java:*JdbcTemplate.query*#0"
+      - "java:*JdbcTemplate.update#0"
+      - "java:*JdbcTemplate.execute#0"
+      - "java:*JdbcTemplate.batchUpdate#0"
+      - "java:*EntityManager.createQuery#0"
+      - "java:*EntityManager.createNativeQuery#0"
+      - "java:*Session.createQuery#0"
+      - "java:*Session.createSQLQuery#0"
     sanitizers: []
     propagators:
       - "java:*String.concat"

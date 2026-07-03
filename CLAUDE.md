@@ -75,7 +75,15 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to
   recover SSA values. Instance calls → `OP_CODE_INVOKE` (receiver in `Call.Value`, so a sink `#0` and the
   engine's arg→param mapping both line up); string concat (`makeConcatWithConstants`) → BIN_OP. Canonical
-  names `java:<owner>.<method>`.
+  names `java:<owner>.<method>`. A scan target that is a **Maven/Gradle project** (`pom.xml` /
+  `build.gradle`) is compiled by its own build tool first (`resolveInputs` in `converter.go`, preferring a
+  `mvnw`/`gradlew` wrapper, else `mvn`/`gradle` on PATH) so third-party deps (Spring, etc.) are on the
+  classpath, and the resulting `.class` output is analyzed — with graceful fallback to the in-process
+  compile when no build tool / the build fails. **Spring controller param annotations**
+  (`@RequestParam`/`@PathVariable`/`@RequestBody`/…) become taint sources by *synthesizing a source CALL*
+  per annotated parameter (JavaDump emits `paramAnnotations`; `lower.go` binds the param slot to a
+  `java:<annotation>` CALL) — the same trick JS/Python use for opaque-base member reads, so it's a frontend
+  + YAML change with **no gIR/engine change**.
 - `converters/rust/` — analyzes **rustc MIR** (Mid-level IR). Shells out to `rustc --emit=mir
   -Zmir-include-spans=on` (`RUSTC_BOOTSTRAP=1` unlocks the span flag; the MIR text format is itself
   unstable, so this adds no new assumption), then `mir.go` runs a **straight-line value-forwarding**
