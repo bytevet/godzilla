@@ -1,0 +1,2 @@
+# No findings: the opened path is constant; only logged / non-path data is tainted.
+findings: []

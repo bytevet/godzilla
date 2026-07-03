@@ -105,7 +105,7 @@ $ godzilla scan ./test/go/sql_injection
 | Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) | JVM bytecode (`java.lang.classfile`) | rustc MIR |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ | — | ✅ |
+| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ |
 | SSRF | ✅ | ✅ | ✅ | — | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ | — | — |
 | Open redirect | ✅ | ✅ | ✅ | — | — |
