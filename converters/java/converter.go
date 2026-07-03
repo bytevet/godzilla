@@ -226,7 +226,7 @@ func buildProject(dir string, sys buildSystem) ([]string, error) {
 // multi-module reactor has one per module.
 func classOutputDirs(root, suffix string) []string {
 	var dirs []string
-	seen := map[string]bool{}
+	// WalkDir visits each directory exactly once, so no dedup is needed.
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
@@ -235,8 +235,7 @@ func classOutputDirs(root, suffix string) []string {
 		case ".git", ".gradle", "node_modules":
 			return filepath.SkipDir
 		}
-		if strings.HasSuffix(p, suffix) && !seen[p] {
-			seen[p] = true
+		if strings.HasSuffix(p, suffix) {
 			dirs = append(dirs, p)
 		}
 		return nil

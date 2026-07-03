@@ -188,17 +188,19 @@ func globRegexp(pattern string) *regexp.Regexp {
 		return re
 	}
 
+	// Translate the glob to an anchored regexp: quote each literal segment
+	// between '*' metacharacters and join the segments with ".*".
 	var b strings.Builder
 	b.WriteString("^")
-	for _, part := range strings.Split(pattern, "*") {
+	for i, part := range strings.Split(pattern, "*") {
+		if i > 0 {
+			b.WriteString(".*")
+		}
 		b.WriteString(regexp.QuoteMeta(part))
-		b.WriteString(".*")
 	}
-	// The loop appends a trailing ".*" after the final segment; trim it so the
-	// pattern stays anchored at the end.
-	expr := strings.TrimSuffix(b.String(), ".*") + "$"
+	b.WriteString("$")
 
-	re = regexp.MustCompile(expr)
+	re = regexp.MustCompile(b.String())
 	globCacheMu.Lock()
 	globCache[pattern] = re
 	globCacheMu.Unlock()

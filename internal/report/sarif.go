@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"godzilla/internal/analysis"
@@ -94,15 +93,7 @@ type sarifResultProperties struct {
 // sorted worst-severity-first, then by sink location, matching WriteHTML's
 // ordering, so output is deterministic across runs.
 func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
-	sorted := make([]analysis.Finding, len(findings))
-	copy(sorted, findings)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
-		if ri != rj {
-			return ri > rj // worst (highest rank) first
-		}
-		return sinkSortKey(sorted[i]) < sinkSortKey(sorted[j])
-	})
+	sorted := sortedFindings(findings)
 
 	// Build the rules array: one entry per distinct rule ID, in order of
 	// first appearance, and an index lookup for results.

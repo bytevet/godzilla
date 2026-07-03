@@ -10,6 +10,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 
@@ -30,18 +31,24 @@ const (
 	exitFindings = 3 // findings at/above the fail-on threshold (gate failed)
 )
 
+const usageText = `usage: godzilla scan [flags] <path>
+
+Convert Go source at <path> to gIR, run taint analysis, and report findings.
+
+flags:
+  -rules <file>     additional YAML rule file to load alongside the built-in rules
+  -fail-on <sev>    minimum severity that fails the gate: info|low|medium|high|critical (default medium)
+  -summary          also print a gIR summary (opcode histogram, intrinsics)
+  -html <file>      write an HTML report to <file>
+  -json <file>      write a JSON report to <file>
+  -sarif <file>     write a SARIF 2.1.0 report to <file>
+  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
+
+exit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on
+`
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: godzilla scan [flags] <path>")
-	fmt.Fprintln(os.Stderr, "\nConvert Go source at <path> to gIR, run taint analysis, and report findings.")
-	fmt.Fprintln(os.Stderr, "\nflags:")
-	fmt.Fprintln(os.Stderr, "  -rules <file>     additional YAML rule file to load alongside the built-in rules")
-	fmt.Fprintln(os.Stderr, "  -fail-on <sev>    minimum severity that fails the gate: info|low|medium|high|critical (default medium)")
-	fmt.Fprintln(os.Stderr, "  -summary          also print a gIR summary (opcode histogram, intrinsics)")
-	fmt.Fprintln(os.Stderr, "  -html <file>      write an HTML report to <file>")
-	fmt.Fprintln(os.Stderr, "  -json <file>      write a JSON report to <file>")
-	fmt.Fprintln(os.Stderr, "  -sarif <file>     write a SARIF 2.1.0 report to <file>")
-	fmt.Fprintln(os.Stderr, "  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)")
-	fmt.Fprintln(os.Stderr, "\nexit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on")
+	fmt.Fprint(os.Stderr, usageText)
 }
 
 func main() {
@@ -112,28 +119,24 @@ func runScan(args []string) {
 
 	gated := printFindings(os.Stdout, findings, threshold)
 
-	if *htmlPath != "" {
-		if err := writeHTMLReport(*htmlPath, findings); err != nil {
-			fmt.Fprintf(os.Stderr, "error: writing HTML report: %v\n", err)
-			os.Exit(exitError)
-		}
-		fmt.Fprintf(os.Stdout, "HTML report written to %s\n", *htmlPath)
+	reports := []struct {
+		path  string
+		kind  string
+		write func(io.Writer, []analysis.Finding) error
+	}{
+		{*htmlPath, "HTML", report.WriteHTML},
+		{*jsonPath, "JSON", report.WriteJSON},
+		{*sarifPath, "SARIF", report.WriteSARIF},
 	}
-
-	if *jsonPath != "" {
-		if err := writeJSONReport(*jsonPath, findings); err != nil {
-			fmt.Fprintf(os.Stderr, "error: writing JSON report: %v\n", err)
+	for _, r := range reports {
+		if r.path == "" {
+			continue
+		}
+		if err := writeReport(r.path, findings, r.write); err != nil {
+			fmt.Fprintf(os.Stderr, "error: writing %s report: %v\n", r.kind, err)
 			os.Exit(exitError)
 		}
-		fmt.Fprintf(os.Stdout, "JSON report written to %s\n", *jsonPath)
-	}
-
-	if *sarifPath != "" {
-		if err := writeSARIFReport(*sarifPath, findings); err != nil {
-			fmt.Fprintf(os.Stderr, "error: writing SARIF report: %v\n", err)
-			os.Exit(exitError)
-		}
-		fmt.Fprintf(os.Stdout, "SARIF report written to %s\n", *sarifPath)
+		fmt.Fprintf(os.Stdout, "%s report written to %s\n", r.kind, r.path)
 	}
 
 	if gated > 0 {
@@ -142,20 +145,10 @@ func runScan(args []string) {
 	os.Exit(exitClean)
 }
 
-func writeHTMLReport(path string, findings []analysis.Finding) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr // a failed flush/close would otherwise silently truncate the report
-		}
-	}()
-	return report.WriteHTML(f, findings)
-}
-
-func writeJSONReport(path string, findings []analysis.Finding) (err error) {
+// writeReport creates path, streams the report to it via write, and returns any
+// error. The file's Close error is surfaced when write itself succeeded: a
+// failed flush/close would otherwise silently truncate the report.
+func writeReport(path string, findings []analysis.Finding, write func(io.Writer, []analysis.Finding) error) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -165,20 +158,7 @@ func writeJSONReport(path string, findings []analysis.Finding) (err error) {
 			err = cerr
 		}
 	}()
-	return report.WriteJSON(f, findings)
-}
-
-func writeSARIFReport(path string, findings []analysis.Finding) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-	return report.WriteSARIF(f, findings)
+	return write(f, findings)
 }
 
 // printFindings renders findings sorted by severity (worst first) then location,

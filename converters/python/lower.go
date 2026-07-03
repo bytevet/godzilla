@@ -210,6 +210,49 @@ func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
 
+func stringValue(s string) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
+}
+
+func nilValue() *ir.Value {
+	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
+}
+
+// emitBinOp emits an OP_CODE_BIN_OP over (left, right) and returns its result
+// register. Positioned at node n.
+func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_BIN_OP
+	inst.BinOp = kind
+	inst.Operands = []*ir.Value{left, right}
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
+// foldBinOp accumulates val into acc with a BIN_OP of the given kind, seeding
+// the fold on the first element (acc == nil) without emitting anything.
+func (fs *funcState) foldBinOp(kind ir.BinOpKind, acc, val *ir.Value, n astNode) *ir.Value {
+	if acc == nil {
+		return val
+	}
+	return fs.emitBinOp(kind, acc, val, n)
+}
+
+// lowerIterTarget lowers the `iter` of a for-loop / comprehension generator and
+// binds its `target` to that value (element taint == container taint), so taint
+// in the iterable reaches the loop variable and a source in the iterable is not
+// dropped.
+func (fs *funcState) lowerIterTarget(n astNode) {
+	it := n.node("iter")
+	if it == nil {
+		return
+	}
+	iterVal := fs.lowerExpr(it)
+	if tgt := n.node("target"); tgt != nil {
+		fs.assign(tgt, iterVal)
+	}
+}
+
 // lookupName resolves a bare Name reference through the current environment,
 // falling back to a GlobalName reference for an unbound name (module global,
 // builtin, or imported symbol) -- the same rule the "Name" case of lowerExpr
@@ -291,16 +334,8 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 			fs.lowerBody(s.list("body"))
 			fs.lowerBody(s.list("orelse"))
 		case "For":
-			// `for x in iter:` — lower the iterable and bind the loop target to
-			// it, so taint in the iterable reaches the loop variable
-			// (conservative: element taint == container taint), and a source in
-			// the iterable is not dropped.
-			if it := s.node("iter"); it != nil {
-				iterVal := fs.lowerExpr(it)
-				if tgt := s.node("target"); tgt != nil {
-					fs.assign(tgt, iterVal)
-				}
-			}
+			// `for x in iter:` — lower the iterable and bind the loop target to it.
+			fs.lowerIterTarget(s)
 			fs.lowerBody(s.list("body"))
 			fs.lowerBody(s.list("orelse"))
 		case "With":
@@ -331,12 +366,7 @@ func (fs *funcState) lowerStmt(s astNode) {
 		target := s.node("target")
 		cur := fs.lowerExpr(target)
 		rhs := fs.lowerExpr(s.node("value"))
-		inst := fs.newValueInst(s)
-		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = binOpKind(s.str("op"))
-		inst.Operands = []*ir.Value{cur, rhs}
-		fs.emit(inst)
-		fs.assign(target, regValue(inst.Name))
+		fs.assign(target, fs.emitBinOp(binOpKind(s.str("op")), cur, rhs, s))
 	case "ExprStmt":
 		fs.lowerExpr(s.node("value"))
 	case "Return":
@@ -420,7 +450,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		} else {
 			// a[i:j] slice: no single index expression: propagate taint
 			// through the base only via a nil-constant placeholder index.
-			idx = &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
+			idx = nilValue()
 		}
 
 		// base["key"] rooted at a global/imported name or a function
@@ -466,12 +496,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 	case "BinOp":
 		left := fs.lowerExpr(n.node("left"))
 		right := fs.lowerExpr(n.node("right"))
-		inst := fs.newValueInst(n)
-		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = binOpKind(n.str("op"))
-		inst.Operands = []*ir.Value{left, right}
-		fs.emit(inst)
-		return regValue(inst.Name)
+		return fs.emitBinOp(binOpKind(n.str("op")), left, right, n)
 
 	case "UnaryOp":
 		operand := fs.lowerExpr(n.node("operand"))
@@ -491,20 +516,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// taint.
 		var acc *ir.Value
 		for _, v := range n.list("values") {
-			cur := fs.lowerExpr(v)
-			if acc == nil {
-				acc = cur
-				continue
-			}
-			inst := fs.newValueInst(n)
-			inst.Op = ir.OpCode_OP_CODE_BIN_OP
-			inst.BinOp = ir.BinOpKind_BIN_OP_OR
-			inst.Operands = []*ir.Value{acc, cur}
-			fs.emit(inst)
-			acc = regValue(inst.Name)
+			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_OR, acc, fs.lowerExpr(v), n)
 		}
 		if acc == nil {
-			return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+			return stringValue("")
 		}
 		return acc
 
@@ -516,12 +531,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		fs.lowerExpr(n.node("test"))
 		body := fs.lowerExpr(n.node("body"))
 		orelse := fs.lowerExpr(n.node("orelse"))
-		inst := fs.newValueInst(n)
-		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = ir.BinOpKind_BIN_OP_OR
-		inst.Operands = []*ir.Value{body, orelse}
-		fs.emit(inst)
-		return regValue(inst.Name)
+		return fs.emitBinOp(ir.BinOpKind_BIN_OP_OR, body, orelse, n)
 
 	case "NamedExpr":
 		// walrus `target := value`: the expression evaluates to `value` and also
@@ -542,7 +552,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		for _, e := range n.list("elts") {
 			fs.lowerExpr(e)
 		}
-		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+		return stringValue("")
 
 	case "Starred":
 		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
@@ -559,12 +569,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// does not itself carry element taint (consistent, precise container
 		// handling; see subprocess_argv_safe).
 		for _, g := range n.list("generators") {
-			if it := g.node("iter"); it != nil {
-				iterVal := fs.lowerExpr(it)
-				if tgt := g.node("target"); tgt != nil {
-					fs.assign(tgt, iterVal)
-				}
-			}
+			fs.lowerIterTarget(g)
 			for _, cond := range g.list("ifs") {
 				fs.lowerExpr(cond)
 			}
@@ -574,7 +579,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 				fs.lowerExpr(e)
 			}
 		}
-		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+		return stringValue("")
 
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
@@ -582,20 +587,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// the final value, same as Python's runtime semantics.
 		var acc *ir.Value
 		for _, part := range n.list("values") {
-			v := fs.lowerExpr(part)
-			if acc == nil {
-				acc = v
-				continue
-			}
-			inst := fs.newValueInst(n)
-			inst.Op = ir.OpCode_OP_CODE_BIN_OP
-			inst.BinOp = ir.BinOpKind_BIN_OP_ADD
-			inst.Operands = []*ir.Value{acc, v}
-			fs.emit(inst)
-			acc = regValue(inst.Name)
+			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(part), n)
 		}
 		if acc == nil {
-			acc = &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: ""}}}}
+			acc = stringValue("")
 		}
 		return acc
 
@@ -698,26 +693,14 @@ func (fs *funcState) lowerNestedCallees(funcNode astNode) {
 }
 
 func (fs *funcState) lowerFormatCall(n, funcNode astNode) *ir.Value {
+	// "...".format(a, b=c) concatenates the format string with every positional
+	// and keyword argument value, so taint from any of them reaches the result.
 	acc := fs.lowerExpr(funcNode.node("value"))
-	args := n.list("args")
-	kwArgs := n.list("keywords")
-	for _, a := range args {
-		v := fs.lowerExpr(a)
-		inst := fs.newValueInst(n)
-		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = ir.BinOpKind_BIN_OP_ADD
-		inst.Operands = []*ir.Value{acc, v}
-		fs.emit(inst)
-		acc = regValue(inst.Name)
+	for _, a := range n.list("args") {
+		acc = fs.emitBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(a), n)
 	}
-	for _, kw := range kwArgs {
-		v := fs.lowerExpr(kw.node("value"))
-		inst := fs.newValueInst(n)
-		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = ir.BinOpKind_BIN_OP_ADD
-		inst.Operands = []*ir.Value{acc, v}
-		fs.emit(inst)
-		acc = regValue(inst.Name)
+	for _, kw := range n.list("keywords") {
+		acc = fs.emitBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(kw.node("value")), n)
 	}
 	return acc
 }

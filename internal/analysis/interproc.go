@@ -322,6 +322,36 @@ func analyzeFunc(
 		}
 	}
 
+	// handleMakeClosure flows taint through a builtin.make_closure intrinsic,
+	// whose operands are [Fn, binding0, binding1, ...]. The frontend appends the
+	// closure's captured free variables as its trailing params, so a tainted
+	// binding must flow into the closure's matching free-var param — this is how
+	// taint reaches a `go func(){ ...captured... }()` goroutine body.
+	handleMakeClosure := func(inst *ir.Instruction) {
+		ops := inst.GetOperands()
+		if len(ops) < 2 {
+			return
+		}
+		closureName := ops[0].GetFuncName()
+		if closureName == "" {
+			return
+		}
+		closure := byKey[closureName]
+		if closure == nil {
+			return
+		}
+		bindings := ops[1:]
+		base := len(closure.Params) - len(bindings)
+		if base < 0 {
+			return
+		}
+		for i, b := range bindings {
+			if p, ok := isTainted(tainted, b); ok {
+				addEffect(closureName, base+i, p)
+			}
+		}
+	}
+
 	visit := func(inst *ir.Instruction) {
 		switch inst.Op {
 		case ir.OpCode_OP_CODE_CALL, ir.OpCode_OP_CODE_INVOKE:
@@ -334,28 +364,8 @@ func analyzeFunc(
 			if inst.Call != nil {
 				handleCall(inst)
 			}
-			// builtin.make_closure captures free variables: operands are
-			// [Fn, binding0, binding1, ...]. The frontend appends the closure's
-			// free vars as its trailing params, so a tainted binding must flow
-			// into the closure's matching free-var param — this is how taint
-			// reaches a `go func(){ ...captured... }()` goroutine body.
 			if inst.GetIntrinsic() == "builtin.make_closure" {
-				ops := inst.GetOperands()
-				if len(ops) >= 2 {
-					if closureName := ops[0].GetFuncName(); closureName != "" {
-						if closure := byKey[closureName]; closure != nil {
-							bindings := ops[1:]
-							base := len(closure.Params) - len(bindings)
-							if base >= 0 {
-								for i, b := range bindings {
-									if p, ok := isTainted(tainted, b); ok {
-										addEffect(closureName, base+i, p)
-									}
-								}
-							}
-						}
-					}
-				}
+				handleMakeClosure(inst)
 			}
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:

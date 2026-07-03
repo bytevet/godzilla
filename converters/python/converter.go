@@ -175,8 +175,6 @@ func writeHelperScript() (string, func(), error) {
 	return path, func() { _ = os.Remove(path) }, nil
 }
 
-// convertPythonFile runs the embedded pyast.py helper against file and lowers
-// the resulting JSON AST into one gIR Module.
 // moduleNameFor derives a module name unique to the file: its path relative to
 // the scan root, extension stripped, slash-normalized (e.g. "ssrf/app"). When
 // root is the file's own directory (single-file scans) this is just the bare
@@ -189,6 +187,8 @@ func moduleNameFor(root, file string) string {
 	return filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
 }
 
+// convertPythonFile runs the embedded pyast.py helper against file and lowers
+// the resulting JSON AST into one gIR Module.
 func (c *Converter) convertPythonFile(pythonExe, scriptPath, file, moduleName string) (*ir.Module, error) {
 	cmd := exec.Command(pythonExe, scriptPath, file)
 	var stdout, stderr bytes.Buffer

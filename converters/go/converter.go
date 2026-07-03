@@ -219,11 +219,11 @@ func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
 	case *ssa.If:
 		irInst.Op = ir.OpCode_OP_CODE_IF
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.Cond))
-		irInst.TrueBlock = fmt.Sprintf("b%d", i.Block().Succs[0].Index)
-		irInst.FalseBlock = fmt.Sprintf("b%d", i.Block().Succs[1].Index)
+		irInst.TrueBlock = blockName(i.Block().Succs[0])
+		irInst.FalseBlock = blockName(i.Block().Succs[1])
 	case *ssa.Jump:
 		irInst.Op = ir.OpCode_OP_CODE_JUMP
-		irInst.JumpBlock = fmt.Sprintf("b%d", i.Block().Succs[0].Index)
+		irInst.JumpBlock = blockName(i.Block().Succs[0])
 	case *ssa.Store:
 		irInst.Op = ir.OpCode_OP_CODE_STORE
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.Addr), c.convertValue(i.Val))
@@ -231,7 +231,7 @@ func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
 		irInst.Op = ir.OpCode_OP_CODE_PHI
 		for idx, edge := range i.Edges {
 			irInst.Operands = append(irInst.Operands, c.convertValue(edge))
-			irInst.Blocks = append(irInst.Blocks, fmt.Sprintf("b%d", i.Block().Preds[idx].Index))
+			irInst.Blocks = append(irInst.Blocks, blockName(i.Block().Preds[idx]))
 		}
 	case *ssa.Index:
 		irInst.Op = ir.OpCode_OP_CODE_INDEX
@@ -346,6 +346,13 @@ func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
 	return irInst
 }
 
+// blockName is the gIR label for an SSA basic block ("b<index>"); the
+// control-flow instructions (IF/JUMP/PHI) use it to name their target and
+// predecessor blocks.
+func blockName(b *ssa.BasicBlock) string {
+	return fmt.Sprintf("b%d", b.Index)
+}
+
 func (c *Converter) convertValue(v ssa.Value) *ir.Value {
 	if v == nil {
 		return nil
@@ -372,7 +379,8 @@ func (c *Converter) convertConstant(con *ssa.Const) *ir.Constant {
 		res.IsNil = true
 		return res
 	}
-	// For simplicity, using String representation for now, but should handle correctly
+	// Model every constant by its string form: it feeds the secrets scanner and
+	// stays untainted (a compile-time constant is never attacker-controlled).
 	res.Value = &ir.Constant_StringVal{StringVal: con.Value.String()}
 	return res
 }

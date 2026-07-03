@@ -122,11 +122,11 @@ func parseHeader(h string) (name string, params []string) {
 		return normalizeName(strings.TrimSuffix(strings.TrimSpace(h), "{")), nil
 	}
 	name = normalizeName(h[:open])
-	close := matchParen(h, open)
-	if close < 0 {
+	closeIdx := matchParen(h, open)
+	if closeIdx < 0 {
 		return name, nil
 	}
-	for _, part := range splitTop(h[open+1:close], ',') {
+	for _, part := range splitTop(h[open+1:closeIdx], ',') {
 		if id, _, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
 			if id = strings.TrimSpace(id); localRe.MatchString(id) {
 				params = append(params, id)
@@ -410,8 +410,8 @@ func callShape(expr string) (callee, args string, ok bool) {
 	if open <= 0 {
 		return "", "", false
 	}
-	close := matchParen(expr, open)
-	if close < 0 {
+	closeIdx := matchParen(expr, open)
+	if closeIdx < 0 {
 		return "", "", false
 	}
 	callee = strings.TrimSpace(expr[:open])
@@ -422,7 +422,7 @@ func callShape(expr string) (callee, args string, ok bool) {
 		strings.HasPrefix(callee, "(") || localRe.MatchString(callee) {
 		return "", "", false
 	}
-	return callee, expr[open+1 : close], true
+	return callee, expr[open+1 : closeIdx], true
 }
 
 // placeOf strips a leading move/copy qualifier from an operand, yielding the

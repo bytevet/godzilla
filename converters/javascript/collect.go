@@ -157,13 +157,9 @@ func (c *collector) collectStmt(s ast.Statement, qualPrefix string) {
 		}
 		c.addFunctionLiteral(v.Function, name)
 	case *ast.VariableStatement:
-		for _, b := range v.List {
-			c.collectExpr(b.Initializer, qualPrefix, bindingName(b.Target))
-		}
+		c.collectBindings(v.List, qualPrefix)
 	case *ast.LexicalDeclaration:
-		for _, b := range v.List {
-			c.collectExpr(b.Initializer, qualPrefix, bindingName(b.Target))
-		}
+		c.collectBindings(v.List, qualPrefix)
 	case *ast.ExpressionStatement:
 		c.collectExpr(v.Expression, qualPrefix, "")
 	case *ast.ReturnStatement:
@@ -219,6 +215,15 @@ func (c *collector) collectStmt(s ast.Statement, qualPrefix string) {
 	}
 }
 
+// collectBindings walks the initializers of a `var`/`let`/`const` declaration
+// list, preferring each binding's target name for an anonymous function
+// assigned to it (e.g. `const f = function(){}` names the literal "f").
+func (c *collector) collectBindings(list []*ast.Binding, qualPrefix string) {
+	for _, b := range list {
+		c.collectExpr(b.Initializer, qualPrefix, bindingName(b.Target))
+	}
+}
+
 // stmtList normalizes a statement that may or may not be a BlockStatement
 // (e.g. an `if` consequent, a `for` body) into a flat statement list.
 func stmtList(s ast.Statement) []ast.Statement {
@@ -263,15 +268,9 @@ func (c *collector) collectExpr(e ast.Expression, qualPrefix, preferredName stri
 		}
 		c.addArrow(v, name)
 	case *ast.CallExpression:
-		c.collectExpr(v.Callee, qualPrefix, "")
-		for _, a := range v.ArgumentList {
-			c.collectExpr(a, qualPrefix, "")
-		}
+		c.collectCall(v.Callee, v.ArgumentList, qualPrefix)
 	case *ast.NewExpression:
-		c.collectExpr(v.Callee, qualPrefix, "")
-		for _, a := range v.ArgumentList {
-			c.collectExpr(a, qualPrefix, "")
-		}
+		c.collectCall(v.Callee, v.ArgumentList, qualPrefix)
 	case *ast.AssignExpression:
 		c.collectExpr(v.Left, qualPrefix, "")
 		c.collectExpr(v.Right, qualPrefix, assignTargetName(v.Left))
@@ -313,6 +312,16 @@ func (c *collector) collectExpr(e ast.Expression, qualPrefix, preferredName stri
 		c.collectExpr(v.Argument, qualPrefix, "")
 	default:
 		// Identifier, literals, ThisExpression, etc: no children to walk.
+	}
+}
+
+// collectCall walks a call/new expression's callee and argument list for
+// nested function literals (shared by the CallExpression and NewExpression
+// cases, which are structurally identical here).
+func (c *collector) collectCall(callee ast.Expression, args []ast.Expression, qualPrefix string) {
+	c.collectExpr(callee, qualPrefix, "")
+	for _, a := range args {
+		c.collectExpr(a, qualPrefix, "")
 	}
 }
 
