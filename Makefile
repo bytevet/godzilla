@@ -34,6 +34,12 @@ build-llvm:
 	$(LLVM_ENV) go build $(LLVM_TAGS) ./...
 test-llvm:
 	$(LLVM_ENV) go test $(LLVM_TAGS) ./...
+# build-llvm compiles every package under the tag (a full compile check); vet
+# runs over everything. The `llvm` tag only affects the C/C++ frontend, though —
+# Go/Python/JS/Java/Rust are tag-agnostic and covered by the default `test`
+# target — so gate only the C/C++ corpus here. This keeps the cgo job from
+# needing the Java/Rust toolchains (a bare `go test ./...` would run the Java
+# samples against whatever old JDK is on PATH and fail).
 gate-llvm: build-llvm
 	$(LLVM_ENV) go vet $(LLVM_TAGS) ./...
-	$(LLVM_ENV) go test $(LLVM_TAGS) ./...
+	$(LLVM_ENV) go test $(LLVM_TAGS) ./test/corpus/ -run 'TestCorpus/(c|cpp)/'
