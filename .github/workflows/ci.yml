@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Only the latest run per ref needs to finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast static checks, all blocking. golangci-lint's default set (govet,
+  # errcheck, ineffassign, staticcheck, unused) is a strict superset of `go vet`,
+  # so there is no separate vet step — the config lives in .golangci.yml.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd converters internal rulepacks test/corpus)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+
+  # ---------------------------------------------------------------------------
+  # The core gate: default pure-Go build + the full sample corpus. The corpus
+  # SKIPS a language when its toolchain is absent, so install python3 (preinstalled),
+  # a JDK 24+ (Java frontend: java.lang.classfile), and Rust (rustc/cargo) — without
+  # them the Java/Rust samples would silently skip and never actually run.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Build & test (Go · Python · JS · Java · Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+  # ---------------------------------------------------------------------------
+  # C/C++ frontend: the opt-in cgo backend that binds libLLVM (tinygo.org/x/go-llvm).
+  # libLLVM must match the major the binding targets (22); install it from
+  # apt.llvm.org and drive the Makefile's *-llvm targets (they derive the CGO flags
+  # from llvm-config). Isolated so a libLLVM hiccup doesn't red the pure-Go gate.
+  # ---------------------------------------------------------------------------
+  test-llvm:
+    name: Build & test (C/C++ · libLLVM cgo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install LLVM 22 + clang
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22 all
+          echo "LLVM_CONFIG=llvm-config-22" >> "$GITHUB_ENV"
+
+      - name: gate (build + vet + test, -tags llvm)
+        run: make gate-llvm
+
+  # ---------------------------------------------------------------------------
+  # End-to-end: the "real framework" samples that fetch third-party crates/jars
+  # over the network (gated off by default to keep the suite hermetic). CI has
+  # network, so run them here to verify detection against a real Spring app and a
+  # real Rust web framework (rouille), not just the hermetic stubs.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (real Spring / Cargo builds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: real-framework corpus samples
+        env:
+          GODZILLA_SPRING_E2E: '1'
+          GODZILLA_RUST_E2E: '1'
+        run: go test ./test/corpus/ -run 'TestCorpus/(java/spring_boot|rust/web_rouille)' -v
