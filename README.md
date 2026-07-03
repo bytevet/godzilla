@@ -246,13 +246,14 @@ Godzilla is functional and covered by tests, but deliberately scoped:
   resolved to more implementations than are reachable at runtime.
 - **SSRF (CWE-918) is host-aware.** An SSRF finding is suppressed when the
   untrusted value only reaches the **path or query of a fixed host** —
-  `http.Get("https://api.example.com/" + userPath)` or the `fmt.Sprintf`
-  equivalent — because the request cannot be redirected to an attacker host.
-  The check reconstructs the URL from concatenation and format strings and is
-  conservative: it drops a finding only when a constant `scheme://host/…` prefix
-  is *proven* to precede the taint. Constructions whose literal template is not
-  present in gIR — **Rust `format!`** and **Java string `+`**
-  (`makeConcatWithConstants`) — can't be introspected, so those keep firing
+  `http.Get("https://api.example.com/" + userPath)`, the `fmt.Sprintf`
+  equivalent, or Rust `format!("https://api.example.com/{}", p)` — because the
+  request cannot be redirected to an attacker host. The check reconstructs the
+  URL from concatenation and format strings (including Rust's packed
+  `fmt::Arguments` template) and is conservative: it drops a finding only when a
+  constant `scheme://host/…` prefix is *proven* to precede the taint. The one
+  construction whose literal template is not present in gIR — **Java string `+`**
+  (`makeConcatWithConstants`) — can't be introspected, so it keeps firing
   (potential false positive over a fixed host, never a false negative).
 - Pointer analysis is approximated (value-flow + CHA), not a full demand-driven
   points-to.

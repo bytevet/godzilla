@@ -29,12 +29,16 @@ var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\
 
 // formatCallees identifies printf-style format functions whose first argument is
 // the literal template (the interpolated values follow, packed into a slice/array).
+// Rust `format!` lowers to `fmt::Arguments::new(<template>, args)`, and the Rust
+// frontend decodes the packed template into a `{}`-placeholder string in that
+// same argument-0 slot, so it fits the same shape.
 func isFormatCallee(callee string) bool {
 	return strings.Contains(callee, "Sprintf") ||
 		strings.Contains(callee, "Sprintln") ||
 		strings.HasSuffix(callee, "Sprint") ||
 		strings.Contains(callee, "String.format") ||
-		strings.Contains(callee, "String.valueOf")
+		strings.Contains(callee, "String.valueOf") ||
+		strings.Contains(callee, "Arguments::new")
 }
 
 // isConcatAddCallee identifies an operator-overload string concatenation lowered
@@ -50,6 +54,10 @@ func isPassthroughCallee(callee string) bool {
 	for _, suffix := range []string{
 		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
 		"String.toString", "String::from", "borrow",
+		// Rust `format!` result chain: format(Arguments) -> String, wrapped in
+		// must_use; each forwards its argument-0 so the URL construction is found
+		// at the underlying fmt::Arguments::new.
+		"must_use", "format",
 	} {
 		if strings.HasSuffix(callee, suffix) {
 			return true

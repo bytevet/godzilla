@@ -171,6 +171,28 @@ func TestURLHostControllable(t *testing.T) {
 			want:    true,
 		},
 		{
+			name: "Rust format! path-confined (deref->must_use->format->Arguments::new)",
+			defs: defsOf(
+				callInst("t", "rust:Arguments::new", cstV("https://api.example.com/v1/{}"), regV("args")),
+				callInst("f", "rust:format", regV("t")),
+				callInst("m", "rust:must_use", regV("f")),
+				callInst("u", "rust:deref", regV("m")),
+			),
+			tainted: taintedSet("u", "m", "f", "t"),
+			want:    false,
+		},
+		{
+			name: "Rust format! host-controlled",
+			defs: defsOf(
+				callInst("t", "rust:Arguments::new", cstV("https://{}.example.com/v1/"), regV("args")),
+				callInst("f", "rust:format", regV("t")),
+				callInst("m", "rust:must_use", regV("f")),
+				callInst("u", "rust:deref", regV("m")),
+			),
+			tainted: taintedSet("u", "m", "f", "t"),
+			want:    true,
+		},
+		{
 			name: "passthrough (deref) over a path-confined concat",
 			defs: defsOf(
 				binOp("a", ir.BinOpKind_BIN_OP_ADD, cstV("https://h/v1/"), regV("t")),
