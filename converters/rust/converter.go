@@ -99,8 +99,8 @@ func emitMIR(src string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	cmd := exec.Command(rustc,
 		"--emit=mir", "-Zmir-include-spans=on",
@@ -140,8 +140,8 @@ func convertCargo(dir string) (*ir.Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	cmd := exec.Command(cargo, "rustc", "--lib", "--",
 		"--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
