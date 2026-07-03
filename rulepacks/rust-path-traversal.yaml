@@ -10,11 +10,21 @@ rules:
     severity: high
     cwe: CWE-22
     message: >-
-      Untrusted input (environment, args) flows into a filesystem path without
-      validation, which may allow path traversal (reading or writing files
-      outside the intended directory). Canonicalize the path and confirm it
-      stays within an allowed base directory.
+      Untrusted input (an HTTP request parameter, header, or body) flows into a
+      filesystem path without validation, which may allow path traversal
+      (reading or writing files outside the intended directory). Canonicalize the
+      path and confirm it stays within an allowed base directory.
     sources:
+      # HTTP request accessors — the real attack surface.
+      - "rust:*Request::query"
+      - "rust:*Request::header"
+      - "rust:*Request::body"
+      - "rust:*Request::get_param"
+      - "rust:*Request::param"
+      - "rust:*HttpRequest::query_string"
+      - "rust:*HttpRequest::headers"
+      - "rust:*HttpRequest::match_info"
+      # Environment / CLI args — a real but secondary source (CLI tools, CGI).
       - "rust:var"
       - "rust:var_os"
       - "rust:*env::var"

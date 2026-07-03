@@ -1,11 +1,20 @@
-// Vulnerable sample: OS command injection via a command-line argument (CWE-78).
+// Vulnerable sample: OS command injection via a split HTTP parameter (CWE-78).
 //
-// Exercises the env::args() source flowing through Vec collect + indexing into a
-// std::process::Command argument.
-use std::env;
+// Exercises taint flow through str::split + Vec collect + indexing: an untrusted
+// HTTP query parameter is split into an argv and an element reaches the command.
+mod http {
+    pub struct Request;
+    impl Request {
+        pub fn header(&self, _n: &str) -> String { String::new() }
+        pub fn query(&self, _n: &str) -> String { String::new() }
+        pub fn body(&self) -> String { String::new() }
+    }
+}
+
 use std::process::Command;
 
-fn main() {
-    let a: Vec<String> = env::args().collect();
-    Command::new("sh").arg("-c").arg(&a[1]).output().unwrap();
+pub fn handle(req: &http::Request) {
+    let raw = req.query("cmd"); // untrusted HTTP query parameter
+    let parts: Vec<&str> = raw.split(' ').collect();
+    Command::new("sh").arg("-c").arg(parts[0]).output().unwrap();
 }
