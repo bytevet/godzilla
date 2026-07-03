@@ -42,8 +42,8 @@ for a concise map of the codebase. In short:
 
 ## Common contributions
 
-**Add or improve a detection rule.** Usually just YAML under
-`internal/rules/loader/builtin/`. Sources/sinks/sanitizers/propagators are
+**Add or improve a detection rule.** Usually just YAML in the top-level
+`rulepacks/` directory. Sources/sinks/sanitizers/propagators are
 canonical-name globs; a sink may pin its injection-point argument with `#<index>`
 (e.g. `"go:*database/sql*.Query#0"`). Add a vulnerable sample under `test/<lang>/`
 with an `expected.yaml` — the corpus test then asserts it (see

@@ -169,8 +169,8 @@ rules:
       - "go:strings.Join"
 ```
 
-Pass a file with `--rules`; it is merged with the built-in packs (see
-`internal/rules/loader/builtin/`).
+Pass a file with `--rules`; it is merged with the built-in packs (see the
+top-level `rulepacks/` directory).
 
 ## How it works
 

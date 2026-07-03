@@ -118,8 +118,9 @@ canonical-FQN globs, `*` matches across `/` and `.`) + `AppliesTo`/glob matcher.
 its injection point with a `#<idx>` suffix (`"go:*database/sql*.Query#0"`): only taint reaching that
 LOGICAL (receiver-excluded) argument fires — this is what prevents parameterized-query false positives
 (`db.Query("... = ?", taintedParam)` binds a safe placeholder). A bare pattern means all args.
-`loader/` — YAML loader (`LoadFile`/`LoadDir`/`Builtin`/`LoadDefault`) with built-in rules embedded via
-`//go:embed builtin/*.yaml`:
+`loader/` — YAML loader (`LoadFile`/`LoadDir`/`Builtin`/`LoadDefault`). The built-in rule packs live in
+the **top-level `rulepacks/`** directory and are embedded into the binary by `rulepacks/embed.go`
+(`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and JS code injection (CWE-95).
 - **Java** — SQLi, command injection.
