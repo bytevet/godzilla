@@ -1,0 +1,2 @@
+# No findings: untrusted input is only logged; the request URL is a constant.
+findings: []

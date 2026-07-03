@@ -1,0 +1,93 @@
+# Server-Side Request Forgery (Rust): untrusted input flowing into the URL of an
+# outbound HTTP request (reqwest, ureq), letting an attacker make the server
+# request arbitrary internal/external hosts.
+#
+# Sinks pin the URL argument: a client METHOD carries the receiver at operand 0,
+# so the URL is #1 (Client::request(method, url) puts the URL at #2); a free
+# function (reqwest::get, ureq::get) takes the URL at #0.
+rules:
+  - id: rust-ssrf
+    languages: [rust]
+    severity: high
+    cwe: CWE-918
+    message: >-
+      Untrusted input (an HTTP request parameter, header, or body) flows into the
+      URL of an outbound HTTP request, which may allow server-side request
+      forgery (SSRF). Validate the URL against an allow-list of permitted hosts
+      before requesting it.
+    sources:
+      # HTTP request accessors — the real attack surface.
+      - "rust:*Request::query"
+      - "rust:*Request::header"
+      - "rust:*Request::body"
+      - "rust:*Request::get_param"
+      - "rust:*Request::param"
+      - "rust:*HttpRequest::query_string"
+      - "rust:*HttpRequest::headers"
+      - "rust:*HttpRequest::match_info"
+      # Environment / CLI args — a real but secondary source (CLI tools, CGI).
+      - "rust:var"
+      - "rust:var_os"
+      - "rust:*env::var"
+      - "rust:*env::var_os"
+      - "rust:args"
+      - "rust:args_os"
+      - "rust:*env::args"
+      - "rust:*env::args_os"
+    sinks:
+      # reqwest / ureq free functions: get(url) / post(url) — URL at operand 0.
+      - "rust:*reqwest::get#0"
+      - "rust:*reqwest::blocking::get#0"
+      - "rust:*ureq::get#0"
+      - "rust:*ureq::post#0"
+      # Client methods: client.get(url) etc. — URL at operand 1 (receiver at 0);
+      # client.request(method, url) — URL at operand 2.
+      - "rust:*Client::get#1"
+      - "rust:*Client::post#1"
+      - "rust:*Client::head#1"
+      - "rust:*Client::put#1"
+      - "rust:*Client::patch#1"
+      - "rust:*Client::delete#1"
+      - "rust:*Client::request#2"
+    sanitizers: []
+    propagators:
+      - "rust:*unwrap"
+      - "rust:*unwrap_or"
+      - "rust:*unwrap_or_default"
+      - "rust:*expect"
+      - "rust:*to_string"
+      - "rust:*to_owned"
+      - "rust:*as_str"
+      - "rust:*as_ref"
+      - "rust:*as_bytes"
+      - "rust:*clone"
+      - "rust:*deref"
+      - "rust:*into"
+      - "rust:*trim"
+      - "rust:*collect"
+      - "rust:*join"
+      - "rust:*concat"
+      - "rust:*push_str"
+      - "rust:*index"
+      - "rust:*get"
+      - "rust:*nth"
+      - "rust:*first"
+      - "rust:*last"
+      - "rust:*iter"
+      - "rust:*into_iter"
+      - "rust:*next"
+      - "rust:*map"
+      - "rust:*chars"
+      - "rust:*split"
+      - "rust:*splitn"
+      - "rust:*lines"
+      - "rust:*bytes"
+      - "rust:*to_vec"
+      - "rust:*from_utf8"
+      - "rust:*from_utf8_lossy"
+      - "rust:*String::from"
+      - "rust:format"
+      - "rust:*must_use"
+      - "rust:*new_display"
+      - "rust:*new_debug"
+      - "rust:*Arguments::new"

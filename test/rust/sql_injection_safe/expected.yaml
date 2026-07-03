@@ -1,0 +1,2 @@
+# No findings: the untrusted value is a bound parameter, not part of the SQL text.
+findings: []

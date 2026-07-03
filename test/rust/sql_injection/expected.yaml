@@ -1,0 +1,3 @@
+findings:
+  - rule: rust-sql-injection
+    min: 1

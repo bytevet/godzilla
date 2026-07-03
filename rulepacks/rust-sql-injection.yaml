@@ -1,0 +1,93 @@
+# SQL injection (Rust): untrusted input concatenated/formatted into a query string
+# instead of a bound parameter, then executed by a DB driver (rusqlite, sqlx,
+# diesel).
+#
+# Sinks pin the QUERY-STRING argument with `#idx` (receiver at operand 0, so a
+# method's SQL arg is #1; a free function's is #0). A parameterized call binds
+# user data at a LATER argument, so the taint never reaches the pinned SQL index
+# and is not flagged — the same false-positive guard as go-/java-sql-injection.
+rules:
+  - id: rust-sql-injection
+    languages: [rust]
+    severity: high
+    cwe: CWE-89
+    message: >-
+      Untrusted input (an HTTP request parameter, header, or body) is built into
+      a SQL query string instead of a bound parameter, which may allow SQL
+      injection. Use parameterized queries (bind values with `?`/`$1`) rather
+      than formatting user input into the query text.
+    sources:
+      # HTTP request accessors — the real attack surface.
+      - "rust:*Request::query"
+      - "rust:*Request::header"
+      - "rust:*Request::body"
+      - "rust:*Request::get_param"
+      - "rust:*Request::param"
+      - "rust:*HttpRequest::query_string"
+      - "rust:*HttpRequest::headers"
+      - "rust:*HttpRequest::match_info"
+      # Environment / CLI args — a real but secondary source (CLI tools, CGI).
+      - "rust:var"
+      - "rust:var_os"
+      - "rust:*env::var"
+      - "rust:*env::var_os"
+      - "rust:args"
+      - "rust:args_os"
+      - "rust:*env::args"
+      - "rust:*env::args_os"
+    sinks:
+      # rusqlite: conn.execute(sql, params) / query_row(sql, params, f) /
+      # prepare(sql) — the SQL string is operand 1 (receiver at 0).
+      - "rust:*Connection::execute#1"
+      - "rust:*Connection::query_row#1"
+      - "rust:*Connection::query#1"
+      - "rust:*Connection::prepare#1"
+      # sqlx free functions take the SQL at operand 0 (anchored to sqlx:: so they
+      # don't collide with a request object's `query` accessor).
+      - "rust:*sqlx::query#0"
+      - "rust:*sqlx::query_as#0"
+      - "rust:*sqlx::query_scalar#0"
+      # diesel raw SQL.
+      - "rust:*sql_query#0"
+    sanitizers: []
+    propagators:
+      - "rust:*unwrap"
+      - "rust:*unwrap_or"
+      - "rust:*unwrap_or_default"
+      - "rust:*expect"
+      - "rust:*to_string"
+      - "rust:*to_owned"
+      - "rust:*as_str"
+      - "rust:*as_ref"
+      - "rust:*as_bytes"
+      - "rust:*clone"
+      - "rust:*deref"
+      - "rust:*into"
+      - "rust:*trim"
+      - "rust:*collect"
+      - "rust:*join"
+      - "rust:*concat"
+      - "rust:*push_str"
+      - "rust:*index"
+      - "rust:*get"
+      - "rust:*nth"
+      - "rust:*first"
+      - "rust:*last"
+      - "rust:*iter"
+      - "rust:*into_iter"
+      - "rust:*next"
+      - "rust:*map"
+      - "rust:*chars"
+      - "rust:*split"
+      - "rust:*splitn"
+      - "rust:*lines"
+      - "rust:*bytes"
+      - "rust:*to_vec"
+      - "rust:*from_utf8"
+      - "rust:*from_utf8_lossy"
+      - "rust:*String::from"
+      - "rust:format"
+      - "rust:*must_use"
+      - "rust:*new_display"
+      - "rust:*new_debug"
+      - "rust:*Arguments::new"

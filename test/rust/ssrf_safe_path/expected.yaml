@@ -1,0 +1,2 @@
+# No findings: taint reaches only the path of a fixed host.
+findings: []

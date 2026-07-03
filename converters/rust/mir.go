@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	ir "godzilla/pkg/ir/v1"
 )
@@ -583,5 +584,108 @@ func constFromLiteral(lit string) *ir.Value {
 			return constString(lit[1:end])
 		}
 	}
+	// A byte-string literal `b"..."` is how MIR renders the packed template that
+	// `format!` hands to fmt::Arguments::new (assigned to a temp, then passed in).
+	// Decode a well-formed template into a readable `{}`-placeholder string so the
+	// SSRF URL-host reconstruction can see its constant pieces; anything that is
+	// not a clean template stays an empty constant (unchanged behavior).
+	if strings.HasPrefix(lit, `b"`) {
+		if tmpl, ok := decodeFmtTemplate(lit); ok {
+			return constString(tmpl)
+		}
+	}
 	return constString("")
+}
+
+// decodeFmtTemplate decodes the packed byte-string template that `format!` passes
+// to `fmt::Arguments::new` into a readable format string with `{}` at each
+// argument position. The template (rustc's `fmt::rt` encoding) is a sequence of
+// tokens: the byte 0xC0 marks an argument insertion, and a byte < 0x80 is the
+// length of a literal run that immediately follows. tok is the raw MIR operand,
+// e.g. `const b"\x14https://h/v1/\xc0\x00"`. Returns ok=false for anything that
+// is not a well-formed, UTF-8-clean byte-string template (the caller then leaves
+// the original empty constant, so a decode miss can never invent a fixed host).
+func decodeFmtTemplate(tok string) (string, bool) {
+	tok = strings.TrimSpace(tok)
+	tok = strings.TrimSpace(strings.TrimPrefix(tok, "const "))
+	if !strings.HasPrefix(tok, `b"`) {
+		return "", false
+	}
+	end := strings.LastIndexByte(tok, '"')
+	if end <= 1 {
+		return "", false
+	}
+	raw, ok := decodeByteString(tok[2:end])
+	if !ok {
+		return "", false
+	}
+	var sb strings.Builder
+	for i := 0; i < len(raw); {
+		b := raw[i]
+		i++
+		switch {
+		case b == 0xC0: // argument insertion
+			sb.WriteString("{}")
+		case int(b) < 0x80: // literal run of length b
+			if i+int(b) > len(raw) {
+				return "", false
+			}
+			sb.Write(raw[i : i+int(b)])
+			i += int(b)
+		default: // unrecognized control byte (e.g. an explicit-index/spec arg)
+			return "", false
+		}
+	}
+	if !utf8.ValidString(sb.String()) {
+		return "", false
+	}
+	return sb.String(), true
+}
+
+// decodeByteString decodes the escapes rustc uses when printing a byte-string
+// literal's contents (the bytes between `b"` and the closing quote): `\xHH` for
+// arbitrary bytes plus the usual `\n`/`\t`/`\r`/`\0`/`\\`/`\"`/`\'`.
+func decodeByteString(s string) ([]byte, bool) {
+	var out []byte
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c != '\\' {
+			out = append(out, c)
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return nil, false
+		}
+		switch s[i+1] {
+		case 'x':
+			if i+3 >= len(s) {
+				return nil, false
+			}
+			v, err := strconv.ParseUint(s[i+2:i+4], 16, 8)
+			if err != nil {
+				return nil, false
+			}
+			out = append(out, byte(v))
+			i += 4
+		case 'n':
+			out = append(out, '\n')
+			i += 2
+		case 't':
+			out = append(out, '\t')
+			i += 2
+		case 'r':
+			out = append(out, '\r')
+			i += 2
+		case '0':
+			out = append(out, 0)
+			i += 2
+		case '\\', '"', '\'':
+			out = append(out, s[i+1])
+			i += 2
+		default:
+			return nil, false
+		}
+	}
+	return out, true
 }

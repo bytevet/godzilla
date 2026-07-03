@@ -92,7 +92,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   assigns call results directly to locals (no `sret` out-pointer indirection), so no cgo/libLLVM and
   no memory modeling are needed. Method calls → `OP_CODE_CALL` with the receiver as operand 0 (rules
   pin the tainted arg with `#1`); tuple/array/struct construction → `builtin.aggregate` intrinsic and
-  field reads fold to the stored element, so taint flows through `format!`. Canonical names
+  field reads fold to the stored element, so taint flows through `format!`. A `format!` call lowers to
+  `fmt::Arguments::new(<packed byte-template>, args)`; `decodeFmtTemplate` turns that `const b"..."`
+  template into a readable `{}`-placeholder string so the SSRF host check can read its constant pieces
+  (rustc's `fmt::rt` encoding: `0xC0` = an argument, a byte `< 0x80` = the length of a literal run).
+  Canonical names
   `rust:<normalized-path>` (generics stripped). Pure Go, in the default binary; only `rustc` is needed
   at scan time. A scan target with a **`Cargo.toml`** is built with `cargo rustc -- --emit=mir`
   (`convertCargo`) so its dependency crates — a web framework, etc. — resolve and the project's calls
@@ -109,10 +113,21 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 
 **Analysis (`internal/analysis/`).**
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
-  aliasing, intrinsic + opcode propagators).
+  aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
+  taint for Go/JS/Python; Rust models `+` as an `Add::add` **call**, so `interproc.go` treats a concat-add
+  call (`isConcatAddCallee`) as a built-in propagator too — otherwise taint would drop at every Rust concat.
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
+- `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
+  sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
+  `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed
+  `fmt::Arguments` byte-template the Rust frontend decodes into a `{}`-placeholder string, see `mir.go`
+  `decodeFmtTemplate`) and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`)
+  precedes the first tainted segment** — i.e. the taint is confined to the path/query of a fixed host and
+  cannot redirect the request. Deliberately conservative: it suppresses only when the fixed host is *proven*;
+  an opaque or unrecoverable construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is
+  dropped from gIR) keeps firing, so no real SSRF is lost.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch) + `Reachable`/`Roots` (tree-shaking primitive).
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
   (CWE-798).
@@ -129,7 +144,8 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and JS code injection (CWE-95).
 - **Java** — SQLi, command injection.
-- **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`).
+- **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
+  (rusqlite/sqlx/diesel), SSRF (reqwest/ureq).
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
   (CWE-134).
 
