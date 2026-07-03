@@ -33,8 +33,17 @@ type Converter struct{}
 
 func NewConverter() *Converter { return &Converter{} }
 
-// ConvertFile lowers a single .rs file or every .rs file under a directory.
+// ConvertFile lowers a single .rs file, a directory of standalone .rs files, or
+// a Cargo project. A directory with a Cargo.toml at its root is built with cargo
+// (so its dependency crates — a web framework, etc. — resolve); otherwise each
+// .rs file is compiled standalone with rustc.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		if fileExists(filepath.Join(path, "Cargo.toml")) {
+			return convertCargo(path)
+		}
+	}
+
 	files, err := collect(path)
 	if err != nil {
 		return nil, err
@@ -90,8 +99,8 @@ func emitMIR(src string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	cmd := exec.Command(rustc,
 		"--emit=mir", "-Zmir-include-spans=on",
@@ -106,4 +115,45 @@ func emitMIR(src string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// convertCargo builds a Cargo project with `cargo rustc -- --emit=mir` so its
+// dependency crates (a web framework, etc.) are resolved and on the path, then
+// lowers the top-level crate's MIR. cargo passes the trailing args to ONLY the
+// final crate's rustc invocation, so dependency MIR is not emitted — the analyzed
+// module is exactly the project's own code, with framework calls named by their
+// real crate paths. A build failure (e.g. a dependency that can't be fetched
+// offline) is surfaced as an error, which the directory merge / CLI treats as a
+// skipped frontend. --emit=mir=<path> pins the output; RUSTC_BOOTSTRAP=1 unlocks
+// the span flag on stable (the MIR text format is already unstable).
+func convertCargo(dir string) (*ir.Program, error) {
+	cargo := "cargo"
+	if v := os.Getenv("GODZILLA_CARGO"); v != "" {
+		cargo = v
+	}
+	tmp, err := os.CreateTemp("", "godzilla-cargo-*.mir")
+	if err != nil {
+		return nil, err
+	}
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	cmd := exec.Command(cargo, "rustc", "--lib", "--",
+		"--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "RUSTC_BOOTSTRAP=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("cargo rustc in %s: %v: %s", dir, err, strings.TrimSpace(string(out)))
+	}
+	data, err := os.ReadFile(tmp.Name())
+	if err != nil {
+		return nil, err
+	}
+	mod := lowerMIR(string(data), filepath.Join(dir, "src", "lib.rs"))
+	return &ir.Program{Mode: "mir", Modules: []*ir.Module{mod}}, nil
 }

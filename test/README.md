@@ -47,6 +47,23 @@ exercises that mechanism deterministically with the JDK alone (it stubs the
 annotations), so it runs by default; `spring_boot` validates the real Gradle build
 against actual Spring jars.
 
+**Rust Cargo samples.** A Rust sample may be a `Cargo.toml` project rather than a
+loose `.rs` file: the Rust frontend builds it with `cargo rustc -- --emit=mir` so a
+dependency crate (a web framework) resolves. A project with **no external deps**
+(e.g. `web_command_injection`, which uses a local request stub) runs by default when
+`cargo` is present; a project with an **external dependency** (e.g. `web_rouille`,
+using the real `rouille` framework) fetches crates over the network and is therefore
+**opt-in**, skipped unless `GODZILLA_RUST_E2E=1`:
+
+```bash
+GODZILLA_RUST_E2E=1 go test ./test/corpus/ -run TestCorpus/rust/web_rouille -v
+```
+
+Taint sources across the samples model the real attack surface — an untrusted HTTP
+request parameter / header / body — rather than environment variables (env/args
+remain a secondary CLI/CGI source; in C, CGI exposes HTTP data as `QUERY_STRING` /
+`HTTP_*` env vars and the body on stdin).
+
 ## Running
 
 Everything runs through the root module's test command:

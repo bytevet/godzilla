@@ -1,0 +1,4 @@
+# Real-crate (rouille) sample — opt-in, needs cargo + network (GODZILLA_RUST_E2E=1).
+findings:
+  - rule: rust-command-injection
+    min: 1

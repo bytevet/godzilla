@@ -142,30 +142,42 @@ func runScan(args []string) {
 	os.Exit(exitClean)
 }
 
-func writeHTMLReport(path string, findings []analysis.Finding) error {
+func writeHTMLReport(path string, findings []analysis.Finding) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr // a failed flush/close would otherwise silently truncate the report
+		}
+	}()
 	return report.WriteHTML(f, findings)
 }
 
-func writeJSONReport(path string, findings []analysis.Finding) error {
+func writeJSONReport(path string, findings []analysis.Finding) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	return report.WriteJSON(f, findings)
 }
 
-func writeSARIFReport(path string, findings []analysis.Finding) error {
+func writeSARIFReport(path string, findings []analysis.Finding) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	return report.WriteSARIF(f, findings)
 }
 

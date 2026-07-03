@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"godzilla/internal/analysis"
 
@@ -63,6 +64,34 @@ func buildToolAvailable(dir string) bool {
 	}
 	for _, tool := range []string{"mvn", "gradle"} {
 		if _, err := exec.LookPath(tool); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// isCargoProject reports whether dir is the root of a Cargo project (built with
+// cargo so its dependency crates resolve, rather than compiled per-.rs).
+func isCargoProject(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "Cargo.toml"))
+	return err == nil
+}
+
+// cargoHasDeps reports whether a Cargo project declares external dependencies (a
+// non-empty [dependencies] table). Such a sample fetches crates over the network,
+// so it is opt-in; a Cargo project with no external deps stays hermetic.
+func cargoHasDeps(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		return false
+	}
+	inDeps := false
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "["):
+			inDeps = t == "[dependencies]"
+		case inDeps && t != "" && !strings.HasPrefix(t, "#"):
 			return true
 		}
 	}

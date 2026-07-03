@@ -1,0 +1,18 @@
+# golangci-lint configuration. The CI `lint` job runs this as a required gate.
+# The default linter set (errcheck, govet, ineffassign, staticcheck, unused) is a
+# strict superset of `go vet`, so there is no separate vet step.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  settings:
+    errcheck:
+      # Writes to stdout/stderr are console output; a failed console write is not
+      # actionable, so their error return is intentionally not checked. (File and
+      # temp-file cleanup errors ARE handled explicitly in code.)
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln

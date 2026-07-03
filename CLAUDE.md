@@ -94,7 +94,12 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   pin the tainted arg with `#1`); tuple/array/struct construction → `builtin.aggregate` intrinsic and
   field reads fold to the stored element, so taint flows through `format!`. Canonical names
   `rust:<normalized-path>` (generics stripped). Pure Go, in the default binary; only `rustc` is needed
-  at scan time (std-only flows compile standalone; crate-based sources/sinks need the crate present).
+  at scan time. A scan target with a **`Cargo.toml`** is built with `cargo rustc -- --emit=mir`
+  (`convertCargo`) so its dependency crates — a web framework, etc. — resolve and the project's calls
+  are named by their real crate paths; cargo passes the trailing args to only the final crate's rustc,
+  so dependency MIR is not emitted. A build failure (e.g. an unfetchable dep offline) is a skipped
+  frontend. Sources model the real attack surface — HTTP request accessors (`*Request::query|header|
+  body`, actix `*HttpRequest::query_string|headers`) — with env/args as a secondary CLI/CGI source.
 - `converters/cpp/` + `converters/llvm/` — C/C++ via **LLVM IR** (clang `-O1 -g -emit-llvm`), lowered
   by the shared `converters/llvm` package. This is the opt-in **cgo** backend (`-tags "llvm byollvm"`
   + libLLVM), NOT in the default build; see the Makefile `*-llvm` targets. (Rust was formerly on this

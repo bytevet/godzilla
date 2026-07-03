@@ -163,16 +163,16 @@ func writeHelperScript() (string, func(), error) {
 		return "", nil, fmt.Errorf("py_converter: failed to create temp helper script: %w", err)
 	}
 	if _, err := tmp.Write(pyASTScript); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return "", nil, fmt.Errorf("py_converter: failed to write temp helper script: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return "", nil, fmt.Errorf("py_converter: failed to close temp helper script: %w", err)
 	}
 	path := tmp.Name()
-	return path, func() { os.Remove(path) }, nil
+	return path, func() { _ = os.Remove(path) }, nil
 }
 
 // convertPythonFile runs the embedded pyast.py helper against file and lowers

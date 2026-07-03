@@ -141,7 +141,7 @@ func TestSeverityOrdering(t *testing.T) {
 	if critIdx == -1 || highIdx == -1 || lowIdx == -1 {
 		t.Fatalf("expected all rule IDs present, got critIdx=%d highIdx=%d lowIdx=%d", critIdx, highIdx, lowIdx)
 	}
-	if !(critIdx < highIdx && highIdx < lowIdx) {
+	if critIdx >= highIdx || highIdx >= lowIdx {
 		t.Errorf("expected findings ordered critical < high < low in output, got positions %d, %d, %d", critIdx, highIdx, lowIdx)
 	}
 }

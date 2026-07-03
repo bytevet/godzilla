@@ -344,7 +344,13 @@ func (st *lowerState) span(comment string) *ir.Position {
 	if m == nil {
 		return nil
 	}
-	pos := &ir.Position{Filename: st.filename, Line: int32(atoi(m[2])), Column: int32(atoi(m[3]))}
+	// Prefer the file the MIR span names (correct per-instruction for a
+	// multi-file Cargo crate); fall back to the frontend's filename.
+	file := m[1]
+	if file == "" {
+		file = st.filename
+	}
+	pos := &ir.Position{Filename: file, Line: int32(atoi(m[2])), Column: int32(atoi(m[3]))}
 	if st.firstPos == nil {
 		st.firstPos = pos
 	}

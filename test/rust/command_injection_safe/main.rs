@@ -1,14 +1,22 @@
 // Safe sample / false-positive sentinel.
 //
-// Untrusted input IS read from the environment, but it only flows to stdout, not
+// Untrusted input IS read from an HTTP header, but it only flows to the log, not
 // into a command. The command that IS run uses fixed, constant arguments. The
 // scanner must report ZERO findings here.
-use std::env;
+mod http {
+    pub struct Request;
+    impl Request {
+        pub fn header(&self, _n: &str) -> String { String::new() }
+        pub fn query(&self, _n: &str) -> String { String::new() }
+        pub fn body(&self) -> String { String::new() }
+    }
+}
+
 use std::process::Command;
 
-fn main() {
-    let user = env::var("USER").unwrap(); // tainted...
-    println!("hello {}", user); // ...but only printed, never executed
+pub fn handle(req: &http::Request) {
+    let ua = req.header("User-Agent"); // tainted...
+    println!("request from {}", ua); // ...but only logged, never executed
 
     let output = Command::new("ls").arg("-la").arg("/tmp").output().unwrap();
     println!("{:?}", output.status);

@@ -12,10 +12,24 @@ rules:
     severity: critical
     cwe: CWE-78
     message: >-
-      Untrusted input (environment, args) flows into a std::process command,
-      which may allow OS command injection. Validate/allow-list the program and
-      arguments instead of passing user-controlled data to a shell.
+      Untrusted input (an HTTP request parameter, header, or body) flows into a
+      std::process command, which may allow OS command injection. Validate or
+      allow-list the program and arguments instead of passing user-controlled
+      data to a shell.
     sources:
+      # HTTP request accessors — the real attack surface (query/path params,
+      # headers, request body). Matches a request object's accessor methods
+      # across the common web frameworks plus a generic Request::{query,header,
+      # body,get_param,param} shape.
+      - "rust:*Request::query"
+      - "rust:*Request::header"
+      - "rust:*Request::body"
+      - "rust:*Request::get_param"
+      - "rust:*Request::param"
+      - "rust:*HttpRequest::query_string"
+      - "rust:*HttpRequest::headers"
+      - "rust:*HttpRequest::match_info"
+      # Environment / CLI args — a real but secondary source (CLI tools, CGI).
       - "rust:var"
       - "rust:var_os"
       - "rust:*env::var"
