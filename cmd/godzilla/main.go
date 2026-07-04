@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/llm"
@@ -43,6 +44,7 @@ flags:
   -json <file>      write a JSON report to <file>
   -sarif <file>     write a SARIF 2.1.0 report to <file>
   -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
+  -strict           fail (exit 1) if a detected language's frontend could not analyze its source
 
 exit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on
 `
@@ -76,6 +78,7 @@ func runScan(args []string) {
 	jsonPath := fs.String("json", "", "write a JSON report to this file")
 	sarifPath := fs.String("sarif", "", "write a SARIF 2.1.0 report to this file")
 	llmReview := fs.Bool("llm-review", false, "review lower-confidence findings with an LLM and drop false positives")
+	strict := fs.Bool("strict", false, "fail if a detected language could not be analyzed")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -101,6 +104,8 @@ func runScan(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
 	}
+
+	printCoverage(os.Stdout, res.Coverage)
 
 	if *showSummary {
 		printSummary(os.Stdout, summarize(res.Program))
@@ -145,10 +150,42 @@ func runScan(args []string) {
 		fmt.Fprintf(os.Stdout, "%s report written to %s\n", r.kind, r.path)
 	}
 
+	// A strict gate fails closed: if any detected language could not be analyzed,
+	// the scan is incomplete and a "clean" result cannot be trusted, so this
+	// outranks the findings-based exit code.
+	if *strict {
+		if failed := res.Failed(); len(failed) > 0 {
+			langs := make([]string, 0, len(failed))
+			for _, c := range failed {
+				langs = append(langs, c.Language)
+			}
+			fmt.Fprintf(os.Stderr, "error: -strict: %d language(s) failed to analyze: %s\n", len(failed), strings.Join(langs, ", "))
+			os.Exit(exitError)
+		}
+	}
+
 	if gated > 0 {
 		os.Exit(exitFindings)
 	}
 	os.Exit(exitClean)
+}
+
+// printCoverage prints a one-line per-language coverage summary so a degraded
+// scan (a frontend that failed to analyze detected source) is visible even when
+// the run is not strict. Nothing is printed when no languages were detected.
+func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
+	if len(coverage) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(coverage))
+	for _, c := range coverage {
+		status := "ok"
+		if !c.Converted {
+			status = "FAILED"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
+	}
+	fmt.Fprintf(w, "coverage: %s\n\n", strings.Join(parts, ", "))
 }
 
 // writeReport creates path, streams the report to it via write, and returns any
