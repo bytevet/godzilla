@@ -216,12 +216,16 @@ func analyzeFunc(
 
 	// Seed tainted parameters. A flow that enters through a parameter is
 	// inter-procedural, which lowers the confidence of any finding it feeds.
-	seededOrigins := map[*ir.Position]bool{}
+	// interprocOrigins records every source origin whose taint crossed a function
+	// boundary to reach this function — parameter seeds here, plus taint pulled
+	// back from a callee's return summary in handleCall. confidenceFor consults it
+	// so all cross-function findings are Medium (and thus seen by the LLM reviewer).
+	interprocOrigins := map[*ir.Position]bool{}
 	for idx, origin := range seeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
 				markTainted(tainted, reg, origin)
-				seededOrigins[origin] = true
+				interprocOrigins[origin] = true
 			}
 		}
 	}
@@ -239,7 +243,7 @@ func analyzeFunc(
 	}
 
 	confidenceFor := func(origin *ir.Position) Confidence {
-		if seededOrigins[origin] {
+		if interprocOrigins[origin] {
 			return ConfidenceMedium
 		}
 		return ConfidenceHigh
@@ -259,7 +263,12 @@ func analyzeFunc(
 
 		switch {
 		case rule.IsSanitizer(callee):
-			// Result stays clean.
+			// A sanitizer neutralizes taint: its result is clean. Critically, we
+			// must NOT fall through to the inter-procedural summary blocks below —
+			// when the sanitizer is a function lowered from the scanned repo
+			// (byKey[callee] != nil), that path would re-taint the sanitizer's
+			// result from its own return summary and defeat the sanitizer. Stop here.
+			return
 		case rule.IsSource(callee):
 			if inst.Name != "" {
 				markTainted(tainted, inst.Name, inst.Pos)
@@ -298,17 +307,40 @@ func analyzeFunc(
 			}
 		}
 
-		// Inter-procedural, direct/static call: if the callee is a function we
-		// lowered, pass tainted arguments into its parameters and pull back its
-		// return taint. (Args[0]==Params[0]==receiver for a static method call.)
+		// Inter-procedural, direct call: if the callee is a function we lowered,
+		// pass tainted arguments into its parameters and pull back its return taint.
 		if byKey[callee] != nil {
-			for j, a := range args {
-				if p, ok := isTainted(tainted, a); ok {
-					addEffect(callee, j, p)
+			if inst.Call.GetIsInvoke() {
+				// A concrete instance-method call (e.g. Java) whose method we
+				// lowered: the receiver lives in Call.Value and maps to param 0,
+				// and the real arguments EXCLUDE the receiver, so they map to the
+				// callee's params shifted by one. Mapping args[j]->param j here
+				// would seed the receiver slot and drop the last argument — an
+				// off-by-one that silently loses every cross-function instance
+				// flow. (Go interface INVOKEs name an abstract method absent from
+				// byKey, so they skip this and are handled by the CHA block below.)
+				if p, ok := isTainted(tainted, inst.Call.GetValue()); ok {
+					addEffect(callee, 0, p)
+				}
+				for j, a := range args {
+					if p, ok := isTainted(tainted, a); ok {
+						addEffect(callee, j+1, p)
+					}
+				}
+			} else {
+				// Static/free function or Go method call: args already align with
+				// params (Args[0]==Params[0]==receiver for a Go method).
+				for j, a := range args {
+					if p, ok := isTainted(tainted, a); ok {
+						addEffect(callee, j, p)
+					}
 				}
 			}
 			if ro := returnTaint[callee]; ro != nil && inst.Name != "" {
 				markTainted(tainted, inst.Name, ro)
+				// Taint entered via a callee's return summary: this is a
+				// cross-function flow, so any finding it feeds must be Medium.
+				interprocOrigins[ro] = true
 			}
 		}
 
@@ -329,6 +361,7 @@ func analyzeFunc(
 				}
 				if ro := returnTaint[impl]; ro != nil && inst.Name != "" {
 					markTainted(tainted, inst.Name, ro)
+					interprocOrigins[ro] = true // cross-function return -> Medium
 				}
 			}
 		}

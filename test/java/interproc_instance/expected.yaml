@@ -1,0 +1,6 @@
+# Untrusted input reaches Runtime.exec across an instance-method boundary. Only
+# fires when the interprocedural INVOKE arg->param mapping is receiver-aware
+# (ENG-5 regression guard).
+findings:
+    - rule: java-command-injection
+      min: 1

@@ -1,0 +1,7 @@
+# The built-in rules do not register Sanitize as a sanitizer, so they
+# conservatively flag the source -> Sanitize -> exec flow. A rule set that DOES
+# register go:*Sanitize as a sanitizer must suppress it — asserted in the unit
+# test internal/analysis/sanitizer_test.go (the ENG-1 regression guard).
+findings:
+    - rule: go-command-injection
+      min: 1
