@@ -59,7 +59,7 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > (`2326058`), TRUST-3 optional location oracle (`99abf24`), TRUST-5 precision/recall scorer
 > (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`),
 > ENG-9 guard/barrier sanitization (`8e33f7c`), ENG-2 flow-sensitivity + strong updates (`41ae16f`),
-> LLM-4 agentic tool-using reviewer (`<pending>`). Every High-severity engine/reviewer gap from the
+> LLM-4 agentic tool-using reviewer (`516c18f`). Every High-severity engine/reviewer gap from the
 > audit is now implemented and tested; the remaining backlog is the medium/low opportunistic set.
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
@@ -380,7 +380,7 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Impact:** Findings can be suppressed at the CI gate based on no code whatsoever — the worst possible failure mode for a tool whose pitch is trust. Java findings are especially at risk since positions come from bytecode line tables and the analyzed .class files may sit in a build output directory.
 - **Fix direction:** In Filter (or codeContextFor's caller), if the assembled context is empty, skip the review and keep the finding (treat 'no context' like a reviewer error — fail open). Additionally instruct the model in buildPrompt that absence of code context must yield true_positive, as defense in depth.
 
-### LLM-4 [HIGH] ✅ DONE (`<pending>`) Zero agency: one-shot prompt→verdict with no tool use, no ability to open files or trace the flow
+### LLM-4 [HIGH] ✅ DONE (`516c18f`) Zero agency: one-shot prompt→verdict with no tool use, no ability to open files or trace the flow
 
 - **Impact:** A human triager (and modern agentic reviewers) resolves an uncertain finding by reading more code: the caller of the tainted function, the sanitizer implementation, the route registration. This reviewer structurally cannot, so its accuracy is capped by whatever 14 lines codeContextFor guessed to include — a large gap versus the 'best-in-world reviewer' vision and versus what the Anthropic SDK already supports (tool use).
 - **Fix direction:** Give AnthropicReviewer a small agent loop with 2-3 read-only tools (`read_file_range`, `find_function_by_canonical_name` backed by the already-loaded gIR module, `grep`), bounded to N tool calls per finding. Keep the Reviewer interface but widen it to accept the *ir.Module (or a context provider callback) so the loop can resolve canonical names to positions. review.go stays dependency-free; the loop lives in anthropic.go.
