@@ -180,6 +180,76 @@ func TestAxumTaintFlow_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestLowerMIR_BranchMergeKeepsTaint is a hermetic guard (no rustc) for FE-5:
+// a hand-built MIR body of the "default if empty" shape. `_1` (the tainted
+// param) is reassigned to a constant in the if-arm (bb2) and the two paths join
+// at bb3, which reads `_1` into the Command::arg sink. The block-structured
+// lowering must PHI-merge `_1` at bb3 so the tainted path survives; the prior
+// linear flattener overwrote it with the bb2 constant and dropped the finding.
+func TestLowerMIR_BranchMergeKeepsTaint(t *testing.T) {
+	mir := "fn run(_1: axum::extract::Query<Params>) -> () {\n" +
+		"    bb0: {\n" +
+		"        _2 = String::is_empty(move _1) -> [return: bb1, unwind continue];\n" +
+		"    }\n" +
+		"    bb1: {\n" +
+		"        switchInt(move _2) -> [0: bb3, otherwise: bb2];\n" +
+		"    }\n" +
+		"    bb2: {\n" +
+		"        _1 = const \"localhost\";\n" +
+		"        goto -> bb3;\n" +
+		"    }\n" +
+		"    bb3: {\n" +
+		"        _0 = Command::new(move _1) -> [return: bb4, unwind continue];\n" +
+		"    }\n" +
+		"}\n"
+	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "run.rs")}}
+
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	findings := analysis.NewEngine(rs).Analyze(prog)
+	got := false
+	for _, f := range findings {
+		if f.RuleID == "rust-command-injection" {
+			got = true
+		}
+	}
+	if !got {
+		t.Errorf("expected taint to survive the default-if-empty join into Command::arg; got %d finding(s)", len(findings))
+	}
+}
+
+// TestParseSuccs covers the terminator-edge parsing that drives the FE-5 CFG:
+// goto and switchInt list every target as a normal successor, while a call/drop
+// contributes only its `return:` edge (the unwind/cleanup edge is excluded).
+func TestParseSuccs(t *testing.T) {
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{"        goto -> bb6;", []string{"bb6"}},
+		{"switchInt(move _3) -> [0: bb6, otherwise: bb2];", []string{"bb6", "bb2"}},
+		{"_3 = f(move _4) -> [return: bb1, unwind: bb15];", []string{"bb1"}},
+		{"drop(_10) -> [return: bb11, unwind: bb15];", []string{"bb11"}},
+		{"_4 = &_2;", nil},
+		{"drop(_2) -> bb15;", []string{"bb15"}},
+	}
+	for _, c := range cases {
+		got := parseSuccs(c.line)
+		if len(got) != len(c.want) {
+			t.Errorf("parseSuccs(%q) = %v, want %v", c.line, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("parseSuccs(%q) = %v, want %v", c.line, got, c.want)
+				break
+			}
+		}
+	}
+}
+
 // TestParseCargoTargets covers the FE-3 cargo-metadata target enumeration: bin
 // and lib targets are kept (with -p set only for a workspace), and
 // test/example/build-script targets are skipped.
