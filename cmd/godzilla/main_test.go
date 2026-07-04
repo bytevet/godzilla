@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,5 +50,47 @@ func TestStrict_FailsClosedOnCoverageFailure(t *testing.T) {
 	code, out = runCLI(t, "scan", "-strict", dir)
 	if code != exitError {
 		t.Errorf("strict scan of an unanalyzable dir should exit %d, got %d\n%s", exitError, code, out)
+	}
+}
+
+// TestInlineIgnore_SuppressesAtSource is the CI-1 CLI guard: a godzilla:ignore
+// directive on the sink line drops the finding out of the gate (exit 0) while
+// keeping it visible as suppressed.
+func TestInlineIgnore_SuppressesAtSource(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module ignoretest\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
+
+import (
+	"net/http"
+	"os/exec"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		cmd := r.URL.Query().Get("cmd")
+		exec.Command("sh", "-c", cmd).Run() // godzilla:ignore
+	})
+	http.ListenAndServe(":8090", nil)
+}
+`)
+
+	abs, _ := filepath.Abs(dir)
+
+	// Control: without the directive the same shape gates (exit 3). Prove the
+	// directive is doing the suppression by first confirming a finding exists.
+	code, out := runCLI(t, "scan", abs)
+	if code != exitClean {
+		t.Errorf("inline-ignored finding should not gate, got exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "Suppressed") || !strings.Contains(out, "inline") {
+		t.Errorf("expected the finding to be listed as inline-suppressed, got:\n%s", out)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

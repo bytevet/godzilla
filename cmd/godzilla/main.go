@@ -21,6 +21,7 @@ import (
 	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
 	"godzilla/internal/scan"
+	"godzilla/internal/triage"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -45,6 +46,11 @@ flags:
   -sarif <file>     write a SARIF 2.1.0 report to <file>
   -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
+  -baseline <file>  suppress findings whose fingerprint is in this baseline file (gate only NEW findings)
+  -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
+
+Suppress a single finding at the source with a "godzilla:ignore" comment on the
+sink line or the line above it (optionally "godzilla:ignore[rule-id]").
 
 exit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on
 `
@@ -79,6 +85,8 @@ func runScan(args []string) {
 	sarifPath := fs.String("sarif", "", "write a SARIF 2.1.0 report to this file")
 	llmReview := fs.Bool("llm-review", false, "review lower-confidence findings with an LLM and drop false positives")
 	strict := fs.Bool("strict", false, "fail if a detected language could not be analyzed")
+	baselinePath := fs.String("baseline", "", "suppress findings whose fingerprint is in this baseline file")
+	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -113,6 +121,38 @@ func runScan(args []string) {
 	}
 
 	findings := res.Findings
+
+	// Deterministic, user-directed suppression runs before the (nondeterministic)
+	// LLM stage: inline `godzilla:ignore` source directives, then a fingerprint
+	// baseline. Both flag findings as suppressed rather than deleting them.
+	findings = triage.ApplyInlineIgnores(findings)
+	if *baselinePath != "" {
+		baseFps, err := triage.LoadBaseline(*baselinePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading baseline: %v\n", err)
+			os.Exit(exitError)
+		}
+		findings = triage.ApplyBaseline(findings, baseFps)
+	}
+
+	// -write-baseline captures the current (deterministically filtered) findings
+	// as a baseline and exits cleanly — the adopt-on-legacy-code workflow.
+	if *writeBaseline != "" {
+		if err := writeReportRaw(*writeBaseline, func(w io.Writer) error {
+			return triage.WriteBaseline(w, findings)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "error: writing baseline: %v\n", err)
+			os.Exit(exitError)
+		}
+		active := 0
+		for _, f := range findings {
+			if !f.Suppressed {
+				active++
+			}
+		}
+		fmt.Fprintf(os.Stdout, "Baseline written to %s (%d fingerprint(s)).\n", *writeBaseline, active)
+		os.Exit(exitClean)
+	}
 
 	if *llmReview {
 		var stats llm.ReviewStats
@@ -204,6 +244,21 @@ func writeReport(path string, findings []analysis.Finding, write func(io.Writer,
 	return write(f, findings)
 }
 
+// writeReportRaw is writeReport for a writer function that does not take a
+// findings slice (e.g. the baseline writer), with the same Close-error handling.
+func writeReportRaw(path string, write func(io.Writer) error) (err error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return write(f)
+}
+
 // printFindings renders findings sorted by severity (worst first) then location,
 // and returns how many meet or exceed the gate threshold.
 func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Severity) int {
@@ -247,9 +302,13 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 	}
 
 	if len(suppressed) > 0 {
-		fmt.Fprintf(w, "Suppressed by LLM reviewer (%d) — not gated:\n", len(suppressed))
+		fmt.Fprintf(w, "Suppressed (%d) — not gated:\n", len(suppressed))
 		for _, f := range suppressed {
-			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s\n", f.Severity, f.RuleID, posString(f.SinkPos), f.SinkCallee)
+			by := f.SuppressedBy
+			if by == "" {
+				by = "suppressed"
+			}
+			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s  (%s)\n", f.Severity, f.RuleID, posString(f.SinkPos), f.SinkCallee, by)
 			if f.SuppressionReason != "" {
 				fmt.Fprintf(w, "    reason: %s\n", f.SuppressionReason)
 			}

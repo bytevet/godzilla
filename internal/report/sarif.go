@@ -48,14 +48,15 @@ type sarifRuleProperties struct {
 }
 
 type sarifResult struct {
-	RuleID           string                 `json:"ruleId"`
-	RuleIndex        int                    `json:"ruleIndex"`
-	Level            string                 `json:"level"`
-	Message          sarifMessage           `json:"message"`
-	Locations        []sarifLocation        `json:"locations,omitempty"`
-	RelatedLocations []sarifRelatedLocation `json:"relatedLocations,omitempty"`
-	Suppressions     []sarifSuppression     `json:"suppressions,omitempty"`
-	Properties       sarifResultProperties  `json:"properties,omitempty"`
+	RuleID              string                 `json:"ruleId"`
+	RuleIndex           int                    `json:"ruleIndex"`
+	Level               string                 `json:"level"`
+	Message             sarifMessage           `json:"message"`
+	Locations           []sarifLocation        `json:"locations,omitempty"`
+	RelatedLocations    []sarifRelatedLocation `json:"relatedLocations,omitempty"`
+	Suppressions        []sarifSuppression     `json:"suppressions,omitempty"`
+	PartialFingerprints map[string]string      `json:"partialFingerprints,omitempty"`
+	Properties          sarifResultProperties  `json:"properties,omitempty"`
 }
 
 // sarifSuppression records that a result was suppressed downstream (here, by
@@ -126,10 +127,11 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 	results := make([]sarifResult, 0, len(sorted))
 	for _, f := range sorted {
 		result := sarifResult{
-			RuleID:    f.RuleID,
-			RuleIndex: ruleIndex[f.RuleID],
-			Level:     sarifLevel(f.Severity),
-			Message:   sarifMessage{Text: f.Message},
+			RuleID:              f.RuleID,
+			RuleIndex:           ruleIndex[f.RuleID],
+			Level:               sarifLevel(f.Severity),
+			Message:             sarifMessage{Text: f.Message},
+			PartialFingerprints: map[string]string{"godzilla/v1": analysis.Fingerprint(f)},
 			Properties: sarifResultProperties{
 				Confidence: string(f.Confidence),
 				CWE:        f.CWE,

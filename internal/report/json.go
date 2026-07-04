@@ -16,16 +16,17 @@ type jsonDocument struct {
 
 // jsonFinding is the per-finding shape written by WriteJSON.
 type jsonFinding struct {
-	RuleID     string        `json:"ruleId"`
-	Severity   string        `json:"severity"`
-	Confidence string        `json:"confidence"`
-	CWE        string        `json:"cwe"`
-	Message    string        `json:"message"`
-	Language   string        `json:"language"`
-	Function   string        `json:"function"`
-	SinkCallee string        `json:"sinkCallee"`
-	Source     *jsonLocation `json:"source"`
-	Sink       *jsonLocation `json:"sink"`
+	RuleID      string        `json:"ruleId"`
+	Fingerprint string        `json:"fingerprint"`
+	Severity    string        `json:"severity"`
+	Confidence  string        `json:"confidence"`
+	CWE         string        `json:"cwe"`
+	Message     string        `json:"message"`
+	Language    string        `json:"language"`
+	Function    string        `json:"function"`
+	SinkCallee  string        `json:"sinkCallee"`
+	Source      *jsonLocation `json:"source"`
+	Sink        *jsonLocation `json:"sink"`
 	// Suppressed findings (judged false positives by the LLM reviewer) are
 	// retained in the output, flagged, with the reviewer's reason — never
 	// silently dropped.
@@ -55,6 +56,7 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 	for _, f := range sorted {
 		doc.Findings = append(doc.Findings, jsonFinding{
 			RuleID:            f.RuleID,
+			Fingerprint:       analysis.Fingerprint(f),
 			Severity:          string(f.Severity),
 			Confidence:        string(f.Confidence),
 			CWE:               f.CWE,
