@@ -67,6 +67,15 @@ type Rule struct {
 	Sinks []string `yaml:"sinks"`
 
 	Propagators []string `yaml:"propagators"` // callees that pass taint arg->result (e.g. fmt.Sprintf)
+
+	// Validators are guard/barrier callees (ENG-9): a boolean-returning check
+	// (an allowlist test, a regexp match, a path-containment predicate like
+	// filepath.IsLocal) that, when it dominates the branch leading to a sink,
+	// clears the checked value's taint on that path. Unlike a Sanitizer — which
+	// transforms a value and returns a clean result — a Validator returns a bool
+	// and leaves the value unchanged; it neutralizes the finding by controlling
+	// which path reaches the sink. Matched by canonical-FQN glob, like sinks.
+	Validators []string `yaml:"validators"`
 }
 
 // RuleSet is a collection of rules, matching the top-level YAML document shape.
@@ -157,6 +166,15 @@ func (r *Rule) IsSanitizer(callee string) bool { return MatchAny(r.Sanitizers, c
 
 // IsPropagator reports whether callee matches any of the rule's propagator patterns.
 func (r *Rule) IsPropagator(callee string) bool { return MatchAny(r.Propagators, callee) }
+
+// IsValidator reports whether callee matches any of the rule's validator (guard)
+// patterns.
+func (r *Rule) IsValidator(callee string) bool { return MatchAny(r.Validators, callee) }
+
+// HasValidators reports whether the rule declares any guard/barrier validators,
+// so the engine can skip the (dominator) guard analysis entirely for rules that
+// don't use the feature — keeping the common path free of extra work.
+func (r *Rule) HasValidators() bool { return len(r.Validators) > 0 }
 
 // MatchAny reports whether s matches any of the glob patterns.
 func MatchAny(patterns []string, s string) bool {

@@ -334,6 +334,13 @@ func analyzeFunc(
 	tainted := map[string]*ir.Position{}
 	defs := buildDefs(fn)
 
+	// Guard/barrier index (ENG-9), built once and only for a rule that declares
+	// validators (nil otherwise, so the common path pays nothing). curBlock tracks
+	// the block being visited so a sink can ask whether a validator guard
+	// dominates it on the path taken.
+	guards := buildGuardIndex(fn, rule, defs)
+	var curBlock int32
+
 	// Seed tainted parameters. A flow that enters through a parameter is
 	// inter-procedural, which lowers the confidence of any finding it feeds.
 	// interprocOrigins records every source origin whose taint crossed a function
@@ -506,6 +513,13 @@ func analyzeFunc(
 		case isSink:
 			inj := injectableArgs(sinkArgs, callee, args)
 			if pos, ok := firstTaintedOrigin(tainted, inj); ok && !reported[inst] {
+				// ENG-9: suppress when a validator guard on this flow's source
+				// value dominates the sink on the path taken to reach it. The check
+				// is left un-reported (not marked) so a later iteration re-evaluates
+				// it — it stays suppressed as long as the guard holds.
+				if guards.guarded(curBlock, pos, tainted) {
+					break
+				}
 				reported[inst] = true
 				// SSRF (CWE-918): keep the finding only if the taint can reach the
 				// request URL's host. Taint confined to the path/query of a fixed
@@ -702,6 +716,7 @@ func analyzeFunc(
 			if blk == nil {
 				continue
 			}
+			curBlock = blk.GetIndex()
 			for _, inst := range blk.Instrs {
 				if inst != nil {
 					visit(inst)
