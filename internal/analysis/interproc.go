@@ -365,19 +365,22 @@ func analyzeFunc(
 				// off-by-one that silently loses every cross-function instance
 				// flow. (Go interface INVOKEs name an abstract method absent from
 				// byKey, so they skip this and are handled by the CHA block below.)
-				if p, ok := isTainted(tainted, inst.Call.GetValue()); ok {
+				if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
 					addEffect(callee, 0, p)
 				}
 				for j, a := range args {
-					if p, ok := isTainted(tainted, a); ok {
+					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(callee, j+1, p)
 					}
 				}
 			} else {
 				// Static/free function or Go method call: args already align with
-				// params (Args[0]==Params[0]==receiver for a Go method).
+				// params (Args[0]==Params[0]==receiver for a Go method). isTaintedArg
+				// also seeds when an argument is a struct carrying a tainted field,
+				// so a field-tainted struct passed by value/pointer still flows into
+				// the callee (see fieldAnyKey / ENG-3).
 				for j, a := range args {
-					if p, ok := isTainted(tainted, a); ok {
+					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(callee, j, p)
 					}
 				}
@@ -397,11 +400,11 @@ func analyzeFunc(
 		// params shifted by one — param 0 is the receiver.
 		if inst.Call.GetIsInvoke() {
 			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
-				if p, ok := isTainted(tainted, inst.Call.GetValue()); ok {
+				if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
 					addEffect(impl, 0, p)
 				}
 				for j, a := range args {
-					if p, ok := isTainted(tainted, a); ok {
+					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(impl, j+1, p)
 					}
 				}
@@ -449,6 +452,8 @@ func analyzeFunc(
 			handleCall(inst)
 		case ir.OpCode_OP_CODE_STORE:
 			visitStore(inst, defs, tainted)
+		case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
+			visitFieldRead(inst, tainted)
 		case ir.OpCode_OP_CODE_INTRINSIC:
 			// go.defer / go.goroutine carry a CallCommon; route them through the
 			// call transfer so sinks/sources/propagation aren't lost.

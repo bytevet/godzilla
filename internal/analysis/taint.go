@@ -1,6 +1,8 @@
 package analysis
 
 import (
+	"strconv"
+
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -33,12 +35,14 @@ var intrinsicPropagators = map[string]bool{
 // propagatingOps are non-call opcodes that propagate taint from any tainted
 // operand to the instruction's result register.
 var propagatingOps = map[ir.OpCode]bool{
-	ir.OpCode_OP_CODE_BIN_OP:         true,
-	ir.OpCode_OP_CODE_UN_OP:          true,
-	ir.OpCode_OP_CODE_CONVERT:        true,
-	ir.OpCode_OP_CODE_TYPE_ASSERT:    true, // v := x.(T): the result is x's value with a narrower static type
-	ir.OpCode_OP_CODE_FIELD:          true,
-	ir.OpCode_OP_CODE_FIELD_ADDR:     true,
+	ir.OpCode_OP_CODE_BIN_OP:      true,
+	ir.OpCode_OP_CODE_UN_OP:       true,
+	ir.OpCode_OP_CODE_CONVERT:     true,
+	ir.OpCode_OP_CODE_TYPE_ASSERT: true, // v := x.(T): the result is x's value with a narrower static type
+	// FIELD / FIELD_ADDR are NOT here: struct-field reads are handled
+	// field-sensitively by visitFieldRead so tainting one field does not taint a
+	// read of a different field (see ENG-3). INDEX(_ADDR) stay whole-container
+	// (array elements can't be statically distinguished — variadic packing).
 	ir.OpCode_OP_CODE_INDEX:          true,
 	ir.OpCode_OP_CODE_INDEX_ADDR:     true,
 	ir.OpCode_OP_CODE_EXTRACT:        true,
@@ -91,10 +95,65 @@ func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted m
 	taintContainer(defs, tainted, addrReg, pos)
 }
 
+// fieldPathKey is the taint-map key for a specific struct field of a base
+// register — a one-level access path. Register names never contain '#', so a
+// path key can't collide with a plain register.
+func fieldPathKey(base string, idx int32) string {
+	return base + "#f" + strconv.Itoa(int(idx))
+}
+
+// fieldAnyKey marks that a base register has SOME tainted field. It is consulted
+// ONLY when the base is passed to a function (isTaintedArg), not by field reads
+// — so intra-procedurally a clean field of the struct stays clean (ENG-3), but
+// passing the whole struct across a call still carries the field taint into the
+// callee (which then sees the parameter wholesale-tainted, its Medium-confidence
+// over-approximation). This preserves cross-function struct-field recall.
+func fieldAnyKey(base string) string {
+	return base + "#*"
+}
+
+// isTaintedArg reports whether a call argument carries taint for the purpose of
+// seeding a callee parameter: either the whole value is tainted, or the value is
+// a struct with at least one tainted field. Field reads use isTainted (precise);
+// only cross-call seeding uses this broader check.
+func isTaintedArg(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool) {
+	if pos, ok := isTainted(tainted, v); ok {
+		return pos, true
+	}
+	if v != nil {
+		if reg := v.GetRegName(); reg != "" {
+			if pos, ok := tainted[fieldAnyKey(reg)]; ok {
+				return pos, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// isAggregateAccess reports whether an instruction is a FIELD/INDEX (value or
+// address) access — used to tell a "root" base (an alloc/param) apart from a
+// nested access.
+func isAggregateAccess(def *ir.Instruction) bool {
+	if def == nil {
+		return false
+	}
+	switch def.Op {
+	case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR,
+		ir.OpCode_OP_CODE_INDEX, ir.OpCode_OP_CODE_INDEX_ADDR:
+		return true
+	}
+	return false
+}
+
 // taintContainer walks up the address-derivation chain from reg (produced by
-// INDEX_ADDR/FIELD_ADDR/INDEX/FIELD) and marks each enclosing container base
-// tainted. This is a field-insensitive over-approximation that recovers taint
-// through Go's variadic slice packing and aggregate mutation.
+// INDEX_ADDR/FIELD_ADDR/INDEX/FIELD) and records the taint a store just wrote.
+// For a one-level STRUCT field on a root base (p.f = x, where p is an
+// alloc/param), it records the precise access path base#f rather than tainting
+// the whole struct — so a later read of a DIFFERENT field is not falsely
+// tainted (ENG-3). Array elements (INDEX) stay field-insensitive (whole
+// container), since elements can't be statically distinguished (variadic slice
+// packing), and nested field accesses fall back to whole-container too (a
+// one-level path can't name them precisely), preserving recall.
 func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Position, reg string, pos *ir.Position) {
 	seen := map[string]bool{}
 	for reg != "" && !seen[reg] {
@@ -104,8 +163,7 @@ func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Posi
 			return
 		}
 		switch def.Op {
-		case ir.OpCode_OP_CODE_INDEX_ADDR, ir.OpCode_OP_CODE_FIELD_ADDR,
-			ir.OpCode_OP_CODE_INDEX, ir.OpCode_OP_CODE_FIELD:
+		case ir.OpCode_OP_CODE_FIELD_ADDR, ir.OpCode_OP_CODE_FIELD:
 			ops := def.GetOperands()
 			if len(ops) == 0 {
 				return
@@ -114,11 +172,63 @@ func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Posi
 			if base == "" {
 				return
 			}
-			markTainted(tainted, base, pos)
+			if isAggregateAccess(defs[base]) {
+				// Nested (p.q.f): a one-level path can't name it; fall back to
+				// whole-container to preserve recall, and keep walking up.
+				markTainted(tainted, base, pos)
+				reg = base
+				continue
+			}
+			// One-level struct field on a root base: field-precise for reads,
+			// plus the any-field marker so passing the whole struct to a call
+			// still carries the taint into the callee.
+			markTainted(tainted, fieldPathKey(base, def.GetFieldIndex()), pos)
+			markTainted(tainted, fieldAnyKey(base), pos)
+			return
+		case ir.OpCode_OP_CODE_INDEX_ADDR, ir.OpCode_OP_CODE_INDEX:
+			ops := def.GetOperands()
+			if len(ops) == 0 {
+				return
+			}
+			base := ops[0].GetRegName()
+			if base == "" {
+				return
+			}
+			markTainted(tainted, base, pos) // array: whole container
 			reg = base
 		default:
 			return
 		}
+	}
+}
+
+// visitFieldRead handles a FIELD / FIELD_ADDR read field-sensitively: the result
+// is tainted if the specific field's access path (base#f) was tainted, OR if the
+// whole base value is untrusted (e.g. a struct that came straight from a source
+// or a seeded parameter). This is what stops a tainted p.A from falsely tainting
+// a read of the clean p.B (ENG-3), while still flagging p.A and any field of a
+// wholly-untrusted struct.
+func visitFieldRead(inst *ir.Instruction, tainted map[string]*ir.Position) {
+	if inst.Name == "" {
+		return
+	}
+	ops := inst.GetOperands()
+	if len(ops) == 0 {
+		return
+	}
+	base := ops[0].GetRegName()
+	if base == "" {
+		// Non-register base (e.g. a global): can't form a path key, so fall back
+		// to the conservative operand propagation.
+		markTaintFromOperands(tainted, inst.Name, ops)
+		return
+	}
+	if pos, ok := tainted[fieldPathKey(base, inst.GetFieldIndex())]; ok {
+		markTainted(tainted, inst.Name, pos)
+		return
+	}
+	if pos, ok := tainted[base]; ok {
+		markTainted(tainted, inst.Name, pos)
 	}
 }
 
