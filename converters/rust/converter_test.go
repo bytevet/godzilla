@@ -83,3 +83,34 @@ func keys(m map[string]bool) []string {
 	}
 	return out
 }
+
+// TestVerifyMIRShape is the FE-10 smoke-check core: it recognizes a lowered
+// program that still carries a positioned CALL, and rejects one that does not
+// (the signature of MIR-format drift).
+func TestVerifyMIRShape(t *testing.T) {
+	good := &ir.Program{Modules: []*ir.Module{{
+		Language: "rust",
+		Functions: []*ir.Function{{
+			Blocks: []*ir.BasicBlock{{Instrs: []*ir.Instruction{
+				{Op: ir.OpCode_OP_CODE_CALL, Pos: &ir.Position{Filename: "a.rs", Line: 2},
+					Call: &ir.CallCommon{Callee: "rust:std::env::var"}},
+			}}},
+		}},
+	}}}
+	if !verifyMIRShape(good) {
+		t.Errorf("expected a positioned CALL to pass the smoke check")
+	}
+
+	// A CALL with no position (drift symptom) and a program with no calls both fail.
+	noPos := &ir.Program{Modules: []*ir.Module{{Functions: []*ir.Function{{
+		Blocks: []*ir.BasicBlock{{Instrs: []*ir.Instruction{
+			{Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{Callee: "x"}},
+		}}},
+	}}}}}
+	if verifyMIRShape(noPos) {
+		t.Errorf("a CALL with no position must fail the smoke check")
+	}
+	if verifyMIRShape(&ir.Program{}) {
+		t.Errorf("an empty program must fail the smoke check")
+	}
+}

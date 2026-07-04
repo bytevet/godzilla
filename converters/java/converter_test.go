@@ -94,3 +94,28 @@ func TestConvertFile_SpringParamAnnotationSource(t *testing.T) {
 		}
 	}
 }
+
+// TestParseJavaMajor covers the `java -version` parser used by the FE-9 version
+// guard, including the legacy "1.8" scheme and unparseable input.
+func TestParseJavaMajor(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want int
+		ok   bool
+	}{
+		{"jdk24", `openjdk version "24.0.1" 2025-04-15`, 24, true},
+		{"jdk21", `openjdk version "21.0.3" 2024-04-16`, 21, true},
+		{"legacy 1.8", `java version "1.8.0_401"`, 8, true},
+		{"early access", `openjdk version "25-ea" 2025-09-16`, 25, true},
+		{"no version", "some unrelated output", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseJavaMajor(c.out)
+			if ok != c.ok || (ok && got != c.want) {
+				t.Errorf("parseJavaMajor(%q) = (%d,%v), want (%d,%v)", c.out, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}

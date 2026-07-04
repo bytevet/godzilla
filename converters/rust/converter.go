@@ -59,6 +59,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	// FE-10: verify (once) that this rustc's MIR still lowers to the shapes taint
+	// analysis needs, warning loudly on format drift rather than silently
+	// producing zero findings.
+	warnIfMIRDrifted()
 	prog := &ir.Program{Mode: "mir"}
 	for _, f := range files {
 		mir, err := emitMIR(f)

@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"godzilla/internal/buildpolicy"
@@ -78,10 +79,22 @@ type dumpInstr struct {
 
 // ConvertFile lowers the Java at path (a file or directory) into a gIR program:
 // one ir.Module per class, one ir.Function per method.
+// minJDK is the lowest JDK the Java frontend supports: JavaDump.java uses the
+// java.lang.classfile API, standardized in JDK 24.
+const minJDK = 24
+
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	javaExe, err := exec.LookPath("java")
 	if err != nil {
-		return nil, fmt.Errorf("java not found on PATH (JDK 24+ required for the Java frontend): %w", err)
+		return nil, fmt.Errorf("java not found on PATH (JDK %d+ required for the Java frontend): %w", minJDK, err)
+	}
+
+	// Probe the JDK version up front: the common CI JDK (Temurin 17/21) is too
+	// old for the classfile API, and the failure would otherwise surface as an
+	// opaque compile error. Only hard-fail on a POSITIVE too-old detection; if the
+	// probe itself can't run, proceed and let the dump report the real error.
+	if major, ok := javaMajor(javaExe); ok && major < minJDK {
+		return nil, fmt.Errorf("the Java frontend requires JDK %d+ (JavaDump.java uses the java.lang.classfile API); found Java %d at %s — install a JDK %d+ or set JAVA_HOME to one", minJDK, major, javaExe, minJDK)
 	}
 
 	scriptPath, cleanup, err := writeHelperScript()
@@ -103,7 +116,13 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	cmd := exec.CommandContext(ctx, javaExe, args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("java dump failed for %s: %w", path, err)
+		// cmd.Output() puts the helper's stderr (the actual javac/classfile
+		// diagnostic) on ExitError.Stderr; surface it instead of a bare exit code.
+		detail := ""
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			detail = "\n" + string(tail(ee.Stderr, 2000))
+		}
+		return nil, fmt.Errorf("java dump failed for %s: %w%s", path, err, detail)
 	}
 
 	var doc dumpDoc
@@ -117,6 +136,49 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		prog.Modules = append(prog.Modules, convertClass(cl, filename))
 	}
 	return prog, nil
+}
+
+// javaMajor runs `java -version` and returns the launcher's major version. The
+// bool is false if the probe could not run or its output could not be parsed.
+func javaMajor(javaExe string) (int, bool) {
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	// `java -version` prints to stderr; CombinedOutput captures it.
+	out, err := exec.CommandContext(ctx, javaExe, "-version").CombinedOutput()
+	if err != nil {
+		return 0, false
+	}
+	return parseJavaMajor(string(out))
+}
+
+// parseJavaMajor extracts the major version from `java -version` output, e.g.
+// `openjdk version "24.0.1" 2025-...` -> 24, or the legacy `java version
+// "1.8.0_401"` -> 8. Returns false when no version token is found.
+func parseJavaMajor(out string) (int, bool) {
+	i := strings.Index(out, "version \"")
+	if i < 0 {
+		return 0, false
+	}
+	rest := out[i+len("version \""):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		return 0, false
+	}
+	parts := strings.FieldsFunc(rest[:j], func(r rune) bool { return r == '.' || r == '_' || r == '-' })
+	if len(parts) == 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	// The legacy "1.N" scheme (JDK <= 8): the real major is the second field.
+	if major == 1 && len(parts) > 1 {
+		if n, err := strconv.Atoi(parts[1]); err == nil {
+			major = n
+		}
+	}
+	return major, true
 }
 
 // writeHelperScript writes the embedded JavaDump.java to a temp file so `java`
