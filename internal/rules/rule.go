@@ -200,9 +200,20 @@ func globRegexp(pattern string) *regexp.Regexp {
 	}
 	b.WriteString("$")
 
-	re = regexp.MustCompile(b.String())
+	// Compile (not MustCompile): a pattern containing invalid UTF-8 bytes makes
+	// the regexp engine fail to parse, which must not panic the whole scan (a
+	// corrupt or adversarial rule pattern would otherwise be a denial of
+	// service). On failure, cache a regexp that matches nothing.
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		re = neverMatch
+	}
 	globCacheMu.Lock()
 	globCache[pattern] = re
 	globCacheMu.Unlock()
 	return re
 }
+
+// neverMatch is a compiled regexp that matches no input; used as the safe
+// fallback for a glob pattern that cannot be compiled.
+var neverMatch = regexp.MustCompile(`[^\x00-\x{10FFFF}]`)

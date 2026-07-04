@@ -72,3 +72,14 @@ func TestInvalidSinkSpec(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchGlob_InvalidUTF8PatternDoesNotPanic guards the fuzz-found DoS: a
+// pattern with invalid UTF-8 bytes must not panic (it just never matches).
+func TestMatchGlob_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
+	if MatchGlob("\x80", "x") {
+		t.Error("an uncompilable pattern must match nothing, not panic")
+	}
+	if MatchGlob("go:*\xff", "go:anything") {
+		t.Error("invalid-byte pattern should not match")
+	}
+}
