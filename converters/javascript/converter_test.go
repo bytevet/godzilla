@@ -212,6 +212,20 @@ func TestConvertCommandInjectionSample(t *testing.T) {
 	requireFinding(t, findings, "js-command-injection")
 }
 
+// TestConvertBranchMergeDefault proves the statement-level "default if empty"
+// pattern (`if (!host) host = "localhost"`) no longer drops taint (FE-5).
+// Before branch-merge PHI flattening the reassignment inside the `if` killed
+// the tainted binding on the merge path (a false negative); lowerIfMerge now
+// PHI-merges both incoming values so the tainted branch stays live into the
+// execSync sink.
+func TestConvertBranchMergeDefault(t *testing.T) {
+	prog := mustConvert(t, "../../test/js/branch_merge_default/app.js")
+
+	engine := analysis.NewEngine(commandInjectionRuleSet())
+	findings := engine.Analyze(prog)
+	requireFinding(t, findings, "js-command-injection")
+}
+
 func TestConvertSQLInjectionSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/sql_injection/app.js")
 

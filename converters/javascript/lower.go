@@ -306,10 +306,7 @@ func (fs *funcState) lowerBodyStmt(s ast.Statement) {
 	switch v := s.(type) {
 	case *ast.IfStatement:
 		fs.lowerExpr(v.Test)
-		fs.lowerBody(stmtList(v.Consequent))
-		if v.Alternate != nil {
-			fs.lowerBody(stmtList(v.Alternate))
-		}
+		fs.lowerIfMerge(v)
 	case *ast.ForStatement:
 		if v.Initializer != nil {
 			fs.lowerForInit(v.Initializer)
@@ -358,6 +355,58 @@ func (fs *funcState) lowerBodyStmt(s ast.Statement) {
 	default:
 		fs.lowerStmt(s)
 	}
+}
+
+// lowerIfMerge lowers an `if`/`else` statement's branches and PHI-merges the
+// bindings each side rebinds, so a name reassigned in one arm keeps its
+// pre-branch value live on the other path. Without this, the ubiquitous
+// defaulting pattern `if (!x) x = "default"` would overwrite a tainted `x`
+// with a last-write-wins env (a deterministic false negative) — the
+// statement-level analogue of the ConditionalExpression PHI above. There is no
+// CFG here, so both arms are lowered and their divergent bindings unioned.
+func (fs *funcState) lowerIfMerge(v *ast.IfStatement) {
+	before := cloneEnv(fs.env)
+	fs.lowerBody(stmtList(v.Consequent))
+	afterBody := fs.env
+	fs.env = cloneEnv(before)
+	if v.Alternate != nil {
+		fs.lowerBody(stmtList(v.Alternate))
+	}
+	afterElse := fs.env
+	merged := cloneEnv(afterElse)
+	names := map[string]bool{}
+	for k := range afterBody {
+		names[k] = true
+	}
+	for k := range afterElse {
+		names[k] = true
+	}
+	for name := range names {
+		bv, ev := afterBody[name], afterElse[name]
+		if bv == nil {
+			bv = before[name]
+		}
+		if ev == nil {
+			ev = before[name]
+		}
+		if bv == ev || bv == nil || ev == nil {
+			continue
+		}
+		inst := fs.newValueInst(v.Idx0())
+		inst.Op = ir.OpCode_OP_CODE_PHI
+		inst.Operands = []*ir.Value{bv, ev}
+		fs.emit(inst)
+		merged[name] = regValue(inst.Name)
+	}
+	fs.env = merged
+}
+
+func cloneEnv(env map[string]*ir.Value) map[string]*ir.Value {
+	out := make(map[string]*ir.Value, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
 }
 
 // lowerForInit lowers a `for(...)` loop's initializer clause, which may be a
