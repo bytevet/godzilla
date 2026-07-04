@@ -527,12 +527,17 @@ func analyzeFunc(
 				if guards.guarded(curBlock, pos, tainted) {
 					break
 				}
-				reported[inst] = true
 				// SSRF (CWE-918): keep the finding only if the taint can reach the
 				// request URL's host. Taint confined to the path/query of a fixed
-				// host cannot redirect the request and is a false positive; the
-				// check is structural/deterministic, so marking reported is safe.
+				// host cannot redirect the request and is a false positive.
 				if rule.CWE != "CWE-918" || urlHostControllable(inj, tainted, defs) {
+					// Mark reported ONLY when a finding is actually emitted (ENG-8).
+					// Setting it before the CWE-918 check masked a real SSRF: a
+					// benign, host-fixed flow to this sink would set reported and
+					// suppress, blocking a later flow whose taint DOES reach the host
+					// (e.g. once an interprocedural summary taints the host segment).
+					// Leaving reported unset on suppression lets that real flow fire.
+					reported[inst] = true
 					steps := reconstructPath(defs, tainted, firstTaintedReg(tainted, inj), pos, inst.Pos)
 					res.findings = append(res.findings, Finding{
 						RuleID:     rule.ID,
