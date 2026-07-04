@@ -87,12 +87,21 @@ type callEffect struct {
 	origin *ir.Position
 }
 
+// globalEffect records that a function stored tainted data into a package/
+// module-level global, carrying the ultimate source origin. It publishes taint
+// program-wide (ENG-6): any function that later loads that global observes it.
+type globalEffect struct {
+	name   string
+	origin *ir.Position
+}
+
 // funcResult is the outcome of analyzing one function under a set of
 // tainted-parameter seeds.
 type funcResult struct {
 	findings      []Finding
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
+	globalEffects []globalEffect
 }
 
 // logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping the
@@ -153,6 +162,7 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map[string]*ir.Module, methodImpls map[string][]string, rule *rules.Rule) []Finding {
 	paramTaint := map[string]map[int]*ir.Position{}
 	returnTaint := map[string]*ir.Position{}
+	globalTaint := map[string]*ir.Position{}
 	reported := map[*ir.Instruction]bool{}
 	var findings []Finding
 
@@ -162,6 +172,32 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 	for caller, callees := range cg.Edges {
 		for _, callee := range callees {
 			callers[callee] = append(callers[callee], caller)
+		}
+	}
+
+	// Global read index (ENG-6): global name -> every function that reads it, so a
+	// global becoming tainted re-enqueues exactly its readers. Built once over the
+	// immutable function set. This is the outer fixpoint over globals: the taint
+	// map is program-wide, so a store in one function must wake the reads in
+	// others. A read is any named instruction with a GlobalName operand (Go lowers
+	// a global read as UN_OP(MUL), others as LOAD); a STORE writes its global
+	// operand but has no result Name, so it is not counted as a reader.
+	globalReaders := map[string][]string{}
+	for name, fn := range byKey {
+		for _, blk := range fn.Blocks {
+			if blk == nil {
+				continue
+			}
+			for _, inst := range blk.Instrs {
+				if inst == nil || inst.Name == "" {
+					continue
+				}
+				for _, op := range inst.GetOperands() {
+					if g := op.GetGlobalName(); g != "" {
+						globalReaders[g] = append(globalReaders[g], name)
+					}
+				}
+			}
 		}
 	}
 
@@ -201,7 +237,7 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, globalTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -220,6 +256,17 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
 				enqueue(ce.callee)
+			}
+		}
+
+		// A tainted store into a global publishes it program-wide: record the
+		// taint and re-enqueue every function that reads that global (ENG-6).
+		for _, ge := range res.globalEffects {
+			if _, exists := globalTaint[ge.name]; !exists {
+				globalTaint[ge.name] = ge.origin
+				for _, reader := range globalReaders[ge.name] {
+					enqueue(reader)
+				}
 			}
 		}
 	}
@@ -249,6 +296,7 @@ func analyzeFunc(
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
 	returnTaint map[string]*ir.Position,
+	globalTaint map[string]*ir.Position,
 	byKey map[string]*ir.Function,
 	methodImpls map[string][]string,
 	reported map[*ir.Instruction]bool,
@@ -282,6 +330,55 @@ func analyzeFunc(
 		}
 		effectSeen[key] = true
 		res.callEffects = append(res.callEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+
+	// ENG-6(a): taint through package/module-level globals. A store of tainted
+	// data into a global publishes the taint program-wide (recorded as a global
+	// effect the orchestrator merges); a load from a global that is already tainted
+	// seeds the loaded register. Both cross a function boundary, so any finding
+	// they feed is Medium confidence (interprocOrigins), matching the confidence
+	// contract for over-approximating flows.
+	recordGlobalStore := func(inst *ir.Instruction) {
+		ops := inst.GetOperands()
+		if len(ops) < 2 {
+			return
+		}
+		g := ops[0].GetGlobalName()
+		if g == "" {
+			return
+		}
+		pos, ok := isTainted(tainted, ops[1])
+		if !ok {
+			return
+		}
+		key := "g:" + g
+		if effectSeen[key] {
+			return
+		}
+		effectSeen[key] = true
+		res.globalEffects = append(res.globalEffects, globalEffect{name: g, origin: pos})
+	}
+
+	// readGlobalTaint seeds the result of any named instruction that reads a
+	// tainted global. A global read is not one fixed opcode: the Go frontend
+	// lowers `x := pkgVar` as UN_OP(MUL) over a GlobalName operand, others as
+	// LOAD — so this keys on the presence of a tainted GlobalName operand rather
+	// than the opcode. A STORE's global operand is its write target, but a STORE
+	// has no result Name, so it is naturally excluded.
+	readGlobalTaint := func(inst *ir.Instruction) {
+		if inst.Name == "" {
+			return
+		}
+		for _, op := range inst.GetOperands() {
+			g := op.GetGlobalName()
+			if g == "" {
+				continue
+			}
+			if pos, ok := globalTaint[g]; ok {
+				markTainted(tainted, inst.Name, pos)
+				interprocOrigins[pos] = true // cross-function -> Medium
+			}
+		}
 	}
 
 	confidenceFor := func(origin *ir.Position) Confidence {
@@ -449,11 +546,16 @@ func analyzeFunc(
 	}
 
 	visit := func(inst *ir.Instruction) {
+		// A read of a tainted global seeds the result regardless of the reading
+		// opcode (ENG-6); runs before the switch so the register is tainted for
+		// any subsequent same-pass use.
+		readGlobalTaint(inst)
 		switch inst.Op {
 		case ir.OpCode_OP_CODE_CALL, ir.OpCode_OP_CODE_INVOKE:
 			handleCall(inst)
 		case ir.OpCode_OP_CODE_STORE:
 			visitStore(inst, defs, tainted)
+			recordGlobalStore(inst)
 		case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
 			visitFieldRead(inst, tainted)
 		case ir.OpCode_OP_CODE_INTRINSIC:
@@ -480,6 +582,7 @@ func analyzeFunc(
 	for {
 		beforeTaint := len(tainted)
 		beforeEffects := len(res.callEffects)
+		beforeGlobals := len(res.globalEffects)
 		beforeReturn := res.returnsOrigin
 		for _, blk := range fn.Blocks {
 			if blk == nil {
@@ -491,7 +594,8 @@ func analyzeFunc(
 				}
 			}
 		}
-		if len(tainted) == beforeTaint && len(res.callEffects) == beforeEffects && res.returnsOrigin == beforeReturn {
+		if len(tainted) == beforeTaint && len(res.callEffects) == beforeEffects &&
+			len(res.globalEffects) == beforeGlobals && res.returnsOrigin == beforeReturn {
 			break
 		}
 	}
