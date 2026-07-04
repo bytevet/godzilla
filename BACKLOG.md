@@ -45,7 +45,12 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 ## Prioritized roadmap
 
 > **Implementation status** (branch `claude/backlog-gap-analysis`):
-> **Tier 0 — ✅ COMPLETE** (commits `4f445c9` engine, `6f7b62a` reviewer, `96ff41e` gate). Tier 1 — in progress.
+> **Tier 0 — ✅ COMPLETE** (`4f445c9` engine, `6f7b62a` reviewer, `96ff41e` gate).
+> **Tier 1 — ✅ COMPLETE**: CI-1/CI-2 fingerprints+baseline+inline-ignore (`b9f3df7`), ENG-4 default
+> propagators (`ea27eb3`), COV-1 secrets-over-config-files (`9b142bd`), TRUST-1 build-exec gate
+> (`96a5dbe`), COV-3 Java XSS/SSRF/redirect/deser (`39c5cf3`), COV-5 Python code injection (`315bbf6`),
+> COV-6 header/cookie sources (`55d4f15`), FE-6/COV-2 TypeScript/JSX/ESM via esbuild (`803dcfd`).
+> **Tier 2 — in progress.**
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
