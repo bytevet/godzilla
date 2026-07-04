@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"godzilla/internal/buildpolicy"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -148,6 +149,13 @@ func resolveInputs(abs string) []string {
 	}
 	sys, ok := detectBuildSystem(abs)
 	if !ok {
+		return []string{abs}
+	}
+	// Running the project's own build tool executes arbitrary code from the
+	// scanned repo (Maven plugins, Gradle build logic). Off by default; without
+	// opt-in, fall back to the in-process JDK-only compile.
+	if !buildpolicy.Allowed() {
+		fmt.Fprintf(os.Stderr, "godzilla: java: %s build not run under %s (set %s=1 or pass -allow-build to enable); using in-process source compile\n", sys.name, abs, buildpolicy.EnvAllowBuild)
 		return []string{abs}
 	}
 	outputs, err := buildProject(abs, sys)

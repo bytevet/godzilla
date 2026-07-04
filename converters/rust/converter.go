@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"godzilla/internal/buildpolicy"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -40,7 +41,15 @@ func NewConverter() *Converter { return &Converter{} }
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		if fileExists(filepath.Join(path, "Cargo.toml")) {
-			return convertCargo(path)
+			// `cargo` executes arbitrary code from the scanned repo (build.rs,
+			// proc-macros, and every dependency crate's build script). Off by
+			// default; without opt-in, fall through to per-file rustc, which
+			// compiles the project's own sources with no dependency resolution
+			// and no build-script execution.
+			if buildpolicy.Allowed() {
+				return convertCargo(path)
+			}
+			fmt.Fprintf(os.Stderr, "warning: rust: cargo build not run under %s (set %s=1 or pass -allow-build to enable); lowering source files directly without dependency resolution\n", path, buildpolicy.EnvAllowBuild)
 		}
 	}
 

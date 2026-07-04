@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"godzilla/internal/analysis"
+	"godzilla/internal/buildpolicy"
 	"godzilla/internal/llm"
 	"godzilla/internal/report"
 	"godzilla/internal/rules"
@@ -48,6 +49,7 @@ flags:
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
   -baseline <file>  suppress findings whose fingerprint is in this baseline file (gate only NEW findings)
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
+  -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
 
 Suppress a single finding at the source with a "godzilla:ignore" comment on the
 sink line or the line above it (optionally "godzilla:ignore[rule-id]").
@@ -87,7 +89,10 @@ func runScan(args []string) {
 	strict := fs.Bool("strict", false, "fail if a detected language could not be analyzed")
 	baselinePath := fs.String("baseline", "", "suppress findings whose fingerprint is in this baseline file")
 	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
+	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
 	_ = fs.Parse(args)
+
+	buildpolicy.SetAllowed(*allowBuild)
 
 	if fs.NArg() < 1 {
 		usage()

@@ -62,6 +62,9 @@ func TestCorpus(t *testing.T) {
 					if !buildToolAvailable(dir) {
 						t.Skip("no Maven/Gradle wrapper or mvn/gradle on PATH; skipping build sample")
 					}
+					// Running the sample's build tool is opt-in for safety; a build
+					// sample by definition needs it (restored after the subtest).
+					t.Setenv("GODZILLA_ALLOW_BUILD", "1")
 				}
 			}
 			if strings.HasPrefix(name, "c/") || strings.HasPrefix(name, "cpp/") {
@@ -83,6 +86,9 @@ func TestCorpus(t *testing.T) {
 					if _, err := exec.LookPath("cargo"); err != nil {
 						t.Skip("cargo not on PATH; skipping Cargo-based Rust sample")
 					}
+					// A Cargo project is analyzed by running cargo; that is build
+					// execution, opt-in for safety (restored after the subtest).
+					t.Setenv("GODZILLA_ALLOW_BUILD", "1")
 					if cargoHasDeps(dir) {
 						if os.Getenv("GODZILLA_RUST_E2E") == "" {
 							t.Skip("set GODZILLA_RUST_E2E=1 to run the real-crate Rust sample (needs cargo + network)")
