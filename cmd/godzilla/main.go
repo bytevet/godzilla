@@ -43,9 +43,13 @@ const (
 	exitFindings = 3 // findings at/above the fail-on threshold (gate failed)
 )
 
-const usageText = `usage: godzilla scan [flags] <path>
+const usageText = `usage: godzilla <scan|rules|version> ...
 
-Convert Go source at <path> to gIR, run taint analysis, and report findings.
+  scan [flags] <path>   analyze source at <path> and report findings (see below)
+  rules <list|lint|test>  inspect, validate, or test rules (see: godzilla rules)
+  version               print the tool version
+
+Convert source at <path> to gIR, run taint analysis, and report findings.
 
 flags:
   -rules <file>     additional YAML rule file to load alongside the built-in rules
@@ -83,6 +87,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		runScan(os.Args[2:])
+	case "rules":
+		runRules(os.Args[2:])
 	case "version", "-version", "--version", "-v":
 		fmt.Printf("godzilla %s\n", version)
 	default:
