@@ -8,10 +8,19 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
+// Version is the tool version stamped into machine-readable reports (SARIF and
+// JSON). The CLI sets it at startup (from -ldflags at build time); it defaults
+// to "dev" so tests and un-stamped builds still produce valid output (CI-8).
+var Version = "dev"
+
 // jsonDocument is the top-level shape written by WriteJSON.
 type jsonDocument struct {
-	Tool     string        `json:"tool"`
-	Findings []jsonFinding `json:"findings"`
+	Tool string `json:"tool"`
+	// ToolVersion and SchemaVersion let scripted consumers detect which binary
+	// produced a report and pin against the JSON format's evolution.
+	ToolVersion   string        `json:"toolVersion"`
+	SchemaVersion string        `json:"schemaVersion"`
+	Findings      []jsonFinding `json:"findings"`
 }
 
 // jsonFinding is the per-finding shape written by WriteJSON.
@@ -52,8 +61,10 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 	sorted := sortedFindings(findings)
 
 	doc := jsonDocument{
-		Tool:     "godzilla",
-		Findings: make([]jsonFinding, 0, len(sorted)),
+		Tool:          "godzilla",
+		ToolVersion:   Version,
+		SchemaVersion: "1",
+		Findings:      make([]jsonFinding, 0, len(sorted)),
 	}
 	for _, f := range sorted {
 		doc.Findings = append(doc.Findings, jsonFinding{

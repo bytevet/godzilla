@@ -33,6 +33,7 @@ type sarifTool struct {
 
 type sarifDriver struct {
 	Name           string      `json:"name"`
+	Version        string      `json:"version"`
 	InformationURI string      `json:"informationUri"`
 	Rules          []sarifRule `json:"rules"`
 }
@@ -175,6 +176,7 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 				Tool: sarifTool{
 					Driver: sarifDriver{
 						Name:           "Godzilla",
+						Version:        Version,
 						InformationURI: "https://github.com/bytevet/godzilla",
 						Rules:          sarifRules,
 					},

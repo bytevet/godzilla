@@ -17,6 +17,7 @@ import (
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/buildpolicy"
+	"godzilla/internal/config"
 	"godzilla/internal/llm"
 	"godzilla/internal/report"
 	"godzilla/internal/rules"
@@ -25,6 +26,14 @@ import (
 	"godzilla/internal/triage"
 	ir "godzilla/pkg/ir/v1"
 )
+
+// version is the tool version, overridable at build time via
+//
+//	go build -ldflags "-X main.version=v1.2.3"
+//
+// (wired in the Makefile). It is printed by `godzilla version` and stamped into
+// SARIF and JSON reports for CI provenance (CI-8).
+var version = "dev"
 
 // Exit codes.
 const (
@@ -50,6 +59,10 @@ flags:
   -baseline <file>  suppress findings whose fingerprint is in this baseline file (gate only NEW findings)
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
   -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
+  -config <file>    path to a .godzilla.yaml (default: auto-loaded from the scan root)
+
+A .godzilla.yaml in the scan root can set fail-on, path include/exclude globs,
+and per-rule disable / severity-overrides; CLI flags override its values.
 
 Suppress a single finding at the source with a "godzilla:ignore" comment on the
 sink line or the line above it (optionally "godzilla:ignore[rule-id]").
@@ -70,6 +83,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		runScan(os.Args[2:])
+	case "version", "-version", "--version", "-v":
+		fmt.Printf("godzilla %s\n", version)
 	default:
 		usage()
 		os.Exit(exitUsage)
@@ -90,15 +105,48 @@ func runScan(args []string) {
 	baselinePath := fs.String("baseline", "", "suppress findings whose fingerprint is in this baseline file")
 	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
 	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
+	configPath := fs.String("config", "", "path to a .godzilla.yaml (default: auto-loaded from the scan root)")
 	_ = fs.Parse(args)
 
 	buildpolicy.SetAllowed(*allowBuild)
+	report.Version = version // stamp the tool version into SARIF/JSON reports
 
 	if fs.NArg() < 1 {
 		usage()
 		os.Exit(exitUsage)
 	}
 	path := fs.Arg(0)
+
+	// Per-project config (.godzilla.yaml): gate threshold, path filters, and
+	// per-rule disable/severity overrides. An explicit -config wins; otherwise it
+	// auto-loads from the scan root. CLI flags override file values (CI-5).
+	var cfg *config.Config
+	if *configPath != "" {
+		c, err := config.LoadFile(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", *configPath, err)
+			os.Exit(exitError)
+		}
+		cfg = c
+	} else {
+		c, p, err := config.Load(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", p, err)
+			os.Exit(exitError)
+		}
+		cfg = c
+	}
+
+	// The config's fail-on applies only when the CLI did not set -fail-on.
+	failOnSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "fail-on" {
+			failOnSet = true
+		}
+	})
+	if cfg != nil && cfg.FailOn != "" && !failOnSet {
+		*failOn = cfg.FailOn
+	}
 
 	threshold := rules.Severity(*failOn)
 	if threshold.Rank() == 0 {
@@ -111,6 +159,7 @@ func runScan(args []string) {
 		fmt.Fprintf(os.Stderr, "error: loading rules: %v\n", err)
 		os.Exit(exitError)
 	}
+	ruleSet = cfg.ApplyRules(ruleSet) // disable rules / apply severity overrides (no-op if cfg nil)
 
 	res, err := scan.Scan(path, ruleSet)
 	if err != nil {
@@ -131,6 +180,13 @@ func runScan(args []string) {
 	// LLM stage: inline `godzilla:ignore` source directives, then a fingerprint
 	// baseline. Both flag findings as suppressed rather than deleting them.
 	findings = triage.ApplyInlineIgnores(findings)
+	if cfg != nil {
+		var excluded int
+		findings, excluded = cfg.FilterFindings(findings, path)
+		if excluded > 0 {
+			fmt.Fprintf(os.Stdout, "config: excluded %d finding(s) by path filter.\n", excluded)
+		}
+	}
 	if *baselinePath != "" {
 		baseFps, err := triage.LoadBaseline(*baselinePath)
 		if err != nil {
