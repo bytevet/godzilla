@@ -198,6 +198,19 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 	return findings
 }
 
+// propagatorOperands returns the values whose taint a propagating call carries
+// to its result: the explicit arguments plus, for a method/INVOKE call, the
+// receiver (Call.Value). A transform like `tainted.trim()` taints its result
+// through the receiver — which Java/JS keep in Call.Value, not args — so
+// omitting it would drop taint at the most common propagator shape.
+func propagatorOperands(inst *ir.Instruction) []*ir.Value {
+	args := inst.Call.GetArgs()
+	if v := inst.Call.GetValue(); v != nil {
+		return append([]*ir.Value{v}, args...)
+	}
+	return args
+}
+
 // analyzeFunc runs the intra-procedural fixpoint for one function, seeded with
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
@@ -296,14 +309,18 @@ func analyzeFunc(
 					})
 				}
 			}
-		case rule.IsPropagator(callee) || isConcatAddCallee(callee):
-			// A concat-add call (Rust `String + &str`, lowered to an `Add::add`
-			// call) always carries taint from either operand to the result — the
-			// call-shaped analogue of the universal BIN_OP_ADD propagator that
-			// covers Go/JS/Python `+`. Without this, taint would drop at every
-			// Rust string concatenation.
+		case rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee):
+			// A propagating call carries taint from any of its operands to its
+			// result. This covers the rule's own propagators, a Rust concat-add
+			// call (`String + &str` lowered to `Add::add` — the call-shaped
+			// analogue of the universal BIN_OP_ADD propagator), and the built-in
+			// default propagators (stdlib string/encoding transforms that real
+			// code interposes between a source and a sink; without them one
+			// `strings.TrimSpace`/`.toLowerCase()` silently drops taint). Operands
+			// include the RECEIVER of a method call (Call.Value, e.g. Java/JS
+			// `tainted.trim()`), not just the explicit arguments.
 			if inst.Name != "" {
-				markTaintFromOperands(tainted, inst.Name, args)
+				markTaintFromOperands(tainted, inst.Name, propagatorOperands(inst))
 			}
 		}
 

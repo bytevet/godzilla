@@ -1,0 +1,5 @@
+# Taint flows through a receiver-method transform (.toLowerCase()) into execSync;
+# must fire (ENG-4 default propagators + receiver-aware propagation).
+findings:
+    - rule: js-command-injection
+      min: 1
