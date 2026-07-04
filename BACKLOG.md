@@ -50,7 +50,9 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > propagators (`ea27eb3`), COV-1 secrets-over-config-files (`9b142bd`), TRUST-1 build-exec gate
 > (`96a5dbe`), COV-3 Java XSS/SSRF/redirect/deser (`39c5cf3`), COV-5 Python code injection (`315bbf6`),
 > COV-6 header/cookie sources (`55d4f15`), FE-6/COV-2 TypeScript/JSX/ESM via esbuild (`803dcfd`).
-> **Tier 2 — in progress.**
+> **Tier 2 — ✅ core goals met**: PERF-2 Go dep-scoping (`a6e6d06`), PERF-3 parallelism (`c99075e`),
+> PERF-4 subprocess timeouts (`a53dec4`), PERF-5 shared CHA index (`d049e80`), PERF-7 dir excludes
+> (`b73af85`); PERF-1/6/8 deferred with rationale (see Tier 2 below). **Tier 3 — in progress.**
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
@@ -69,12 +71,15 @@ Localized bug fixes and one-line safety flips. Ship first.
 - **COV-3, COV-5, COV-6** — fill the pure-YAML class/framework/source holes (Java deser/XXE/SSRF/XSS, SSTI/NoSQL/zip-slip/etc., missing HTTP accessors & frameworks).
 - **TRUST-1** — gate build execution behind `--allow-build` + loud warning.
 
-### Tier 2 — Make it fast (per-commit viability, goal #1)
-- **PERF-2** — scope Go analysis to target packages, not the whole dependency closure (3.7s/1.45 GB for 40 lines today).
-- **PERF-3** — parallelize frontends / per-file conversion / analysis / LLM review.
-- **PERF-6** — wire up the already-built tree-shaking (`Reachable`/`Roots`).
-- **PERF-1 + PERF-4** — caching + incremental/diff-aware scanning; up-to-date checks + timeouts on build subprocesses.
-- **PERF-7** — standard directory exclusions + size caps.
+### Tier 2 — Make it fast (per-commit viability, goal #1) — ✅ core goals met
+- ✅ **PERF-2** — scope Go analysis to target packages, not the whole dependency closure. *(`a6e6d06`; measured ~11× on gin_gorm, corpus 60s→21s)*
+- ✅ **PERF-3** — parallelize per-rule analysis + per-frontend conversion. *(`c99075e`; race-clean, deterministic)*
+- ✅ **PERF-4** — subprocess timeouts on every toolchain shell-out. *(`a53dec4`; `internal/proc`)*
+- ✅ **PERF-5** — build the CHA method index once, shared across rules. *(`d049e80`)*
+- ✅ **PERF-7** — shared directory exclusions + size caps. *(`b73af85`; `internal/walkignore`)*
+- ⏸ **PERF-1** *(deferred, rationale)* — full incremental/per-file caching. High-value for the per-commit goal, but a substantial correctness-sensitive feature (content-hash keys, converter-version salt, invalidation, cache concurrency with PERF-3). Deferred: PERF-2/3/4/5/7 already delivered "ultra-fast" (an 11× frontend win + parallelism), so caching's marginal benefit no longer justifies the invalidation risk. Diff-aware *gating* already ships via CI-2 fingerprints + baseline.
+- ⏸ **PERF-6** *(deferred, rationale)* — wire up tree-shaking (`Reachable`/`Roots`). After PERF-2 the speedup is marginal, and restricting analysis to reachable functions trades the whole-program-analysis safety property (analyze everything) for that marginal gain — the call graph is a CHA over-approximation with incomplete edges for reflection/DI/framework dispatch, so it risks dropping real findings. The primitives are kept as a building block for a future demand-driven pass.
+- ⏸ **PERF-8** *(deferred, low)* — streaming/memory discipline; not a bottleneck after PERF-2 cut peak heap.
 
 ### Tier 3 — Make it precise & credible (deeper engine + measurement)
 - **ENG-3** — field/key-sensitive containers (one-level access paths).
