@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"godzilla/internal/rules"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -176,8 +177,7 @@ func ScanSecretsInFiles(root string) []Finding {
 			return nil
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case "node_modules", "vendor", ".git", "target", "dist", "build":
+			if walkignore.SkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

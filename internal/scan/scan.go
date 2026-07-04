@@ -20,6 +20,7 @@ import (
 	rust_converter "godzilla/converters/rust"
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -212,8 +213,7 @@ func detectLanguages(dir string) map[string]bool {
 			return nil
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case "node_modules", "vendor", ".git":
+			if walkignore.SkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

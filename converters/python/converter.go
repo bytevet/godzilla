@@ -46,6 +46,7 @@ import (
 	"sort"
 	"strings"
 
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -82,7 +83,16 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			if err != nil {
 				return err
 			}
-			if !d.IsDir() && strings.HasSuffix(p, ".py") {
+			if d.IsDir() {
+				if walkignore.SkipDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(p, ".py") && !walkignore.SkipFile(d.Name()) {
+				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
+					return nil
+				}
 				files = append(files, p)
 			}
 			return nil

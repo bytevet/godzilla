@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"godzilla/internal/buildpolicy"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -239,8 +240,7 @@ func classOutputDirs(root, suffix string) []string {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
-		switch d.Name() {
-		case ".git", ".gradle", "node_modules":
+		if walkignore.SkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if strings.HasSuffix(p, suffix) {

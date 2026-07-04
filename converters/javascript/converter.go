@@ -112,6 +112,7 @@ import (
 	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
 
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -145,12 +146,15 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 				return err
 			}
 			if d.IsDir() {
-				if d.Name() == "node_modules" {
+				if walkignore.SkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if isJSFamily(p) {
+			if isJSFamily(p) && !walkignore.SkipFile(d.Name()) {
+				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
+					return nil
+				}
 				files = append(files, p)
 			}
 			return nil
