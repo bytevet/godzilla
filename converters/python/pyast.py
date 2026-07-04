@@ -181,12 +181,27 @@ def conv_stmt(node):
             "finalbody": conv_body(node.finalbody),
             "pos": p,
         }
+    # Imports carry their names+asnames so the lowering can resolve aliased and
+    # from-imported sink modules (FE-2): `import subprocess as sp` / `from os
+    # import system` otherwise silently break module-anchored sink matching.
+    if isinstance(node, ast.Import):
+        return {
+            "kind": "Import",
+            "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+            "pos": p,
+        }
+    if isinstance(node, ast.ImportFrom):
+        return {
+            "kind": "ImportFrom",
+            "module": node.module,
+            "level": node.level,
+            "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+            "pos": p,
+        }
     if isinstance(
         node,
         (
             ast.Pass,
-            ast.Import,
-            ast.ImportFrom,
             ast.Global,
             ast.Nonlocal,
             ast.Break,

@@ -3,6 +3,7 @@ package py_converter
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	ir "godzilla/pkg/ir/v1"
 )
@@ -36,12 +37,15 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 		}
 	}
 
+	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
+	aliases := collectImportAliases(root.list("body"))
+
 	var collect func(stmts []astNode, qualPrefix string)
 	collect = func(stmts []astNode, qualPrefix string) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
-				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs)
+				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases)
 				functions = append(functions, fn)
 				collect(s.list("body"), qualPrefix+s.str("name")+".")
 			case "ClassDef":
@@ -85,7 +89,7 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 		}
 	}
 
-	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs)
+	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs, aliases)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 
 	return mod
@@ -95,7 +99,7 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 // (skipping nested def/class bodies, which become their own functions) into a
 // synthetic entry-point function, analogous to converters/go treating
 // package-level init code as part of the SSA program.
-func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool) *ir.Function {
+func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool, aliases map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          moduleName + ".<module>",
 		ObjectName:    "<module>",
@@ -106,6 +110,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 	fs := newFuncState(filename)
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
+	fs.aliases = aliases
 	fs.lowerBody(root.list("body"))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
@@ -113,7 +118,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 
 // convertFunction lowers a single `def` (module-level, nested, or method)
 // into an ir.Function containing one straight-line basic block.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool) *ir.Function {
+func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
@@ -128,6 +133,7 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	fs := newFuncState(filename)
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
+	fs.aliases = aliases
 	params := node.strList("params")
 	for _, p := range params {
 		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
@@ -176,10 +182,69 @@ type funcState struct {
 	// are empty for non-methods.
 	selfName     string
 	methodPrefix string
+
+	// aliases maps a locally-bound import name to its canonical dotted path
+	// (FE-2): "sp" -> "subprocess" for `import subprocess as sp`, "system" ->
+	// "os.system" for `from os import system`. resolveDotted rewrites a callee's
+	// root through it so module-anchored sink rules match regardless of aliasing.
+	aliases map[string]string
 }
 
 func newFuncState(filename string) *funcState {
 	return &funcState{filename: filename, env: map[string]*ir.Value{}, paramRegs: map[string]bool{}}
+}
+
+// resolveDotted rewrites the root component of a dotted callee name through the
+// import alias table, so `sp.call` becomes `subprocess.call` and a from-imported
+// `system` becomes `os.system` (FE-2). Names with no alias pass through.
+func (fs *funcState) resolveDotted(dotted string) string {
+	if len(fs.aliases) == 0 {
+		return dotted
+	}
+	root, rest, hasRest := strings.Cut(dotted, ".")
+	canon, ok := fs.aliases[root]
+	if !ok {
+		return dotted
+	}
+	if hasRest {
+		return canon + "." + rest
+	}
+	return canon
+}
+
+// collectImportAliases scans a module body for Import/ImportFrom statements and
+// returns the local-name -> canonical-dotted-path map (FE-2). `import x as y`
+// binds y->x; `from m import n as a` binds a->m.n; relative imports are skipped.
+func collectImportAliases(body []astNode) map[string]string {
+	aliases := map[string]string{}
+	for _, s := range body {
+		switch s.kind() {
+		case "Import":
+			for _, a := range s.list("names") {
+				name, as := a.str("name"), a.str("asname")
+				if as != "" && name != "" {
+					aliases[as] = name // `import a.b.c as x` -> x resolves to a.b.c
+				}
+			}
+		case "ImportFrom":
+			mod := s.str("module")
+			if mod == "" { // relative (`from . import x`) or unresolved
+				continue
+			}
+			for _, a := range s.list("names") {
+				name, as := a.str("name"), a.str("asname")
+				if name == "" || name == "*" {
+					continue
+				}
+				bound := as
+				if bound == "" {
+					bound = name
+				}
+				aliases[bound] = mod + "." + name
+			}
+		}
+	}
+	return aliases
 }
 
 func (fs *funcState) newReg() string {
@@ -629,7 +694,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	// lowerNestedCallees.
 	fs.lowerNestedCallees(funcNode)
 
-	callee := "py:" + dottedName(funcNode)
+	callee := "py:" + fs.resolveDotted(dottedName(funcNode))
 	// A bare call to a module-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName
 	// ("py:<module>.helper"); otherwise byKey never resolves it and taint does

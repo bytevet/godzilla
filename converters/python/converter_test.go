@@ -2,6 +2,7 @@ package py_converter
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
 	"godzilla/internal/analysis"
@@ -51,10 +52,13 @@ func TestConvertFile_SQLInjectionSample(t *testing.T) {
 					t.Errorf("unsupported python construct in function %s: %s", f.Name, inst.Comment)
 				}
 				if inst.Op == ir.OpCode_OP_CODE_CALL && inst.Call != nil {
-					switch inst.Call.Callee {
-					case "py:request.args.get":
+					// `request` comes from `from flask import request`, so FE-2 alias
+					// resolution qualifies the callee to py:flask.request.args.get;
+					// match by suffix so the test is robust to that (correct) rewrite.
+					if strings.HasSuffix(inst.Call.Callee, "request.args.get") {
 						foundSourceCall = true
-					case "py:cursor.execute":
+					}
+					if inst.Call.Callee == "py:cursor.execute" {
 						foundSinkCall = true
 					}
 				}
@@ -377,5 +381,63 @@ func TestConvertFile_ModuleConstantBecomesGlobal(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a global AWS_ACCESS_KEY_ID with init value %q; globals = %v", want, prog.Modules[0].Globals)
+	}
+}
+
+// TestResolveDotted covers FE-2 import-alias resolution of a callee's root:
+// module aliases (import x as y) and from-imports (from m import n).
+func TestResolveDotted(t *testing.T) {
+	fs := &funcState{aliases: map[string]string{
+		"sp":     "subprocess",    // import subprocess as sp
+		"system": "os.system",     // from os import system
+		"req":    "flask.request", // import flask.request as req
+	}}
+	cases := []struct{ in, want string }{
+		{"sp.call", "subprocess.call"},
+		{"sp", "subprocess"},
+		{"system", "os.system"},
+		{"req.args.get", "flask.request.args.get"},
+		{"os.system", "os.system"}, // unaliased root passes through
+		{"cursor.execute", "cursor.execute"},
+	}
+	for _, c := range cases {
+		if got := fs.resolveDotted(c.in); got != c.want {
+			t.Errorf("resolveDotted(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// No alias table: identity.
+	empty := &funcState{}
+	if got := empty.resolveDotted("sp.call"); got != "sp.call" {
+		t.Errorf("no aliases should be identity, got %q", got)
+	}
+}
+
+// TestCollectImportAliases covers building the alias table from import statements.
+func TestCollectImportAliases(t *testing.T) {
+	// astNode is map[string]any; a list() child is []any of map[string]any.
+	body := []astNode{
+		{"kind": "Import", "names": []any{
+			map[string]any{"name": "subprocess", "asname": "sp"},
+			map[string]any{"name": "os", "asname": nil}, // no asname -> no alias
+		}},
+		{"kind": "ImportFrom", "module": "os", "names": []any{
+			map[string]any{"name": "system", "asname": nil},
+		}},
+		{"kind": "ImportFrom", "module": nil, "names": []any{
+			map[string]any{"name": "x", "asname": nil}, // relative -> skipped
+		}},
+	}
+	got := collectImportAliases(body)
+	if got["sp"] != "subprocess" {
+		t.Errorf("sp -> %q, want subprocess", got["sp"])
+	}
+	if got["system"] != "os.system" {
+		t.Errorf("system -> %q, want os.system", got["system"])
+	}
+	if _, ok := got["os"]; ok {
+		t.Errorf("plain `import os` should not create an alias")
+	}
+	if _, ok := got["x"]; ok {
+		t.Errorf("relative import should be skipped")
 	}
 }
