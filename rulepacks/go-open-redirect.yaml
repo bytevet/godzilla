@@ -28,7 +28,9 @@ rules:
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
     sinks:
       - "go:*net/http.Redirect#2"
-    sanitizers: []
+    sanitizers:
+      - "go:*url.QueryEscape"
+      - "go:*url.PathEscape"
     propagators:
       - "go:fmt.Sprintf"
       - "go:fmt.Sprint"

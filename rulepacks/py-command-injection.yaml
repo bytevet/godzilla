@@ -41,6 +41,8 @@ rules:
       - "py:*.subprocess.*"
     # No built-in sanitizer neutralizes tainted input for shell command
     # construction; avoid passing tainted data to a shell entirely.
-    sanitizers: []
+    sanitizers:
+      - "py:shlex.quote"
+      - "py:*shlex.quote"
     propagators:
       - "py:*.join"

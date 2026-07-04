@@ -37,5 +37,6 @@ rules:
       - "js:*fetch"
     # No built-in sanitizer neutralizes tainted input for a request URL; the
     # fix is allow-listing the destination host, not escaping.
-    sanitizers: []
+    sanitizers:
+      - "js:encodeURIComponent"
     propagators: []

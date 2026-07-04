@@ -39,13 +39,28 @@ type sarifDriver struct {
 }
 
 type sarifRule struct {
-	ID         string              `json:"id"`
-	Name       string              `json:"name"`
-	Properties sarifRuleProperties `json:"properties,omitempty"`
+	ID                   string              `json:"id"`
+	Name                 string              `json:"name"`
+	ShortDescription     *sarifMessage       `json:"shortDescription,omitempty"`
+	FullDescription      *sarifMessage       `json:"fullDescription,omitempty"`
+	DefaultConfiguration *sarifDefaultConfig `json:"defaultConfiguration,omitempty"`
+	HelpURI              string              `json:"helpUri,omitempty"`
+	Properties           sarifRuleProperties `json:"properties,omitempty"`
+}
+
+// sarifDefaultConfig sets a rule's default result level; GitHub code scanning
+// uses it when a result omits its own level.
+type sarifDefaultConfig struct {
+	Level string `json:"level"`
 }
 
 type sarifRuleProperties struct {
 	CWE string `json:"cwe,omitempty"`
+	// SecuritySeverity is a CVSS-like 0-10 string GitHub code scanning uses to
+	// filter and rank security results; without it, security alerts are not
+	// severity-sortable. Tags mark the result as a security finding.
+	SecuritySeverity string   `json:"security-severity,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
 }
 
 type sarifResult struct {
@@ -131,11 +146,20 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 			continue
 		}
 		ruleIndex[f.RuleID] = len(sarifRules)
+		tags := []string{"security"}
+		if f.CWE != "" {
+			tags = append(tags, "external/cwe/"+strings.ToLower(f.CWE))
+		}
 		sarifRules = append(sarifRules, sarifRule{
-			ID:   f.RuleID,
-			Name: f.RuleID,
+			ID:                   f.RuleID,
+			Name:                 f.RuleID,
+			ShortDescription:     &sarifMessage{Text: f.Message},
+			DefaultConfiguration: &sarifDefaultConfig{Level: sarifLevel(f.Severity)},
+			HelpURI:              "https://github.com/bytevet/godzilla",
 			Properties: sarifRuleProperties{
-				CWE: f.CWE,
+				CWE:              f.CWE,
+				SecuritySeverity: securitySeverity(f.Severity),
+				Tags:             tags,
 			},
 		})
 	}
@@ -204,6 +228,26 @@ func sarifLevel(sev rules.Severity) string {
 		return "note"
 	default:
 		return "none"
+	}
+}
+
+// securitySeverity maps a rule severity to the CVSS-like 0-10 string GitHub code
+// scanning uses to rank and filter security results (CI-4). Empty for an
+// unknown severity so no misleading score is emitted.
+func securitySeverity(sev rules.Severity) string {
+	switch rules.Severity(strings.ToLower(string(sev))) {
+	case rules.SeverityCritical:
+		return "9.0"
+	case rules.SeverityHigh:
+		return "7.0"
+	case rules.SeverityMedium:
+		return "5.0"
+	case rules.SeverityLow:
+		return "3.0"
+	case rules.SeverityInfo:
+		return "1.0"
+	default:
+		return ""
 	}
 }
 

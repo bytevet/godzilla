@@ -24,5 +24,6 @@ rules:
       - "js:*ctx.request*"
     sinks:
       - "js:*.redirect"
-    sanitizers: []
+    sanitizers:
+      - "js:encodeURIComponent"
     propagators: []
