@@ -71,6 +71,9 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 	}
 	findings := analysis.NewEngine(rs).Analyze(prog)
 	findings = append(findings, analysis.ScanSecrets(prog)...)
+	// Also scan raw config files (.env, compose, Dockerfile, CI YAML, ...) that
+	// no language frontend parses — the dominant hardcoded-secret vector.
+	findings = append(findings, analysis.ScanSecretsInFiles(path)...)
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
 }
 

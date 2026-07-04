@@ -1,7 +1,9 @@
 package scan
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"godzilla/internal/rules/loader"
@@ -68,5 +70,42 @@ func TestScanCoverageFrontendFailure(t *testing.T) {
 	}
 	if failed[0].Err == "" {
 		t.Errorf("a coverage failure must carry the frontend error for diagnosis")
+	}
+}
+
+// TestScan_FindsSecretsInConfigFiles is the COV-1 end-to-end guard: a credential
+// in a .env config file (which no frontend parses) is reported by scan.Scan.
+// The fixture is written to a temp dir and the secret assembled from fragments,
+// so no complete credential is committed (avoids tripping push protection).
+func TestScan_FindsSecretsInConfigFiles(t *testing.T) {
+	dir := t.TempDir()
+	// A trivial Go source file so a frontend runs (Convert needs a language).
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module cfgsec\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	awsKey := "AKIA" + "IOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("AWS_ACCESS_KEY_ID="+awsKey+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	res, err := Scan(dir, rs)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.RuleID == "secret-aws-access-key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected scan.Scan to report the .env secret, got %d finding(s)", len(res.Findings))
 	}
 }
