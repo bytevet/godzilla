@@ -127,8 +127,10 @@ type sarifRegion struct {
 }
 
 type sarifResultProperties struct {
-	Confidence string `json:"confidence,omitempty"`
-	CWE        string `json:"cwe,omitempty"`
+	Confidence      string `json:"confidence,omitempty"`
+	CWE             string `json:"cwe,omitempty"`
+	ReviewConfirmed bool   `json:"reviewConfirmed,omitempty"`
+	ReviewNote      string `json:"reviewNote,omitempty"`
 }
 
 // WriteSARIF renders findings as a SARIF 2.1.0 document to w. Findings are
@@ -173,8 +175,10 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 			Message:             sarifMessage{Text: f.Message},
 			PartialFingerprints: map[string]string{"godzilla/v1": analysis.Fingerprint(f)},
 			Properties: sarifResultProperties{
-				Confidence: string(f.Confidence),
-				CWE:        f.CWE,
+				Confidence:      string(f.Confidence),
+				CWE:             f.CWE,
+				ReviewConfirmed: f.ReviewConfirmed,
+				ReviewNote:      f.ReviewNote,
 			},
 		}
 		if loc, ok := sarifLocationFor(f.SinkPos); ok {

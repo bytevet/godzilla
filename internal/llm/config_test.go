@@ -132,3 +132,31 @@ func TestFilter_OrderPreserved(t *testing.T) {
 		t.Errorf("expected a, c, e active")
 	}
 }
+
+// exploitReviewer keeps every finding and reports an exploitability note, to
+// verify LLM-7's confirmed-finding annotation.
+type exploitReviewer struct{}
+
+func (exploitReviewer) Review(_ context.Context, _ analysis.Finding, _ string) (Verdict, error) {
+	return Verdict{FalsePositive: false, Confidence: 0.9, Exploitability: "attacker controls the shell command", Reason: "reachable"}, nil
+}
+
+// TestFilter_ConfirmedAnnotation verifies a KEPT finding is flagged
+// ReviewConfirmed with the reviewer's exploitability note (LLM-7).
+func TestFilter_ConfirmedAnnotation(t *testing.T) {
+	out, stats := FilterWithConfig(context.Background(), exploitReviewer{},
+		[]analysis.Finding{withContext("x", analysis.ConfidenceMedium)}, analysis.ConfidenceMedium, DefaultReviewConfig())
+	if stats.Reviewed != 1 || stats.Suppressed != 0 {
+		t.Fatalf("expected 1 reviewed, 0 suppressed; got reviewed=%d suppressed=%d", stats.Reviewed, stats.Suppressed)
+	}
+	f := out[0]
+	if f.Suppressed {
+		t.Errorf("a confirmed finding must not be suppressed")
+	}
+	if !f.ReviewConfirmed {
+		t.Errorf("kept-after-review finding should be ReviewConfirmed")
+	}
+	if f.ReviewNote != "attacker controls the shell command" {
+		t.Errorf("ReviewNote = %q, want the exploitability note", f.ReviewNote)
+	}
+}

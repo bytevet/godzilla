@@ -62,6 +62,14 @@ type Finding struct {
 	Suppressed        bool
 	SuppressedBy      string // what suppressed it, e.g. "llm-review"
 	SuppressionReason string // the reviewer's stated justification
+
+	// ReviewConfirmed marks a finding the LLM reviewer adjudicated as a TRUE
+	// positive (kept, not suppressed); ReviewNote carries the reviewer's
+	// exploitability/reasoning. This surfaces the value of a review on the
+	// findings it KEEPS — a confirmed interprocedural finding is higher-priority
+	// triage — instead of only recording the ones it drops (LLM-7).
+	ReviewConfirmed bool
+	ReviewNote      string
 }
 
 // String renders a one-line human-readable summary of the finding.

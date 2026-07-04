@@ -22,10 +22,15 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
-// Verdict is a reviewer's judgment about a single finding.
+// Verdict is a reviewer's judgment about a single finding. Beyond the binary
+// false-positive decision, it can carry the model's self-confidence and a
+// one-sentence exploitability assessment (LLM-7) — surfaced on a KEPT finding so
+// a developer sees the reviewer's reasoning, not just a pass/drop.
 type Verdict struct {
-	FalsePositive bool
-	Reason        string
+	FalsePositive  bool
+	Reason         string
+	Confidence     float64 // model self-confidence 0..1 (0 if not provided)
+	Exploitability string  // one-sentence exploitability note (optional)
 }
 
 // Reviewer adjudicates a finding, given some surrounding source context, and
@@ -157,12 +162,22 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 			}
 			continue // fail open
 		}
+		idx := jobs[k].idx
 		if verdicts[k].FalsePositive {
-			idx := jobs[k].idx
 			out[idx].Suppressed = true
 			out[idx].SuppressedBy = "llm-review"
 			out[idx].SuppressionReason = verdicts[k].Reason
 			stats.Suppressed++
+			continue
+		}
+		// Kept after review: annotate as LLM-confirmed with the reviewer's
+		// exploitability note (falling back to its reason), so a developer sees
+		// why it survived triage (LLM-7).
+		out[idx].ReviewConfirmed = true
+		if note := verdicts[k].Exploitability; note != "" {
+			out[idx].ReviewNote = note
+		} else {
+			out[idx].ReviewNote = verdicts[k].Reason
 		}
 	}
 	return out, stats
@@ -220,7 +235,7 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("path, and whether the sink is genuinely dangerous. ")
 	b.WriteString(calibration)
 	b.WriteString("\nRespond with ONLY a JSON object of the form ")
-	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
+	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
 	return b.String()
 }
 
@@ -284,7 +299,7 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("\nDecide whether this is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive. ")
 	b.WriteString(calibration + " (do not suppress on thin evidence).\n")
 	b.WriteString("When done investigating, respond with ONLY a JSON object of the form ")
-	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
+	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
 	return b.String()
 }
 
@@ -298,13 +313,15 @@ func parseVerdict(text string) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("no JSON object in reviewer response")
 	}
 	var raw struct {
-		Verdict string `json:"verdict"`
-		Reason  string `json:"reason"`
+		Verdict        string  `json:"verdict"`
+		Reason         string  `json:"reason"`
+		Confidence     float64 `json:"confidence"`
+		Exploitability string  `json:"exploitability"`
 	}
 	if err := json.Unmarshal([]byte(text[start:end+1]), &raw); err != nil {
 		return Verdict{}, fmt.Errorf("parsing reviewer response: %w", err)
 	}
-	v := Verdict{Reason: raw.Reason}
+	v := Verdict{Reason: raw.Reason, Confidence: raw.Confidence, Exploitability: raw.Exploitability}
 	// Leniency is allowed only in the KEEP direction. Dropping a finding is the
 	// one verdict that must be unambiguous, so require the exact canonical token
 	// and reject loose aliases like bare "false"/"fp" — anything unrecognized

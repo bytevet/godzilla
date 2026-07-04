@@ -44,6 +44,10 @@ type jsonFinding struct {
 	Suppressed        bool   `json:"suppressed,omitempty"`
 	SuppressedBy      string `json:"suppressedBy,omitempty"`
 	SuppressionReason string `json:"suppressionReason,omitempty"`
+	// A finding the LLM reviewer KEPT is flagged confirmed with its reasoning,
+	// so a developer sees the reviewer's exploitability note, not just drops.
+	ReviewConfirmed bool   `json:"reviewConfirmed,omitempty"`
+	ReviewNote      string `json:"reviewNote,omitempty"`
 }
 
 // jsonLocation mirrors an ir.Position for JSON output.
@@ -83,6 +87,8 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 			Suppressed:        f.Suppressed,
 			SuppressedBy:      f.SuppressedBy,
 			SuppressionReason: f.SuppressionReason,
+			ReviewConfirmed:   f.ReviewConfirmed,
+			ReviewNote:        f.ReviewNote,
 		})
 	}
 
