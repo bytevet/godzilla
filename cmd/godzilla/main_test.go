@@ -94,3 +94,62 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestQuiet_SuppressesOutputButKeepsGate is the CI-9 guard: -quiet prints no
+// console output yet still fails the gate (non-zero exit) on a finding.
+func TestQuiet_SuppressesOutputButKeepsGate(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module q\n\ngo 1.21\n")
+	write("main.go", `package main
+
+import (
+	"net/http"
+	"os/exec"
+)
+
+func h(w http.ResponseWriter, r *http.Request) {
+	_ = exec.Command("sh", "-c", r.URL.Query().Get("c")).Run()
+	_ = w
+}
+
+func main() { http.HandleFunc("/x", h); _ = http.ListenAndServe(":0", nil) }
+`)
+	// Non-quiet: fails the gate (non-zero) and prints findings. (`go run`
+	// collapses any non-zero program exit to 1, so compare gate outcomes rather
+	// than the exact code 3.)
+	code, out := runCLI(t, "scan", dir)
+	if code == 0 {
+		t.Fatalf("expected a non-zero (gate-fail) exit on a finding, got 0\n%s", out)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatalf("non-quiet scan should print findings")
+	}
+	// Quiet: same non-zero gate outcome, but no console output. (`go run` prints
+	// its own "exit status N" line to stderr on a non-zero exit; that wrapper
+	// noise is not the program's output, so drop it before the empty check.)
+	qcode, qout := runCLI(t, "scan", "-quiet", dir)
+	if qcode != code {
+		t.Errorf("-quiet must keep the same gate exit as non-quiet (%d), got %d", code, qcode)
+	}
+	if prog := dropGoRunNoise(qout); prog != "" {
+		t.Errorf("-quiet must produce no program output, got:\n%s", prog)
+	}
+}
+
+// dropGoRunNoise removes the "exit status N" line `go run` writes on a non-zero
+// program exit, leaving only the program's own output.
+func dropGoRunNoise(out string) string {
+	var kept []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "exit status ") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}

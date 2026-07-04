@@ -64,6 +64,7 @@ flags:
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
   -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
   -config <file>    path to a .godzilla.yaml (default: auto-loaded from the scan root)
+  -quiet            suppress console output; the exit code and report files still reflect findings
 
 A .godzilla.yaml in the scan root can set fail-on, path include/exclude globs,
 and per-rule disable / severity-overrides; CLI flags override its values.
@@ -112,6 +113,7 @@ func runScan(args []string) {
 	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
 	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
 	configPath := fs.String("config", "", "path to a .godzilla.yaml (default: auto-loaded from the scan root)")
+	quiet := fs.Bool("quiet", false, "suppress coverage/summary/per-finding console output; the exit code and any report files still reflect findings")
 	_ = fs.Parse(args)
 
 	buildpolicy.SetAllowed(*allowBuild)
@@ -173,9 +175,11 @@ func runScan(args []string) {
 		os.Exit(exitError)
 	}
 
-	printCoverage(os.Stdout, res.Coverage)
+	if !*quiet {
+		printCoverage(os.Stdout, res.Coverage)
+	}
 
-	if *showSummary {
+	if *showSummary && !*quiet {
 		printSummary(os.Stdout, summarize(res.Program))
 		fmt.Fprintln(os.Stdout)
 	}
@@ -241,7 +245,7 @@ func runScan(args []string) {
 		fmt.Fprintln(os.Stdout)
 	}
 
-	gated := printFindings(os.Stdout, findings, threshold)
+	gated := printFindings(os.Stdout, findings, threshold, *quiet)
 
 	reports := []struct {
 		path  string
@@ -333,8 +337,10 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 }
 
 // printFindings renders findings sorted by severity (worst first) then location,
-// and returns how many meet or exceed the gate threshold.
-func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Severity) int {
+// and returns how many meet or exceed the gate threshold. When quiet, it still
+// computes the gate count but prints nothing — for CI that consumes a report
+// file and only needs the exit code.
+func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
 	sort.SliceStable(findings, func(i, j int) bool {
 		ri, rj := findings[i].Severity.Rank(), findings[j].Severity.Rank()
 		if ri != rj {
@@ -361,6 +367,10 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 		if f.Severity.Rank() >= threshold.Rank() {
 			gated++
 		}
+	}
+
+	if quiet {
+		return gated
 	}
 
 	if len(active) == 0 {

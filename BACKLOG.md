@@ -60,7 +60,20 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`),
 > ENG-9 guard/barrier sanitization (`8e33f7c`), ENG-2 flow-sensitivity + strong updates (`41ae16f`),
 > LLM-4 agentic tool-using reviewer (`516c18f`). Every High-severity engine/reviewer gap from the
-> audit is now implemented and tested; the remaining backlog is the medium/low opportunistic set.
+> audit is now implemented and tested.
+>
+> **Opportunistic (medium/low) — ✅ swept**: LLM-5 reviewer concurrency/timeout/cap (`3dceb0f`),
+> ENG-8 SSRF dedup ordering (`b8344be`), CI-5 project config + path filters (`0fce6df`), CI-8 version
+> stamping (`b2e8133`), CI-7 rules list/lint/test (`6acc72f`), LLM-8 rule-vocabulary prompt +
+> verdict-parse safety (`1cd91ee`), COV-4 dangerous-call rule kind (`3a1b72e`), FE-9/FE-10 Java/Rust
+> toolchain-decay guards (`f866600`), CI-4 SARIF rule metadata + COV-9 sanitizer realism (`1abcdab`),
+> LLM-6 verified done, LLM-7 richer verdict + confirmed-finding annotation (`6ac4a91`), CI-9 `-quiet`
+> (`<pending>`). **Remaining — deferred with rationale** (open-ended coverage/lowering-fidelity work,
+> low incremental value against the near-zero-FP gate goal; see the Terminal-state note below):
+> COV-7 (axum sources — needs MIR-signature extractor synthesis in the frontend), COV-8 (C/C++ cgo
+> depth), COV-10 (PHP/Ruby/C#/Kotlin — new frontends), FE-2/FE-3/FE-4/FE-5/FE-7/FE-8 (per-frontend
+> lowering fidelity), LLM-9 (OpenAI-compatible adapter; `ANTHROPIC_BASE_URL` already works for
+> Anthropic-compatible proxies), PERF-1/6/8 (already reasoned).
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
@@ -105,6 +118,31 @@ COV-9 (sanitizer realism), COV-10 (new languages), ENG-8 (SSRF dedup ordering), 
 verifier correction; narrower than first stated), FE-3 (Rust bin/workspace targets), FE-4/FE-5/FE-7/FE-8
 (frontend lowering fidelity), FE-9/FE-10 (JDK req / MIR version guard), LLM-5/LLM-7/LLM-8/LLM-9,
 PERF-5/PERF-8.
+
+### Terminal state — what's DONE vs. deferred
+
+Everything **CRITICAL / HIGH / tractable-MEDIUM across the whole backlog is implemented and tested**
+(Tiers 0–3 complete; the opportunistic MEDIUM/LOW set swept — see the roadmap status header for the
+per-ID commit map). The items intentionally **left open** are the ones whose cost is disproportionate to
+their value against the headline near-zero-FP per-commit-gate goal, deferred here with rationale so the
+list is honest rather than silently unfinished:
+
+- **COV-7 (Rust axum sources)** — needs the frontend to synthesize a source CALL per axum extractor
+  (`Query`/`Path`/`Json`) by pattern-matching the MIR signature text, mirroring the Java
+  `@RequestParam` trick. Real work in `mir.go`, only exercisable with `rustc` + the axum crate; the
+  taint *engine* is ready (rules are a YAML edit once the sources fire). Highest-value of the deferrals.
+- **COV-8 (C/C++ depth)** — more packs + argv/execve coverage on the opt-in cgo LLVM frontend; gated on
+  a libLLVM build, so it can't run in the default test matrix.
+- **COV-10 (PHP/Ruby/C#/Kotlin)** — net-new frontends; each is a large project on its own.
+- **FE-2/FE-3/FE-4/FE-5/FE-7/FE-8** — per-frontend lowering-fidelity refinements (import aliases,
+  Rust bin/workspace targets, misc node coverage). Each is narrow and open-ended; the fidelity guards
+  FE-9/FE-10 already surface *gross* decay loudly, which was the trust-critical part.
+- **LLM-9 (OpenAI-compatible adapter)** — the `Reviewer` interface already supports it and
+  `ANTHROPIC_BASE_URL` covers Anthropic-compatible proxies today; a full OpenAI/Ollama adapter is a
+  clean add when demanded.
+- **CI-9 changed-files/`--files -`** — a convenience wrapper over per-file `scan`; marginal.
+- **PERF-1/6/8** — reasoned in the Tier 2 section (caching invalidation risk; tree-shaking soundness
+  trade-off; streaming not a bottleneck).
 
 ---
 
@@ -366,10 +404,11 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Add a `var version = "dev"` in cmd/godzilla injected via -ldflags in the Makefile, a `godzilla version` subcommand, `Version` on sarifDriver, and a `schemaVersion: "1"` + `toolVersion` on jsonDocument.
 - **DONE:** `var version = "dev"` in `cmd/godzilla`, injected at build via `-ldflags "-X main.version=$(VERSION)"` (Makefile `VERSION` defaults to `git describe`). A `godzilla version` subcommand (also `--version`/`-v`) prints it. `report.Version` (stamped from the CLI at startup) now flows into the SARIF `driver.version` and the JSON document's `toolVersion` + `schemaVersion: "1"`. Tested by `TestReportsStampVersion`; the ldflags injection verified end-to-end.
 
-### CI-9 [LOW] Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
+### CI-9 [LOW] ✅ DONE (`<pending>`, partial) Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
 
 - **Impact:** Minor individually, but for the 'ultra-fast per-commit' headline goal the absence of a changed-files entry point matters: pre-commit frameworks pass filenames, and per-file invocation re-pays JVM/rustc startup each time. Stale usage text erodes polish/trust on first contact.
 - **Fix direction:** Fix usageText and scan.go:106's language list; add --quiet (suppress per-finding text when a report flag is set) and a simple frontends-started/finished progress line on stderr; accept multiple positional paths and a `--files -` stdin list feeding a single merged Convert, enabling a documented pre-commit hook recipe in README.
+- **DONE:** Added `-quiet` (suppresses coverage/summary/per-finding console output while the exit code and any report files still reflect findings — the CI-consumes-a-report-file case). The multi-command usage text was already refreshed with the `scan`/`rules`/`version` subcommands (CI-7/CI-8). Tested by `TestQuiet_SuppressesOutputButKeepsGate`. The changed-files / `--files -` stdin pre-commit entry point is deferred (see Terminal-state note): it is a convenience wrapper — the same coverage is achievable today by invoking `scan` per file — and merging arbitrary file lists across six frontends into one Convert is a non-trivial addition for marginal gain.
 
 ## LLM reviewer (LLM)
 
