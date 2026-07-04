@@ -155,6 +155,44 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 	t.Logf("finding: %s", found.String())
 }
 
+// TestConvertFile_BranchMergeDefault proves that the "default if empty"
+// pattern (`if not host: host = "localhost"`) no longer drops taint (FE-5).
+// Before branch-merge PHI flattening the reassignment inside the `if` killed
+// the tainted binding on the merge path, a false negative; lowerIfMerge now
+// PHI-merges both incoming values so the tainted branch keeps the flow live
+// into the os.system sink.
+func TestConvertFile_BranchMergeDefault(t *testing.T) {
+	requirePython3(t)
+
+	conv := NewConverter()
+	prog, err := conv.ConvertFile("../../test/python/branch_merge_default/app.py")
+	if err != nil {
+		t.Fatalf("failed to convert file: %v", err)
+	}
+
+	rs := &rules.RuleSet{Rules: []rules.Rule{{
+		ID:        "PY-CMDI-BRANCH",
+		Languages: []string{"python"},
+		Severity:  rules.SeverityCritical,
+		CWE:       "CWE-78",
+		Message:   "untrusted input reaches os.system after a default-if-empty branch",
+		Sources:   []string{"py:*request.args.get"},
+		Sinks:     []string{"py:os.system"},
+	}}}
+
+	findings := analysis.NewEngine(rs).Analyze(prog)
+	var found bool
+	for i := range findings {
+		if findings[i].RuleID == "PY-CMDI-BRANCH" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected taint to survive the default-if-empty branch, got: %v", findings)
+	}
+}
+
 func TestConvertFile_Directory(t *testing.T) {
 	requirePython3(t)
 

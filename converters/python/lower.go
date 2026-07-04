@@ -390,8 +390,7 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 			if t := s.node("test"); t != nil {
 				fs.lowerExpr(t)
 			}
-			fs.lowerBody(s.list("body"))
-			fs.lowerBody(s.list("orelse"))
+			fs.lowerIfMerge(s)
 		case "While":
 			if t := s.node("test"); t != nil {
 				fs.lowerExpr(t)
@@ -416,6 +415,61 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 			fs.lowerStmt(s)
 		}
 	}
+}
+
+// lowerIfMerge lowers a flattened If's body and orelse and PHI-merges the names
+// each branch rebinds, instead of the previous last-write-wins overwrite (FE-5).
+// Without this, the ubiquitous "default if empty" branch (`if not x: x = "d"`)
+// dropped the attacker-controlled value bound before the branch — a real,
+// deterministic false negative. A PHI over the two branch values keeps taint
+// from EITHER path (the taint engine treats PHI as a propagator).
+func (fs *funcState) lowerIfMerge(s astNode) {
+	before := cloneEnv(fs.env)
+
+	fs.lowerBody(s.list("body"))
+	afterBody := cloneEnv(fs.env)
+
+	// Lower the else branch from the pre-branch bindings (the two branches are
+	// mutually exclusive), keeping the already-emitted body instructions.
+	fs.env = cloneEnv(before)
+	fs.lowerBody(s.list("orelse"))
+	afterElse := fs.env
+
+	merged := cloneEnv(afterElse)
+	names := map[string]bool{}
+	for k := range afterBody {
+		names[k] = true
+	}
+	for k := range afterElse {
+		names[k] = true
+	}
+	for name := range names {
+		bv, ev := afterBody[name], afterElse[name]
+		if bv == nil {
+			bv = before[name] // else-only rebind: body kept the pre-branch value
+		}
+		if ev == nil {
+			ev = before[name] // body-only rebind: else kept the pre-branch value
+		}
+		if bv == ev || bv == nil || ev == nil {
+			continue // unchanged on both paths, or only ever bound on one path
+		}
+		phi := fs.newValueInst(s)
+		phi.Op = ir.OpCode_OP_CODE_PHI
+		phi.Operands = []*ir.Value{bv, ev}
+		fs.emit(phi)
+		merged[name] = regValue(phi.Name)
+	}
+	fs.env = merged
+}
+
+// cloneEnv shallow-copies the name->value environment (values are shared).
+func cloneEnv(env map[string]*ir.Value) map[string]*ir.Value {
+	out := make(map[string]*ir.Value, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;
