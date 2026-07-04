@@ -182,9 +182,14 @@ func TestParseVerdict(t *testing.T) {
 		wantErr bool
 	}{
 		{"false positive", `{"verdict": "false_positive", "reason": "sanitized"}`, true, false},
+		{"false positive hyphen", `{"verdict": "false-positive", "reason": "x"}`, true, false},
 		{"true positive", `{"verdict": "true_positive", "reason": "reachable"}`, false, false},
 		{"surrounded by prose", "Sure!\n{\"verdict\":\"false_positive\",\"reason\":\"x\"}\nDone.", true, false},
 		{"unrecognized keeps", `{"verdict": "maybe", "reason": "unsure"}`, false, false},
+		// LLM-8: leniency only in the KEEP direction. A bare "false"/"fp" must NOT
+		// be read as a drop signal — anything but the exact canonical token keeps.
+		{"bare false keeps", `{"verdict": "false", "reason": "x"}`, false, false},
+		{"fp alias keeps", `{"verdict": "fp", "reason": "x"}`, false, false},
 		{"no json", "I cannot answer.", false, true},
 	}
 	for _, tc := range cases {
@@ -237,5 +242,30 @@ func TestBuildPrompt_And_Context_IncludeTaintPath(t *testing.T) {
 	prompt := buildPrompt(f, cc)
 	if !strings.Contains(prompt, "Taint path (source -> sink):") {
 		t.Errorf("prompt missing the taint-path listing; got:\n%s", prompt)
+	}
+}
+
+// TestPromptIncludesRuleVocabulary checks that the matched rule's own source and
+// sanitizer globs plus the recall-preserving calibration reach the prompt, so
+// the reviewer adjudicates by the rulepack definition rather than generic
+// knowledge (LLM-8).
+func TestPromptIncludesRuleVocabulary(t *testing.T) {
+	f := analysis.Finding{
+		RuleID:         "GO-PT",
+		Message:        "path traversal",
+		RuleSources:    []string{"go:*net/url*.Get"},
+		RuleSanitizers: []string{"go:*filepath.Base"},
+		SinkPos:        &ir.Position{Filename: "a.go", Line: 1},
+	}
+	for _, p := range []string{buildPrompt(f, "ctx"), buildAgenticPrompt(f, "ctx")} {
+		if !strings.Contains(p, "go:*filepath.Base") {
+			t.Errorf("prompt missing the rule's sanitizer glob; got:\n%s", p)
+		}
+		if !strings.Contains(p, "go:*net/url*.Get") {
+			t.Errorf("prompt missing the rule's source glob; got:\n%s", p)
+		}
+		if !strings.Contains(p, "true_positive") {
+			t.Errorf("prompt missing the keep-direction calibration; got:\n%s", p)
+		}
 	}
 }

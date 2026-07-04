@@ -209,16 +209,43 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 			fmt.Fprintf(&b, "  - %s\n", posString(p))
 		}
 	}
+	writeRuleDefinition(&b, f)
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
 		b.WriteString("\n")
 	}
 	b.WriteString("\nConsider whether the tainted data is actually attacker-controlled, whether an ")
-	b.WriteString("effective sanitizer or validation sits on the path, and whether the sink is genuinely dangerous.\n")
-	b.WriteString("Respond with ONLY a JSON object of the form ")
+	b.WriteString("effective sanitizer (one of the rule's sanitizers above, or an equivalent) sits on the ")
+	b.WriteString("path, and whether the sink is genuinely dangerous. ")
+	b.WriteString(calibration)
+	b.WriteString("\nRespond with ONLY a JSON object of the form ")
 	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
 	return b.String()
+}
+
+// calibration steers the model toward the recall-preserving default: when the
+// evidence is not decisive, keep the finding.
+const calibration = "If the evidence does not clearly show the finding is a false positive, answer true_positive."
+
+// writeRuleDefinition adds the matched rule's own source/sanitizer vocabulary to
+// the prompt so the reviewer adjudicates by the rulepack's definition rather than
+// generic knowledge — e.g. it will not "clear" a finding for a sanitizer the
+// rule does not recognize, nor keep one an obvious rule sanitizer would clear
+// (LLM-8).
+func writeRuleDefinition(b *strings.Builder, f analysis.Finding) {
+	if len(f.RuleSources) == 0 && len(f.RuleSanitizers) == 0 {
+		return
+	}
+	b.WriteString("\nRule definition (canonical-name globs):\n")
+	if len(f.RuleSources) > 0 {
+		fmt.Fprintf(b, "  sources: %s\n", strings.Join(f.RuleSources, ", "))
+	}
+	if len(f.RuleSanitizers) > 0 {
+		fmt.Fprintf(b, "  sanitizers: %s\n", strings.Join(f.RuleSanitizers, ", "))
+	} else {
+		b.WriteString("  sanitizers: (none — this rule declares no neutralizing function)\n")
+	}
 }
 
 // buildAgenticPrompt renders the prompt for the tool-using reviewer. It states
@@ -248,13 +275,14 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 			fmt.Fprintf(&b, "  - %s\n", posString(p))
 		}
 	}
+	writeRuleDefinition(&b, f)
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nInitial code context:\n")
 		b.WriteString(codeContext)
 		b.WriteString("\n")
 	}
 	b.WriteString("\nDecide whether this is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive. ")
-	b.WriteString("If the evidence is inconclusive, treat it as a true_positive (do not suppress on thin evidence).\n")
+	b.WriteString(calibration + " (do not suppress on thin evidence).\n")
 	b.WriteString("When done investigating, respond with ONLY a JSON object of the form ")
 	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
 	return b.String()
@@ -277,8 +305,12 @@ func parseVerdict(text string) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("parsing reviewer response: %w", err)
 	}
 	v := Verdict{Reason: raw.Reason}
+	// Leniency is allowed only in the KEEP direction. Dropping a finding is the
+	// one verdict that must be unambiguous, so require the exact canonical token
+	// and reject loose aliases like bare "false"/"fp" — anything unrecognized
+	// keeps the finding (LLM-8).
 	switch strings.ToLower(strings.TrimSpace(raw.Verdict)) {
-	case "false_positive", "false-positive", "false", "fp":
+	case "false_positive", "false-positive":
 		v.FalsePositive = true
 	default:
 		v.FalsePositive = false // conservative: unrecognized => keep

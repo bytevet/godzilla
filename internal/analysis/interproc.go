@@ -540,17 +540,19 @@ func analyzeFunc(
 					reported[inst] = true
 					steps := reconstructPath(defs, tainted, firstTaintedReg(tainted, inj), pos, inst.Pos)
 					res.findings = append(res.findings, Finding{
-						RuleID:     rule.ID,
-						Severity:   rule.Severity,
-						Confidence: confidenceFor(pos),
-						CWE:        rule.CWE,
-						Message:    rule.Message,
-						Language:   mod.Language,
-						Function:   fn.CanonicalName,
-						SourcePos:  pos,
-						SinkPos:    inst.Pos,
-						SinkCallee: callee,
-						Steps:      steps,
+						RuleID:         rule.ID,
+						Severity:       rule.Severity,
+						Confidence:     confidenceFor(pos),
+						CWE:            rule.CWE,
+						Message:        rule.Message,
+						Language:       mod.Language,
+						Function:       fn.CanonicalName,
+						SourcePos:      pos,
+						SinkPos:        inst.Pos,
+						SinkCallee:     callee,
+						Steps:          steps,
+						RuleSanitizers: rule.Sanitizers,
+						RuleSources:    rule.Sources,
 					})
 				}
 			}

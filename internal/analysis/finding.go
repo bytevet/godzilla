@@ -39,6 +39,14 @@ type Finding struct {
 	SinkPos    *ir.Position
 	SinkCallee string
 
+	// RuleSanitizers and RuleSources are the matched rule's sanitizer/source
+	// globs, carried onto the finding so the LLM reviewer can adjudicate using the
+	// rulepack's OWN vocabulary (which documented sanitizer neutralizes this sink,
+	// what the sources are) instead of second-guessing from generic knowledge
+	// (LLM-8). Not serialized in reports.
+	RuleSanitizers []string
+	RuleSources    []string
+
 	// Steps is the ordered taint path from source to sink (inclusive), when it
 	// can be reconstructed intra-procedurally by walking the def-use chain. It
 	// powers SARIF codeFlows (which GitHub code scanning renders as a data-flow)
