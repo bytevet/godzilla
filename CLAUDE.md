@@ -142,7 +142,8 @@ LOGICAL (receiver-excluded) argument fires — this is what prevents parameteriz
 the **top-level `rulepacks/`** directory and are embedded into the binary by `rulepacks/embed.go`
 (`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
-  insecure deserialization (CWE-502) and JS code injection (CWE-95).
+  insecure deserialization (CWE-502) and code injection (CWE-95: `eval`/`exec`/`compile`, exact-named
+  so the safe `ast.literal_eval` is not flagged), and JS code injection (CWE-95).
 - **Java** — SQLi, command injection, path traversal (CWE-22: `java.io` file streams/readers,
   `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path), XSS
   (CWE-79: servlet/`PrintWriter` response writes; `HtmlUtils`/OWASP-`Encode`/`StringEscapeUtils`

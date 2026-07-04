@@ -110,7 +110,7 @@ $ godzilla scan ./test/go/sql_injection
 | Reflected XSS | ✅ | ✅ | ✅ | ✅ | — |
 | Open redirect | ✅ | ✅ | ✅ | ✅ | — |
 | Insecure deserialization | — | ✅ | — | ✅ | — |
-| Code injection (`eval`) | — | — | ✅ | — | — |
+| Code injection (`eval`) | — | ✅ | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
 > scan over gIR string constants — independent of the taint engine.
