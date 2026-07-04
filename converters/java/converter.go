@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"godzilla/internal/buildpolicy"
+	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -97,7 +98,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	inputs := resolveInputs(abs)
 
 	args := append([]string{scriptPath}, inputs...)
-	cmd := exec.Command(javaExe, args...)
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, javaExe, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("java dump failed for %s: %w", path, err)
@@ -223,7 +226,9 @@ func buildProject(dir string, sys buildSystem) ([]string, error) {
 		return nil, fmt.Errorf("neither ./%s wrapper nor %s on PATH", sys.wrapper, sys.tool)
 	}
 
-	cmd := exec.Command(name, sys.args...)
+	ctx, cancel := proc.BuildContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, sys.args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("%s %v: %w\n%s", name, sys.args, err, tail(out, 2000))

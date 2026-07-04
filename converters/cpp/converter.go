@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	llvm_converter "godzilla/converters/llvm"
+	"godzilla/internal/proc"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -82,7 +83,9 @@ func lowerOne(src string) (*ir.Module, error) {
 	// -O1 runs mem2reg (SSA registers) without heavy inlining; -g provides source
 	// positions; -w silences warnings; -fsyntax-only is NOT used (we need IR).
 	args := []string{"-O1", "-g", "-w", "-S", "-emit-llvm", "-o", tmp.Name(), src}
-	out, err := exec.Command(cc, args...).CombinedOutput()
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	out, err := exec.CommandContext(ctx, cc, args...).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("clang: %v: %s", err, strings.TrimSpace(string(out)))
 	}

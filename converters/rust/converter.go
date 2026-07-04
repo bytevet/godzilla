@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"godzilla/internal/buildpolicy"
+	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -121,7 +122,9 @@ func emitMIR(src string) (string, error) {
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
-	cmd := exec.Command(rustc,
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, rustc,
 		"--emit=mir", "-Zmir-include-spans=on",
 		"--crate-type", "lib", "--cap-lints", "allow",
 		"-o", tmp.Name(), src)
@@ -171,7 +174,9 @@ func convertCargo(dir string) (*ir.Program, error) {
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
-	cmd := exec.Command(cargo, "rustc", "--lib", "--",
+	ctx, cancel := proc.BuildContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cargo, "rustc", "--lib", "--",
 		"--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
 	cmd.Dir = dir
 	data, err := runMIR(cmd, tmp.Name(), fmt.Sprintf("cargo rustc in %s", dir))
