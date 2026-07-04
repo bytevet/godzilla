@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"strconv"
+	"strings"
 
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -73,18 +74,29 @@ func buildDefs(fn *ir.Function) map[string]*ir.Instruction {
 // value is tainted, the destination address register is marked tainted too,
 // so a later LOAD from that register (a distinct SSA register on ssa.Alloc
 // pointers) observes the taint.
-func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position) {
+//
+// A clean store (a non-tainted value) into a non-escaping alloc is a STRONG
+// UPDATE (ENG-2): it fully overwrites the cell, so the cell's prior taint is
+// cleared on this path. This is what makes the flow-sensitive pass reject the
+// "taint, then overwrite with a constant, then use" false positive that a
+// monotonic (never-un-taint) model cannot. It is applied only to non-escaping
+// allocs — where no alias can hold the taint — so no real flow is lost.
+func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position, nonEscaping map[string]bool) {
 	operands := inst.GetOperands()
 	if len(operands) < 2 {
 		return
 	}
 	addr, val := operands[0], operands[1]
-	pos, ok := isTainted(tainted, val)
-	if !ok {
-		return
-	}
 	addrReg := addr.GetRegName()
 	if addrReg == "" {
+		return
+	}
+	pos, ok := isTainted(tainted, val)
+	if !ok {
+		if nonEscaping[addrReg] {
+			delete(tainted, addrReg)
+			clearFieldPaths(tainted, addrReg)
+		}
 		return
 	}
 	markTainted(tainted, addrReg, pos)
@@ -93,6 +105,18 @@ func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted m
 	// packing, or a struct field load) observes the taint. Walk the
 	// address-derivation chain to taint every enclosing aggregate base.
 	taintContainer(defs, tainted, addrReg, pos)
+}
+
+// clearFieldPaths removes every one-level access-path key (base#f…, base#*)
+// rooted at base from the taint state — the field-precise companion to clearing
+// base itself in a strong update.
+func clearFieldPaths(tainted map[string]*ir.Position, base string) {
+	prefix := base + "#"
+	for k := range tainted {
+		if strings.HasPrefix(k, prefix) {
+			delete(tainted, k)
+		}
+	}
 }
 
 // fieldPathKey is the taint-map key for a specific struct field of a base

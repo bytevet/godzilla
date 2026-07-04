@@ -266,20 +266,24 @@ func TestAnalyze_Sanitizer(t *testing.T) {
 
 // TestAnalyze_PhiFixpoint verifies that taint reaching a PHI node's operand
 // via a back-edge (loop) is picked up by fixpoint iteration, even when the
-// PHI textually precedes the instruction that taints one of its operands.
+// PHI textually precedes the instruction that taints one of its operands. The
+// CFG is a real loop — header (block 0, the phi) <-> body (block 2, the source
+// and sink) — with the predecessor/successor edges a frontend always emits;
+// the flow-sensitive dataflow needs them to carry the body's taint back to the
+// header phi across a second pass.
 func TestAnalyze_PhiFixpoint(t *testing.T) {
 	reg := func(name string) *ir.Value { return &ir.Value{Kind: &ir.Value_RegName{RegName: name}} }
 
 	fn := &ir.Function{
 		CanonicalName: "go:example.loop",
 		Blocks: []*ir.BasicBlock{
-			{Index: 0, Instrs: []*ir.Instruction{
+			{Index: 0, Succs: []int32{2}, Preds: []int32{2}, Instrs: []*ir.Instruction{
 				// loop header: t2 = phi [b1: t0, b2: t3]
 				{Name: "t2", Op: ir.OpCode_OP_CODE_PHI,
 					Operands: []*ir.Value{reg("t0"), reg("t3")},
 					Blocks:   []string{"b1", "b2"}},
 			}},
-			{Index: 2, Instrs: []*ir.Instruction{
+			{Index: 2, Succs: []int32{0}, Preds: []int32{0}, Instrs: []*ir.Instruction{
 				// t0 = source.Get() -- defined "later" in block order than the phi
 				// that consumes it via a back-edge, forcing a second fixpoint pass.
 				{Name: "t0", Op: ir.OpCode_OP_CODE_CALL, Pos: &ir.Position{Line: 1},

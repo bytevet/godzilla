@@ -331,8 +331,13 @@ func analyzeFunc(
 	methodImpls map[string][]string,
 	reported map[*ir.Instruction]bool,
 ) funcResult {
+	// tainted is the CURRENT block's taint state; the flow-sensitive driver
+	// (ENG-2) reassigns it to each block's entry state before visiting the block,
+	// so the transfer closures below (which capture this variable) always operate
+	// on the right per-block facts.
 	tainted := map[string]*ir.Position{}
 	defs := buildDefs(fn)
+	nonEscaping := nonEscapingAllocs(fn, defs)
 
 	// Guard/barrier index (ENG-9), built once and only for a rule that declares
 	// validators (nil otherwise, so the common path pays nothing). curBlock tracks
@@ -341,17 +346,19 @@ func analyzeFunc(
 	guards := buildGuardIndex(fn, rule, defs)
 	var curBlock int32
 
-	// Seed tainted parameters. A flow that enters through a parameter is
-	// inter-procedural, which lowers the confidence of any finding it feeds.
-	// interprocOrigins records every source origin whose taint crossed a function
-	// boundary to reach this function — parameter seeds here, plus taint pulled
-	// back from a callee's return summary in handleCall. confidenceFor consults it
-	// so all cross-function findings are Medium (and thus seen by the LLM reviewer).
+	// Seed tainted parameters into the entry block's in-state. A flow that enters
+	// through a parameter is inter-procedural, which lowers the confidence of any
+	// finding it feeds. interprocOrigins records every source origin whose taint
+	// crossed a function boundary to reach this function — parameter seeds here,
+	// plus taint pulled back from a callee's return summary in handleCall.
+	// confidenceFor consults it so all cross-function findings are Medium (and
+	// thus seen by the LLM reviewer).
 	interprocOrigins := map[*ir.Position]bool{}
+	seedState := taintState{}
 	for idx, origin := range seeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
-				markTainted(tainted, reg, origin)
+				seedState[reg] = origin
 				interprocOrigins[origin] = true
 			}
 		}
@@ -681,7 +688,7 @@ func analyzeFunc(
 		case ir.OpCode_OP_CODE_CALL, ir.OpCode_OP_CODE_INVOKE:
 			handleCall(inst)
 		case ir.OpCode_OP_CODE_STORE:
-			visitStore(inst, defs, tainted)
+			visitStore(inst, defs, tainted, nonEscaping)
 			recordGlobalStore(inst)
 			recordParamMemoryTaint(inst)
 		case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
@@ -707,24 +714,68 @@ func analyzeFunc(
 		}
 	}
 
-	for {
-		beforeTaint := len(tainted)
-		beforeEffects := len(res.callEffects)
-		beforeGlobals := len(res.globalEffects)
-		beforeReturn := res.returnsOrigin
-		for _, blk := range fn.Blocks {
+	// Flow-sensitive intra-procedural dataflow (ENG-2). Each block's entry state
+	// is the union of its predecessors' exit states (plus the parameter seeds at
+	// the entry block); the block is then transferred forward over its
+	// instructions, with STORE giving non-escaping alloc cells strong-update
+	// (un-taint) semantics. Blocks are processed in reverse-post-order and the
+	// per-block exit states are iterated to a fixpoint. The join is a union so
+	// taint that reaches a program point on ANY path is retained — the pass is
+	// strictly more precise than the previous whole-function flat map yet never
+	// drops a real flow. Interprocedural effects and findings accumulate
+	// monotonically across passes (deduped by effectSeen / reported).
+	rpo := reversePostOrder(fn)
+	idxToBlock := map[int32]*ir.BasicBlock{}
+	preds := map[int32][]int32{}
+	for _, blk := range fn.Blocks {
+		if blk == nil {
+			continue
+		}
+		idxToBlock[blk.GetIndex()] = blk
+		preds[blk.GetIndex()] = blk.GetPreds()
+	}
+	entry := int32(-1)
+	if len(fn.Blocks) > 0 && fn.Blocks[0] != nil {
+		entry = fn.Blocks[0].GetIndex()
+	}
+	blockOut := map[int32]taintState{}
+
+	// The block-out states ascend monotonically over a finite lattice, so this
+	// terminates; maxPasses is a defensive backstop against a pathological CFG.
+	const maxPasses = 100000
+	for pass := 0; pass < maxPasses; pass++ {
+		changed := false
+		for _, idx := range rpo {
+			blk := idxToBlock[idx]
 			if blk == nil {
 				continue
 			}
-			curBlock = blk.GetIndex()
+			in := taintState{}
+			if idx == entry {
+				for k, v := range seedState {
+					in[k] = v
+				}
+			}
+			for _, p := range preds[idx] {
+				for k, v := range blockOut[p] {
+					if _, exists := in[k]; !exists {
+						in[k] = v
+					}
+				}
+			}
+			tainted = in
+			curBlock = idx
 			for _, inst := range blk.Instrs {
 				if inst != nil {
 					visit(inst)
 				}
 			}
+			if !statesEqual(blockOut[idx], tainted) {
+				blockOut[idx] = cloneState(tainted)
+				changed = true
+			}
 		}
-		if len(tainted) == beforeTaint && len(res.callEffects) == beforeEffects &&
-			len(res.globalEffects) == beforeGlobals && res.returnsOrigin == beforeReturn {
+		if !changed {
 			break
 		}
 	}

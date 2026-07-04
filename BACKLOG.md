@@ -58,9 +58,8 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > glob-DoS fix (`09f40e1`), TRUST-6 perf-regression guard + TRUST-8 2nd differential shape
 > (`2326058`), TRUST-3 optional location oracle (`99abf24`), TRUST-5 precision/recall scorer
 > (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`),
-> ENG-9 guard/barrier sanitization (`8e33f7c`).
-> Remaining: ENG-2 (flow-sensitivity/strong updates), LLM-4 (agentic reviewer) — the deep-engine/
-> research items; see per-item notes for scope.
+> ENG-9 guard/barrier sanitization (`8e33f7c`), ENG-2 flow-sensitivity + strong updates (`<pending>`).
+> Remaining: LLM-4 (agentic reviewer) — the last deep-engine/research item; see its note for scope.
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
@@ -119,10 +118,11 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Impact:** Any project that writes its own sanitize/escape/validate helper (the common case — rulepack sanitizer support exists precisely for this) still gets flagged, at High confidence, which per finding.go:19 and the CLI design means the LLM reviewer never adjudicates it. This directly breaks the near-zero-FP gate promise: teams cannot silence findings by sanitizing, so they disable the rule or the gate.
 - **Fix direction:** In handleCall, when rule.IsSanitizer(callee) matches, return early (or at minimum skip the returnTaint pull and the INVOKE return pull) so the sanitizer's result register is never tainted by the callee's summary. Also consider suppressing addEffect into sanitizer callees so their bodies don't generate spurious summaries. Pure engine change; no gIR or YAML impact.
 
-### ENG-2 [HIGH] (verified: CONFIRMED) Taint is monotonic with no strong updates: stores through allocs never un-taint, making the analysis flow-insensitive through memory (FP class)
+### ENG-2 [HIGH] ✅ DONE (`<pending>`) (verified: CONFIRMED) Taint is monotonic with no strong updates: stores through allocs never un-taint, making the analysis flow-insensitive through memory (FP class)
 
 - **Impact:** False positives at High confidence on any code that reuses an address-taken local: sink-then-taint ordering, sanitize-by-reassignment, or cleared/reset buffers. CodeQL/Snyk are flow-sensitive over SSA memory (or use SSA-converted heap locations); this engine is strictly weaker even than block-ordered abstract interpretation.
 - **Fix direction:** Exploit the SSA structure the frontends already emit: process blocks in reverse-post-order with per-block taint states joined at PHIs instead of a single global fixpoint map, and give STORE a strong-update semantics for non-aliased allocs (an alloc whose address is only used by LOAD/STORE in one function). This is engine-only work (internal/analysis), no gIR change.
+- **DONE:** `analyzeFunc`'s whole-function flat fixpoint was replaced with a flow-sensitive per-block dataflow (`internal/analysis/flow.go`): blocks are processed in reverse-post-order, each block's entry state is the **union** of its predecessors' exit states (join over the frontend's Preds/Succs edges), and per-block exit states iterate to a fixpoint. STORE now gives a **strong update** — a clean store into a *non-escaping* alloc (`nonEscapingAllocs`: address used only as a STORE dest or a deref-read) clears the cell's taint. The union join keeps taint that reaches a point on ANY path (so no real flow is lost — verified by conditional-taint and escaping-alloc recall tests), while strong updates reject the "taint, overwrite with a constant, then use" and "sink before taint" FPs that a monotonic model cannot. Note the register-level cases are already handled by SSA renaming; this fix is specifically the **memory** (address-taken alloc) case, which is where flow-insensitivity actually bit. Guarded by `test/go/flow_strong_update` (FP control) + `TestFlow_StrongUpdateSuppresses`/`SinkBeforeTaint` (suppression) and `TestFlow_TaintedMemoryStillFires`/`ConditionalTaintStillFires`/`EscapingAllocNotStrongUpdated` (recall/soundness). Full corpus green (no recall regression across all six languages); the flow-sensitive state also sharpens the ENG-9 guard and SSRF checks at each sink. Engine-only, no gIR change.
 
 ### ENG-3 [HIGH] (verified: CONFIRMED) Field- and key-insensitive containers: storing taint into one struct field/map key taints the whole aggregate and every other field read
 
