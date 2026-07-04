@@ -1,0 +1,4 @@
+# Untrusted HTTP header reaches an exec sink (header source; COV-6).
+findings:
+    - rule: go-command-injection
+      min: 1

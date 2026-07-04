@@ -12,6 +12,8 @@ rules:
     sources:
       - "go:*net/url*.Get"
       - "go:*net/http*.Request*.FormValue"
+      - "go:*net/http.Header*.Get"
+      - "go:*net/http*.Request*.Cookie"
       - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
       # Web-framework request accessors (Gin, Echo, Chi).

@@ -1,0 +1,3 @@
+findings:
+    - rule: js-command-injection
+      min: 1

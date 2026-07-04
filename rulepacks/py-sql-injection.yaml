@@ -19,6 +19,10 @@ rules:
       concatenating or formatting user input into the query string.
     sources:
       - "py:*request.args.get"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
       # Django request accessors.
       - "py:*request.GET.get"
       - "py:*request.GET.__getitem__"
