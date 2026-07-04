@@ -58,7 +58,9 @@ flags:
   -html <file>      write an HTML report to <file>
   -json <file>      write a JSON report to <file>
   -sarif <file>     write a SARIF 2.1.0 report to <file>
-  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
+  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY;
+                    set GODZILLA_LLM_PROVIDER=openai + GODZILLA_LLM_BASE_URL for a local/
+                    OpenAI-compatible server, e.g. Ollama/vLLM)
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
   -baseline <file>  suppress findings whose fingerprint is in this baseline file (gate only NEW findings)
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
@@ -227,9 +229,10 @@ func runScan(args []string) {
 
 	if *llmReview {
 		var stats llm.ReviewStats
-		// Give the reviewer read-only agency over the scanned project (LLM-4): it
-		// can read files, resolve callees, and grep to trace a flow before judging.
-		reviewer := llm.NewAnthropicReviewer().WithTools(llm.NewFileToolBox(res.Program, path))
+		// Select the reviewer backend (LLM-9: GODZILLA_LLM_PROVIDER=openai uses an
+		// OpenAI-compatible/local endpoint; default is Anthropic with read-only
+		// agency over the scanned project — LLM-4).
+		reviewer := llm.NewReviewer(llm.NewFileToolBox(res.Program, path))
 		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
 		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
 			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
