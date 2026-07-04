@@ -50,6 +50,12 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		}
 	}
 
+	// Class-hierarchy index for interface dynamic dispatch, built ONCE and shared
+	// by every rule: a Go bare method name -> every lowered concrete method that
+	// implements it. It depends only on the immutable function index, so rebuilding
+	// it per rule (as before) wasted O(rules x functions) work.
+	methodImpls := buildMethodImpls(byKey)
+
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
 	// rules concurrently (bounded by GOMAXPROCS). Results are collected per rule
@@ -63,7 +69,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = analyzeInterproc(cg, byKey, modByKey, &e.rs.Rules[i])
+			results[i] = analyzeInterproc(cg, byKey, modByKey, methodImpls, &e.rs.Rules[i])
 		}(i)
 	}
 	wg.Wait()
@@ -121,10 +127,30 @@ func injectableArgs(sinkArgs []int32, callee string, args []*ir.Value) []*ir.Val
 	return sel
 }
 
+// buildMethodImpls builds the class-hierarchy index for interface dynamic
+// dispatch: a Go bare method name -> every lowered concrete method that
+// implements it. An INVOKE call names an abstract interface method (not a
+// concrete function), so this lets taint flow through the interface into the
+// concrete implementations. It over-approximates (any same-named method
+// matches), which is why such findings stay Medium confidence. It depends only
+// on the immutable function index, so it is built once and shared by every rule.
+func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
+	methodImpls := map[string][]string{}
+	for name := range byKey {
+		if strings.HasPrefix(name, "go:(") { // a Go method (receiver-type syntax)
+			if i := strings.LastIndex(name, "."); i >= 0 {
+				bare := name[i+1:]
+				methodImpls[bare] = append(methodImpls[bare], name)
+			}
+		}
+	}
+	return methodImpls
+}
+
 // analyzeInterproc runs the worklist-based inter-procedural taint analysis for
 // a single rule. State (parameter taint, return taint) grows monotonically, so
 // iteration converges.
-func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map[string]*ir.Module, rule *rules.Rule) []Finding {
+func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map[string]*ir.Module, methodImpls map[string][]string, rule *rules.Rule) []Finding {
 	paramTaint := map[string]map[int]*ir.Position{}
 	returnTaint := map[string]*ir.Position{}
 	reported := map[*ir.Instruction]bool{}
@@ -136,22 +162,6 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 	for caller, callees := range cg.Edges {
 		for _, callee := range callees {
 			callers[callee] = append(callers[callee], caller)
-		}
-	}
-
-	// Class-hierarchy index for interface dynamic dispatch: a Go bare method name
-	// -> every lowered concrete method that implements it. An INVOKE call names an
-	// abstract interface method (not a concrete function), so this lets taint flow
-	// through the interface into the concrete implementations. It over-approximates
-	// (any same-named method matches), which is why such findings stay Medium
-	// confidence.
-	methodImpls := map[string][]string{}
-	for name := range byKey {
-		if strings.HasPrefix(name, "go:(") { // a Go method (receiver-type syntax)
-			if i := strings.LastIndex(name, "."); i >= 0 {
-				bare := name[i+1:]
-				methodImpls[bare] = append(methodImpls[bare], name)
-			}
 		}
 	}
 
