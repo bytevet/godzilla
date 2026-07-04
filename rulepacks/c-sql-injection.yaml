@@ -1,0 +1,41 @@
+# SQL injection (C/C++, CWE-89): untrusted input concatenated into a SQL string
+# passed to a database driver's query API. The query text is the argument that
+# matters, so each sink pins the tainted parameter with a #<idx> suffix (the
+# logical, receiver-excluded argument) to avoid firing on the connection/handle
+# argument.
+rules:
+  - id: c-sql-injection
+    languages: [c, cpp]
+    severity: critical
+    cwe: CWE-89
+    message: >-
+      Untrusted input flows into a SQL query string executed by the database
+      driver, which may allow SQL injection. Use parameterized queries / prepared
+      statements (e.g. mysql_stmt_bind_param, sqlite3_bind_*) instead of building
+      the query by concatenation.
+    sources:
+      - "c*:getenv"
+      - "c*:*scanf"
+      - "c*:fgets"
+      - "c*:gets"
+      - "c*:read"
+      - "c*:recv"
+      - "c*:argv"
+    sinks:
+      - "c*:mysql_query#1"       # mysql_query(MYSQL*, const char *stmt)
+      - "c*:mysql_real_query#1"
+      - "c*:sqlite3_exec#1"      # sqlite3_exec(db, const char *sql, ...)
+      - "c*:sqlite3_prepare#1"
+      - "c*:sqlite3_prepare_v2#1"
+      - "c*:PQexec#1"            # PQexec(PGconn*, const char *query)
+      - "c*:PQsendQuery#1"
+    sanitizers: []
+    propagators:
+      - "c*:strcpy"
+      - "c*:strncpy"
+      - "c*:strcat"
+      - "c*:strncat"
+      - "c*:sprintf"
+      - "c*:snprintf"
+      - "c*:memcpy"
+      - "c*:strdup"

@@ -47,4 +47,5 @@ test-llvm:
 # samples against whatever old JDK is on PATH and fail).
 gate-llvm: build-llvm
 	$(LLVM_ENV) go vet $(LLVM_TAGS) ./...
+	$(LLVM_ENV) go test $(LLVM_TAGS) ./converters/llvm/ ./converters/cpp/
 	$(LLVM_ENV) go test $(LLVM_TAGS) ./test/corpus/ -run 'TestCorpus/(c|cpp)/'

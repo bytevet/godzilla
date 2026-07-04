@@ -5,10 +5,11 @@ rules:
     severity: critical
     cwe: CWE-78
     message: >-
-      Untrusted input (environment, stdin, socket, etc.) flows into a shell
-      command execution (system/popen/exec*), which may allow OS command
-      injection. Avoid passing user-controlled data to a shell; use an argument
-      vector (execv) with a fixed program and validate inputs.
+      Untrusted input (environment, stdin, socket, command line, etc.) flows into
+      a process/shell execution (system/popen/exec*), which may allow OS command
+      injection. Never pass user-controlled data as the shell command or the
+      program path; use a fixed program with an argument vector and validate
+      inputs.
     sources:
       - "c*:getenv"
       - "c*:*scanf"
@@ -16,13 +17,20 @@ rules:
       - "c*:gets"
       - "c*:read"
       - "c*:recv"
+      - "c*:argv"        # synthesized by the frontend for main(argc, argv)
     sinks:
       - "c*:system"
       - "c*:popen"
       - "c*:execl"
       - "c*:execlp"
       - "c*:execle"
+      - "c*:execv"
       - "c*:execvp"
+      - "c*:execvpe"
+      - "c*:execvP"
+      - "c*:execve"
+      - "c*:execveat"
+      - "c*:fexecve"
     sanitizers: []
     propagators:
       - "c*:strcpy"

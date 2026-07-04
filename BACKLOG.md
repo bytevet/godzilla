@@ -141,11 +141,12 @@ the items gated on toolchains outside the default test matrix, or that are large
 - **FE-7 (Python dict/set literals)** ✅ — lowered as sequences so elements fire.
 - **FE-8 (Java source-file anchoring)** ✅ — findings anchor to each class's `.java` via SourceFile.
 - **LLM-9 (OpenAI-compatible adapter)** ✅ — `internal/llm/openai.go`, routed by `GODZILLA_LLM_PROVIDER`.
+- **COV-8 (C/C++ depth)** ✅ — LLVM CFG-edge fix + exec-family/argv sources + c-buffer-overflow and
+  c-sql-injection packs; six new C corpus samples, green under `make gate-llvm`. (C/C++ SSRF left as a
+  follow-on.)
 
-**Still deferred (toolchain-gated or net-new project):**
+**Still deferred (net-new project):**
 
-- **COV-8 (C/C++ depth)** — more packs + argv/execve coverage on the opt-in cgo LLVM frontend; gated on
-  a libLLVM build, so it can't run in the default test matrix.
 - **COV-10 (PHP/Ruby/C#/Kotlin)** — net-new frontends; each is a large project on its own.
 - **CI-9 changed-files/`--files -`** — a convenience wrapper over per-file `scan`; marginal.
 - **PERF-1/6/8** — reasoned in the Tier 2 section (caching invalidation risk; tree-shaking soundness
@@ -315,10 +316,11 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Frontend-lowering + YAML: mirror the Java @RequestParam trick the project already uses (CLAUDE.md documents it) — when MIR shows a handler receiving axum extractor types (Query<...>, Path<...>, Json<...> appear in the MIR signature text mir.go already parses), synthesize a source CALL per extracted parameter with a canonical name like rust:axum::extract::Query, then list those names as YAML sources. Add rust-xss (sinks: *Html::from, response body builders) and rust-open-redirect (*Redirect::to#0, *Redirect::temporary#0) packs.
 - **DONE:** `parseHeader` now captures each MIR parameter's type; `lowerFn` recognizes an axum extractor parameter (`Query`/`Path`/`Json`/`Form` before the generic `<`, via `axumExtractorSource`) and **synthesizes a source CALL** (`rust:axum::extract::<Extractor>`) whose result IS that parameter's value — the exact Java `@RequestParam` trick, in the frontend, no gIR change. Those source names are added to the rust command-injection/path-traversal/sql-injection/ssrf packs, and two new packs ship: `rust-xss` (`*Html::from`/`Html::new` sinks) and `rust-open-redirect` (`*Redirect::to`/`temporary`/`permanent`). Tested hermetically (no rustc) by `TestAxumExtractorSource`, `TestLowerMIR_AxumSourceSynthesis`, and `TestAxumTaintFlow_EndToEnd` (lowered handler → engine → `rust-command-injection` fires).
 
-### COV-8 [MEDIUM] C/C++ has only 3 packs, no memory-safety class, no SQLi/SSRF, argv missing as a source, and execv/execve missing as sinks
+### COV-8 [MEDIUM] ✅ DONE (`<pending>`) C/C++ has only 3 packs, no memory-safety class, no SQLi/SSRF, argv missing as a source, and execv/execve missing as sinks
 
 - **Impact:** For C/C++, memory corruption IS the vulnerability model — CodeQL/Sonar's C coverage is majority CWE-120/125/787. A tool that flags getenv→system but stays silent on gets(buf) or strcpy(fixed_buf, tainted) will not be taken seriously by C teams, and the execv/execve omission is a straight command-injection FN in the one class the pack does claim.
 - **Fix direction:** YAML: add execv/execve/execvpe (and execvP/fexecve) to c-command-injection sinks; add a c-buffer-overflow pack with sinks c*:gets (all args), c*:strcpy#0-from-tainted-source, c*:sprintf, c*:strcat, keeping strncpy/snprintf as propagators; add c-sql-injection (c*:mysql_query#1, c*:sqlite3_exec#1, c*:PQexec#1) and c-ssrf packs. For argv, have the LLVM lowering synthesize a source CALL for main's argv (the same parameter-annotation trick used for Spring), then reference it in YAML.
+- **DONE:** First, a prerequisite correctness fix (`e47b28a`): the LLVM frontend never populated block `Preds`/`Succs`, so after ENG-2 made the engine flow-sensitive, any C/C++ function with a branch between a source and a sink dropped the taint (`l = fgets(...); if (l) system(l);` gave zero findings). `lower()` now wires each terminator's successor blocks into the CFG. Then the coverage itself: **c-command-injection** gains the full exec family (`execv`/`execve`/`execvp`/`execvpe`/`execvP`/`execveat`/`fexecve`) as sinks and `c*:argv` as a source; the frontend **synthesizes a `c*:argv` source CALL** for `main(argc, argv)` (the same trick the axum/Spring frontends use), so CLI-arg injection is caught. New **c-buffer-overflow** pack (CWE-120/242): `gets` as an unconditional `kind: dangerous-call` finding, plus `strcpy`/`strcat`/`sprintf`/`vsprintf` as taint sinks with the bounded `strncpy`/`snprintf`/`strncat` kept as propagators. New **c-sql-injection** pack (CWE-89): `mysql_query#1`/`sqlite3_exec#1`/`PQexec#1`/… pinning the query argument. Verified by six new corpus samples (`command_injection_argv`, `command_injection_execve`, `buffer_overflow` + `buffer_overflow_safe`, `gets_unsafe`, `sql_injection`) and the hermetic `TestLowerWiresCFGEdges` + `TestLowerSynthesizesArgvSource` (hand-written `.ll`, no clang); the full `make gate-llvm` C/C++ corpus is green with the safe sample proving the bounded variants don't fire. **C/C++ SSRF (curl option varargs) is left as a follow-on** — modeling `curl_easy_setopt(h, CURLOPT_URL, x)` needs option-aware arg selection, lower value than the memory-safety class delivered here.
 
 ### COV-9 [MEDIUM] ✅ DONE (`1abcdab`) Sanitizer modeling is nearly empty and the one broad Python sanitizer glob (py:*escape) accepts non-sanitizers
 

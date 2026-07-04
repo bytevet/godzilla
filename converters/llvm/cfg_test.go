@@ -6,7 +6,50 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	ir "godzilla/pkg/ir/v1"
 )
+
+// lowerLL writes src to a temp .ll and lowers it as C, failing the test on error.
+func lowerLL(t *testing.T, src string) *ir.Module {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.ll")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod, err := Lower(path, "m.c", "c", "c:", CDemangle)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	return mod
+}
+
+// TestLowerSynthesizesArgvSource guards COV-8's CLI taint source: for
+// `main(i32 argc, ptr argv)` the lowering must emit a synthetic `c:argv` source
+// CALL so an `argv[i]` read carries taint into a sink.
+func TestLowerSynthesizesArgvSource(t *testing.T) {
+	const ll = `
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  ret i32 0
+}
+`
+	mod := lowerLL(t, ll)
+	found := false
+	for _, fn := range mod.Functions {
+		for _, blk := range fn.Blocks {
+			for _, in := range blk.Instrs {
+				if in.Call != nil && in.Call.GetCallee() == "c:argv" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a synthesized c:argv source CALL for main(argc, argv)")
+	}
+}
 
 // TestLowerWiresCFGEdges is a hermetic guard (a hand-written .ll, no clang) that
 // the LLVM lowering populates each block's Succs/Preds. The flow-sensitive
@@ -26,15 +69,7 @@ end:
   ret i32 0
 }
 `
-	dir := t.TempDir()
-	path := filepath.Join(dir, "m.ll")
-	if err := os.WriteFile(path, []byte(ir), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mod, err := Lower(path, "m.c", "c", "c:", CDemangle)
-	if err != nil {
-		t.Fatalf("Lower: %v", err)
-	}
+	mod := lowerLL(t, ir)
 	if len(mod.Functions) != 1 {
 		t.Fatalf("expected 1 function, got %d", len(mod.Functions))
 	}

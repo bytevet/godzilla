@@ -1,0 +1,53 @@
+# Buffer overflow / unsafe memory writes (C/C++, CWE-120/CWE-242). For C, memory
+# corruption is the dominant vulnerability class, so this pack covers both the
+# unconditionally-dangerous APIs (gets — no bounds argument exists) and the
+# taint-driven case where attacker-controlled data reaches an unbounded copy.
+rules:
+  # gets() has no way to bound the read and is impossible to use safely; its use
+  # is a defect regardless of dataflow (CWE-242). Modeled call-site-syntactic
+  # (kind: dangerous-call) for a near-zero-FP finding, like the weak-crypto packs.
+  - id: c-gets-unsafe
+    kind: dangerous-call
+    languages: [c, cpp]
+    severity: high
+    cwe: CWE-242
+    message: >-
+      Use of gets(), which cannot bound its input and always risks a buffer
+      overflow. Use fgets() with an explicit size, or getline().
+    callees:
+      - "c*:gets"
+
+  # Untrusted input reaching an unbounded copy/format into a fixed-size buffer.
+  # The bounded variants (strncpy/snprintf/strncat) are propagators, not sinks:
+  # they carry taint onward but are not themselves the overflow. strcpy/strcat
+  # copy into arg 0 (the destination) from arg 1; sprintf formats into arg 0 from
+  # the trailing args — the tainted *source* is what makes the write unsafe, so
+  # these fire when any tainted value reaches them.
+  - id: c-buffer-overflow
+    languages: [c, cpp]
+    severity: high
+    cwe: CWE-120
+    message: >-
+      Untrusted input flows into an unbounded buffer write (strcpy/strcat/sprintf)
+      into a fixed-size buffer, which may overflow it. Use the bounded variants
+      (strncpy/strncat/snprintf) with a correct size, or a safe string type.
+    sources:
+      - "c*:getenv"
+      - "c*:*scanf"
+      - "c*:fgets"
+      - "c*:gets"
+      - "c*:read"
+      - "c*:recv"
+      - "c*:argv"
+    sinks:
+      - "c*:strcpy"
+      - "c*:strcat"
+      - "c*:sprintf"
+      - "c*:vsprintf"
+    sanitizers: []
+    propagators:
+      - "c*:strncpy"
+      - "c*:strncat"
+      - "c*:snprintf"
+      - "c*:memcpy"
+      - "c*:strdup"
