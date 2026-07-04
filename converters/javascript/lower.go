@@ -41,6 +41,12 @@ type funcState struct {
 	// (e.g. "UserController."), empty for non-methods.
 	moduleName  string
 	methodClass string
+
+	// moduleAliases maps a require-bound name to its canonical module(.member)
+	// path (FE-2): "cp" -> "child_process" for `const cp = require('child_process')`,
+	// "exec" -> "child_process.exec" for a destructured require. resolveRequire
+	// rewrites a callee's root through it so module-anchored sink rules match.
+	moduleAliases map[string]string
 }
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
@@ -52,6 +58,25 @@ func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]strin
 		paramRegs:  map[string]bool{},
 		localFuncs: localFuncs,
 	}
+}
+
+// resolveRequire rewrites the root component of a dotted callee name through the
+// require-alias table, so `cp.exec` becomes `child_process.exec` and a
+// destructured `exec` becomes `child_process.exec` (FE-2). Unaliased roots and
+// "<dynamic>" pass through unchanged.
+func (fs *funcState) resolveRequire(dotted string) string {
+	if len(fs.moduleAliases) == 0 {
+		return dotted
+	}
+	root, rest, hasRest := strings.Cut(dotted, ".")
+	canon, ok := fs.moduleAliases[root]
+	if !ok {
+		return dotted
+	}
+	if hasRest {
+		return canon + "." + rest
+	}
+	return canon
 }
 
 func (fs *funcState) newReg() string {
@@ -147,7 +172,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -157,6 +182,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 
 	fs := newFuncState(filename, fset, nameOf, localFuncs)
 	fs.moduleName = moduleName
+	fs.moduleAliases = moduleAliases
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -831,7 +857,7 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // note on the js-ssrf sample's chained axios.get(...).then(...) handler.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
-	callee := "js:" + syntacticCallee(v.Callee)
+	callee := "js:" + fs.resolveRequire(syntacticCallee(v.Callee))
 	// A bare call to a top-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName; otherwise byKey
 	// never resolves it and taint does not flow through the local helper.

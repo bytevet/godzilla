@@ -57,8 +57,10 @@ export function run(req: Req, res: unknown): void {
 		t.Fatal(err)
 	}
 	cs := calleeNames(t, src)
-	if !hasCallee(cs, "js:cp.execSync") {
-		t.Errorf("expected sink callee js:cp.execSync in TS output, got %v", cs)
+	// FE-2: `const cp = require("child_process")` makes cp an alias, so the callee
+	// resolves to the canonical js:child_process.execSync (not the local js:cp.*).
+	if !hasCallee(cs, "js:child_process.execSync") {
+		t.Errorf("expected sink callee js:child_process.execSync in TS output, got %v", cs)
 	}
 }
 

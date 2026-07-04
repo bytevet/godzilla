@@ -378,9 +378,12 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		}
 	}
 
+	// Module-level require-alias table for FE-2 (cp.exec -> child_process.exec).
+	moduleAliases := collectRequireAliases(prog.Body)
+
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs))
+		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases))
 	}
 
 	moduleFn := &ir.Function{
@@ -392,6 +395,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	}
 	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
 	fs.moduleName = moduleName
+	fs.moduleAliases = moduleAliases
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 
