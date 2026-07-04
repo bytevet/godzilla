@@ -179,3 +179,63 @@ func TestAxumTaintFlow_EndToEnd(t *testing.T) {
 		t.Errorf("expected rust-command-injection from an axum Query handler; got %d finding(s)", len(findings))
 	}
 }
+
+// TestParseCargoTargets covers the FE-3 cargo-metadata target enumeration: bin
+// and lib targets are kept (with -p set only for a workspace), and
+// test/example/build-script targets are skipped.
+func TestParseCargoTargets(t *testing.T) {
+	// Single-package project with a bin and a lib, plus a test target to skip.
+	single := []byte(`{
+	  "packages": [{
+	    "name": "app",
+	    "targets": [
+	      {"name": "app", "kind": ["bin"], "src_path": "/p/src/main.rs"},
+	      {"name": "app", "kind": ["lib"], "src_path": "/p/src/lib.rs"},
+	      {"name": "it", "kind": ["test"], "src_path": "/p/tests/it.rs"}
+	    ]
+	  }],
+	  "workspace_members": ["app 0.1.0 (path+file:///p)"]
+	}`)
+	got := parseCargoTargets(single)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 targets (bin+lib, test skipped), got %d: %+v", len(got), got)
+	}
+	var bin, lib bool
+	for _, tgt := range got {
+		if tgt.pkg != "" {
+			t.Errorf("single-package project should not set -p, got pkg=%q", tgt.pkg)
+		}
+		switch tgt.kind {
+		case "bin":
+			bin = true
+			if tgt.name != "app" || tgt.srcPath != "/p/src/main.rs" {
+				t.Errorf("bin target mis-parsed: %+v", tgt)
+			}
+		case "lib":
+			lib = true
+		}
+	}
+	if !bin || !lib {
+		t.Errorf("expected both a bin and a lib target, got %+v", got)
+	}
+
+	// Workspace with two members: -p must be set to disambiguate.
+	ws := []byte(`{"packages":[
+	  {"name":"a","targets":[{"name":"a","kind":["bin"],"src_path":"/w/a/src/main.rs"}]},
+	  {"name":"b","targets":[{"name":"b","kind":["lib"],"src_path":"/w/b/src/lib.rs"}]}
+	]}`)
+	wsTargets := parseCargoTargets(ws)
+	if len(wsTargets) != 2 {
+		t.Fatalf("expected 2 workspace targets, got %d", len(wsTargets))
+	}
+	for _, tgt := range wsTargets {
+		if tgt.pkg == "" {
+			t.Errorf("workspace target should set -p, got %+v", tgt)
+		}
+	}
+
+	// Garbage in -> nil (caller falls back).
+	if parseCargoTargets([]byte("not json")) != nil {
+		t.Errorf("invalid metadata should parse to nil")
+	}
+}

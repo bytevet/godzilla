@@ -1,0 +1,4 @@
+[package]
+name = "web_bin_command_injection"
+version = "0.1.0"
+edition = "2021"
