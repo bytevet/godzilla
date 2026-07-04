@@ -423,7 +423,7 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Add a `var version = "dev"` in cmd/godzilla injected via -ldflags in the Makefile, a `godzilla version` subcommand, `Version` on sarifDriver, and a `schemaVersion: "1"` + `toolVersion` on jsonDocument.
 - **DONE:** `var version = "dev"` in `cmd/godzilla`, injected at build via `-ldflags "-X main.version=$(VERSION)"` (Makefile `VERSION` defaults to `git describe`). A `godzilla version` subcommand (also `--version`/`-v`) prints it. `report.Version` (stamped from the CLI at startup) now flows into the SARIF `driver.version` and the JSON document's `toolVersion` + `schemaVersion: "1"`. Tested by `TestReportsStampVersion`; the ldflags injection verified end-to-end.
 
-### CI-9 [LOW] ✅ DONE (`c05af2f` + `<pending>`) Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
+### CI-9 [LOW] ✅ DONE (`c05af2f` + `38cd351`) Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
 
 - **Impact:** Minor individually, but for the 'ultra-fast per-commit' headline goal the absence of a changed-files entry point matters: pre-commit frameworks pass filenames, and per-file invocation re-pays JVM/rustc startup each time. Stale usage text erodes polish/trust on first contact.
 - **Fix direction:** Fix usageText and scan.go:106's language list; add --quiet (suppress per-finding text when a report flag is set) and a simple frontends-started/finished progress line on stderr; accept multiple positional paths and a `--files -` stdin list feeding a single merged Convert, enabling a documented pre-commit hook recipe in README.

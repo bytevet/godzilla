@@ -81,6 +81,19 @@ godzilla scan --rules myrules.yaml --summary ./path/to/project
 
 # Triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
 godzilla scan --llm-review ./path/to/project
+
+# Changed-files mode: scan only what a commit touched (one process, one gate).
+# Pass several paths, or feed a list on stdin with -files - for a pre-commit hook:
+git diff --name-only --cached | godzilla scan -files -
+```
+
+**Pre-commit hook** (`.git/hooks/pre-commit`): gate a commit on only its staged
+files — no re-paying frontend startup per file, and a docs-only commit passes
+cleanly:
+
+```bash
+#!/bin/sh
+git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on high
 ```
 
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
