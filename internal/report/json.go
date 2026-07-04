@@ -27,6 +27,8 @@ type jsonFinding struct {
 	SinkCallee  string        `json:"sinkCallee"`
 	Source      *jsonLocation `json:"source"`
 	Sink        *jsonLocation `json:"sink"`
+	// Path is the ordered source->sink taint flow (when reconstructable).
+	Path []*jsonLocation `json:"path,omitempty"`
 	// Suppressed findings (judged false positives by the LLM reviewer) are
 	// retained in the output, flagged, with the reviewer's reason — never
 	// silently dropped.
@@ -66,6 +68,7 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 			SinkCallee:        f.SinkCallee,
 			Source:            jsonLocationFor(f.SourcePos),
 			Sink:              jsonLocationFor(f.SinkPos),
+			Path:              jsonPathFor(f.Steps),
 			Suppressed:        f.Suppressed,
 			SuppressedBy:      f.SuppressedBy,
 			SuppressionReason: f.SuppressionReason,
@@ -75,6 +78,19 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// jsonPathFor converts the taint-path positions to JSON locations, or nil when
+// there is no multi-step path to report.
+func jsonPathFor(steps []*ir.Position) []*jsonLocation {
+	if len(steps) < 2 {
+		return nil
+	}
+	out := make([]*jsonLocation, 0, len(steps))
+	for _, p := range steps {
+		out = append(out, jsonLocationFor(p))
+	}
+	return out
 }
 
 // jsonLocationFor converts an *ir.Position to a *jsonLocation, returning nil

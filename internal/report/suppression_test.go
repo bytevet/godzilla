@@ -106,3 +106,43 @@ func TestHTML_MarksSuppressedRow(t *testing.T) {
 		t.Errorf("suppressed finding not visually marked in HTML report")
 	}
 }
+
+func TestSARIF_EmitsCodeFlowFromSteps(t *testing.T) {
+	f := analysis.Finding{
+		RuleID:   "GO-SQLI",
+		Severity: rules.SeverityHigh,
+		Message:  "sqli",
+		SinkPos:  &ir.Position{Filename: "h.go", Line: 42, Column: 3},
+		Steps: []*ir.Position{
+			{Filename: "h.go", Line: 10, Column: 5},
+			{Filename: "h.go", Line: 20, Column: 7},
+			{Filename: "h.go", Line: 42, Column: 3},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteSARIF(&buf, []analysis.Finding{f}); err != nil {
+		t.Fatalf("WriteSARIF: %v", err)
+	}
+	var doc struct {
+		Runs []struct {
+			Results []struct {
+				CodeFlows []struct {
+					ThreadFlows []struct {
+						Locations []struct {
+							Location struct {
+								PhysicalLocation struct{ Region struct{ StartLine int } }
+							}
+						} `json:"locations"`
+					} `json:"threadFlows"`
+				} `json:"codeFlows"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cf := doc.Runs[0].Results[0].CodeFlows
+	if len(cf) != 1 || len(cf[0].ThreadFlows) != 1 || len(cf[0].ThreadFlows[0].Locations) != 3 {
+		t.Fatalf("expected a codeFlow with a 3-step threadFlow, got %+v", cf)
+	}
+}

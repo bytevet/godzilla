@@ -39,6 +39,13 @@ type Finding struct {
 	SinkPos    *ir.Position
 	SinkCallee string
 
+	// Steps is the ordered taint path from source to sink (inclusive), when it
+	// can be reconstructed intra-procedurally by walking the def-use chain. It
+	// powers SARIF codeFlows (which GitHub code scanning renders as a data-flow)
+	// and richer triage. Empty when only the endpoints are known (e.g. a flow
+	// whose middle crossed a function boundary).
+	Steps []*ir.Position
+
 	// Suppressed marks a finding that a downstream triage stage (the LLM
 	// reviewer) judged a false positive. A suppressed finding is RETAINED, not
 	// discarded: it does not count toward the gate, but it stays visible in

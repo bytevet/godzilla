@@ -324,6 +324,7 @@ func analyzeFunc(
 				// host cannot redirect the request and is a false positive; the
 				// check is structural/deterministic, so marking reported is safe.
 				if rule.CWE != "CWE-918" || urlHostControllable(inj, tainted, defs) {
+					steps := reconstructPath(defs, tainted, firstTaintedReg(tainted, inj), pos, inst.Pos)
 					res.findings = append(res.findings, Finding{
 						RuleID:     rule.ID,
 						Severity:   rule.Severity,
@@ -335,6 +336,7 @@ func analyzeFunc(
 						SourcePos:  pos,
 						SinkPos:    inst.Pos,
 						SinkCallee: callee,
+						Steps:      steps,
 					})
 				}
 			}

@@ -54,9 +54,24 @@ type sarifResult struct {
 	Message             sarifMessage           `json:"message"`
 	Locations           []sarifLocation        `json:"locations,omitempty"`
 	RelatedLocations    []sarifRelatedLocation `json:"relatedLocations,omitempty"`
+	CodeFlows           []sarifCodeFlow        `json:"codeFlows,omitempty"`
 	Suppressions        []sarifSuppression     `json:"suppressions,omitempty"`
 	PartialFingerprints map[string]string      `json:"partialFingerprints,omitempty"`
 	Properties          sarifResultProperties  `json:"properties,omitempty"`
+}
+
+// sarifCodeFlow / threadFlow model the ordered source->sink taint path. GitHub
+// code scanning renders a codeFlow as a navigable data-flow trace.
+type sarifCodeFlow struct {
+	ThreadFlows []sarifThreadFlow `json:"threadFlows"`
+}
+
+type sarifThreadFlow struct {
+	Locations []sarifThreadFlowLocation `json:"locations"`
+}
+
+type sarifThreadFlowLocation struct {
+	Location sarifLocation `json:"location"`
 }
 
 // sarifSuppression records that a result was suppressed downstream (here, by
@@ -143,6 +158,9 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 		if related, ok := sarifRelatedLocationFor(f.SourcePos); ok {
 			result.RelatedLocations = []sarifRelatedLocation{related}
 		}
+		if cf, ok := sarifCodeFlowFor(f.Steps); ok {
+			result.CodeFlows = []sarifCodeFlow{cf}
+		}
 		if f.Suppressed {
 			result.Suppressions = []sarifSuppression{{Kind: "external", Justification: f.SuppressionReason}}
 		}
@@ -222,6 +240,22 @@ func sarifURI(filename string) string {
 		}
 	}
 	return filepath.ToSlash(filename)
+}
+
+// sarifCodeFlowFor builds a SARIF codeFlow (one threadFlow) from the ordered
+// taint-path positions. Returns ok=false when there are fewer than two mappable
+// steps (nothing to render as a flow).
+func sarifCodeFlowFor(steps []*ir.Position) (sarifCodeFlow, bool) {
+	tfls := make([]sarifThreadFlowLocation, 0, len(steps))
+	for _, p := range steps {
+		if loc, ok := sarifLocationFor(p); ok {
+			tfls = append(tfls, sarifThreadFlowLocation{Location: loc})
+		}
+	}
+	if len(tfls) < 2 {
+		return sarifCodeFlow{}, false
+	}
+	return sarifCodeFlow{ThreadFlows: []sarifThreadFlow{{Locations: tfls}}}, true
 }
 
 // sarifRelatedLocationFor builds a SARIF related location (used for the

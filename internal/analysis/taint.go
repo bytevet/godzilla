@@ -265,6 +265,82 @@ func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 	taintContainer(defs, tainted, reg, pos)
 }
 
+// reconstructPath best-effort recovers the taint path from source to sink by
+// walking the def-use chain backward from the sink's tainted argument, following
+// the first tainted operand at each hop and collecting each defining
+// instruction's position. It returns the path ordered source -> ... -> sink
+// (with srcPos first and sinkPos last), consecutive duplicates removed. The walk
+// is bounded and stops at a register with no tainted operand (a source result, a
+// seeded parameter, or an opaque value), so the result may be a partial
+// intra-procedural segment — good enough to render a data flow.
+func reconstructPath(defs map[string]*ir.Instruction, tainted map[string]*ir.Position, argReg string, srcPos, sinkPos *ir.Position) []*ir.Position {
+	var rev []*ir.Position // sink -> ... -> source order while walking
+	if sinkPos != nil {
+		rev = append(rev, sinkPos)
+	}
+	seen := map[string]bool{}
+	for reg := argReg; reg != "" && !seen[reg]; {
+		seen[reg] = true
+		def := defs[reg]
+		if def == nil {
+			break
+		}
+		if p := def.GetPos(); p != nil {
+			rev = append(rev, p)
+		}
+		reg = firstTaintedOperandReg(tainted, def)
+	}
+	if srcPos != nil {
+		rev = append(rev, srcPos)
+	}
+	// Reverse to source -> sink and drop consecutive duplicate positions.
+	path := make([]*ir.Position, 0, len(rev))
+	for i := len(rev) - 1; i >= 0; i-- {
+		if len(path) > 0 && samePos(path[len(path)-1], rev[i]) {
+			continue
+		}
+		path = append(path, rev[i])
+	}
+	return path
+}
+
+// firstTaintedOperandReg returns the register name of def's first tainted
+// operand (including the receiver of a method call), or "" if none.
+func firstTaintedOperandReg(tainted map[string]*ir.Position, def *ir.Instruction) string {
+	if def.Call != nil {
+		if v := def.Call.GetValue(); v != nil {
+			if reg := v.GetRegName(); reg != "" {
+				if _, ok := tainted[reg]; ok {
+					return reg
+				}
+			}
+		}
+		for _, a := range def.Call.GetArgs() {
+			if reg := a.GetRegName(); reg != "" {
+				if _, ok := tainted[reg]; ok {
+					return reg
+				}
+			}
+		}
+	}
+	for _, op := range def.GetOperands() {
+		if reg := op.GetRegName(); reg != "" {
+			if _, ok := tainted[reg]; ok {
+				return reg
+			}
+		}
+	}
+	return ""
+}
+
+// samePos reports whether two positions point at the same file:line:col.
+func samePos(a, b *ir.Position) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.GetFilename() == b.GetFilename() && a.GetLine() == b.GetLine() && a.GetColumn() == b.GetColumn()
+}
+
 // isTainted reports whether operand v refers to a tainted register, and if
 // so, the Position it originated from.
 func isTainted(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool) {
@@ -277,6 +353,18 @@ func isTainted(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool
 	}
 	pos, ok := tainted[reg]
 	return pos, ok
+}
+
+// firstTaintedReg returns the register of the first tainted value in vals.
+func firstTaintedReg(tainted map[string]*ir.Position, vals []*ir.Value) string {
+	for _, v := range vals {
+		if reg := v.GetRegName(); reg != "" {
+			if _, ok := tainted[reg]; ok {
+				return reg
+			}
+		}
+	}
+	return ""
 }
 
 // firstTaintedOrigin scans vals in order and returns the origin Position of
