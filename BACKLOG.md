@@ -44,14 +44,17 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 
 ## Prioritized roadmap
 
-### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact)
+> **Implementation status** (branch `claude/backlog-gap-analysis`):
+> **Tier 0 — ✅ COMPLETE** (commits `4f445c9` engine, `6f7b62a` reviewer, `96ff41e` gate). Tier 1 — in progress.
+
+### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
 
-- **ENG-1** *(critical, bug)* — sanitizer bypass via return summary. Highest value: kills a whole High-confidence FP class. One-function fix.
-- **ENG-5** *(high, bug)* — Java instance-method interproc off-by-one. Kills a whole Java FN class.
-- **FE-1 / CI-3 / TRUST-2** *(critical)* — fail **closed** on frontend/build failure in CI mode; print a coverage summary.
-- **LLM-1 + LLM-3 + LLM-6** *(critical/high)* — make the reviewer auditable: keep dropped findings visible with the model's reason; never drop on empty/failed context; surface reviewer errors.
-- **ENG-7** *(medium)* — label return-flow findings Medium (not High) so the reviewer actually sees them (rides along with ENG-1).
+- ✅ **ENG-1** *(critical, bug)* — sanitizer bypass via return summary. Highest value: kills a whole High-confidence FP class. One-function fix. *(early-return in `handleCall`; guard `internal/analysis/sanitizer_test.go`)*
+- ✅ **ENG-5** *(high, bug)* — Java instance-method interproc off-by-one. Kills a whole Java FN class. *(receiver-aware INVOKE mapping; `test/java/interproc_instance{,_safe}`)*
+- ✅ **FE-1 / CI-3 / TRUST-2** *(critical)* — fail **closed** on frontend/build failure. *(scan.Result.Coverage + `-strict` + coverage summary; `internal/scan/scan_test.go`, `cmd/godzilla/main_test.go`)*
+- ✅ **LLM-1 + LLM-3 + LLM-6** *(critical/high)* — reviewer auditability. *(retain-and-flag suppressed findings + reason in JSON/SARIF/HTML; never drop on empty context; ReviewStats no-op/error warnings; `internal/llm/review_test.go`, `internal/report/suppression_test.go`)*
+- ✅ **ENG-7** *(medium)* — return-flow findings labeled Medium so the reviewer sees them. *(interprocOrigins; `internal/analysis/return_flow_test.go`)*
 
 ### Tier 1 — Make it adoptable (the FP/coverage blockers that stop trials)
 - **CI-1 + CI-2** — baseline file + inline `// godzilla:ignore` + stable finding fingerprints → enables `--fail-on-new` diff-aware gating.
