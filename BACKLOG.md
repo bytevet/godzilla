@@ -123,23 +123,30 @@ PERF-5/PERF-8.
 
 Everything **CRITICAL / HIGH / tractable-MEDIUM across the whole backlog is implemented and tested**
 (Tiers 0–3 complete; the opportunistic MEDIUM/LOW set swept — see the roadmap status header for the
-per-ID commit map). The items intentionally **left open** are the ones whose cost is disproportionate to
-their value against the headline near-zero-FP per-commit-gate goal, deferred here with rationale so the
-list is honest rather than silently unfinished:
+per-ID commit map). The deferred-with-rationale set has since been **worked down further**: the
+per-frontend fidelity items and the OpenAI adapter are now done (see below). What remains open are only
+the items gated on toolchains outside the default test matrix, or that are large net-new projects.
 
-- **COV-7 (Rust axum sources)** — needs the frontend to synthesize a source CALL per axum extractor
-  (`Query`/`Path`/`Json`) by pattern-matching the MIR signature text, mirroring the Java
-  `@RequestParam` trick. Real work in `mir.go`, only exercisable with `rustc` + the axum crate; the
-  taint *engine* is ready (rules are a YAML edit once the sources fire). Highest-value of the deferrals.
+**Since first declaring terminal state, now DONE:**
+
+- **COV-7 (Rust axum sources)** ✅ — `mir.go` synthesizes a source CALL per axum extractor
+  (`Query`/`Path`/`Json`/`Form`) by pattern-matching the MIR signature type, mirroring the Java
+  `@RequestParam` trick; rules updated. Verified end-to-end (`TestAxumTaintFlow_EndToEnd`).
+- **FE-2 (import aliases)** ✅ — Python (`from x import y` / `import x as z`) and JS
+  (`require`-bound names) resolve to canonical FQNs so aliased sinks match; relative requires excluded to
+  preserve cross-file linking.
+- **FE-3 (Rust bin/workspace targets)** ✅ — `cargo metadata`-driven per-target `cargo rustc` MIR emit.
+- **FE-4 (Java control-flow joins)** ✅ (`9300e96`) — CFG reconstruction + operand-stack/local PHI merge.
+- **FE-5 (Python/JS/Rust branch merge)** ✅ — statement-level "default if empty" PHI merge in all three.
+- **FE-7 (Python dict/set literals)** ✅ — lowered as sequences so elements fire.
+- **FE-8 (Java source-file anchoring)** ✅ — findings anchor to each class's `.java` via SourceFile.
+- **LLM-9 (OpenAI-compatible adapter)** ✅ — `internal/llm/openai.go`, routed by `GODZILLA_LLM_PROVIDER`.
+
+**Still deferred (toolchain-gated or net-new project):**
+
 - **COV-8 (C/C++ depth)** — more packs + argv/execve coverage on the opt-in cgo LLVM frontend; gated on
   a libLLVM build, so it can't run in the default test matrix.
 - **COV-10 (PHP/Ruby/C#/Kotlin)** — net-new frontends; each is a large project on its own.
-- **FE-2/FE-3/FE-4/FE-5/FE-7/FE-8** — per-frontend lowering-fidelity refinements (import aliases,
-  Rust bin/workspace targets, misc node coverage). Each is narrow and open-ended; the fidelity guards
-  FE-9/FE-10 already surface *gross* decay loudly, which was the trust-critical part.
-- **LLM-9 (OpenAI-compatible adapter)** — the `Reviewer` interface already supports it and
-  `ANTHROPIC_BASE_URL` covers Anthropic-compatible proxies today; a full OpenAI/Ollama adapter is a
-  clean add when demanded.
 - **CI-9 changed-files/`--files -`** — a convenience wrapper over per-file `scan`; marginal.
 - **PERF-1/6/8** — reasoned in the Tier 2 section (caching invalidation risk; tree-shaking soundness
   trade-off; streaming not a bottleneck).
@@ -226,7 +233,7 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Use `cargo metadata` to enumerate targets/workspace members, then run `cargo rustc --bin <name> -- --emit=mir=...` (and --lib where present) per target, merging the resulting modules. Fall back through targets rather than hard-failing on --lib absence.
 - **DONE:** `convertCargo` now enumerates the project's own lib/bin targets via `cargo metadata --no-deps` (`parseCargoTargets`), then emits + lowers each with `cargo rustc --bin <name>` / `--lib` (adding `-p <pkg>` to disambiguate workspace members) and merges the modules — so binary crates (`src/main.rs`) and workspaces are analyzed instead of hard-failing on `--lib`. Falls back to a best-effort `--lib`/default build if metadata is unavailable, so the existing lib path never regresses. Tested by `TestParseCargoTargets` (bin+lib kept, test targets skipped, workspace `-p`, garbage→nil) and the `test/rust/web_bin_command_injection` corpus sample (a binary crate); verified end-to-end that a `src/main.rs` crate that previously produced zero analysis now fires.
 
-### FE-4 [HIGH] ✅ DONE (`<pending>`) Java operand-stack simulation breaks at control-flow merges: a ternary selecting a tainted value is silently missed and misaligns the rest of the method
+### FE-4 [HIGH] ✅ DONE (`9300e96`) Java operand-stack simulation breaks at control-flow merges: a ternary selecting a tainted value is silently missed and misaligns the rest of the method
 
 - **Impact:** `cond ? tainted : default` and any branch-shaped value selection (very common in handler code) is a silent FN in Java; worse, the stack misalignment can garble every subsequent instruction's operands in that method, so unrelated later sinks in the same method also see wrong values (both FNs and garbage). This is a correctness cliff, not a graceful approximation.
 - **Fix direction:** Track branch targets from the dump (JavaDump already sees offsets): split the linear pass at labels, snapshot the stack at each conditional/GOTO, and at a join merge differing stack slots with OP_CODE_PHI (mirroring how the JS ConditionalExpression is lowered with PHI, lower.go:545-558 in the JS frontend). Even a minimal 'ternary pattern' merge (two pushes reaching one store) would recover the dominant case without touching gIR.
