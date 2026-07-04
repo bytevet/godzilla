@@ -167,6 +167,9 @@ func runScan(args []string) {
 		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
 		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
 			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
+		if stats.Skipped > 0 {
+			fmt.Fprintf(os.Stdout, "note: %d finding(s) past the review cap were kept unreviewed.\n", stats.Skipped)
+		}
 		if stats.Errors > 0 {
 			fmt.Fprintf(os.Stdout, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
 		}

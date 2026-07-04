@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"godzilla/internal/analysis"
 	ir "godzilla/pkg/ir/v1"
@@ -41,7 +43,26 @@ type ReviewStats struct {
 	Suppressed int   // findings the reviewer judged false positives (retained, flagged)
 	Errors     int   // reviewer errors (finding kept unreviewed, fail-open)
 	LowContext int   // findings kept unreviewed because no code context was available
+	Skipped    int   // findings past the per-scan review cap (kept unreviewed, fail-open)
 	FirstErr   error // first reviewer error, for a single actionable message
+}
+
+// ReviewConfig bounds a review pass so a large scan cannot stall or cost
+// unboundedly (LLM-5): reviews run through a bounded worker pool, each under a
+// per-call timeout, capped at a maximum number per scan (excess findings are
+// kept unreviewed — fail open).
+type ReviewConfig struct {
+	Concurrency int           // max concurrent reviews (default 8)
+	Timeout     time.Duration // per-review timeout (0 = none; default 30s)
+	MaxReviews  int           // cap on reviews per pass (0 = unlimited; default 200)
+}
+
+// DefaultReviewConfig returns the tuned defaults: 8-way concurrency, a 30s
+// per-review timeout, and a 200-finding cap so a pathological scan degrades to
+// "some findings kept unreviewed" rather than an unbounded bill or a stalled
+// pipeline.
+func DefaultReviewConfig() ReviewConfig {
+	return ReviewConfig{Concurrency: 8, Timeout: 30 * time.Second, MaxReviews: 200}
 }
 
 // Filter reviews every finding whose Confidence is at or below reviewUpTo. A
@@ -57,42 +78,92 @@ type ReviewStats struct {
 // It returns all findings (surviving ones plus the suppressed-and-flagged ones)
 // and a ReviewStats describing the pass.
 func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence) ([]analysis.Finding, ReviewStats) {
+	return FilterWithConfig(ctx, r, findings, reviewUpTo, DefaultReviewConfig())
+}
+
+// FilterWithConfig is Filter with an explicit ReviewConfig. Reviews run through
+// a bounded worker pool (order-preserving output), each under a per-call
+// timeout, capped at cfg.MaxReviews per pass; findings past the cap are kept
+// unreviewed (fail open, counted in Skipped). The two safety properties of
+// Filter still hold: fail-open on error/timeout, and never-blind on empty
+// context.
+func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence, cfg ReviewConfig) ([]analysis.Finding, ReviewStats) {
 	var stats ReviewStats
 	if r == nil {
 		return findings, stats
 	}
-	out := make([]analysis.Finding, 0, len(findings))
-	for _, f := range findings {
-		if !shouldReview(f.Confidence, reviewUpTo) {
-			out = append(out, f)
+	out := make([]analysis.Finding, len(findings))
+	copy(out, findings)
+
+	// Decide, in order, which findings to review and with what context.
+	type job struct {
+		idx int
+		cc  string
+	}
+	var jobs []job
+	for i := range out {
+		if !shouldReview(out[i].Confidence, reviewUpTo) {
 			continue
 		}
-		cc := codeContextFor(f)
+		cc := codeContextFor(out[i])
 		if strings.TrimSpace(cc) == "" {
-			// No code to judge on: never adjudicate (and never drop) blind.
-			stats.LowContext++
-			out = append(out, f)
+			stats.LowContext++ // never adjudicate (or drop) blind
 			continue
 		}
+		jobs = append(jobs, job{idx: i, cc: cc})
+	}
+
+	// Cap the number of reviews per pass; the rest are kept unreviewed.
+	if cfg.MaxReviews > 0 && len(jobs) > cfg.MaxReviews {
+		stats.Skipped = len(jobs) - cfg.MaxReviews
+		jobs = jobs[:cfg.MaxReviews]
+	}
+
+	// Review concurrently, bounded, each under its own timeout. Only reads of
+	// out[idx] happen here; the suppression writes are applied afterward in
+	// original order, so there is no data race on out.
+	conc := cfg.Concurrency
+	if conc < 1 {
+		conc = 1
+	}
+	verdicts := make([]Verdict, len(jobs))
+	errs := make([]error, len(jobs))
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for k := range jobs {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rctx := ctx
+			if cfg.Timeout > 0 {
+				var cancel context.CancelFunc
+				rctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+				defer cancel()
+			}
+			verdicts[k], errs[k] = r.Review(rctx, out[jobs[k].idx], jobs[k].cc)
+		}(k)
+	}
+	wg.Wait()
+
+	// Apply results in original order for deterministic stats and output.
+	for k := range jobs {
 		stats.Reviewed++
-		v, err := r.Review(ctx, f, cc)
-		if err != nil {
+		if errs[k] != nil {
 			stats.Errors++
 			if stats.FirstErr == nil {
-				stats.FirstErr = err
+				stats.FirstErr = errs[k]
 			}
-			out = append(out, f) // fail open
-			continue
+			continue // fail open
 		}
-		if !v.FalsePositive {
-			out = append(out, f)
-			continue
+		if verdicts[k].FalsePositive {
+			idx := jobs[k].idx
+			out[idx].Suppressed = true
+			out[idx].SuppressedBy = "llm-review"
+			out[idx].SuppressionReason = verdicts[k].Reason
+			stats.Suppressed++
 		}
-		f.Suppressed = true
-		f.SuppressedBy = "llm-review"
-		f.SuppressionReason = v.Reason
-		stats.Suppressed++
-		out = append(out, f)
 	}
 	return out, stats
 }

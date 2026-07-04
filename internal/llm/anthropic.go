@@ -30,14 +30,16 @@ type AnthropicReviewer struct {
 // number of model calls; after it, the reviewer forces a final verdict.
 const maxToolRounds = 6
 
-// NewAnthropicReviewer builds a reviewer using the default Claude model
-// (claude-opus-4-8), overridable via the GODZILLA_LLM_MODEL environment
-// variable (e.g. set it to a faster/cheaper model for high-volume triage).
-// Credentials are resolved by the SDK from ANTHROPIC_API_KEY or an `ant auth`
-// profile; a missing credential surfaces as a per-review error, which Filter
-// treats as fail-open (the finding is kept, never silently dropped).
+// NewAnthropicReviewer builds a reviewer using a fast, inexpensive default model
+// (claude-haiku-4-5) — the review task is one-sentence JSON triage over a
+// finding, run per-finding at scale, so a Haiku-class model keeps a large scan
+// affordable and quick (LLM-5). Override with GODZILLA_LLM_MODEL to upgrade to
+// Opus for harder adjudication. Credentials are resolved by the SDK from
+// ANTHROPIC_API_KEY or an `ant auth` profile; a missing credential surfaces as a
+// per-review error, which Filter treats as fail-open (the finding is kept, never
+// silently dropped).
 func NewAnthropicReviewer() *AnthropicReviewer {
-	model := anthropic.ModelClaudeOpus4_8
+	model := anthropic.ModelClaudeHaiku4_5
 	if m := os.Getenv("GODZILLA_LLM_MODEL"); m != "" {
 		model = anthropic.Model(m)
 	}

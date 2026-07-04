@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"godzilla/internal/analysis"
@@ -14,20 +15,31 @@ import (
 
 // mockReviewer marks findings whose RuleID is in fp as false positives, and
 // optionally returns an error for every call. It records how many times it was
-// called so tests can assert the empty-context guard skips the reviewer.
+// called so tests can assert the empty-context guard skips the reviewer. The
+// call counter is mutex-guarded because Filter now reviews concurrently.
 type mockReviewer struct {
 	fp     map[string]bool
 	reason string
 	err    error
-	calls  int
+
+	mu    sync.Mutex
+	calls int
 }
 
 func (m *mockReviewer) Review(_ context.Context, f analysis.Finding, _ string) (Verdict, error) {
+	m.mu.Lock()
 	m.calls++
+	m.mu.Unlock()
 	if m.err != nil {
 		return Verdict{}, m.err
 	}
 	return Verdict{FalsePositive: m.fp[f.RuleID], Reason: m.reason}, nil
+}
+
+func (m *mockReviewer) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
 
 // withContext returns a finding whose sink points at the package testdata file,
@@ -59,8 +71,8 @@ func TestFilter_KeepsHighConfidenceWithoutReview(t *testing.T) {
 	}
 	m := &mockReviewer{fp: map[string]bool{"a": true, "b": true}}
 	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if m.calls != 0 {
-		t.Errorf("high-confidence findings should not be reviewed, got %d calls", m.calls)
+	if m.callCount() != 0 {
+		t.Errorf("high-confidence findings should not be reviewed, got %d calls", m.callCount())
 	}
 	if activeCount(out) != 2 || stats.Suppressed != 0 {
 		t.Errorf("expected all kept, got active=%d suppressed=%d", activeCount(out), stats.Suppressed)
@@ -75,8 +87,8 @@ func TestFilter_SuppressesFalsePositivesButRetainsThem(t *testing.T) {
 	}
 	m := &mockReviewer{fp: map[string]bool{"fp": true, "lowfp": true}, reason: "constant, not attacker-controlled"}
 	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if m.calls != 3 {
-		t.Errorf("expected 3 reviews, got %d", m.calls)
+	if m.callCount() != 3 {
+		t.Errorf("expected 3 reviews, got %d", m.callCount())
 	}
 	if stats.Reviewed != 3 || stats.Suppressed != 2 {
 		t.Errorf("expected reviewed=3 suppressed=2, got reviewed=%d suppressed=%d", stats.Reviewed, stats.Suppressed)
@@ -114,8 +126,8 @@ func TestFilter_NeverDropsWithoutCodeContext(t *testing.T) {
 	}}
 	m := &mockReviewer{fp: map[string]bool{"ctxless": true}}
 	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if m.calls != 0 {
-		t.Errorf("reviewer must not be called without code context, got %d calls", m.calls)
+	if m.callCount() != 0 {
+		t.Errorf("reviewer must not be called without code context, got %d calls", m.callCount())
 	}
 	if activeCount(out) != 1 || stats.Suppressed != 0 {
 		t.Errorf("empty-context finding must be kept, got active=%d suppressed=%d", activeCount(out), stats.Suppressed)
