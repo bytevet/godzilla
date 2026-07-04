@@ -3,6 +3,9 @@ package llm
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"godzilla/internal/analysis"
@@ -182,5 +185,45 @@ func TestParseVerdict(t *testing.T) {
 				t.Errorf("FalsePositive=%v want %v", v.FalsePositive, tc.wantFP)
 			}
 		})
+	}
+}
+
+func TestBuildPrompt_And_Context_IncludeTaintPath(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "h.go")
+	content := "package main\n" + // 1
+		"func h(r Req) {\n" + //   2
+		"  x := r.Query(\"q\")\n" + // 3 source
+		"  y := clean(x)\n" + //     4 intermediate
+		"  exec(y)\n" + //           5 sink
+		"}\n"
+	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := analysis.Finding{
+		RuleID:    "GO-CMDI",
+		Message:   "cmd injection",
+		SourcePos: &ir.Position{Filename: src, Line: 3, Column: 8},
+		SinkPos:   &ir.Position{Filename: src, Line: 5, Column: 3},
+		Steps: []*ir.Position{
+			{Filename: src, Line: 3, Column: 8},
+			{Filename: src, Line: 4, Column: 8},
+			{Filename: src, Line: 5, Column: 3},
+		},
+	}
+
+	cc := codeContextFor(f)
+	// Context must include a snippet at the INTERMEDIATE hop (line 4, the clean()
+	// call) — the whole point of feeding the path (LLM-2 context poverty).
+	if !strings.Contains(cc, "clean(x)") {
+		t.Errorf("code context missing the intermediate hop; got:\n%s", cc)
+	}
+	if !strings.Contains(cc, "-- source") || !strings.Contains(cc, "-- sink") {
+		t.Errorf("code context missing source/sink labels; got:\n%s", cc)
+	}
+
+	prompt := buildPrompt(f, cc)
+	if !strings.Contains(prompt, "Taint path (source -> sink):") {
+		t.Errorf("prompt missing the taint-path listing; got:\n%s", prompt)
 	}
 }

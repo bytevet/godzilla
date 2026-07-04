@@ -132,6 +132,12 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	fmt.Fprintf(&b, "Sink callee: %s\n", f.SinkCallee)
 	fmt.Fprintf(&b, "Source location: %s\n", posString(f.SourcePos))
 	fmt.Fprintf(&b, "Sink location: %s\n", posString(f.SinkPos))
+	if len(f.Steps) >= 2 {
+		b.WriteString("Taint path (source -> sink):\n")
+		for _, p := range f.Steps {
+			fmt.Fprintf(&b, "  - %s\n", posString(p))
+		}
+	}
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
@@ -170,11 +176,40 @@ func parseVerdict(text string) (Verdict, error) {
 	return v, nil
 }
 
-// codeContextFor reads a few source lines around the sink (and source, if in a
-// different file) to give the reviewer something concrete to judge. Best-effort:
-// any file-read error yields an empty context rather than failing the review.
+// codeContextFor gathers the source lines the reviewer needs to judge a finding.
+// When the finding carries a reconstructed taint path (Steps), it snippets code
+// at EVERY hop along the path — so the reviewer can see any sanitizer/validation
+// that sits between source and sink, not just the two endpoints (the "context
+// poverty" that made interprocedural adjudication guesswork). Otherwise it falls
+// back to snippets at the sink and source. Best-effort: any file-read error is
+// skipped rather than failing the review; a fully empty context makes Filter
+// keep the finding unreviewed.
 func codeContextFor(f analysis.Finding) string {
 	var b strings.Builder
+	if len(f.Steps) >= 2 {
+		seen := map[string]bool{}
+		for i, p := range f.Steps {
+			key := fmt.Sprintf("%s:%d", p.GetFilename(), p.GetLine())
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if snip := snippet(p, 2); snip != "" {
+				label := "step"
+				switch i {
+				case 0:
+					label = "source"
+				case len(f.Steps) - 1:
+					label = "sink"
+				}
+				fmt.Fprintf(&b, "-- %s (%s) --\n", label, posString(p))
+				b.WriteString(snip)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+	}
 	if snip := snippet(f.SinkPos, 3); snip != "" {
 		b.WriteString("-- sink --\n")
 		b.WriteString(snip)
