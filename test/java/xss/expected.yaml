@@ -1,0 +1,3 @@
+findings:
+    - rule: java-xss
+      min: 1

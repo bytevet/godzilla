@@ -1,0 +1,3 @@
+findings:
+    - rule: java-insecure-deserialization
+      min: 1

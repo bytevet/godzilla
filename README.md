@@ -106,10 +106,10 @@ $ godzilla scan ./test/go/sql_injection
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSRF | ✅ | ✅ | ✅ | — | ✅ |
-| Reflected XSS | ✅ | ✅ | ✅ | — | — |
-| Open redirect | ✅ | ✅ | ✅ | — | — |
-| Insecure deserialization | — | ✅ | — | — | — |
+| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reflected XSS | ✅ | ✅ | ✅ | ✅ | — |
+| Open redirect | ✅ | ✅ | ✅ | ✅ | — |
+| Insecure deserialization | — | ✅ | — | ✅ | — |
 | Code injection (`eval`) | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex

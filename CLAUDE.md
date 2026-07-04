@@ -144,7 +144,11 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and JS code injection (CWE-95).
 - **Java** — SQLi, command injection, path traversal (CWE-22: `java.io` file streams/readers,
-  `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path).
+  `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path), XSS
+  (CWE-79: servlet/`PrintWriter` response writes; `HtmlUtils`/OWASP-`Encode`/`StringEscapeUtils`
+  sanitizers), SSRF (CWE-918: `java.net.URL`/`URI`, `RestTemplate`/`WebClient`/HttpClient/OkHttp),
+  open redirect (CWE-601: `sendRedirect`/`RedirectView`), insecure deserialization (CWE-502:
+  `ObjectInputStream`/`XMLDecoder`/SnakeYAML/XStream).
 - **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
   (rusqlite/sqlx/diesel), SSRF (reqwest/ureq).
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
