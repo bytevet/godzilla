@@ -69,16 +69,48 @@ func (fl *funcLowerer) lower(fn llvm.Value) *ir.Function {
 		out.Params = append(out.Params, &ir.Value{Kind: &ir.Value_RegName{RegName: fl.reg(p)}})
 	}
 
-	idx := int32(0)
+	// Index the basic blocks first so a terminator's successor blocks resolve to
+	// block indices in the second pass.
+	blockIdx := map[llvm.BasicBlock]int32{}
+	var bbs []llvm.BasicBlock
 	for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
-		block := &ir.BasicBlock{Index: idx}
-		idx++
+		blockIdx[bb] = int32(len(bbs))
+		bbs = append(bbs, bb)
+	}
+
+	// Lower each block and wire its CFG edges (Preds/Succs). The flow-sensitive
+	// engine (ENG-2) propagates taint in reverse-post-order over these edges, so
+	// without them a branch between a source and a sink — `l = fgets(...); if (l)
+	// system(l);` — would strand the taint in the entry block (a false negative).
+	// A terminator's successor blocks appear among its operands as block values.
+	preds := make([][]int32, len(bbs))
+	for i, bb := range bbs {
+		block := &ir.BasicBlock{Index: int32(i)}
 		for in := bb.FirstInstruction(); !in.IsNil(); in = llvm.NextInstruction(in) {
 			if inst := fl.lowerInst(in); inst != nil {
 				block.Instrs = append(block.Instrs, inst)
 			}
 		}
+		if term := bb.LastInstruction(); !term.IsNil() {
+			seen := map[int32]bool{}
+			for k := 0; k < term.OperandsCount(); k++ {
+				op := term.Operand(k)
+				if !op.IsBasicBlock() {
+					continue
+				}
+				si, ok := blockIdx[op.AsBasicBlock()]
+				if !ok || seen[si] {
+					continue
+				}
+				seen[si] = true
+				block.Succs = append(block.Succs, si)
+				preds[si] = append(preds[si], int32(i))
+			}
+		}
 		out.Blocks = append(out.Blocks, block)
+	}
+	for i, ps := range preds {
+		out.Blocks[i].Preds = ps
 	}
 	return out
 }
