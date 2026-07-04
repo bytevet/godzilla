@@ -14,6 +14,7 @@ flowchart LR
     JS[JavaScript] --> FE
     JV[Java] --> FE
     RS[Rust] --> FE
+    RB[Ruby] --> FE
     CC["C / C++"] --> FE
 
     FE["Language<br/>frontends"] --> IR["gIR<br/>language-neutral SSA"]
@@ -24,15 +25,15 @@ flowchart LR
     LLM -.-> OUT
 ```
 
-<sub>All six languages lower to the same gIR; a single engine and rule set run over it.</sub>
+<sub>All seven languages lower to the same gIR; a single engine and rule set run over it.</sub>
 
 > Status: usable and tested, but young. See [Status & limitations](#status--limitations).
 
 ## Features
 
-- **Multi-language, one engine.** Go, Python, JavaScript, Java, and Rust frontends
-  (plus C/C++ in the opt-in cgo build) all emit the same gIR; the taint engine and
-  rules are language-agnostic.
+- **Multi-language, one engine.** Go, Python, JavaScript, Java, Rust, and Ruby
+  frontends (plus C/C++ in the opt-in cgo build) all emit the same gIR; the taint
+  engine and rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
   calls (source → sanitizer → sink) with a call graph and function summaries.
   Each finding carries a **confidence** (High for intra-procedural, Medium for
@@ -50,8 +51,9 @@ flowchart LR
 - **Optional LLM review.** A pluggable stage sends low-confidence findings to
   Claude to trim false positives; it fails open and is off by default.
 - **Single self-contained binary.** The Go and JavaScript frontends are pure Go;
-  Python, Java, and Rust shell out to the toolchain already on `PATH` (`python3`,
-  a JDK `java`, `rustc`) and degrade gracefully when it is absent. C/C++ is an
+  Python, Java, Rust, and Ruby shell out to the toolchain already on `PATH`
+  (`python3`, a JDK `java`, `rustc`, `ruby`) and degrade gracefully when it is
+  absent. C/C++ is an
   opt-in cgo build (libLLVM). No frontend adds a runtime dependency to *run* the
   binary — only to analyze that language.
 

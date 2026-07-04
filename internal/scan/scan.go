@@ -18,6 +18,7 @@ import (
 	java_converter "godzilla/converters/java"
 	js_converter "godzilla/converters/javascript"
 	py_converter "godzilla/converters/python"
+	ruby_converter "godzilla/converters/ruby"
 	rust_converter "godzilla/converters/rust"
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
@@ -171,6 +172,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		{"java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }},
 		{"cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }},
 		{"rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }},
+		{"ruby", func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }},
 	}
 	// Present frontends are independent (separate converters, separate source
 	// sets), so run them concurrently. Results are collected per frontend index
@@ -216,7 +218,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		}
 	}
 	if !ranAny {
-		return nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript source found under %s", path)
+		return nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
 	return merged, coverage, nil
 }
@@ -237,6 +239,8 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, error)) {
 		return "cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }
 	case strings.HasSuffix(path, ".rs"):
 		return "rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }
+	case strings.HasSuffix(path, ".rb"):
+		return "ruby", func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }
 	}
 	return "", nil
 }
@@ -300,6 +304,8 @@ func detectLanguages(dir string) map[string]bool {
 			present["cpp"] = true
 		case strings.HasSuffix(p, ".rs"):
 			present["rust"] = true
+		case strings.HasSuffix(p, ".rb"):
+			present["ruby"] = true
 		}
 		return nil
 	})

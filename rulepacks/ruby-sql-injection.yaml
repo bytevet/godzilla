@@ -1,0 +1,34 @@
+# SQL injection (Ruby / Rails, CWE-89): untrusted input interpolated into a raw
+# SQL string passed to a query API. The safe forms (parameterized where(hash),
+# where("x = ?", v), sanitize_sql) are not string-building sinks, so only the
+# raw-string execute/find_by_sql/interpolated-where paths fire here.
+rules:
+  - id: ruby-sql-injection
+    languages: [ruby]
+    severity: critical
+    cwe: CWE-89
+    message: >-
+      Untrusted input flows into a raw SQL string executed by ActiveRecord / a
+      database driver, which may allow SQL injection. Use parameterized queries
+      (where("col = ?", value) or where(col: value)) instead of interpolating
+      input into the SQL string.
+    sources:
+      - "ruby:params"
+      - "ruby:request.params"
+      - "ruby:request.query"
+      - "ruby:request.cookies"
+      - "ruby:request.GET"
+      - "ruby:request.POST"
+      - "ruby:request.body"
+    sinks:
+      - "ruby:*execute"              # connection.execute("... #{x}")
+      - "ruby:*exec_query"
+      - "ruby:*find_by_sql"
+      - "ruby:*.where_sql"
+    sanitizers:
+      - "ruby:*.sanitize_sql"
+      - "ruby:*.quote"
+    propagators:
+      - "ruby:*.to_s"
+      - "ruby:*.strip"
+      - "ruby:*.join"

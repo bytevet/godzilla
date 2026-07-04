@@ -34,6 +34,8 @@ func TestCorpus(t *testing.T) {
 	clangAvailable := clangErr == nil
 	_, rustcErr := exec.LookPath("rustc")
 	rustcAvailable := rustcErr == nil
+	_, rubyErr := exec.LookPath("ruby")
+	rubyAvailable := rubyErr == nil
 
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
@@ -44,6 +46,9 @@ func TestCorpus(t *testing.T) {
 			}
 			if strings.HasPrefix(name, "python/") && !pythonAvailable {
 				t.Skip("python3 not on PATH; skipping Python sample")
+			}
+			if strings.HasPrefix(name, "ruby/") && !rubyAvailable {
+				t.Skip("ruby not on PATH; skipping Ruby sample")
 			}
 			if strings.HasPrefix(name, "java/") {
 				if !javaAvailable {

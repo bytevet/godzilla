@@ -1,0 +1,2 @@
+# No shell is invoked by the multi-arg form, so no command-injection finding.
+findings: []
