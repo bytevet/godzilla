@@ -58,7 +58,7 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > glob-DoS fix (`09f40e1`), TRUST-6 perf-regression guard + TRUST-8 2nd differential shape
 > (`2326058`), TRUST-3 optional location oracle (`99abf24`), TRUST-5 precision/recall scorer
 > (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`),
-> ENG-9 guard/barrier sanitization (`38a6315`).
+> ENG-9 guard/barrier sanitization (`8e33f7c`).
 > Remaining: ENG-2 (flow-sensitivity/strong updates), LLM-4 (agentic reviewer) — the deep-engine/
 > research items; see per-item notes for scope.
 
@@ -155,7 +155,7 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Impact:** A real SSRF can be permanently masked by an earlier benign flow to the same call site — a soundness hole in the one place the engine deliberately suppresses findings. Secondarily, multi-source sinks under-report: fixing one flagged source and re-running can reveal a 'new' finding at the same line, eroding gate trust.
 - **Fix direction:** Only set reported[inst] when a finding is actually emitted, and for CWE-918 re-evaluate suppressed sinks after the worklist reaches fixpoint (or key `reported` on (inst, suppression-relevant tainted-arg set)). For multi-source visibility, key dedup on (inst, origin) rather than inst alone, with output-side collapsing if volume is a concern.
 
-### ENG-9 [MEDIUM] ✅ DONE (`38a6315`) No guard/barrier sanitization or path sensitivity: validation-style checks (allowlists, regex checks, filepath containment) can never stop taint
+### ENG-9 [MEDIUM] ✅ DONE (`8e33f7c`) No guard/barrier sanitization or path sensitivity: validation-style checks (allowlists, regex checks, filepath containment) can never stop taint
 
 - **Impact:** Validation-by-check is at least as common as sanitization-by-transformation in real codebases (ID allowlists, strconv.Atoi-then-use-original, regexp match guards). Every such site is a High-confidence FP with no rule-level escape hatch except deleting the sink. CodeQL's BarrierGuard and Semgrep's pattern-not-inside exist precisely for this; its absence is a top driver of gate fatigue.
 - **Fix direction:** Add a 'validators' rule field (YAML-first, per conventions): a callee glob whose boolean result, when it dominates a branch, clears taint on the guarded successor for the checked argument's register. Engine-side this needs branch-successor awareness: when an IF's condition is a validator call result (or a comparison over one), analyze the true/false successor block sets with the argument register removed from the taint state. gIR already carries IF + block structure, so no schema change.
