@@ -69,7 +69,12 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   JSON dump, then lowers it. Straight-line env-based lowering (documented limitations in the package doc).
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
   off an opaque base (`req.query`) become a synthetic source CALL so taint seeds correctly; chained calls
-  (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`.
+  (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`. **TypeScript/JSX/ESM**
+  (`.ts/.tsx/.jsx/.mjs/.cjs`) are handled by esbuild's in-process `Transform` (pure Go, no Node): it strips
+  TS types and lowers ES modules to CommonJS (`require`/`exports`, which the existing lowering already
+  understands) before goja parses, and a `go-sourcemap` consumer remaps finding positions back to the
+  original file (`transform.go`, `remapPositions`). esbuild's ESM-interop `(0, import_mod.fn)(x)` callee is
+  recovered by a `SequenceExpression` case in `syntacticCallee`. Plain `.js` skips the transform.
 - `converters/java/` — analyzes **JVM bytecode**. An embedded single-file helper (`JavaDump.java`, run
   via `java`, JDK 24+) compiles `.java` in-process (compiler API) and reads `.class` with the standard
   `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to

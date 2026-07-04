@@ -102,7 +102,7 @@ $ godzilla scan ./test/go/sql_injection
 
 | | Go | Python | JavaScript | Java | Rust |
 |---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go) | JVM bytecode (`java.lang.classfile`) | rustc MIR |
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild | JVM bytecode (`java.lang.classfile`) | rustc MIR |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ |

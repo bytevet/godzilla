@@ -911,6 +911,16 @@ func syntacticCallee(e ast.Expression) string {
 			return syntacticCallee(v.Left) + "." + string(sl.Value)
 		}
 		return syntacticCallee(v.Left) + ".<dynamic>"
+	case *ast.SequenceExpression:
+		// esbuild's ES-module interop lowers a named-import call `fn(x)` to
+		// `(0, import_mod.fn)(x)` — the callee is a comma SequenceExpression whose
+		// LAST element (import_mod.fn) carries the real name. Recover it so
+		// import-based sources/sinks (e.g. `import {execSync} from ...`) still
+		// match; without this the callee collapses to "<dynamic>".
+		if n := len(v.Sequence); n > 0 {
+			return syntacticCallee(v.Sequence[n-1])
+		}
+		return "<dynamic>"
 	default:
 		return "<dynamic>"
 	}

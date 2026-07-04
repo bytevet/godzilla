@@ -110,6 +110,7 @@ import (
 
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/parser"
+	"github.com/go-sourcemap/sourcemap"
 
 	ir "godzilla/pkg/ir/v1"
 )
@@ -149,7 +150,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 				}
 				return nil
 			}
-			if strings.HasSuffix(p, ".js") {
+			if isJSFamily(p) {
 				files = append(files, p)
 			}
 			return nil
@@ -217,13 +218,29 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, error) {
 		return nil, fmt.Errorf("js_converter: failed to read %s: %w", path, err)
 	}
 
+	// TypeScript / JSX / ES-module files are esbuild-transformed to plain
+	// CommonJS JS first (goja parses neither TS annotations nor top-level
+	// import/export); a sourcemap consumer remaps positions back to the original
+	// file afterward. Plain .js skips this entirely.
+	code := string(src)
+	var consumer *sourcemap.Consumer
+	if needsTransform(path) {
+		var terr error
+		code, consumer, terr = transformToJS(path, src)
+		if terr != nil {
+			return nil, fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
+		}
+	}
+
 	fset := &file.FileSet{}
-	astProg, err := parser.ParseFile(fset, path, string(src), 0)
+	astProg, err := parser.ParseFile(fset, path, code, 0)
 	if err != nil {
 		return nil, fmt.Errorf("js_converter: failed to parse %s: %w", path, err)
 	}
 
-	return convertModule(astProg, fset, path, moduleName), nil
+	mod := convertModule(astProg, fset, path, moduleName)
+	remapPositions(mod, consumer)
+	return mod, nil
 }
 
 // moduleNameFor derives a module name unique to the file: its path relative to
@@ -235,5 +252,5 @@ func moduleNameFor(root, file string) string {
 	if err != nil {
 		rel = filepath.Base(file)
 	}
-	return filepath.ToSlash(strings.TrimSuffix(rel, ".js"))
+	return filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
 }

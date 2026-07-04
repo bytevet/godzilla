@@ -159,7 +159,7 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, error)) {
 		return "go", func(p string) (*ir.Program, error) { return go_converter.NewConverter().ConvertFile(p) }
 	case strings.HasSuffix(path, ".py"):
 		return "python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }
-	case strings.HasSuffix(path, ".js"):
+	case isJSFamilyFile(path):
 		return "javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }
 	case strings.HasSuffix(path, ".java"), strings.HasSuffix(path, ".class"):
 		return "java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }
@@ -169,6 +169,23 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, error)) {
 		return "rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }
 	}
 	return "", nil
+}
+
+// isJSFamilyFile reports whether path is a JavaScript-family source file the JS
+// frontend handles: plain JS, TypeScript, JSX/TSX, and ES-module/CommonJS
+// variants (the .ts/.tsx/.jsx/.mjs/.cjs files are esbuild-transformed to JS in
+// the frontend before parsing).
+func isJSFamilyFile(path string) bool {
+	switch {
+	case strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".ts"),
+		strings.HasSuffix(path, ".tsx"),
+		strings.HasSuffix(path, ".jsx"),
+		strings.HasSuffix(path, ".mjs"),
+		strings.HasSuffix(path, ".cjs"):
+		return true
+	}
+	return false
 }
 
 // isCppFile reports whether path is a C or C++ translation unit (not a header,
@@ -206,7 +223,7 @@ func detectLanguages(dir string) map[string]bool {
 			present["go"] = true
 		case strings.HasSuffix(p, ".py"):
 			present["python"] = true
-		case strings.HasSuffix(p, ".js"):
+		case isJSFamilyFile(p):
 			present["javascript"] = true
 		case strings.HasSuffix(p, ".java"), strings.HasSuffix(p, ".class"):
 			present["java"] = true
