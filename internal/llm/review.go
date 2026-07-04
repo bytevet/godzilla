@@ -32,32 +32,69 @@ type Reviewer interface {
 	Review(ctx context.Context, f analysis.Finding, codeContext string) (Verdict, error)
 }
 
-// Filter reviews every finding whose Confidence is at or below reviewUpTo and
-// drops the ones the reviewer judges to be false positives. Findings above the
-// threshold (e.g. High confidence when reviewUpTo is Medium) are kept without
-// review. On a reviewer error the finding is KEPT — the reviewer must never
-// silently drop a real finding because of an LLM or network failure (fail open).
+// ReviewStats summarizes one review pass for auditability. It lets the caller
+// report exactly what the reviewer did — how many findings it adjudicated, how
+// many it suppressed, how many it could not review — so a nondeterministic
+// model's effect on the gate is never invisible.
+type ReviewStats struct {
+	Reviewed   int   // findings actually sent to the reviewer
+	Suppressed int   // findings the reviewer judged false positives (retained, flagged)
+	Errors     int   // reviewer errors (finding kept unreviewed, fail-open)
+	LowContext int   // findings kept unreviewed because no code context was available
+	FirstErr   error // first reviewer error, for a single actionable message
+}
+
+// Filter reviews every finding whose Confidence is at or below reviewUpTo. A
+// finding the reviewer judges a false positive is RETAINED but marked
+// Suppressed (with the reviewer's reason), not deleted — auditability over
+// silent deletion. Findings above the threshold are passed through unreviewed.
 //
-// It returns the surviving findings and the number of findings dropped.
-func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence) ([]analysis.Finding, int) {
+// Two safety properties hold. Fail-open: on a reviewer error the finding is
+// kept unreviewed — an LLM/network failure must never drop a real finding.
+// Never-blind: a finding with no readable code context is kept unreviewed
+// rather than judged on nothing, so an empty snippet can't cause a suppression.
+//
+// It returns all findings (surviving ones plus the suppressed-and-flagged ones)
+// and a ReviewStats describing the pass.
+func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence) ([]analysis.Finding, ReviewStats) {
+	var stats ReviewStats
 	if r == nil {
-		return findings, 0
+		return findings, stats
 	}
-	kept := make([]analysis.Finding, 0, len(findings))
-	dropped := 0
+	out := make([]analysis.Finding, 0, len(findings))
 	for _, f := range findings {
 		if !shouldReview(f.Confidence, reviewUpTo) {
-			kept = append(kept, f)
+			out = append(out, f)
 			continue
 		}
-		v, err := r.Review(ctx, f, codeContextFor(f))
-		if err != nil || !v.FalsePositive {
-			kept = append(kept, f)
+		cc := codeContextFor(f)
+		if strings.TrimSpace(cc) == "" {
+			// No code to judge on: never adjudicate (and never drop) blind.
+			stats.LowContext++
+			out = append(out, f)
 			continue
 		}
-		dropped++
+		stats.Reviewed++
+		v, err := r.Review(ctx, f, cc)
+		if err != nil {
+			stats.Errors++
+			if stats.FirstErr == nil {
+				stats.FirstErr = err
+			}
+			out = append(out, f) // fail open
+			continue
+		}
+		if !v.FalsePositive {
+			out = append(out, f)
+			continue
+		}
+		f.Suppressed = true
+		f.SuppressedBy = "llm-review"
+		f.SuppressionReason = v.Reason
+		stats.Suppressed++
+		out = append(out, f)
 	}
-	return kept, dropped
+	return out, stats
 }
 
 // shouldReview reports whether a finding of confidence c should be sent to the

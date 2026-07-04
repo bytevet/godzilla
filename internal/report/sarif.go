@@ -54,7 +54,17 @@ type sarifResult struct {
 	Message          sarifMessage           `json:"message"`
 	Locations        []sarifLocation        `json:"locations,omitempty"`
 	RelatedLocations []sarifRelatedLocation `json:"relatedLocations,omitempty"`
+	Suppressions     []sarifSuppression     `json:"suppressions,omitempty"`
 	Properties       sarifResultProperties  `json:"properties,omitempty"`
+}
+
+// sarifSuppression records that a result was suppressed downstream (here, by
+// the LLM reviewer). SARIF consumers such as GitHub code scanning render a
+// suppressed result as dismissed rather than an open alert, so the finding
+// stays visible and auditable instead of vanishing.
+type sarifSuppression struct {
+	Kind          string `json:"kind"` // "external": suppressed outside the analysis tool proper
+	Justification string `json:"justification,omitempty"`
 }
 
 type sarifMessage struct {
@@ -130,6 +140,9 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 		}
 		if related, ok := sarifRelatedLocationFor(f.SourcePos); ok {
 			result.RelatedLocations = []sarifRelatedLocation{related}
+		}
+		if f.Suppressed {
+			result.Suppressions = []sarifSuppression{{Kind: "external", Justification: f.SuppressionReason}}
 		}
 		results = append(results, result)
 	}

@@ -142,36 +142,40 @@ func confidenceCounts(findings []analysis.Finding) []countRow {
 // findingView is the per-finding data made available to the template; it
 // pre-formats everything so the template stays logic-free.
 type findingView struct {
-	SeverityLabel   string
-	SeverityClass   string
-	ConfidenceLabel string
-	ConfidenceClass string
-	RuleID          string
-	CWE             string
-	Message         string
-	Function        string
-	SinkCallee      string
-	SinkLocation    string
-	SourceLocation  string
-	Snippet         *codeSnippet
+	SeverityLabel     string
+	SeverityClass     string
+	ConfidenceLabel   string
+	ConfidenceClass   string
+	RuleID            string
+	CWE               string
+	Message           string
+	Function          string
+	SinkCallee        string
+	SinkLocation      string
+	SourceLocation    string
+	Snippet           *codeSnippet
+	Suppressed        bool
+	SuppressionReason string
 }
 
 func newFindingView(f analysis.Finding) findingView {
 	sev := normalizeSeverity(f.Severity)
 	conf := normalizeConfidence(f.Confidence)
 	return findingView{
-		SeverityLabel:   strings.ToUpper(string(f.Severity)),
-		SeverityClass:   severityClass(sev),
-		ConfidenceLabel: strings.ToUpper(string(f.Confidence)),
-		ConfidenceClass: confidenceClass(conf),
-		RuleID:          f.RuleID,
-		CWE:             f.CWE,
-		Message:         f.Message,
-		Function:        f.Function,
-		SinkCallee:      f.SinkCallee,
-		SinkLocation:    formatPosition(f.SinkPos),
-		SourceLocation:  formatPosition(f.SourcePos),
-		Snippet:         buildSnippet(f.SinkPos),
+		SeverityLabel:     strings.ToUpper(string(f.Severity)),
+		SeverityClass:     severityClass(sev),
+		ConfidenceLabel:   strings.ToUpper(string(f.Confidence)),
+		ConfidenceClass:   confidenceClass(conf),
+		RuleID:            f.RuleID,
+		CWE:               f.CWE,
+		Message:           f.Message,
+		Function:          f.Function,
+		SinkCallee:        f.SinkCallee,
+		SinkLocation:      formatPosition(f.SinkPos),
+		SourceLocation:    formatPosition(f.SourcePos),
+		Snippet:           buildSnippet(f.SinkPos),
+		Suppressed:        f.Suppressed,
+		SuppressionReason: f.SuppressionReason,
 	}
 }
 
@@ -365,6 +369,8 @@ const reportTemplateSrc = `<!DOCTYPE html>
   }
   pre.snippet .line { display: block; white-space: pre; }
   pre.snippet .line.hl { background: #402626; color: #fecaca; }
+  tr.suppressed { opacity: 0.5; }
+  .tag-suppressed { background: #4b5563; margin-left: 0.4rem; }
   .no-findings { color: #9ca3af; font-style: italic; }
   footer { color: #6b7280; font-size: 0.75rem; margin-top: 2rem; }
 </style>
@@ -418,10 +424,10 @@ const reportTemplateSrc = `<!DOCTYPE html>
     </thead>
     <tbody>
     {{range .Findings}}
-      <tr>
+      <tr{{if .Suppressed}} class="suppressed"{{end}}>
         <td><span class="badge {{.SeverityClass}}">{{.SeverityLabel}}</span></td>
         <td><span class="{{.ConfidenceClass}}">{{.ConfidenceLabel}}</span></td>
-        <td>{{.RuleID}}</td>
+        <td>{{.RuleID}}{{if .Suppressed}}<span class="badge tag-suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}</td>
         <td>{{.CWE}}</td>
         <td>{{.Message}}</td>
         <td>{{.Function}}</td>

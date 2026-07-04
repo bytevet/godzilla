@@ -110,11 +110,17 @@ func runScan(args []string) {
 	findings := res.Findings
 
 	if *llmReview {
-		var dropped int
-		findings, dropped = llm.Filter(context.Background(), llm.NewAnthropicReviewer(), findings, analysis.ConfidenceMedium)
-		if dropped > 0 {
-			fmt.Fprintf(os.Stdout, "LLM reviewer dropped %d likely false positive(s).\n\n", dropped)
+		var stats llm.ReviewStats
+		findings, stats = llm.Filter(context.Background(), llm.NewAnthropicReviewer(), findings, analysis.ConfidenceMedium)
+		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
+			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
+		if stats.Errors > 0 {
+			fmt.Fprintf(os.Stdout, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
 		}
+		if stats.Reviewed > 0 && stats.Errors == stats.Reviewed {
+			fmt.Fprintln(os.Stdout, "warning: --llm-review adjudicated 0 findings (the reviewer was a no-op; check ANTHROPIC_API_KEY).")
+		}
+		fmt.Fprintln(os.Stdout)
 	}
 
 	gated := printFindings(os.Stdout, findings, threshold)
@@ -172,19 +178,30 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 		return posString(findings[i].SinkPos) < posString(findings[j].SinkPos)
 	})
 
-	gated := 0
+	// Suppressed findings (judged false positives by the LLM reviewer) are
+	// retained for auditability but do not count toward the gate: partition them
+	// out of the active set and list them separately with the reviewer's reason.
+	active := make([]analysis.Finding, 0, len(findings))
+	var suppressed []analysis.Finding
 	for _, f := range findings {
+		if f.Suppressed {
+			suppressed = append(suppressed, f)
+		} else {
+			active = append(active, f)
+		}
+	}
+
+	gated := 0
+	for _, f := range active {
 		if f.Severity.Rank() >= threshold.Rank() {
 			gated++
 		}
 	}
 
-	if len(findings) == 0 {
+	if len(active) == 0 {
 		fmt.Fprintln(w, "No findings.")
-		return 0
 	}
-
-	for _, f := range findings {
+	for _, f := range active {
 		fmt.Fprintf(w, "[%s] %s (%s, confidence: %s)\n", f.Severity, f.RuleID, f.CWE, f.Confidence)
 		fmt.Fprintf(w, "  %s\n", f.Message)
 		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", posString(f.SinkPos), f.SinkCallee)
@@ -192,7 +209,20 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 		fmt.Fprintf(w, "  in:     %s\n\n", f.Function)
 	}
 
-	fmt.Fprintf(w, "%d finding(s); %d at/above %q.\n", len(findings), gated, threshold)
+	if len(suppressed) > 0 {
+		fmt.Fprintf(w, "Suppressed by LLM reviewer (%d) — not gated:\n", len(suppressed))
+		for _, f := range suppressed {
+			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s\n", f.Severity, f.RuleID, posString(f.SinkPos), f.SinkCallee)
+			if f.SuppressionReason != "" {
+				fmt.Fprintf(w, "    reason: %s\n", f.SuppressionReason)
+			}
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(active) > 0 || len(suppressed) > 0 {
+		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n", len(active), gated, threshold, len(suppressed))
+	}
 	return gated
 }
 

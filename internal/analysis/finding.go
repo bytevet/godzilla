@@ -38,6 +38,15 @@ type Finding struct {
 	SourcePos  *ir.Position
 	SinkPos    *ir.Position
 	SinkCallee string
+
+	// Suppressed marks a finding that a downstream triage stage (the LLM
+	// reviewer) judged a false positive. A suppressed finding is RETAINED, not
+	// discarded: it does not count toward the gate, but it stays visible in
+	// reports with SuppressedBy/SuppressionReason so a nondeterministic model can
+	// never silently erase a finding. Auditability over silent deletion.
+	Suppressed        bool
+	SuppressedBy      string // what suppressed it, e.g. "llm-review"
+	SuppressionReason string // the reviewer's stated justification
 }
 
 // String renders a one-line human-readable summary of the finding.

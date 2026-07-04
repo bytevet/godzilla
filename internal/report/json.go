@@ -26,6 +26,12 @@ type jsonFinding struct {
 	SinkCallee string        `json:"sinkCallee"`
 	Source     *jsonLocation `json:"source"`
 	Sink       *jsonLocation `json:"sink"`
+	// Suppressed findings (judged false positives by the LLM reviewer) are
+	// retained in the output, flagged, with the reviewer's reason — never
+	// silently dropped.
+	Suppressed        bool   `json:"suppressed,omitempty"`
+	SuppressedBy      string `json:"suppressedBy,omitempty"`
+	SuppressionReason string `json:"suppressionReason,omitempty"`
 }
 
 // jsonLocation mirrors an ir.Position for JSON output.
@@ -48,16 +54,19 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 	}
 	for _, f := range sorted {
 		doc.Findings = append(doc.Findings, jsonFinding{
-			RuleID:     f.RuleID,
-			Severity:   string(f.Severity),
-			Confidence: string(f.Confidence),
-			CWE:        f.CWE,
-			Message:    f.Message,
-			Language:   f.Language,
-			Function:   f.Function,
-			SinkCallee: f.SinkCallee,
-			Source:     jsonLocationFor(f.SourcePos),
-			Sink:       jsonLocationFor(f.SinkPos),
+			RuleID:            f.RuleID,
+			Severity:          string(f.Severity),
+			Confidence:        string(f.Confidence),
+			CWE:               f.CWE,
+			Message:           f.Message,
+			Language:          f.Language,
+			Function:          f.Function,
+			SinkCallee:        f.SinkCallee,
+			Source:            jsonLocationFor(f.SourcePos),
+			Sink:              jsonLocationFor(f.SinkPos),
+			Suppressed:        f.Suppressed,
+			SuppressedBy:      f.SuppressedBy,
+			SuppressionReason: f.SuppressionReason,
 		})
 	}
 
