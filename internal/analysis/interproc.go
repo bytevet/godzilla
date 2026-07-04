@@ -2,9 +2,11 @@ package analysis
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -48,8 +50,25 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		}
 	}
 
+	// Each rule's analysis is independent — it reads the shared, immutable call
+	// graph / function index and writes only its own local state — so run the
+	// rules concurrently (bounded by GOMAXPROCS). Results are collected per rule
+	// index and concatenated in rule order, so output stays deterministic.
+	results := make([][]Finding, len(e.rs.Rules))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	for i := range e.rs.Rules {
-		findings = append(findings, analyzeInterproc(cg, byKey, modByKey, &e.rs.Rules[i])...)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i] = analyzeInterproc(cg, byKey, modByKey, &e.rs.Rules[i])
+		}(i)
+	}
+	wg.Wait()
+	for _, r := range results {
+		findings = append(findings, r...)
 	}
 	return findings
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	cpp_converter "godzilla/converters/cpp"
 	go_converter "godzilla/converters/go"
@@ -127,23 +128,47 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		{"cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }},
 		{"rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }},
 	}
-	for _, fe := range frontends {
+	// Present frontends are independent (separate converters, separate source
+	// sets), so run them concurrently. Results are collected per frontend index
+	// and merged in frontend order, keeping module order and coverage
+	// deterministic.
+	type feResult struct {
+		prog *ir.Program
+		cov  LangCoverage
+	}
+	results := make([]*feResult, len(frontends))
+	var wg sync.WaitGroup
+	for i, fe := range frontends {
 		if !present[fe.name] {
 			continue
 		}
 		ranAny = true
-		cov := LangCoverage{Language: fe.name, Detected: true}
-		prog, err := fe.convert(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
-			cov.Err = err.Error()
-			coverage = append(coverage, cov)
+		wg.Add(1)
+		go func(i int, fe struct {
+			name    string
+			convert func(string) (*ir.Program, error)
+		}) {
+			defer wg.Done()
+			cov := LangCoverage{Language: fe.name, Detected: true}
+			prog, err := fe.convert(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
+				cov.Err = err.Error()
+				results[i] = &feResult{cov: cov}
+				return
+			}
+			cov.Converted = true
+			results[i] = &feResult{prog: prog, cov: cov}
+		}(i, fe)
+	}
+	wg.Wait()
+	for _, r := range results {
+		if r == nil {
 			continue
 		}
-		cov.Converted = true
-		coverage = append(coverage, cov)
-		if prog != nil {
-			merged.Modules = append(merged.Modules, prog.Modules...)
+		coverage = append(coverage, r.cov)
+		if r.prog != nil {
+			merged.Modules = append(merged.Modules, r.prog.Modules...)
 		}
 	}
 	if !ranAny {
