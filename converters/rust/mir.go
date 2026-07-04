@@ -100,22 +100,50 @@ func lowerFn(body []string, filename string) *ir.Function {
 		ObjectName:    name,
 		CanonicalName: "rust:" + name,
 	}
+	// synthSources are the synthetic axum-extractor source CALLs; their position
+	// is patched to the function's after the body is lowered (a header line has
+	// no span, so firstPos is only known then).
+	var synthSources []*ir.Instruction
 	for i, p := range params {
 		v := regValue(fmt.Sprintf("p%d", i))
-		fn.Params = append(fn.Params, v)
-		st.env[p] = v
+		fn.Params = append(fn.Params, v) // preserve arity for interproc arg->param mapping
+		if src, ok := axumExtractorSource(p.typ); ok {
+			// An axum handler receives already-extracted, attacker-controlled data
+			// as a typed parameter (Query<T>/Path<T>/Json<T>/Form<T>); synthesize a
+			// source CALL whose result IS the parameter's value, so the taint engine
+			// seeds it (the same trick the Java @RequestParam frontend uses). COV-7.
+			reg := st.reg()
+			inst := &ir.Instruction{
+				Name: reg, Op: ir.OpCode_OP_CODE_CALL,
+				Call: &ir.CallCommon{Callee: src, Value: &ir.Value{Kind: &ir.Value_FuncName{FuncName: src}}},
+			}
+			st.instrs = append(st.instrs, inst)
+			synthSources = append(synthSources, inst)
+			st.env[p.local] = regValue(reg)
+			continue
+		}
+		st.env[p.local] = v
 	}
 	for _, ln := range body[1:] {
 		st.line(ln)
 	}
 	fn.Pos = st.firstPos
+	for _, s := range synthSources {
+		s.Pos = fn.Pos // best-effort: attribute the source to the handler's position
+	}
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: st.instrs}}
 	return fn
 }
 
-// parseHeader extracts a function's normalized name and its parameter locals
-// from a MIR header line, e.g. `fn build_cmd(_1: &str, _2: i32) -> String {`.
-func parseHeader(h string) (name string, params []string) {
+// mirParam is a lowered function parameter: its MIR local and its type text.
+type mirParam struct {
+	local string
+	typ   string
+}
+
+// parseHeader extracts a function's normalized name and its parameters (local +
+// type) from a MIR header line, e.g. `fn build_cmd(_1: &str, _2: i32) -> String {`.
+func parseHeader(h string) (name string, params []mirParam) {
 	h = strings.TrimSpace(h)
 	h = strings.TrimPrefix(h, "fn ")
 	open := indexAtDepth0(h, '(')
@@ -128,13 +156,35 @@ func parseHeader(h string) (name string, params []string) {
 		return name, nil
 	}
 	for _, part := range splitTop(h[open+1:closeIdx], ',') {
-		if id, _, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
+		if id, typ, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
 			if id = strings.TrimSpace(id); localRe.MatchString(id) {
-				params = append(params, id)
+				params = append(params, mirParam{local: id, typ: strings.TrimSpace(typ)})
 			}
 		}
 	}
 	return name, params
+}
+
+// axumExtractorSource maps an axum extractor parameter type to the canonical
+// source name Godzilla synthesizes for it. axum handlers take request data as
+// typed extractor parameters — Query<T>, Path<T>, Json<T>, Form<T> — so each is
+// a taint source. It keys on the extractor identifier immediately before the
+// generic `<`, so it matches both a bare `Query<..>` and a fully-qualified
+// `axum::extract::Query<..>`. Returns ok=false for any non-extractor type.
+func axumExtractorSource(typ string) (string, bool) {
+	lt := strings.IndexByte(typ, '<') // the extractor's own generic opener (first '<')
+	if lt < 0 {
+		return "", false
+	}
+	head := strings.TrimSpace(typ[:lt])
+	if i := strings.LastIndex(head, "::"); i >= 0 {
+		head = head[i+2:]
+	}
+	switch head {
+	case "Query", "Path", "Json", "Form":
+		return "rust:axum::extract::" + head, true
+	}
+	return "", false
 }
 
 func (st *lowerState) line(raw string) {

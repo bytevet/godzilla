@@ -1,0 +1,31 @@
+# Open redirect (CWE-601): untrusted input flowing into an axum/actix HTTP
+# redirect target. axum's Redirect::to/temporary/permanent take the destination
+# URL as their first argument.
+rules:
+  - id: rust-open-redirect
+    languages: [rust]
+    severity: medium
+    cwe: CWE-601
+    message: >-
+      Untrusted input flows into an HTTP redirect target, which may allow an
+      open redirect to an attacker-controlled site. Validate the destination
+      against an allow-list of paths/hosts before redirecting.
+    sources:
+      - "rust:axum::extract::Query"
+      - "rust:axum::extract::Path"
+      - "rust:axum::extract::Json"
+      - "rust:axum::extract::Form"
+      - "rust:*Request::query"
+      - "rust:*Request::param"
+      - "rust:*HttpRequest::query_string"
+    sinks:
+      - "rust:*Redirect::to"
+      - "rust:*Redirect::temporary"
+      - "rust:*Redirect::permanent"
+    sanitizers: []
+    propagators:
+      - "rust:*to_string"
+      - "rust:*to_owned"
+      - "rust:*as_str"
+      - "rust:format"
+      - "rust:*::add"

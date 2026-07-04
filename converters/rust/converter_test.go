@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"godzilla/internal/analysis"
+	"godzilla/internal/rules/loader"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -112,5 +114,68 @@ func TestVerifyMIRShape(t *testing.T) {
 	}
 	if verifyMIRShape(&ir.Program{}) {
 		t.Errorf("an empty program must fail the smoke check")
+	}
+}
+
+func TestAxumExtractorSource(t *testing.T) {
+	cases := []struct {
+		typ  string
+		want string
+		ok   bool
+	}{
+		{"axum::extract::Query<Params>", "rust:axum::extract::Query", true},
+		{"Path<String>", "rust:axum::extract::Path", true},
+		{"axum::extract::Json<Body>", "rust:axum::extract::Json", true},
+		{"Form<Login>", "rust:axum::extract::Form", true},
+		{"std::string::String", "", false}, // no generic, not an extractor
+		{"&str", "", false},                //
+		{"State<AppState>", "", false},     // an extractor, but not attacker data
+	}
+	for _, c := range cases {
+		got, ok := axumExtractorSource(c.typ)
+		if ok != c.ok || got != c.want {
+			t.Errorf("axumExtractorSource(%q) = (%q,%v), want (%q,%v)", c.typ, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// TestLowerMIR_AxumSourceSynthesis proves (hermetically, no rustc) that an axum
+// extractor handler parameter is lowered into a synthetic source CALL, so the
+// taint engine seeds it and a downstream sink fires (COV-7).
+func TestLowerMIR_AxumSourceSynthesis(t *testing.T) {
+	mir := "fn handler(_1: axum::extract::Query<Params>) -> () {\n" +
+		"    _0 = Command::new(move _1) -> [return: bb1, unwind continue];\n" +
+		"}\n"
+	mod := lowerMIR(mir, "handler.rs")
+
+	// The synthetic source CALL must be present.
+	prog := &ir.Program{Modules: []*ir.Module{mod}}
+	if !callees(prog)["rust:axum::extract::Query"] {
+		t.Fatalf("expected a synthesized axum source CALL; callees=%v", keys(callees(prog)))
+	}
+}
+
+// TestAxumTaintFlow_EndToEnd runs the real engine over a lowered axum handler
+// (no rustc) with the built-in rust-command-injection rule — whose sources now
+// include the synthesized axum extractors — and asserts the flow fires (COV-7).
+func TestAxumTaintFlow_EndToEnd(t *testing.T) {
+	mir := "fn handler(_1: axum::extract::Query<Params>) -> () {\n" +
+		"    _0 = Command::new(move _1) -> [return: bb1, unwind continue];\n" +
+		"}\n"
+	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "handler.rs")}}
+
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	findings := analysis.NewEngine(rs).Analyze(prog)
+	got := false
+	for _, f := range findings {
+		if f.RuleID == "rust-command-injection" {
+			got = true
+		}
+	}
+	if !got {
+		t.Errorf("expected rust-command-injection from an axum Query handler; got %d finding(s)", len(findings))
 	}
 }

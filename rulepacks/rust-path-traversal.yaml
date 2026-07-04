@@ -15,6 +15,12 @@ rules:
       (reading or writing files outside the intended directory). Canonicalize the
       path and confirm it stays within an allowed base directory.
     sources:
+      # axum extractors — request data arrives as typed handler params
+      # (Query/Path/Json/Form), synthesized as sources by the frontend (COV-7).
+      - "rust:axum::extract::Query"
+      - "rust:axum::extract::Path"
+      - "rust:axum::extract::Json"
+      - "rust:axum::extract::Form"
       # HTTP request accessors — the real attack surface.
       - "rust:*Request::query"
       - "rust:*Request::header"

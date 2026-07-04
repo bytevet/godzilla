@@ -17,6 +17,12 @@ rules:
       injection. Use parameterized queries (bind values with `?`/`$1`) rather
       than formatting user input into the query text.
     sources:
+      # axum extractors — request data arrives as typed handler params
+      # (Query/Path/Json/Form), synthesized as sources by the frontend (COV-7).
+      - "rust:axum::extract::Query"
+      - "rust:axum::extract::Path"
+      - "rust:axum::extract::Json"
+      - "rust:axum::extract::Form"
       # HTTP request accessors — the real attack surface.
       - "rust:*Request::query"
       - "rust:*Request::header"
