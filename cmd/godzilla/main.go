@@ -161,7 +161,10 @@ func runScan(args []string) {
 
 	if *llmReview {
 		var stats llm.ReviewStats
-		findings, stats = llm.Filter(context.Background(), llm.NewAnthropicReviewer(), findings, analysis.ConfidenceMedium)
+		// Give the reviewer read-only agency over the scanned project (LLM-4): it
+		// can read files, resolve callees, and grep to trace a flow before judging.
+		reviewer := llm.NewAnthropicReviewer().WithTools(llm.NewFileToolBox(res.Program, path))
+		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
 		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
 			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
 		if stats.Errors > 0 {

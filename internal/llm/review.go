@@ -150,6 +150,45 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	return b.String()
 }
 
+// buildAgenticPrompt renders the prompt for the tool-using reviewer. It states
+// the finding (like buildPrompt) but instructs the model to gather evidence with
+// the read-only tools before deciding — reading the callee, the sanitizer body,
+// the route registration, or grepping for a validator — then emit the same
+// strict JSON verdict. The safety default (unknown ⇒ true_positive) is stated
+// so the reviewer never suppresses on thin evidence.
+func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
+	var b strings.Builder
+	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
+	b.WriteString("You have read-only tools to investigate the code: read_file_range, find_function, and grep.\n")
+	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
+	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
+	fmt.Fprintf(&b, "Rule: %s\n", f.RuleID)
+	fmt.Fprintf(&b, "Severity: %s\n", f.Severity)
+	fmt.Fprintf(&b, "CWE: %s\n", f.CWE)
+	fmt.Fprintf(&b, "Message: %s\n", f.Message)
+	fmt.Fprintf(&b, "Language: %s\n", f.Language)
+	fmt.Fprintf(&b, "Function: %s\n", f.Function)
+	fmt.Fprintf(&b, "Sink callee: %s\n", f.SinkCallee)
+	fmt.Fprintf(&b, "Source location: %s\n", posString(f.SourcePos))
+	fmt.Fprintf(&b, "Sink location: %s\n", posString(f.SinkPos))
+	if len(f.Steps) >= 2 {
+		b.WriteString("Taint path (source -> sink):\n")
+		for _, p := range f.Steps {
+			fmt.Fprintf(&b, "  - %s\n", posString(p))
+		}
+	}
+	if strings.TrimSpace(codeContext) != "" {
+		b.WriteString("\nInitial code context:\n")
+		b.WriteString(codeContext)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nDecide whether this is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive. ")
+	b.WriteString("If the evidence is inconclusive, treat it as a true_positive (do not suppress on thin evidence).\n")
+	b.WriteString("When done investigating, respond with ONLY a JSON object of the form ")
+	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
+	return b.String()
+}
+
 // parseVerdict extracts the JSON verdict from a model response. It tolerates
 // surrounding prose by scanning for the outermost JSON object. When the verdict
 // can't be determined it defaults to NOT a false positive (keep the finding).

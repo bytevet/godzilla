@@ -53,13 +53,14 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > **Tier 2 — ✅ core goals met**: PERF-2 Go dep-scoping (`a6e6d06`), PERF-3 parallelism (`c99075e`),
 > PERF-4 subprocess timeouts (`a53dec4`), PERF-5 shared CHA index (`d049e80`), PERF-7 dir excludes
 > (`b73af85`); PERF-1/6/8 deferred with rationale (see Tier 2 below).
-> **Tier 3 — in progress**: ENG-3 field-sensitive structs (`5c26335`), CI-6 taint-path recording
+> **Tier 3 — ✅ COMPLETE**: ENG-3 field-sensitive structs (`5c26335`), CI-6 taint-path recording
 > (`4c6a417`), LLM-2 taint-path-in-reviewer-context (`531ac68`), TRUST-7 frontend fuzzing +
 > glob-DoS fix (`09f40e1`), TRUST-6 perf-regression guard + TRUST-8 2nd differential shape
 > (`2326058`), TRUST-3 optional location oracle (`99abf24`), TRUST-5 precision/recall scorer
 > (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`),
-> ENG-9 guard/barrier sanitization (`8e33f7c`), ENG-2 flow-sensitivity + strong updates (`41ae16f`).
-> Remaining: LLM-4 (agentic reviewer) — the last deep-engine/research item; see its note for scope.
+> ENG-9 guard/barrier sanitization (`8e33f7c`), ENG-2 flow-sensitivity + strong updates (`41ae16f`),
+> LLM-4 agentic tool-using reviewer (`<pending>`). Every High-severity engine/reviewer gap from the
+> audit is now implemented and tested; the remaining backlog is the medium/low opportunistic set.
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
@@ -379,10 +380,11 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Impact:** Findings can be suppressed at the CI gate based on no code whatsoever — the worst possible failure mode for a tool whose pitch is trust. Java findings are especially at risk since positions come from bytecode line tables and the analyzed .class files may sit in a build output directory.
 - **Fix direction:** In Filter (or codeContextFor's caller), if the assembled context is empty, skip the review and keep the finding (treat 'no context' like a reviewer error — fail open). Additionally instruct the model in buildPrompt that absence of code context must yield true_positive, as defense in depth.
 
-### LLM-4 [HIGH] Zero agency: one-shot prompt→verdict with no tool use, no ability to open files or trace the flow
+### LLM-4 [HIGH] ✅ DONE (`<pending>`) Zero agency: one-shot prompt→verdict with no tool use, no ability to open files or trace the flow
 
 - **Impact:** A human triager (and modern agentic reviewers) resolves an uncertain finding by reading more code: the caller of the tainted function, the sanitizer implementation, the route registration. This reviewer structurally cannot, so its accuracy is capped by whatever 14 lines codeContextFor guessed to include — a large gap versus the 'best-in-world reviewer' vision and versus what the Anthropic SDK already supports (tool use).
 - **Fix direction:** Give AnthropicReviewer a small agent loop with 2-3 read-only tools (`read_file_range`, `find_function_by_canonical_name` backed by the already-loaded gIR module, `grep`), bounded to N tool calls per finding. Keep the Reviewer interface but widen it to accept the *ir.Module (or a context provider callback) so the loop can resolve canonical names to positions. review.go stays dependency-free; the loop lives in anthropic.go.
+- **DONE:** `internal/llm/tools.go` (dependency-free) defines a `ToolBox` — `read_file_range`, `find_function` (resolves a canonical name against the loaded gIR program to its source), and `grep` (bounded, skips vendored dirs) — plus the `ToolSpec` catalog, `dispatchTool`, and `buildAgenticPrompt`. `FileToolBox` fences all file access to the scan root (path-traversal-proof: the reviewer can't read outside the project it is analyzing). `anthropic.go` runs the SDK tool-use loop (`WithTools` switches the reviewer into agentic mode; one-shot remains the default/back-compat), bounded to `maxToolRounds` with a forced final verdict so it can't hang or loop unboundedly; the CLI wires `NewFileToolBox(res.Program, path)`. Tested hermetically: `tools_test.go` (each tool + dispatch + path confinement) and `anthropic_loop_test.go` drives the whole loop against a mock Messages API — tool→result→verdict threading, and the budget cutoff that forces a keep-the-finding default when inconclusive. The live API path is exercised only with a real key (`--llm-review`).
 
 ### LLM-5 [HIGH] Sequential per-finding Opus calls with no concurrency, cap, timeout, or budget — a large scan stalls or costs unboundedly
 
