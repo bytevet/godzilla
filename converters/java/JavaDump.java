@@ -63,7 +63,14 @@ public class JavaDump {
     }
 
     static void dumpClass(ClassModel cm, StringBuilder sb) {
-        sb.append("{\"name\":").append(jstr(cm.thisClass().asInternalName())).append(",\"methods\":[");
+        // The SourceFile attribute names the original .java (e.g. "Login.java"),
+        // which the Go side resolves to a real path under the scan root so findings
+        // anchor to the source file, not the scan directory (FE-8).
+        String source = cm.findAttribute(java.lang.classfile.Attributes.sourceFile())
+            .map(a -> a.sourceFile().stringValue()).orElse("");
+        sb.append("{\"name\":").append(jstr(cm.thisClass().asInternalName()))
+          .append(",\"source\":").append(jstr(source))
+          .append(",\"methods\":[");
         boolean first = true;
         for (MethodModel mm : cm.methods()) {
             if (!first) sb.append(',');

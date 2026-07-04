@@ -49,6 +49,7 @@ type dumpDoc struct {
 
 type dumpClass struct {
 	Name    string       `json:"name"`
+	Source  string       `json:"source"` // SourceFile attribute, e.g. "Login.java" (FE-8)
 	Methods []dumpMethod `json:"methods"`
 }
 
@@ -130,12 +131,55 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		return nil, fmt.Errorf("parsing java dump for %s: %w", path, err)
 	}
 
-	filename := abs
+	// Resolve each class's SourceFile ("Login.java") to a real path under the
+	// scan root so findings anchor to the source file instead of the scan
+	// directory (FE-8). Fall back to the scan path when the source is unknown.
+	sourceIdx := indexJavaSources(abs)
 	prog := &ir.Program{Mode: "bytecode"}
 	for _, cl := range doc.Classes {
-		prog.Modules = append(prog.Modules, convertClass(cl, filename))
+		prog.Modules = append(prog.Modules, convertClass(cl, resolveJavaSource(abs, sourceIdx, cl.Source)))
 	}
 	return prog, nil
+}
+
+// indexJavaSources maps each .java file's base name to its path, under root (or
+// root's directory when root is a file). First match wins on a name collision.
+func indexJavaSources(root string) map[string]string {
+	idx := map[string]string{}
+	base := root
+	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
+		base = filepath.Dir(root)
+	}
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if walkignore.SkipDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".java") {
+			if _, seen := idx[d.Name()]; !seen {
+				idx[d.Name()] = p
+			}
+		}
+		return nil
+	})
+	return idx
+}
+
+// resolveJavaSource picks the source path for a class: its SourceFile base name
+// matched against the index, else the scan path (so a Pos is always populated).
+func resolveJavaSource(scanPath string, idx map[string]string, source string) string {
+	if source == "" {
+		return scanPath
+	}
+	if p, ok := idx[source]; ok {
+		return p
+	}
+	return scanPath
 }
 
 // javaMajor runs `java -version` and returns the launcher's major version. The
