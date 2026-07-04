@@ -1,0 +1,66 @@
+# Path traversal (Java): untrusted input flowing into a filesystem path, letting
+# an attacker escape the intended directory (e.g. ?file=../../etc/passwd) to read
+# or write arbitrary files. A constant directory prefix does NOT make this safe —
+# "/var/data/" + userInput is the canonical vulnerable pattern — so, unlike SSRF,
+# there is no fixed-prefix suppression here.
+rules:
+  - id: java-path-traversal
+    languages: [java]
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input (request parameter/header, environment, etc.) flows into a
+      filesystem path, which may allow path traversal — reading or writing files
+      outside the intended directory. Validate the input against an allow-list
+      and canonicalize the resolved path (e.g. Path.normalize + verify it stays
+      under a fixed base directory) before opening it.
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getQueryString"
+      - "java:*ServletRequest.getParameter"
+      # Spring MVC controller parameter annotations (synthesized source CALLs;
+      # see converters/java/lower.go). Anchored on the annotation package so an
+      # ordinary method ending in the token is not mistaken for a source.
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    sinks:
+      # Stream/reader/writer constructors take the path as (receiver-excluded)
+      # argument 0; a File is constructed from any of its path components.
+      - "java:java/io/File.<init>"
+      - "java:java/io/FileInputStream.<init>#0"
+      - "java:java/io/FileOutputStream.<init>#0"
+      - "java:java/io/FileReader.<init>#0"
+      - "java:java/io/FileWriter.<init>#0"
+      - "java:java/io/RandomAccessFile.<init>#0"
+      # java.nio.file.Files operations — the Path is logical arg 0 (so a tainted
+      # payload written to a FIXED path via Files.write(path, data) is not
+      # flagged; only a tainted path is).
+      - "java:*Files.newInputStream#0"
+      - "java:*Files.newOutputStream#0"
+      - "java:*Files.newBufferedReader#0"
+      - "java:*Files.newBufferedWriter#0"
+      - "java:*Files.readAllBytes#0"
+      - "java:*Files.readAllLines#0"
+      - "java:*Files.readString#0"
+      - "java:*Files.lines#0"
+      - "java:*Files.write#0"
+      - "java:*Files.copy#0"
+      - "java:*Files.move#0"
+      - "java:*Files.delete#0"
+      - "java:*Files.deleteIfExists#0"
+    sanitizers: []
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"
+      # String -> Path (java.nio.file) and path composition, so taint flows from
+      # the tainted string into a Files.* sink that takes the resulting Path.
+      - "java:*Paths.get"
+      - "java:*Path.of"
+      - "java:*Path.resolve"
+      - "java:*File.toPath"

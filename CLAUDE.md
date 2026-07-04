@@ -143,7 +143,8 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 (`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and JS code injection (CWE-95).
-- **Java** — SQLi, command injection.
+- **Java** — SQLi, command injection, path traversal (CWE-22: `java.io` file streams/readers,
+  `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path).
 - **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
   (rusqlite/sqlx/diesel), SSRF (reqwest/ureq).
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
