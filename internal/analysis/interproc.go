@@ -102,6 +102,11 @@ type funcResult struct {
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
 	globalEffects []globalEffect
+	// taintsParamMemory[i] is set when the function writes tainted data into
+	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
+	// whose address roots at param i. Callers then mark the argument they pass at
+	// that position tainted, so `fill(&dst); use(dst)` flows.
+	taintsParamMemory map[int]*ir.Position
 }
 
 // logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping the
@@ -163,6 +168,7 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 	paramTaint := map[string]map[int]*ir.Position{}
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
+	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
 	reported := map[*ir.Instruction]bool{}
 	var findings []Finding
 
@@ -237,7 +243,7 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, globalTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -260,12 +266,35 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 		}
 
 		// A tainted store into a global publishes it program-wide: record the
-		// taint and re-enqueue every function that reads that global (ENG-6).
+		// taint and re-enqueue every function that reads that global (ENG-6a).
 		for _, ge := range res.globalEffects {
 			if _, exists := globalTaint[ge.name]; !exists {
 				globalTaint[ge.name] = ge.origin
 				for _, reader := range globalReaders[ge.name] {
 					enqueue(reader)
+				}
+			}
+		}
+
+		// This function fills tainted data into one of its out-parameters
+		// (ENG-6b): record it on the callee's summary and re-enqueue its callers
+		// so the argument they pass at that position picks up the taint.
+		if len(res.taintsParamMemory) > 0 {
+			m := paramMemTaint[name]
+			if m == nil {
+				m = map[int]*ir.Position{}
+				paramMemTaint[name] = m
+			}
+			changed := false
+			for idx, origin := range res.taintsParamMemory {
+				if _, exists := m[idx]; !exists {
+					m[idx] = origin
+					changed = true
+				}
+			}
+			if changed {
+				for _, caller := range callers[name] {
+					enqueue(caller)
 				}
 			}
 		}
@@ -297,6 +326,7 @@ func analyzeFunc(
 	seeds map[int]*ir.Position,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
+	paramMemTaint map[string]map[int]*ir.Position,
 	byKey map[string]*ir.Function,
 	methodImpls map[string][]string,
 	reported map[*ir.Instruction]bool,
@@ -359,6 +389,50 @@ func analyzeFunc(
 		res.globalEffects = append(res.globalEffects, globalEffect{name: g, origin: pos})
 	}
 
+	// ENG-6(b): out-parameter fill. When this function stores tainted data into
+	// memory reachable from one of its own parameters (the store address roots at
+	// a param — `*out = tainted`, `out.f = tainted`, `out[i] = tainted`), record
+	// it so callers mark the argument they pass at that position tainted. Only
+	// parameters carrying address semantics can be a store root (a value param
+	// that is reassigned is a fresh local in SSA, not a store target), so this
+	// does not falsely taint by-value arguments.
+	paramReg := map[string]int{}
+	for i, p := range fn.Params {
+		if r := p.GetRegName(); r != "" {
+			paramReg[r] = i
+		}
+	}
+	recordParamMemoryTaint := func(inst *ir.Instruction) {
+		if len(paramReg) == 0 {
+			return
+		}
+		ops := inst.GetOperands()
+		if len(ops) < 2 {
+			return
+		}
+		pos, ok := isTainted(tainted, ops[1])
+		if !ok {
+			return
+		}
+		addrReg := ops[0].GetRegName()
+		if addrReg == "" {
+			return
+		}
+		idx, ok := paramReg[rootBaseReg(defs, addrReg)]
+		if !ok {
+			return
+		}
+		key := "pm:" + strconv.Itoa(idx)
+		if effectSeen[key] {
+			return
+		}
+		effectSeen[key] = true
+		if res.taintsParamMemory == nil {
+			res.taintsParamMemory = map[int]*ir.Position{}
+		}
+		res.taintsParamMemory[idx] = pos
+	}
+
 	// readGlobalTaint seeds the result of any named instruction that reads a
 	// tainted global. A global read is not one fixed opcode: the Go frontend
 	// lowers `x := pkgVar` as UN_OP(MUL) over a GlobalName operand, others as
@@ -386,6 +460,23 @@ func analyzeFunc(
 			return ConfidenceMedium
 		}
 		return ConfidenceHigh
+	}
+
+	// taintCallerArg marks a call argument register tainted because the callee
+	// filled tainted data into the memory it points at (ENG-6b out-parameter).
+	// The taint reaches the caller through a pointer, so it is a cross-function
+	// flow (Medium confidence). Walking the container chain covers `&dst.field`.
+	taintCallerArg := func(v *ir.Value, origin *ir.Position) {
+		if v == nil {
+			return
+		}
+		reg := v.GetRegName()
+		if reg == "" {
+			return
+		}
+		markTainted(tainted, reg, origin)
+		taintContainer(defs, tainted, reg, origin)
+		interprocOrigins[origin] = true
 	}
 
 	// handleCall applies the taint transfer for any call-carrying instruction:
@@ -490,6 +581,28 @@ func analyzeFunc(
 				// cross-function flow, so any finding it feeds must be Medium.
 				interprocOrigins[ro] = true
 			}
+			// The callee fills tainted data into one of its out-parameters: taint
+			// the argument passed at that position (ENG-6b), using the same
+			// arg->param mapping as the seeding above (receiver = param 0 for an
+			// INVOKE, args shifted by one; direct alignment otherwise).
+			if pm := paramMemTaint[callee]; len(pm) > 0 {
+				if inst.Call.GetIsInvoke() {
+					if o, ok := pm[0]; ok {
+						taintCallerArg(inst.Call.GetValue(), o)
+					}
+					for j, a := range args {
+						if o, ok := pm[j+1]; ok {
+							taintCallerArg(a, o)
+						}
+					}
+				} else {
+					for j, a := range args {
+						if o, ok := pm[j]; ok {
+							taintCallerArg(a, o)
+						}
+					}
+				}
+			}
 		}
 
 		// Inter-procedural, interface dynamic dispatch: an INVOKE call's callee is
@@ -556,6 +669,7 @@ func analyzeFunc(
 		case ir.OpCode_OP_CODE_STORE:
 			visitStore(inst, defs, tainted)
 			recordGlobalStore(inst)
+			recordParamMemoryTaint(inst)
 		case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
 			visitFieldRead(inst, tainted)
 		case ir.OpCode_OP_CODE_INTRINSIC:

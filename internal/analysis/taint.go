@@ -202,6 +202,35 @@ func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Posi
 	}
 }
 
+// rootBaseReg walks the address-derivation chain from reg (through
+// FIELD(_ADDR)/INDEX(_ADDR) accesses) to the ultimate root register — the base
+// an aggregate access is rooted at. It is used to tell whether a STORE writes
+// into memory reachable from a function parameter (ENG-6b: out-parameter fill),
+// by resolving the store address back to its root and checking it is a param.
+func rootBaseReg(defs map[string]*ir.Instruction, reg string) string {
+	seen := map[string]bool{}
+	for reg != "" && !seen[reg] {
+		seen[reg] = true
+		def := defs[reg]
+		if def == nil {
+			return reg
+		}
+		if !isAggregateAccess(def) {
+			return reg
+		}
+		ops := def.GetOperands()
+		if len(ops) == 0 {
+			return reg
+		}
+		base := ops[0].GetRegName()
+		if base == "" {
+			return reg
+		}
+		reg = base
+	}
+	return reg
+}
+
 // visitFieldRead handles a FIELD / FIELD_ADDR read field-sensitively: the result
 // is tainted if the specific field's access path (base#f) was tainted, OR if the
 // whole base value is untrusted (e.g. a struct that came straight from a source

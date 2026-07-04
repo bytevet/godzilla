@@ -76,3 +76,70 @@ func TestAnalyze_GlobalTaintSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestAnalyze_OutParamFill is the ENG-6(b) regression guard: a helper that
+// writes request data into its out-pointer parameter taints the caller's local,
+// so a downstream sink on that local must fire. The taint reaches the caller
+// through a pointer across a function boundary, so it is Medium confidence.
+// Before ENG-6b a store through a parameter was invisible to callers — a silent
+// false negative for the out-parameter-fill idiom (parsers, binders, decoders).
+func TestAnalyze_OutParamFill(t *testing.T) {
+	conv := go_converter.NewConverter()
+	prog, err := conv.ConvertFile("../../test/go/outparam_fill/main.go")
+	if err != nil {
+		t.Fatalf("failed to convert outparam_fill sample: %v", err)
+	}
+
+	rs := &rules.RuleSet{Rules: []rules.Rule{{
+		ID:        "GO-CMDI-OUTPARAM",
+		Languages: []string{"go"},
+		Severity:  rules.SeverityCritical,
+		CWE:       "CWE-78",
+		Message:   "untrusted input reaches os/exec via an out-parameter fill",
+		Sources:   []string{"go:*net/url*.Get"},
+		Sinks:     []string{"go:*os/exec.Command*"},
+	}}}
+
+	findings := NewEngine(rs).Analyze(prog)
+	var f *Finding
+	for i := range findings {
+		if findings[i].RuleID == "GO-CMDI-OUTPARAM" {
+			f = &findings[i]
+			break
+		}
+	}
+	if f == nil {
+		t.Fatalf("expected a command-injection finding through the out-parameter, got %d finding(s)", len(findings))
+	}
+	if f.Confidence != ConfidenceMedium {
+		t.Errorf("expected Medium confidence for a cross-function out-parameter flow, got %q", f.Confidence)
+	}
+}
+
+// TestAnalyze_OutParamFillSafe is the false-positive control for ENG-6b: when
+// the helper writes only a constant into the out-pointer (the request is
+// ignored), the caller's local is clean and the sink MUST NOT be flagged.
+func TestAnalyze_OutParamFillSafe(t *testing.T) {
+	conv := go_converter.NewConverter()
+	prog, err := conv.ConvertFile("../../test/go/outparam_fill_safe/main.go")
+	if err != nil {
+		t.Fatalf("failed to convert outparam_fill_safe sample: %v", err)
+	}
+
+	rs := &rules.RuleSet{Rules: []rules.Rule{{
+		ID:        "GO-CMDI-OUTPARAM",
+		Languages: []string{"go"},
+		Severity:  rules.SeverityCritical,
+		CWE:       "CWE-78",
+		Message:   "untrusted input reaches os/exec via an out-parameter fill",
+		Sources:   []string{"go:*net/url*.Get"},
+		Sinks:     []string{"go:*os/exec.Command*"},
+	}}}
+
+	findings := NewEngine(rs).Analyze(prog)
+	for _, f := range findings {
+		if f.RuleID == "GO-CMDI-OUTPARAM" {
+			t.Errorf("false positive: flagged a sink reading a constant-filled out-parameter (%s at %v)", f.SinkCallee, f.SinkPos)
+		}
+	}
+}
