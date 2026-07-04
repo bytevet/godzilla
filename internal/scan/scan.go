@@ -82,6 +82,47 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
 }
 
+// ScanFiles analyzes an explicit list of paths (a changed-files / pre-commit
+// entry point, CI-9) in a single process: each source path is lowered and its
+// modules merged into one program so the engine runs once (cross-file taint
+// among the changed files still connects, and there is one exit code / report),
+// while every path — source or not — is also scanned for hardcoded secrets so a
+// changed .env/compose/Dockerfile is covered. A path with an unsupported
+// extension contributes only its secrets scan; a genuine frontend failure is
+// warned about on stderr and skipped rather than aborting the batch (pre-commit
+// hands over mixed file types). A batch with no analyzable source — e.g. a
+// commit touching only docs — is not an error: it returns cleanly (with any
+// secrets those files contained), so a pre-commit hook does not spuriously fail.
+func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
+	merged := &ir.Program{Mode: "ssa"}
+	var coverage []LangCoverage
+	var findings []analysis.Finding
+	for _, p := range paths {
+		findings = append(findings, analysis.ScanSecretsInFiles(p)...)
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
+			continue
+		}
+		if !info.IsDir() {
+			if _, conv := fileFrontend(p); conv == nil {
+				continue // non-source file: secrets already scanned, no dataflow
+			}
+		}
+		prog, cov, err := convert(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
+			continue
+		}
+		merged.Modules = append(merged.Modules, prog.Modules...)
+		coverage = append(coverage, cov...)
+	}
+	findings = append(findings, analysis.NewEngine(rs).Analyze(merged)...)
+	findings = append(findings, analysis.ScanDangerousCalls(merged, rs)...)
+	findings = append(findings, analysis.ScanSecrets(merged)...)
+	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
+}
+
 // Convert lowers source at path into a single gIR program. It is the
 // coverage-free façade over convert, retained for callers that do not need the
 // per-language conversion status.

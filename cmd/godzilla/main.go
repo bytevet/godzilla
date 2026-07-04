@@ -45,11 +45,14 @@ const (
 
 const usageText = `usage: godzilla <scan|rules|version> ...
 
-  scan [flags] <path>   analyze source at <path> and report findings (see below)
+  scan [flags] <path...>  analyze source at the given path(s) and report findings (see below)
   rules <list|lint|test>  inspect, validate, or test rules (see: godzilla rules)
   version               print the tool version
 
-Convert source at <path> to gIR, run taint analysis, and report findings.
+Convert source at the given path(s) to gIR, run taint analysis, and report
+findings. Multiple paths (or -files) are lowered and analyzed together in one
+process with a single merged exit code and report — a changed-files entry point
+for pre-commit hooks / CI diffs.
 
 flags:
   -rules <file>     additional YAML rule file to load alongside the built-in rules
@@ -67,6 +70,8 @@ flags:
   -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
   -config <file>    path to a .godzilla.yaml (default: auto-loaded from the scan root)
   -quiet            suppress console output; the exit code and report files still reflect findings
+  -files <file>     changed-files mode: read newline-separated paths from <file> ('-' for stdin),
+                    e.g. a pre-commit hook: git diff --name-only --cached | godzilla scan -files -
 
 A .godzilla.yaml in the scan root can set fail-on, path include/exclude globs,
 and per-rule disable / severity-overrides; CLI flags override its values.
@@ -100,6 +105,29 @@ func main() {
 	}
 }
 
+// readFileList reads newline-separated paths from src (or stdin when src is
+// "-"), skipping blank lines and surrounding whitespace. It backs the
+// changed-files/pre-commit `-files` mode.
+func readFileList(src string) ([]string, error) {
+	var data []byte
+	var err error
+	if src == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(src)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	fs.Usage = usage
@@ -116,16 +144,37 @@ func runScan(args []string) {
 	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
 	configPath := fs.String("config", "", "path to a .godzilla.yaml (default: auto-loaded from the scan root)")
 	quiet := fs.Bool("quiet", false, "suppress coverage/summary/per-finding console output; the exit code and any report files still reflect findings")
+	filesList := fs.String("files", "", "changed-files mode: read newline-separated paths to scan from this file, or '-' for stdin (for pre-commit hooks / CI diffs)")
 	_ = fs.Parse(args)
 
 	buildpolicy.SetAllowed(*allowBuild)
 	report.Version = version // stamp the tool version into SARIF/JSON reports
 
-	if fs.NArg() < 1 {
+	// Collect scan targets: a `-files` list (stdin with '-'), one or more
+	// positional paths, or the single positional path of the classic invocation.
+	var paths []string
+	if *filesList != "" {
+		p, err := readFileList(*filesList)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: reading -files %s: %v\n", *filesList, err)
+			os.Exit(exitError)
+		}
+		paths = p
+	}
+	paths = append(paths, fs.Args()...)
+	if len(paths) == 0 {
 		usage()
 		os.Exit(exitUsage)
 	}
-	path := fs.Arg(0)
+	filesMode := *filesList != "" || len(paths) > 1
+	// The config root: the single target for a classic scan, else the working
+	// directory (a changed-files run has no single root — pre-commit runs at the
+	// repo root).
+	path := paths[0]
+	configRoot := path
+	if filesMode {
+		configRoot = "."
+	}
 
 	// Per-project config (.godzilla.yaml): gate threshold, path filters, and
 	// per-rule disable/severity overrides. An explicit -config wins; otherwise it
@@ -139,7 +188,7 @@ func runScan(args []string) {
 		}
 		cfg = c
 	} else {
-		c, p, err := config.Load(path)
+		c, p, err := config.Load(configRoot)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", p, err)
 			os.Exit(exitError)
@@ -171,7 +220,12 @@ func runScan(args []string) {
 	}
 	ruleSet = cfg.ApplyRules(ruleSet) // disable rules / apply severity overrides (no-op if cfg nil)
 
-	res, err := scan.Scan(path, ruleSet)
+	var res scan.Result
+	if filesMode {
+		res, err = scan.ScanFiles(paths, ruleSet)
+	} else {
+		res, err = scan.Scan(path, ruleSet)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)

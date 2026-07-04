@@ -144,11 +144,12 @@ the items gated on toolchains outside the default test matrix, or that are large
 - **COV-8 (C/C++ depth)** ✅ — LLVM CFG-edge fix + exec-family/argv sources + c-buffer-overflow and
   c-sql-injection packs; six new C corpus samples, green under `make gate-llvm`. (C/C++ SSRF left as a
   follow-on.)
+- **CI-9 changed-files (`-files -` / multi-path)** ✅ — one-process pre-commit / CI-diff entry point
+  (`scan.ScanFiles`), merges the changed files into a single engine run + exit code.
 
 **Still deferred (net-new project):**
 
 - **COV-10 (PHP/Ruby/C#/Kotlin)** — net-new frontends; each is a large project on its own.
-- **CI-9 changed-files/`--files -`** — a convenience wrapper over per-file `scan`; marginal.
 - **PERF-1/6/8** — reasoned in the Tier 2 section (caching invalidation risk; tree-shaking soundness
   trade-off; streaming not a bottleneck).
 
@@ -316,7 +317,7 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Frontend-lowering + YAML: mirror the Java @RequestParam trick the project already uses (CLAUDE.md documents it) — when MIR shows a handler receiving axum extractor types (Query<...>, Path<...>, Json<...> appear in the MIR signature text mir.go already parses), synthesize a source CALL per extracted parameter with a canonical name like rust:axum::extract::Query, then list those names as YAML sources. Add rust-xss (sinks: *Html::from, response body builders) and rust-open-redirect (*Redirect::to#0, *Redirect::temporary#0) packs.
 - **DONE:** `parseHeader` now captures each MIR parameter's type; `lowerFn` recognizes an axum extractor parameter (`Query`/`Path`/`Json`/`Form` before the generic `<`, via `axumExtractorSource`) and **synthesizes a source CALL** (`rust:axum::extract::<Extractor>`) whose result IS that parameter's value — the exact Java `@RequestParam` trick, in the frontend, no gIR change. Those source names are added to the rust command-injection/path-traversal/sql-injection/ssrf packs, and two new packs ship: `rust-xss` (`*Html::from`/`Html::new` sinks) and `rust-open-redirect` (`*Redirect::to`/`temporary`/`permanent`). Tested hermetically (no rustc) by `TestAxumExtractorSource`, `TestLowerMIR_AxumSourceSynthesis`, and `TestAxumTaintFlow_EndToEnd` (lowered handler → engine → `rust-command-injection` fires).
 
-### COV-8 [MEDIUM] ✅ DONE (`<pending>`) C/C++ has only 3 packs, no memory-safety class, no SQLi/SSRF, argv missing as a source, and execv/execve missing as sinks
+### COV-8 [MEDIUM] ✅ DONE (`8e313f7`) C/C++ has only 3 packs, no memory-safety class, no SQLi/SSRF, argv missing as a source, and execv/execve missing as sinks
 
 - **Impact:** For C/C++, memory corruption IS the vulnerability model — CodeQL/Sonar's C coverage is majority CWE-120/125/787. A tool that flags getenv→system but stays silent on gets(buf) or strcpy(fixed_buf, tainted) will not be taken seriously by C teams, and the execv/execve omission is a straight command-injection FN in the one class the pack does claim.
 - **Fix direction:** YAML: add execv/execve/execvpe (and execvP/fexecve) to c-command-injection sinks; add a c-buffer-overflow pack with sinks c*:gets (all args), c*:strcpy#0-from-tainted-source, c*:sprintf, c*:strcat, keeping strncpy/snprintf as propagators; add c-sql-injection (c*:mysql_query#1, c*:sqlite3_exec#1, c*:PQexec#1) and c-ssrf packs. For argv, have the LLVM lowering synthesize a source CALL for main's argv (the same parameter-annotation trick used for Spring), then reference it in YAML.
@@ -422,11 +423,12 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Fix direction:** Add a `var version = "dev"` in cmd/godzilla injected via -ldflags in the Makefile, a `godzilla version` subcommand, `Version` on sarifDriver, and a `schemaVersion: "1"` + `toolVersion` on jsonDocument.
 - **DONE:** `var version = "dev"` in `cmd/godzilla`, injected at build via `-ldflags "-X main.version=$(VERSION)"` (Makefile `VERSION` defaults to `git describe`). A `godzilla version` subcommand (also `--version`/`-v`) prints it. `report.Version` (stamped from the CLI at startup) now flows into the SARIF `driver.version` and the JSON document's `toolVersion` + `schemaVersion: "1"`. Tested by `TestReportsStampVersion`; the ldflags injection verified end-to-end.
 
-### CI-9 [LOW] ✅ DONE (`c05af2f`, partial) Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
+### CI-9 [LOW] ✅ DONE (`c05af2f` + `<pending>`) Console/gate UX gaps: stale usage text, no quiet/verbose/progress, no pre-commit or changed-files mode
 
 - **Impact:** Minor individually, but for the 'ultra-fast per-commit' headline goal the absence of a changed-files entry point matters: pre-commit frameworks pass filenames, and per-file invocation re-pays JVM/rustc startup each time. Stale usage text erodes polish/trust on first contact.
 - **Fix direction:** Fix usageText and scan.go:106's language list; add --quiet (suppress per-finding text when a report flag is set) and a simple frontends-started/finished progress line on stderr; accept multiple positional paths and a `--files -` stdin list feeding a single merged Convert, enabling a documented pre-commit hook recipe in README.
-- **DONE:** Added `-quiet` (suppresses coverage/summary/per-finding console output while the exit code and any report files still reflect findings — the CI-consumes-a-report-file case). The multi-command usage text was already refreshed with the `scan`/`rules`/`version` subcommands (CI-7/CI-8). Tested by `TestQuiet_SuppressesOutputButKeepsGate`. The changed-files / `--files -` stdin pre-commit entry point is deferred (see Terminal-state note): it is a convenience wrapper — the same coverage is achievable today by invoking `scan` per file — and merging arbitrary file lists across six frontends into one Convert is a non-trivial addition for marginal gain.
+- **DONE:** Added `-quiet` (suppresses coverage/summary/per-finding console output while the exit code and any report files still reflect findings — the CI-consumes-a-report-file case). The multi-command usage text was already refreshed with the `scan`/`rules`/`version` subcommands (CI-7/CI-8). Tested by `TestQuiet_SuppressesOutputButKeepsGate`.
+- **DONE (changed-files mode):** `scan` now accepts **multiple positional paths** and a **`-files <file>`** flag (`-files -` reads newline-separated paths from stdin) — the pre-commit / CI-diff entry point (`git diff --name-only --cached | godzilla scan -files -`). `scan.ScanFiles` lowers every source path and merges the modules into one program so the engine runs **once** (cross-file taint among the changed files still connects, one exit code, one report), while every path — source or not — is also secrets-scanned so a changed `.env`/compose/Dockerfile is covered. A non-source or unconvertable path is skipped (secrets still run), and a batch with **no analyzable source** (a docs-only commit) returns cleanly rather than erroring, so the hook never spuriously fails. Tested by `TestScanFiles_ChangedFilesMode` (vulnerable + clean + non-source in one batch) and `TestScanFiles_DocsOnlyIsClean`; verified end-to-end via stdin. This completes CI-9.
 
 ## LLM reviewer (LLM)
 

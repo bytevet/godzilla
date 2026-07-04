@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
 )
 
@@ -45,6 +46,56 @@ func TestScanCoverageHappyPath(t *testing.T) {
 	}
 	if len(res.Failed()) != 0 {
 		t.Errorf("a healthy scan must report no failed coverage, got %+v", res.Failed())
+	}
+}
+
+// TestScanFiles_ChangedFilesMode covers the CI-9 changed-files entry point:
+// several explicit paths are analyzed together in one process, mixing a
+// vulnerable source file, a clean one, and a non-source file. The vulnerable
+// file must fire, the batch must merge into one result, and the non-source file
+// must not abort the run.
+func TestScanFiles_ChangedFilesMode(t *testing.T) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	res, err := ScanFiles([]string{
+		"../../test/js/command_injection/app.js",
+		"../../test/python/subprocess_argv_safe/app.py",
+		"../../README.md", // non-source: must be skipped, not an error
+	}, rs)
+	if err != nil {
+		t.Fatalf("ScanFiles: %v", err)
+	}
+	var sawCmdi bool
+	for _, f := range res.Findings {
+		if f.RuleID == "js-command-injection" {
+			sawCmdi = true
+		}
+	}
+	if !sawCmdi {
+		t.Errorf("expected js-command-injection from the batch, got %d finding(s)", len(res.Findings))
+	}
+}
+
+// TestScanFiles_DocsOnlyIsClean guards the pre-commit UX: a batch with no
+// analyzable source (only docs) must NOT error — it returns cleanly so the hook
+// does not spuriously fail the commit.
+func TestScanFiles_DocsOnlyIsClean(t *testing.T) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	res, err := ScanFiles([]string{"../../README.md"}, rs)
+	if err != nil {
+		t.Fatalf("ScanFiles on docs-only batch should not error, got: %v", err)
+	}
+	for _, f := range res.Findings {
+		if f.RuleID != "" && f.Severity.Rank() >= rules.SeverityMedium.Rank() {
+			// A real secret in README would be a legitimate finding; the fixture
+			// has none, so any medium+ finding here is unexpected.
+			t.Errorf("unexpected finding in docs-only batch: %+v", f)
+		}
 	}
 }
 
