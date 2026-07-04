@@ -52,7 +52,14 @@ A few underlying defects surface across multiple lenses. Fixing the root clears 
 > COV-6 header/cookie sources (`55d4f15`), FE-6/COV-2 TypeScript/JSX/ESM via esbuild (`803dcfd`).
 > **Tier 2 — ✅ core goals met**: PERF-2 Go dep-scoping (`a6e6d06`), PERF-3 parallelism (`c99075e`),
 > PERF-4 subprocess timeouts (`a53dec4`), PERF-5 shared CHA index (`d049e80`), PERF-7 dir excludes
-> (`b73af85`); PERF-1/6/8 deferred with rationale (see Tier 2 below). **Tier 3 — in progress.**
+> (`b73af85`); PERF-1/6/8 deferred with rationale (see Tier 2 below).
+> **Tier 3 — in progress**: ENG-3 field-sensitive structs (`5c26335`), CI-6 taint-path recording
+> (`4c6a417`), LLM-2 taint-path-in-reviewer-context (`531ac68`), TRUST-7 frontend fuzzing +
+> glob-DoS fix (`09f40e1`), TRUST-6 perf-regression guard + TRUST-8 2nd differential shape
+> (`2326058`), TRUST-3 optional location oracle (`99abf24`), TRUST-5 precision/recall scorer
+> (`f04483e`), ENG-6a taint-through-globals (`e88e46a`), ENG-6b out-parameter fill (`72ed5d4`).
+> Remaining: ENG-2 (flow-sensitivity/strong updates), ENG-9 (guard sanitization), LLM-4 (agentic
+> reviewer) — the deep-engine/research items; see per-item notes for scope.
 
 ### Tier 0 — Stop the bleeding (small diffs, highest trust/precision impact) — ✅ DONE
 Localized bug fixes and one-line safety flips. Ship first.
@@ -131,10 +138,11 @@ Grouped by audit lens. Each entry: ID, severity, verification verdict (where run
 - **Impact:** Every Java taint flow that crosses an instance-method boundary — i.e. nearly all real Java code, service/DAO layering especially — is a false negative. The existing test corpus only covers intra-procedural Java flows, so this is invisible to CI. It also means receiver taint (tainted `this`) never propagates for any language via the direct path.
 - **Fix direction:** In handleCall's direct-summary block, detect an INVOKE whose resolved callee function has a receiver param (Java: IsInvoke && byKey hit; check callee's param-0-is-this convention or add a HasReceiver flag frontend-side via existing fields) and shift arg j -> param j+1, seeding param 0 from Call.Value's taint. Separately, extend the methodImpls index beyond 'go:(' so Java/other-language dynamic dispatch participates in CHA. Engine-only fix; add an inter-procedural Java sample to test/java with expected.yaml.
 
-### ENG-6 [HIGH] No taint through globals or callee side effects on pointer/heap arguments — the promised demand-driven points-to was never built and no cheap substitute exists
+### ENG-6 [HIGH] ✅ DONE (`e88e46a`, `72ed5d4`) No taint through globals or callee side effects on pointer/heap arguments — the promised demand-driven points-to was never built and no cheap substitute exists
 
 - **Impact:** Two everyday idioms — stashing request data in a package/module-level variable, and out-parameter fill functions (very common in Go and C, and the natural shape of parsers/binders like json.Unmarshal(&dst)) — are complete false negatives across all six languages. Against CodeQL (global flow through fields/statics, heap summaries) this is a headline soundness gap for goal (3).
 - **Fix direction:** Two incremental engine-side steps before any full points-to: (a) per-rule global taint: treat global_name operands as taintable keys in a program-wide map, with a second outer fixpoint over functions when a global's taint changes (the worklist scaffolding already exists); (b) extend funcResult with 'taintsParamMemory[i] -> origin' derived from stores through param-derived addresses in the callee, and on return mark the caller's argument register (and its container chain) tainted. Both fit the frozen-gIR constraint — the schema already carries everything needed.
+- **DONE:** Both parts landed engine-only, no gIR change. (a) `globalTaint` program-wide map + `globalReaders` index; a tainted store to a global records a `globalEffect` the orchestrator merges, re-enqueueing readers (the outer fixpoint). A global read keys on a tainted `GlobalName` operand, not one opcode (Go lowers a global read as `UN_OP(MUL)`, others as `LOAD`). (b) `funcResult.taintsParamMemory[i]` from a tainted store whose address roots at param `i` (via `rootBaseReg`), merged like `returnTaint`; callers taint the arg at that position (`taintCallerArg`, container chain included). By-value args can't be a store root, and Java models local/param stores as slot rebinds not `OP_CODE_STORE`, so no cross-language FP. Both are cross-function → **Medium** confidence. Guarded by `test/go/global_taint{,_safe}` + `outparam_fill{,_safe}` corpus samples and `TestAnalyze_GlobalTaintFlow/Safe` + `TestAnalyze_OutParamFill/Safe`.
 
 ### ENG-7 [MEDIUM] Confidence contract broken for return-flow: cross-function findings via return summaries are labeled High and bypass the LLM reviewer
 
