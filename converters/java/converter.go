@@ -76,6 +76,15 @@ type dumpInstr struct {
 	Cst   string `json:"cst"`
 	Slot  int    `json:"slot"`
 	Line  int    `json:"line"`
+	// Control-flow fields (FE-4). A LABEL pseudo-instruction carries ID (the
+	// branch-target identifier bound at this position). A BRANCH carries Target
+	// (the label id it jumps to). A SWITCH carries Default + Targets (the label
+	// ids of its default and case arms). These let lower.go rebuild the CFG and
+	// merge the operand stack / locals at control-flow joins with OP_CODE_PHI.
+	ID      int   `json:"id"`
+	Target  int   `json:"target"`
+	Default int   `json:"default"`
+	Targets []int `json:"targets"`
 }
 
 // ConvertFile lowers the Java at path (a file or directory) into a gIR program:

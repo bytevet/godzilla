@@ -2,6 +2,7 @@ package java_converter
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	ir "godzilla/pkg/ir/v1"
@@ -117,10 +118,33 @@ func entryLine(m dumpMethod) int {
 	return 0
 }
 
+// run lowers a method body. For straight-line code (no branch targets) it is a
+// single linear operand-stack simulation, identical to the original frontend.
+// When the method has control flow it is lowered block-by-block over the
+// reconstructed CFG, merging the operand stack and locals at each join with
+// OP_CODE_PHI (FE-4) — so a branch-selected value (`cond ? tainted : default`,
+// an if/else assignment) is no longer silently dropped, and the stack stays
+// aligned past the join instead of garbling every later instruction.
 func (s *methodState) run(instrs []dumpInstr) {
-	for _, in := range instrs {
-		pos := s.pos(in.Line)
+	blocks, labelIdx := splitBlocks(instrs)
+	if len(blocks) <= 1 {
+		for i := range instrs {
+			s.step(instrs[i])
+		}
+		return
+	}
+	s.runBlocks(blocks, labelIdx, instrs)
+}
+
+// step lowers one instruction against the current operand-stack state.
+func (s *methodState) step(in dumpInstr) {
+	pos := s.pos(in.Line)
+	{
 		switch in.Op {
+		case "LABEL":
+			// Block marker only (FE-4); no stack effect.
+		case "SWITCH":
+			s.pop() // the switch key
 		case "LOAD":
 			s.push(s.load(in.Slot))
 		case "STORE":
@@ -176,6 +200,274 @@ func (s *methodState) run(instrs []dumpInstr) {
 			s.other(in.Kind, pos)
 		}
 	}
+}
+
+// block is one basic block of a method's reconstructed CFG: the half-open
+// instruction range [start,end) and the slice of instructions it spans.
+type block struct {
+	start  int
+	end    int
+	instrs []dumpInstr
+}
+
+// simState snapshots the operand stack and locals at a block boundary.
+type simState struct {
+	stack  []*ir.Value
+	locals map[int]*ir.Value
+}
+
+// splitBlocks reconstructs the basic blocks of a method from its linear
+// instruction stream: leaders are index 0, every branch/switch target (a LABEL
+// position), and the instruction after any terminator (branch/switch/return/
+// throw). Returns the blocks in textual order and a label-id→instruction-index
+// map for wiring edges. A method with no branch targets yields a single block.
+func splitBlocks(instrs []dumpInstr) ([]block, map[int]int) {
+	labelIdx := map[int]int{}
+	for i, in := range instrs {
+		if in.Op == "LABEL" {
+			labelIdx[in.ID] = i
+		}
+	}
+	leaders := map[int]bool{0: true}
+	addTarget := func(id int) {
+		if idx, ok := labelIdx[id]; ok {
+			leaders[idx] = true
+		}
+	}
+	for i, in := range instrs {
+		switch in.Op {
+		case "BRANCH":
+			addTarget(in.Target)
+			if i+1 < len(instrs) {
+				leaders[i+1] = true
+			}
+		case "SWITCH":
+			addTarget(in.Default)
+			for _, t := range in.Targets {
+				addTarget(t)
+			}
+			if i+1 < len(instrs) {
+				leaders[i+1] = true
+			}
+		case "RETURN", "THROW":
+			if i+1 < len(instrs) {
+				leaders[i+1] = true
+			}
+		}
+	}
+	starts := make([]int, 0, len(leaders))
+	for ld := range leaders {
+		starts = append(starts, ld)
+	}
+	sort.Ints(starts)
+	blocks := make([]block, len(starts))
+	for i, st := range starts {
+		end := len(instrs)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		blocks[i] = block{start: st, end: end, instrs: instrs[st:end]}
+	}
+	return blocks, labelIdx
+}
+
+// runBlocks lowers a method block-by-block over its CFG, threading the operand
+// stack and locals along control-flow edges and PHI-merging divergent bindings
+// at every join (≥2 predecessors). Blocks are processed in textual order —
+// which is topological for the forward edges javac emits — so a join's
+// predecessors are already lowered; a block reachable only via an unprocessed
+// (back-)edge falls back to the previous block's exit, never doing worse than
+// the old linear walk.
+func (s *methodState) runBlocks(blocks []block, labelIdx map[int]int, instrs []dumpInstr) {
+	blockAt := map[int]int{} // leader instruction index -> block index
+	for bi, b := range blocks {
+		blockAt[b.start] = bi
+	}
+	preds := make([][]int, len(blocks))
+	for bi, b := range blocks {
+		for _, sc := range blockSuccs(b, blockAt, labelIdx) {
+			preds[sc] = append(preds[sc], bi)
+		}
+	}
+
+	seed := simState{locals: s.locals} // block 0 entry: seeded params, empty stack
+	exits := make([]*simState, len(blocks))
+	var prevExit *simState
+	for bi, b := range blocks {
+		var known []int
+		for _, p := range preds[bi] {
+			if exits[p] != nil {
+				known = append(known, p)
+			}
+		}
+		var entry simState
+		switch {
+		case bi == 0:
+			entry = cloneState(seed)
+		case len(known) == 0:
+			if prevExit != nil {
+				entry = cloneState(*prevExit)
+			} else {
+				entry = cloneState(seed)
+			}
+		case len(known) == 1:
+			entry = cloneState(*exits[known[0]])
+		default:
+			entry = s.mergeStates(known, exits, b)
+		}
+		s.stack = entry.stack
+		s.locals = entry.locals
+		for _, in := range b.instrs {
+			s.step(in)
+		}
+		ex := simState{stack: s.stack, locals: s.locals}
+		exits[bi] = &ex
+		prevExit = &ex
+	}
+}
+
+// blockSuccs resolves a block's normal-control-flow successors from its
+// terminator: a conditional branch reaches its target and its fallthrough; a
+// GOTO only its target; a switch its default and every case; return/throw
+// nothing; a block with no terminator falls through to the next.
+func blockSuccs(b block, blockAt, labelIdx map[int]int) []int {
+	fallthr := func() []int {
+		if nx, ok := blockAt[b.end]; ok {
+			return []int{nx}
+		}
+		return nil
+	}
+	target := func(id int) (int, bool) {
+		idx, ok := labelIdx[id]
+		if !ok {
+			return 0, false
+		}
+		bi, ok := blockAt[idx]
+		return bi, ok
+	}
+	if len(b.instrs) == 0 {
+		return fallthr()
+	}
+	last := b.instrs[len(b.instrs)-1]
+	switch last.Op {
+	case "BRANCH":
+		tgt, ok := target(last.Target)
+		if strings.HasPrefix(last.Kind, "GOTO") {
+			if ok {
+				return []int{tgt}
+			}
+			return nil
+		}
+		res := fallthr()
+		if ok {
+			res = append(res, tgt)
+		}
+		return res
+	case "SWITCH":
+		var res []int
+		if d, ok := target(last.Default); ok {
+			res = append(res, d)
+		}
+		for _, t := range last.Targets {
+			if bi, ok := target(t); ok {
+				res = append(res, bi)
+			}
+		}
+		return res
+	case "RETURN", "THROW":
+		return nil
+	default:
+		return fallthr()
+	}
+}
+
+// mergeStates builds a join block's entry state from its already-lowered
+// predecessors, emitting an OP_CODE_PHI for each operand-stack slot and local
+// whose incoming values diverge (identical bindings pass through unchanged). The
+// stack depth is the minimum across predecessors — defensive against the rare
+// unbalanced-stack case; valid bytecode has equal depth at every join.
+func (s *methodState) mergeStates(preds []int, exits []*simState, b block) simState {
+	depth := -1
+	for _, p := range preds {
+		if d := len(exits[p].stack); depth < 0 || d < depth {
+			depth = d
+		}
+	}
+	if depth < 0 {
+		depth = 0
+	}
+	pos := s.blockPos(b)
+	out := simState{stack: make([]*ir.Value, depth), locals: map[int]*ir.Value{}}
+	for i := 0; i < depth; i++ {
+		vals := make([]*ir.Value, 0, len(preds))
+		seen := map[*ir.Value]bool{}
+		for _, p := range preds {
+			v := exits[p].stack[i]
+			if v == nil || seen[v] {
+				continue
+			}
+			seen[v] = true
+			vals = append(vals, v)
+		}
+		out.stack[i] = s.mergeVals(vals, pos)
+	}
+	slots := map[int]bool{}
+	for _, p := range preds {
+		for k := range exits[p].locals {
+			slots[k] = true
+		}
+	}
+	for slot := range slots {
+		vals := make([]*ir.Value, 0, len(preds))
+		seen := map[*ir.Value]bool{}
+		for _, p := range preds {
+			v := exits[p].locals[slot]
+			if v == nil || seen[v] {
+				continue
+			}
+			seen[v] = true
+			vals = append(vals, v)
+		}
+		if len(vals) > 0 {
+			out.locals[slot] = s.mergeVals(vals, pos)
+		}
+	}
+	return out
+}
+
+// mergeVals returns the single value unchanged, or emits an OP_CODE_PHI over
+// several — the taint engine treats PHI as a propagator, so the join is tainted
+// iff any incoming edge is.
+func (s *methodState) mergeVals(vals []*ir.Value, pos *ir.Position) *ir.Value {
+	if len(vals) == 0 {
+		return constString("")
+	}
+	if len(vals) == 1 {
+		return vals[0]
+	}
+	r := s.reg()
+	s.instrs = append(s.instrs, &ir.Instruction{Name: r, Op: ir.OpCode_OP_CODE_PHI, Operands: vals, Pos: pos})
+	return regValue(r)
+}
+
+func (s *methodState) blockPos(b block) *ir.Position {
+	for _, in := range b.instrs {
+		if in.Line > 0 {
+			return s.pos(in.Line)
+		}
+	}
+	return nil
+}
+
+func cloneState(st simState) simState {
+	out := simState{locals: make(map[int]*ir.Value, len(st.locals))}
+	if len(st.stack) > 0 {
+		out.stack = append([]*ir.Value(nil), st.stack...)
+	}
+	for k, v := range st.locals {
+		out.locals[k] = v
+	}
+	return out
 }
 
 // invoke lowers a method call. Calls with a receiver (virtual/interface/special)
