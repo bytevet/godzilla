@@ -68,6 +68,22 @@ type Rule struct {
 
 	Propagators []string `yaml:"propagators"` // callees that pass taint arg->result (e.g. fmt.Sprintf)
 
+	// Kind selects the rule's evaluation model. "" (or "taint") is the default
+	// source->sink dataflow rule. "dangerous-call" (COV-4) is a non-dataflow,
+	// call-site-syntactic check: any call to a Callee glob is a finding, optionally
+	// gated on a constant string argument — for zero-noise categories like weak
+	// crypto, weak ciphers, and insecure randomness that need no taint tracking.
+	Kind string `yaml:"kind"`
+
+	// Callees are the dangerous call globs for a kind: dangerous-call rule.
+	Callees []string `yaml:"callees"`
+
+	// ConstArg optionally restricts a dangerous-call match to calls whose constant
+	// string argument at the LOGICAL index Index matches the Matches regexp — e.g.
+	// the "MD5" literal in MessageDigest.getInstance("MD5"). Nil means any call to
+	// a Callee fires regardless of arguments.
+	ConstArg *ConstArg `yaml:"const_arg"`
+
 	// Validators are guard/barrier callees (ENG-9): a boolean-returning check
 	// (an allowlist test, a regexp match, a path-containment predicate like
 	// filepath.IsLocal) that, when it dominates the branch leading to a sink,
@@ -78,10 +94,23 @@ type Rule struct {
 	Validators []string `yaml:"validators"`
 }
 
+// ConstArg is a dangerous-call rule's optional constant-argument condition.
+type ConstArg struct {
+	Index   int    `yaml:"index"`   // logical (receiver-excluded) argument index
+	Matches string `yaml:"matches"` // regexp the constant string argument must match
+}
+
 // RuleSet is a collection of rules, matching the top-level YAML document shape.
 type RuleSet struct {
 	Rules []Rule `yaml:"rules"`
 }
+
+// IsDangerousCall reports whether the rule is a non-dataflow, call-site rule.
+func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "dangerous-call") }
+
+// MatchesDangerousCallee reports whether callee matches one of the rule's
+// dangerous-call globs.
+func (r *Rule) MatchesDangerousCallee(callee string) bool { return MatchAny(r.Callees, callee) }
 
 // AppliesTo reports whether the rule is active for the given source language
 // (e.g. "go"). A rule with no declared Languages applies to every language.

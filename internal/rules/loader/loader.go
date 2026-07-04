@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -132,6 +133,18 @@ func validate(rs *rules.RuleSet) error {
 		for _, s := range r.Sinks {
 			if rules.InvalidSinkSpec(s) {
 				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s))
+			}
+		}
+		// A dangerous-call rule (COV-4) is defined by its callees; without any it
+		// can never fire, and its const_arg regexp must compile.
+		if r.IsDangerousCall() {
+			if len(r.Callees) == 0 {
+				problems = append(problems, fmt.Sprintf("rule %q is kind: dangerous-call but declares no callees", r.ID))
+			}
+			if r.ConstArg != nil && r.ConstArg.Matches != "" {
+				if _, err := regexp.Compile(r.ConstArg.Matches); err != nil {
+					problems = append(problems, fmt.Sprintf("rule %q has an invalid const_arg.matches regexp %q: %v", r.ID, r.ConstArg.Matches, err))
+				}
 			}
 		}
 	}

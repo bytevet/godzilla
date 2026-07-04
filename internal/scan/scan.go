@@ -72,6 +72,9 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 		return Result{}, err
 	}
 	findings := analysis.NewEngine(rs).Analyze(prog)
+	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
+	// etc.) evaluated in one syntactic pass alongside the taint engine (COV-4).
+	findings = append(findings, analysis.ScanDangerousCalls(prog, rs)...)
 	findings = append(findings, analysis.ScanSecrets(prog)...)
 	// Also scan raw config files (.env, compose, Dockerfile, CI YAML, ...) that
 	// no language frontend parses — the dominant hardcoded-secret vector.

@@ -1,0 +1,31 @@
+# Non-dataflow (kind: dangerous-call) cryptographic-weakness rules for Java. The
+# algorithm is a constant string argument to a factory method, so these use a
+# const_arg regexp condition (COV-4).
+rules:
+  - id: java-weak-hash
+    kind: dangerous-call
+    languages: [java]
+    severity: medium
+    cwe: CWE-327
+    message: >-
+      A weak hash algorithm (MD2/MD4/MD5/SHA-1) was requested from
+      MessageDigest. Use SHA-256 or stronger.
+    callees:
+      - "java:*MessageDigest.getInstance"
+    const_arg:
+      index: 0
+      matches: "(?i)^(MD2|MD4|MD5|SHA-?0|SHA-?1)$"
+
+  - id: java-weak-cipher
+    kind: dangerous-call
+    languages: [java]
+    severity: high
+    cwe: CWE-327
+    message: >-
+      A weak or broken cipher (DES/3DES/RC4/Blowfish) was requested from
+      Cipher.getInstance. Use AES-GCM.
+    callees:
+      - "java:*Cipher.getInstance"
+    const_arg:
+      index: 0
+      matches: "(?i)(^|/)(DES|DESede|RC4|ARCFOUR|Blowfish)(/|$)"

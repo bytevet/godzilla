@@ -63,8 +63,11 @@ func runRulesList(args []string) {
 		if cwe == "" {
 			cwe = "-"
 		}
-		fmt.Fprintf(os.Stdout, "%-32s %-8s %-8s [%s]  %d source(s), %d sink(s)\n",
-			r.ID, r.Severity, cwe, langs, len(r.Sources), len(r.Sinks))
+		shape := fmt.Sprintf("%d source(s), %d sink(s)", len(r.Sources), len(r.Sinks))
+		if r.IsDangerousCall() {
+			shape = fmt.Sprintf("dangerous-call, %d callee(s)", len(r.Callees))
+		}
+		fmt.Fprintf(os.Stdout, "%-32s %-8s %-8s [%s]  %s\n", r.ID, r.Severity, cwe, langs, shape)
 	}
 	fmt.Fprintf(os.Stdout, "\n%d rule(s).\n", len(sorted))
 }

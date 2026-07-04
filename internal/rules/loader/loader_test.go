@@ -22,7 +22,13 @@ func TestBuiltin(t *testing.T) {
 		if r.ID == "" {
 			t.Errorf("rule has empty ID: %+v", r)
 		}
-		if len(r.Sinks) == 0 {
+		// A dataflow (taint) rule is defined by its sinks; a dangerous-call rule
+		// (COV-4) is defined by its callees instead.
+		if r.IsDangerousCall() {
+			if len(r.Callees) == 0 {
+				t.Errorf("dangerous-call rule %q has no callees", r.ID)
+			}
+		} else if len(r.Sinks) == 0 {
 			t.Errorf("rule %q has no sinks", r.ID)
 		}
 		if r.ID == "go-sql-injection" {
