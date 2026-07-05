@@ -32,6 +32,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		if !r.IsDangerousCall() || len(r.Callees) == 0 {
 			continue
 		}
+		r.Compile() // precompile callee globs so the per-call match is lock-free
 		c := compiled{rule: r}
 		if r.ConstArg != nil && r.ConstArg.Matches != "" {
 			re, err := regexp.Compile(r.ConstArg.Matches)

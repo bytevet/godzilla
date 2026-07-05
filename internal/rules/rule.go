@@ -9,10 +9,10 @@
 package rules
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Severity ranks a finding's importance and drives exit-code gating.
@@ -92,6 +92,11 @@ type Rule struct {
 	// and leaves the value unchanged; it neutralizes the finding by controlling
 	// which path reaches the sink. Matched by canonical-FQN glob, like sinks.
 	Validators []string `yaml:"validators"`
+
+	// matchers holds the pattern lists precompiled to shape-matchers (built by
+	// Compile). Unexported and not from YAML; nil until compiled, when the
+	// matching methods fall back to the package-level cached path.
+	matchers *ruleMatchers
 }
 
 // ConstArg is a dangerous-call rule's optional constant-argument condition.
@@ -110,7 +115,12 @@ func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "danger
 
 // MatchesDangerousCallee reports whether callee matches one of the rule's
 // dangerous-call globs.
-func (r *Rule) MatchesDangerousCallee(callee string) bool { return MatchAny(r.Callees, callee) }
+func (r *Rule) MatchesDangerousCallee(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.callees, callee)
+	}
+	return MatchAny(r.Callees, callee)
+}
 
 // AppliesTo reports whether the rule is active for the given source language
 // (e.g. "go"). A rule with no declared Languages applies to every language.
@@ -126,8 +136,73 @@ func (r *Rule) AppliesTo(language string) bool {
 	return false
 }
 
+// ruleMatchers holds a rule's pattern lists precompiled into shape-matchers, so
+// the hot matching path (once per call-site × rule) is a plain slice walk with
+// no per-call cache lookup, mutex, or "#idx" re-parse. Built once by Compile;
+// nil until then, in which case the matching methods fall back to the
+// package-level cached path (correct, just slower — used by tests and the
+// non-hot dangerous-call scan).
+type ruleMatchers struct {
+	sources     []*compiledGlob
+	sinks       []compiledSink
+	sanitizers  []*compiledGlob
+	propagators []*compiledGlob
+	validators  []*compiledGlob
+	callees     []*compiledGlob
+}
+
+// compiledSink pairs a sink's shape-matcher with its parsed injection-point
+// argument indices (nil = all arguments).
+type compiledSink struct {
+	g    *compiledGlob
+	args []int32
+}
+
+// Compile precompiles the rule's pattern lists into shape-matchers. Call it once
+// (single-threaded) before matching a rule against many call sites — the engine
+// does this for every rule before its parallel analysis. Idempotent.
+func (r *Rule) Compile() {
+	if r.matchers != nil {
+		return
+	}
+	m := &ruleMatchers{
+		sources:     classifyAll(r.Sources),
+		sanitizers:  classifyAll(r.Sanitizers),
+		propagators: classifyAll(r.Propagators),
+		validators:  classifyAll(r.Validators),
+		callees:     classifyAll(r.Callees),
+	}
+	for _, entry := range r.Sinks {
+		pattern, idx := parseSink(entry)
+		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx})
+	}
+	r.matchers = m
+}
+
+func classifyAll(patterns []string) []*compiledGlob {
+	out := make([]*compiledGlob, len(patterns))
+	for i, p := range patterns {
+		out[i] = classifyGlob(p)
+	}
+	return out
+}
+
+func matchAnyCompiled(gs []*compiledGlob, s string) bool {
+	for _, g := range gs {
+		if g.match(s) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsSource reports whether callee matches any of the rule's source patterns.
-func (r *Rule) IsSource(callee string) bool { return MatchAny(r.Sources, callee) }
+func (r *Rule) IsSource(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.sources, callee)
+	}
+	return MatchAny(r.Sources, callee)
+}
 
 // IsSink reports whether callee matches any of the rule's sink patterns.
 func (r *Rule) IsSink(callee string) bool {
@@ -140,6 +215,14 @@ func (r *Rule) IsSink(callee string) bool {
 // source-level). A nil/empty result with ok==true means every argument is an
 // injection point (a bare pattern with no "#" spec).
 func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
+	if r.matchers != nil {
+		for _, s := range r.matchers.sinks {
+			if s.g.match(callee) {
+				return s.args, true
+			}
+		}
+		return nil, false
+	}
 	for _, entry := range r.Sinks {
 		pattern, idx := parseSink(entry)
 		if MatchGlob(pattern, callee) {
@@ -191,14 +274,29 @@ func parseSink(entry string) (pattern string, args []int32) {
 }
 
 // IsSanitizer reports whether callee matches any of the rule's sanitizer patterns.
-func (r *Rule) IsSanitizer(callee string) bool { return MatchAny(r.Sanitizers, callee) }
+func (r *Rule) IsSanitizer(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.sanitizers, callee)
+	}
+	return MatchAny(r.Sanitizers, callee)
+}
 
 // IsPropagator reports whether callee matches any of the rule's propagator patterns.
-func (r *Rule) IsPropagator(callee string) bool { return MatchAny(r.Propagators, callee) }
+func (r *Rule) IsPropagator(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.propagators, callee)
+	}
+	return MatchAny(r.Propagators, callee)
+}
 
 // IsValidator reports whether callee matches any of the rule's validator (guard)
 // patterns.
-func (r *Rule) IsValidator(callee string) bool { return MatchAny(r.Validators, callee) }
+func (r *Rule) IsValidator(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.validators, callee)
+	}
+	return MatchAny(r.Validators, callee)
+}
 
 // HasValidators reports whether the rule declares any guard/barrier validators,
 // so the engine can skip the (dominator) guard analysis entirely for rules that
@@ -218,49 +316,145 @@ func MatchAny(patterns []string, s string) bool {
 // MatchGlob reports whether s matches a canonical-name glob. The only
 // metacharacter is '*', which matches any run of characters including '/' and
 // '.'; everything else is matched literally. Matching is anchored (full string).
+//
+// The overwhelming majority of real canonical-name globs are pure literals
+// (`ruby:system`) or a single `*` prefix/suffix (`c*:strcpy`, `go:*request*`).
+// Running a backtracking regexp for those is wasteful — and glob matching is the
+// hottest CPU cost in the engine, run once per (call-site × rule pattern), so it
+// grows linearly with rule-pack size. compileGlob classifies each pattern by
+// shape once (cached) and matches with plain string primitives; only genuinely
+// multi-`*` patterns fall to the general segment walk. No regexp, no per-match
+// allocation, identical semantics.
 func MatchGlob(pattern, s string) bool {
-	return globRegexp(pattern).MatchString(s)
+	return compileGlob(pattern).match(s)
+}
+
+type globKind int
+
+const (
+	globExact        globKind = iota // no '*': s == a
+	globPrefix                       // "a*": HasPrefix(s, a)
+	globSuffix                       // "*a": HasSuffix(s, a)
+	globPrefixSuffix                 // "a*b": HasPrefix(s,a) && HasSuffix(s,b)
+	globContains                     // "*a*": Contains(s, a)
+	globSegments                     // multiple '*': ordered-substring walk
+	globAny                          // "*"/"**": matches anything
+	globNever                        // invalid-UTF8 pattern: matches nothing (DoS guard)
+)
+
+// compiledGlob is a canonical-name glob classified by shape for fast matching.
+type compiledGlob struct {
+	kind      globKind
+	a, b      string   // literal(s) for exact/prefix/suffix/contains (a) and prefixSuffix (a,b)
+	segs      []string // non-empty literal segments between '*'s (globSegments)
+	leadStar  bool     // pattern begins with '*'
+	trailStar bool     // pattern ends with '*'
+}
+
+func (g *compiledGlob) match(s string) bool {
+	switch g.kind {
+	case globExact:
+		return s == g.a
+	case globPrefix:
+		return strings.HasPrefix(s, g.a)
+	case globSuffix:
+		return strings.HasSuffix(s, g.a)
+	case globPrefixSuffix:
+		return len(s) >= len(g.a)+len(g.b) && strings.HasPrefix(s, g.a) && strings.HasSuffix(s, g.b)
+	case globContains:
+		return strings.Contains(s, g.a)
+	case globAny:
+		return true
+	case globNever:
+		return false
+	default: // globSegments
+		return g.matchSegments(s)
+	}
+}
+
+// matchSegments matches a multi-'*' pattern: each literal segment must occur in
+// order, with the first anchored at the start (unless the pattern led with '*')
+// and the last anchored at the end (unless it trailed with '*').
+func (g *compiledGlob) matchSegments(s string) bool {
+	segs := g.segs
+	rest := s
+	if !g.leadStar {
+		if !strings.HasPrefix(rest, segs[0]) {
+			return false
+		}
+		rest = rest[len(segs[0]):]
+		segs = segs[1:]
+	}
+	if !g.trailStar && len(segs) > 0 {
+		last := segs[len(segs)-1]
+		if !strings.HasSuffix(rest, last) {
+			return false
+		}
+		rest = rest[:len(rest)-len(last)]
+		segs = segs[:len(segs)-1]
+	}
+	for _, seg := range segs {
+		i := strings.Index(rest, seg)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len(seg):]
+	}
+	return true
 }
 
 var (
 	globCacheMu sync.RWMutex
-	globCache   = map[string]*regexp.Regexp{}
+	globCache   = map[string]*compiledGlob{}
 )
 
-func globRegexp(pattern string) *regexp.Regexp {
+func compileGlob(pattern string) *compiledGlob {
 	globCacheMu.RLock()
-	re, ok := globCache[pattern]
+	g, ok := globCache[pattern]
 	globCacheMu.RUnlock()
 	if ok {
-		return re
+		return g
 	}
-
-	// Translate the glob to an anchored regexp: quote each literal segment
-	// between '*' metacharacters and join the segments with ".*".
-	var b strings.Builder
-	b.WriteString("^")
-	for i, part := range strings.Split(pattern, "*") {
-		if i > 0 {
-			b.WriteString(".*")
-		}
-		b.WriteString(regexp.QuoteMeta(part))
-	}
-	b.WriteString("$")
-
-	// Compile (not MustCompile): a pattern containing invalid UTF-8 bytes makes
-	// the regexp engine fail to parse, which must not panic the whole scan (a
-	// corrupt or adversarial rule pattern would otherwise be a denial of
-	// service). On failure, cache a regexp that matches nothing.
-	re, err := regexp.Compile(b.String())
-	if err != nil {
-		re = neverMatch
-	}
+	g = classifyGlob(pattern)
 	globCacheMu.Lock()
-	globCache[pattern] = re
+	globCache[pattern] = g
 	globCacheMu.Unlock()
-	return re
+	return g
 }
 
-// neverMatch is a compiled regexp that matches no input; used as the safe
-// fallback for a glob pattern that cannot be compiled.
-var neverMatch = regexp.MustCompile(`[^\x00-\x{10FFFF}]`)
+func classifyGlob(pattern string) *compiledGlob {
+	// A pattern with invalid UTF-8 bytes matched nothing under the old regexp
+	// path (a fuzz-found DoS guard); preserve that exactly.
+	if !utf8.ValidString(pattern) {
+		return &compiledGlob{kind: globNever}
+	}
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return &compiledGlob{kind: globExact, a: pattern}
+	}
+	leadStar := parts[0] == ""
+	trailStar := parts[len(parts)-1] == ""
+	var segs []string
+	for _, p := range parts {
+		if p != "" {
+			segs = append(segs, p)
+		}
+	}
+	if len(segs) == 0 {
+		return &compiledGlob{kind: globAny} // pattern is only '*'s
+	}
+	if len(parts) == 2 { // exactly one '*'
+		switch {
+		case leadStar:
+			return &compiledGlob{kind: globSuffix, a: parts[1]}
+		case trailStar:
+			return &compiledGlob{kind: globPrefix, a: parts[0]}
+		default:
+			return &compiledGlob{kind: globPrefixSuffix, a: parts[0], b: parts[1]}
+		}
+	}
+	if len(segs) == 1 && leadStar && trailStar { // "*x*"
+		return &compiledGlob{kind: globContains, a: segs[0]}
+	}
+	return &compiledGlob{kind: globSegments, segs: segs, leadStar: leadStar, trailStar: trailStar}
+}

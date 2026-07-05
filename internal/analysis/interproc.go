@@ -56,6 +56,16 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// it per rule (as before) wasted O(rules x functions) work.
 	methodImpls := buildMethodImpls(byKey)
 
+	// Precompile every rule's glob patterns ONCE, single-threaded, before the
+	// parallel analysis. This moves shape-classification (and the "#idx" sink
+	// parse) out of the hot per-(call-site × pattern) matching path — which then
+	// does a lock-free slice walk instead of a mutexed cache lookup per match, the
+	// dominant engine cost as rule packs grow. Doing it here (not lazily inside a
+	// goroutine) avoids a data race on the shared matcher cache.
+	for i := range e.rs.Rules {
+		e.rs.Rules[i].Compile()
+	}
+
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
 	// rules concurrently (bounded by GOMAXPROCS). Results are collected per rule
