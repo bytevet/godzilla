@@ -103,6 +103,15 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		}(i)
 	}
 	wg.Wait()
+	// Size the combined slice exactly and copy once. Appending each rule's results
+	// to a growing slice reallocated it by repeated doubling — copying every
+	// (large) Finding many times, the single biggest allocation in a finding-heavy
+	// scan.
+	total := 0
+	for _, r := range results {
+		total += len(r)
+	}
+	findings = make([]Finding, 0, total)
 	for _, r := range results {
 		findings = append(findings, r...)
 	}
@@ -777,6 +786,35 @@ func analyzeFunc(
 	// strictly more precise than the previous whole-function flat map yet never
 	// drops a real flow. Interprocedural effects and findings accumulate
 	// monotonically across passes (deduped by effectSeen / reported).
+	// Fast path: a function with a single basic block has no control-flow merges
+	// or back-edges, so its taint converges in one forward pass. Skip the whole
+	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps, cloneState,
+	// preds/rpo indexes, and the multi-pass loop — and just seed and visit once.
+	// This is the majority of functions (every straight-line-lowered Python / JS /
+	// Ruby / Java / Go-closure body), so it removes most of the engine's
+	// per-(rule × function) allocation. seedState is a fresh map owned by this
+	// analysis, so visiting mutates it in place harmlessly.
+	nBlocks := 0
+	var onlyBlock *ir.BasicBlock
+	for _, blk := range fn.Blocks {
+		if blk != nil {
+			nBlocks++
+			onlyBlock = blk
+		}
+	}
+	if nBlocks <= 1 {
+		tainted = seedState
+		if onlyBlock != nil {
+			curBlock = onlyBlock.GetIndex()
+			for _, inst := range onlyBlock.Instrs {
+				if inst != nil {
+					visit(inst)
+				}
+			}
+		}
+		return res
+	}
+
 	rpo := reversePostOrder(fn)
 	idxToBlock := map[int32]*ir.BasicBlock{}
 	preds := map[int32][]int32{}
