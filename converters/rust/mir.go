@@ -77,8 +77,8 @@ var (
 	derefRe = regexp.MustCompile(`^\(\*_(\d+)\)`)        // (*_9)
 	spanRe  = regexp.MustCompile(`at ([^ ]+\.rs):(\d+):(\d+)`)
 	blockRe = regexp.MustCompile(`^\s*(bb\d+)(\s*\(cleanup\))?\s*:\s*\{`) // block header
-	bbRefRe = regexp.MustCompile(`bb\d+`)                                // a basic-block target
-	retEdge = regexp.MustCompile(`return:\s*(bb\d+)`)                    // call/drop normal edge
+	bbRefRe = regexp.MustCompile(`bb\d+`)                                 // a basic-block target
+	retEdge = regexp.MustCompile(`return:\s*(bb\d+)`)                     // call/drop normal edge
 	// binOps are MIR BinaryOp/UnaryOp names; matched to distinguish an operator
 	// rvalue like `Add(copy _a, copy _b)` from an enum-variant constructor.
 	binOps = map[string]bool{

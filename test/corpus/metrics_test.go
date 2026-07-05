@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"godzilla/internal/buildpolicy"
 	"godzilla/internal/rules/loader"
 	"godzilla/internal/scan"
 )
@@ -73,6 +74,17 @@ func TestCorpusSignalToNoise(t *testing.T) {
 		t.Fatalf("enumerate samples: %v", err)
 	}
 
+	// In E2E mode the dependency-bearing samples (Cargo/Maven/Gradle projects)
+	// must be built so their third-party imports resolve; without this they fall
+	// back to build-less lowering and fail on the unresolved imports, producing no
+	// findings. TestCorpus enables the build per build-sample; mirror it here so
+	// the aggregate score analyzes the same code. Only build projects trigger a
+	// build, and they are eligible only under these E2E flags, so this is a no-op
+	// for a normal run.
+	if os.Getenv("GODZILLA_RUST_E2E") != "" || os.Getenv("GODZILLA_SPRING_E2E") != "" {
+		t.Setenv(buildpolicy.EnvAllowBuild, "1")
+	}
+
 	var tp, fp, fn, samples int
 	for _, dir := range dirs {
 		name := strings.TrimPrefix(filepath.ToSlash(dir), "../")
@@ -85,6 +97,15 @@ func TestCorpusSignalToNoise(t *testing.T) {
 		}
 		res, err := scan.Scan(dir, rs)
 		if err != nil {
+			continue
+		}
+		// A sample whose frontend could not convert its source — a build/toolchain
+		// failure such as a transient Cargo dependency-resolution error (E0432), not
+		// an analysis regression — is excluded from the score, like an ineligible
+		// sample, so it does not masquerade as a dropped finding and make the E2E
+		// gate flaky. TestCorpus still asserts each sample individually, and the WS3
+		// coverage gate surfaces frontend failures separately.
+		if len(res.Failed()) > 0 {
 			continue
 		}
 		samples++
