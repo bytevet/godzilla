@@ -76,12 +76,12 @@ func warnIfMIRDrifted() {
 			smokeOK = true // can't check; don't cry wolf
 			return
 		}
-		defer os.Remove(tmp.Name())
+		defer func() { _ = os.Remove(tmp.Name()) }()
 		if _, err := tmp.WriteString(smokeSnippet); err != nil {
 			smokeOK = true
 			return
 		}
-		tmp.Close()
+		_ = tmp.Close()
 
 		mir, err := emitMIR(tmp.Name())
 		if err != nil {

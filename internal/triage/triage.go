@@ -162,7 +162,7 @@ func LoadBaseline(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var b Baseline
 	if err := json.NewDecoder(bufio.NewReader(f)).Decode(&b); err != nil {
 		return nil, fmt.Errorf("parsing baseline %s: %w", path, err)
