@@ -72,3 +72,68 @@ func TestInvalidSinkSpec(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchGlob_InvalidUTF8PatternDoesNotPanic guards the fuzz-found DoS: a
+// pattern with invalid UTF-8 bytes must not panic (it just never matches).
+func TestMatchGlob_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
+	if MatchGlob("\x80", "x") {
+		t.Error("an uncompilable pattern must match nothing, not panic")
+	}
+	if MatchGlob("go:*\xff", "go:anything") {
+		t.Error("invalid-byte pattern should not match")
+	}
+}
+
+// TestMatchGlob_Semantics pins the '*'-glob semantics across every classified
+// shape (exact / prefix / suffix / prefix+suffix / contains / multi-segment /
+// all-star), so the shape-specialized matcher stays equivalent to the anchored
+// `*`→`.*` regexp it replaced.
+func TestMatchGlob_Semantics(t *testing.T) {
+	cases := []struct {
+		pattern, s string
+		want       bool
+	}{
+		{"ruby:system", "ruby:system", true},   // exact
+		{"ruby:system", "ruby:system2", false}, // exact, not prefix
+		{"go:*", "go:anything/x.y", true},      // prefix (trailing *)
+		{"go:*", "rb:x", false},
+		{"*execute", "py:cursor.execute", true}, // suffix (leading *)
+		{"*execute", "py:execute.now", false},
+		{"c*:strcpy", "c:strcpy", true},   // prefix+suffix
+		{"c*:strcpy", "cpp:strcpy", true}, // '*' spans across ':'
+		{"c*:strcpy", "c:strcpyx", false},
+		{"a*b", "ab", true},     // prefix+suffix, empty middle
+		{"a*b", "a", false},     // too short to hold both anchors
+		{"aa*aa", "aaa", false}, // overlapping anchors must not double-count
+		{"aa*aa", "aaaa", true},
+		{"*req*", "js:req.query", true}, // contains
+		{"*req*", "js:res.send", false},
+		{"a*b*c", "axbyc", true}, // multi-segment
+		{"a*b*c", "axc", false},  // missing middle segment
+		{"go:*database/sql*.Query#0", "go:(*database/sql.DB).Query#0", true},
+		{"*", "anything", true}, // all-star
+		{"**", "", true},
+		{"", "", true}, // empty pattern matches only empty
+		{"", "x", false},
+	}
+	for _, c := range cases {
+		if got := MatchGlob(c.pattern, c.s); got != c.want {
+			t.Errorf("MatchGlob(%q, %q) = %v, want %v", c.pattern, c.s, got, c.want)
+		}
+	}
+}
+
+// BenchmarkMatchGlob exercises the matcher over a realistic mix of pattern
+// shapes and canonical callee names (the engine's hottest inner loop).
+func BenchmarkMatchGlob(b *testing.B) {
+	pats := []string{"ruby:system", "c*:strcpy", "go:*request*", "py:*.execute", "go:(*database/sql.DB).Query#0", "ruby:Open3.*"}
+	ins := []string{"go:net/http.(*Request).FormValue", "ruby:system", "c:strcpy", "py:cursor.execute"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for _, p := range pats {
+			for _, in := range ins {
+				_ = MatchGlob(p, in)
+			}
+		}
+	}
+}

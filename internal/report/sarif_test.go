@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
+	ir "godzilla/pkg/ir/v1"
 )
 
 func TestWriteSARIF(t *testing.T) {
@@ -239,5 +241,60 @@ func TestWriteSARIF_Empty(t *testing.T) {
 	results, _ := run["results"].([]interface{})
 	if len(results) != 0 {
 		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+// TestSARIFRuleMetadata checks the GitHub-integration metadata on rules[]
+// (CI-4): security-severity, defaultConfiguration.level, shortDescription, and
+// security tags.
+func TestSARIFRuleMetadata(t *testing.T) {
+	findings := []analysis.Finding{{
+		RuleID: "go-sql-injection", Severity: rules.SeverityCritical, CWE: "CWE-89",
+		Message: "SQL injection", SinkPos: &ir.Position{Filename: "a.go", Line: 1, Column: 1},
+	}}
+	var buf strings.Builder
+	if err := WriteSARIF(&buf, findings); err != nil {
+		t.Fatalf("WriteSARIF: %v", err)
+	}
+	var doc struct {
+		Runs []struct {
+			Tool struct {
+				Driver struct {
+					Rules []struct {
+						ShortDescription     *struct{ Text string }  `json:"shortDescription"`
+						DefaultConfiguration *struct{ Level string } `json:"defaultConfiguration"`
+						Properties           struct {
+							SecuritySeverity string   `json:"security-severity"`
+							Tags             []string `json:"tags"`
+						} `json:"properties"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(buf.String()), &doc); err != nil {
+		t.Fatalf("parse SARIF: %v", err)
+	}
+	if len(doc.Runs) != 1 || len(doc.Runs[0].Tool.Driver.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d run(s)", len(doc.Runs))
+	}
+	r := doc.Runs[0].Tool.Driver.Rules[0]
+	if r.Properties.SecuritySeverity != "9.0" {
+		t.Errorf("critical rule security-severity = %q, want 9.0", r.Properties.SecuritySeverity)
+	}
+	if r.DefaultConfiguration == nil || r.DefaultConfiguration.Level != "error" {
+		t.Errorf("critical rule defaultConfiguration.level should be error, got %+v", r.DefaultConfiguration)
+	}
+	if r.ShortDescription == nil || r.ShortDescription.Text != "SQL injection" {
+		t.Errorf("rule shortDescription not set from message, got %+v", r.ShortDescription)
+	}
+	hasSecurity := false
+	for _, tag := range r.Properties.Tags {
+		if tag == "security" {
+			hasSecurity = true
+		}
+	}
+	if !hasSecurity {
+		t.Errorf("rule tags should include \"security\", got %v", r.Properties.Tags)
 	}
 }

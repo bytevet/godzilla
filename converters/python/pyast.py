@@ -181,12 +181,27 @@ def conv_stmt(node):
             "finalbody": conv_body(node.finalbody),
             "pos": p,
         }
+    # Imports carry their names+asnames so the lowering can resolve aliased and
+    # from-imported sink modules (FE-2): `import subprocess as sp` / `from os
+    # import system` otherwise silently break module-anchored sink matching.
+    if isinstance(node, ast.Import):
+        return {
+            "kind": "Import",
+            "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+            "pos": p,
+        }
+    if isinstance(node, ast.ImportFrom):
+        return {
+            "kind": "ImportFrom",
+            "module": node.module,
+            "level": node.level,
+            "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+            "pos": p,
+        }
     if isinstance(
         node,
         (
             ast.Pass,
-            ast.Import,
-            ast.ImportFrom,
             ast.Global,
             ast.Nonlocal,
             ast.Break,
@@ -313,6 +328,22 @@ def conv_expr(node):
         # (a, b = ...): bind each element. Both are handled by the "Sequence"
         # lowering, distinguished by context (lowerExpr vs assign).
         return {"kind": "Sequence", "elts": [conv_expr(e) for e in node.elts], "pos": p}
+
+    if isinstance(node, ast.Set):
+        return {"kind": "Sequence", "elts": [conv_expr(e) for e in node.elts], "pos": p}
+
+    if isinstance(node, ast.Dict):
+        # A dict literal is the payload shape for JSON bodies, kwargs, and DB
+        # param maps. Lower its keys and values as a flat Sequence so a source or
+        # sink INSIDE the literal is emitted and can fire (FE-7) — previously the
+        # whole dict was "Unknown" -> py.unsupported and every inner call was
+        # dropped. (A None key is `**spread` per PEP 448; lower only its value.)
+        elts = []
+        for k, v in zip(node.keys, node.values):
+            if k is not None:
+                elts.append(conv_expr(k))
+            elts.append(conv_expr(v))
+        return {"kind": "Sequence", "elts": elts, "pos": p}
 
     if isinstance(node, ast.Starred):
         return {"kind": "Starred", "value": conv_expr(node.value), "pos": p}

@@ -1,0 +1,57 @@
+package rules
+
+// Default propagators: library calls that return a transformed copy of their
+// input and therefore CARRY taint from an argument to the result, but which no
+// rule treats as a sanitizer. Real code almost never passes a raw source
+// straight into a sink — it trims, lower-cases, re-encodes, or reformats the
+// value first — so without these a single intervening stdlib string call
+// silently drops taint and the injection slips past the gate (the dominant
+// false-negative class). They apply to EVERY rule in addition to that rule's own
+// propagators; the engine consults them only in the propagator position, so a
+// rule's explicit source/sink/sanitizer for the same callee still wins.
+//
+// Deliberately conservative: only pure, taint-preserving string/encoding
+// transforms are listed. Nothing here neutralizes an injection (escaping is not
+// sanitizing for command/path/SQL contexts), and nothing here is used as a
+// sanitizer by a built-in rule (path helpers like filepath.Base are omitted for
+// exactly that reason). Patterns are language-prefixed canonical-name globs, so
+// matching the union against a language-tagged callee is naturally
+// language-correct.
+var defaultPropagatorGlobs = []string{
+	// --- Go: strings / fmt / url ---
+	"go:*strings.TrimSpace", "go:*strings.Trim", "go:*strings.TrimLeft", "go:*strings.TrimRight",
+	"go:*strings.TrimPrefix", "go:*strings.TrimSuffix", "go:*strings.ToLower", "go:*strings.ToUpper",
+	"go:*strings.ToTitle", "go:*strings.Title", "go:*strings.Replace", "go:*strings.ReplaceAll",
+	"go:*strings.Repeat", "go:*strings.Map", "go:*strings.Clone",
+	"go:*strings.Builder*.String", "go:*strings.Builder*.Write*",
+	"go:*fmt.Sprintf", "go:*fmt.Sprint", "go:*fmt.Sprintln",
+	"go:*net/url.QueryEscape", "go:*net/url.QueryUnescape", "go:*net/url.PathEscape", "go:*net/url.PathUnescape",
+
+	// --- Python: str methods / builtins ---
+	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",
+	"py:*.replace", "py:*.format", "py:*.encode", "py:*.decode", "py:*.casefold",
+	"py:*str", "py:*repr",
+
+	// --- JavaScript: String methods / URI encoders ---
+	"js:*.trim", "js:*.trimStart", "js:*.trimEnd", "js:*.toLowerCase", "js:*.toUpperCase",
+	"js:*.replace", "js:*.replaceAll", "js:*.substring", "js:*.substr", "js:*.slice",
+	"js:*.concat", "js:*.padStart", "js:*.padEnd", "js:*.toString", "js:*.normalize",
+	"js:*encodeURIComponent", "js:*encodeURI", "js:*decodeURIComponent", "js:*decodeURI",
+
+	// --- Java: String / StringBuilder ---
+	"java:*String.trim", "java:*String.strip", "java:*String.toLowerCase", "java:*String.toUpperCase",
+	"java:*String.replace", "java:*String.replaceAll", "java:*String.substring", "java:*String.concat",
+	"java:*String.format", "java:*String.valueOf", "java:*StringBuilder.append", "java:*StringBuilder.toString",
+
+	// --- Rust: str/String transforms ---
+	"rust:*to_string", "rust:*to_owned", "rust:*trim", "rust:*trim_start", "rust:*trim_end",
+	"rust:*to_lowercase", "rust:*to_uppercase", "rust:*replace", "rust:*replacen",
+	"rust:*to_str", "rust:*as_str", "rust:*into_string",
+}
+
+// IsDefaultPropagator reports whether callee is one of the built-in,
+// taint-preserving library transforms that carry taint from argument to result
+// regardless of the active rule. See defaultPropagatorGlobs.
+func IsDefaultPropagator(callee string) bool {
+	return MatchAny(defaultPropagatorGlobs, callee)
+}

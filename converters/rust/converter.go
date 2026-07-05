@@ -19,6 +19,7 @@
 package rust_converter
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,6 +27,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"godzilla/internal/buildpolicy"
+	"godzilla/internal/proc"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -40,7 +44,15 @@ func NewConverter() *Converter { return &Converter{} }
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		if fileExists(filepath.Join(path, "Cargo.toml")) {
-			return convertCargo(path)
+			// `cargo` executes arbitrary code from the scanned repo (build.rs,
+			// proc-macros, and every dependency crate's build script). Off by
+			// default; without opt-in, fall through to per-file rustc, which
+			// compiles the project's own sources with no dependency resolution
+			// and no build-script execution.
+			if buildpolicy.Allowed() {
+				return convertCargo(path)
+			}
+			fmt.Fprintf(os.Stderr, "warning: rust: cargo build not run under %s (set %s=1 or pass -allow-build to enable); lowering source files directly without dependency resolution\n", path, buildpolicy.EnvAllowBuild)
 		}
 	}
 
@@ -48,6 +60,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	// FE-10: verify (once) that this rustc's MIR still lowers to the shapes taint
+	// analysis needs, warning loudly on format drift rather than silently
+	// producing zero findings.
+	warnIfMIRDrifted()
 	prog := &ir.Program{Mode: "mir"}
 	for _, f := range files {
 		mir, err := emitMIR(f)
@@ -73,10 +89,19 @@ func collect(path string) ([]string, error) {
 	}
 	var out []string
 	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if walkignore.SkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(p), ".rs") {
+			if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
+				return nil
+			}
 			out = append(out, p)
 		}
 		return nil
@@ -102,7 +127,9 @@ func emitMIR(src string) (string, error) {
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
-	cmd := exec.Command(rustc,
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, rustc,
 		"--emit=mir", "-Zmir-include-spans=on",
 		"--crate-type", "lib", "--cap-lints", "allow",
 		"-o", tmp.Name(), src)
@@ -145,20 +172,142 @@ func convertCargo(dir string) (*ir.Program, error) {
 	if v := os.Getenv("GODZILLA_CARGO"); v != "" {
 		cargo = v
 	}
+
+	// Enumerate the project's own lib/bin targets (across workspace members) via
+	// `cargo metadata`, then emit + lower each. This fixes FE-3: the old code only
+	// built `--lib`, so binary crates (src/main.rs) — most deployable Rust — and
+	// workspaces produced zero analysis. Fall back to a plain `--lib`/default
+	// build if metadata is unavailable, so nothing regresses.
+	targets := cargoTargets(cargo, dir)
+	if len(targets) == 0 {
+		targets = []cargoTarget{{kind: "lib"}, {kind: "bin"}} // best-effort fallback
+	}
+
+	prog := &ir.Program{Mode: "mir"}
+	var firstErr error
+	for _, tgt := range targets {
+		data, srcPath, err := emitCargoTargetMIR(cargo, dir, tgt)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		prog.Modules = append(prog.Modules, lowerMIR(data, srcPath))
+	}
+	if len(prog.Modules) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("cargo: no lib/bin target produced MIR under %s", dir)
+	}
+	return prog, nil
+}
+
+// cargoTarget names one lib/bin build target: its kind, the target name (for a
+// bin), the owning package (for -p disambiguation in a workspace), and the
+// source file for position mapping.
+type cargoTarget struct {
+	kind    string // "lib" or "bin"
+	name    string // target name (bins); empty for lib
+	pkg     string // package name (workspace member); empty if single-package
+	srcPath string // absolute path to the target's root source file
+}
+
+// emitCargoTargetMIR runs `cargo rustc` for one target, emitting its MIR.
+func emitCargoTargetMIR(cargo, dir string, tgt cargoTarget) (data, srcPath string, err error) {
 	tmp, err := os.CreateTemp("", "godzilla-cargo-*.mir")
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmp.Name()) }()
 
-	cmd := exec.Command(cargo, "rustc", "--lib", "--",
-		"--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
-	cmd.Dir = dir
-	data, err := runMIR(cmd, tmp.Name(), fmt.Sprintf("cargo rustc in %s", dir))
-	if err != nil {
-		return nil, err
+	args := []string{"rustc"}
+	if tgt.pkg != "" {
+		args = append(args, "-p", tgt.pkg)
 	}
-	mod := lowerMIR(data, filepath.Join(dir, "src", "lib.rs"))
-	return &ir.Program{Mode: "mir", Modules: []*ir.Module{mod}}, nil
+	if tgt.kind == "bin" && tgt.name != "" {
+		args = append(args, "--bin", tgt.name)
+	} else {
+		args = append(args, "--lib")
+	}
+	args = append(args, "--", "--emit=mir="+tmp.Name(), "-Zmir-include-spans=on", "--cap-lints", "allow")
+
+	ctx, cancel := proc.BuildContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cargo, args...)
+	cmd.Dir = dir
+	data, err = runMIR(cmd, tmp.Name(), fmt.Sprintf("cargo rustc %v in %s", args, dir))
+	if err != nil {
+		return "", "", err
+	}
+	sp := tgt.srcPath
+	if sp == "" { // fallback target: guess the conventional source path
+		if tgt.kind == "bin" {
+			sp = filepath.Join(dir, "src", "main.rs")
+		} else {
+			sp = filepath.Join(dir, "src", "lib.rs")
+		}
+	}
+	return data, sp, nil
+}
+
+// cargoTargets returns the project's own lib/bin targets via `cargo metadata
+// --no-deps` (workspace members included). Returns nil on any error so the
+// caller falls back to a best-effort build.
+func cargoTargets(cargo, dir string) []cargoTarget {
+	ctx, cancel := proc.BuildContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cargo, "metadata", "--no-deps", "--format-version", "1")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return parseCargoTargets(out)
+}
+
+// parseCargoTargets extracts the lib/bin build targets from `cargo metadata`
+// JSON. It is the pure, testable core of cargoTargets.
+func parseCargoTargets(data []byte) []cargoTarget {
+	var meta struct {
+		Packages []struct {
+			Name    string `json:"name"`
+			Targets []struct {
+				Name    string   `json:"name"`
+				Kind    []string `json:"kind"`
+				SrcPath string   `json:"src_path"`
+			} `json:"targets"`
+		} `json:"packages"`
+		WorkspaceMembers []string `json:"workspace_members"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil
+	}
+	var targets []cargoTarget
+	multiPkg := len(meta.Packages) > 1
+	for _, p := range meta.Packages {
+		for _, t := range p.Targets {
+			kind := ""
+			for _, k := range t.Kind {
+				if k == "lib" || k == "bin" {
+					kind = k
+					break
+				}
+			}
+			if kind == "" {
+				continue // skip test/example/bench/build-script targets
+			}
+			tgt := cargoTarget{kind: kind, srcPath: t.SrcPath}
+			if kind == "bin" {
+				tgt.name = t.Name
+			}
+			if multiPkg {
+				tgt.pkg = p.Name
+			}
+			targets = append(targets, tgt)
+		}
+	}
+	return targets
 }

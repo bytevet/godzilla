@@ -1,0 +1,48 @@
+# Reflected XSS (Java): untrusted request input written into an HTTP response
+# body without HTML-escaping, so an attacker-controlled value is reflected into
+# the page and executed by the browser.
+rules:
+  - id: java-xss
+    languages: [java]
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input is written to the HTTP response without HTML-escaping,
+      which may allow reflected cross-site scripting (XSS). Escape the value
+      (e.g. Spring HtmlUtils.htmlEscape, OWASP Encoder.forHtml, or Apache
+      StringEscapeUtils.escapeHtml4) or render through a template engine that
+      auto-escapes by context.
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getParameterValues"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getQueryString"
+      - "java:*ServletRequest.getParameter"
+      - "java:*Cookie.getValue"
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    # The tainted string is the value written; it is logical arg 0 of the
+    # response writer/stream call.
+    sinks:
+      - "java:*PrintWriter.print#0"
+      - "java:*PrintWriter.println#0"
+      - "java:*PrintWriter.write#0"
+      - "java:*PrintWriter.append#0"
+      - "java:*Writer.write#0"
+      - "java:*ServletOutputStream.print#0"
+      - "java:*ServletOutputStream.println#0"
+    sanitizers:
+      - "java:*HtmlUtils.htmlEscape"
+      - "java:*StringEscapeUtils.escapeHtml*"
+      - "java:*Encode.forHtml*"
+      - "java:*Encode.forHtmlAttribute*"
+      - "java:*ESAPI*encodeForHTML*"
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"
+      - "java:*String.format"

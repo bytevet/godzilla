@@ -15,6 +15,10 @@ rules:
       directly into the response body.
     sources:
       - "py:*request.args.get"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
       # Django request accessors.
       - "py:*request.GET.get"
       - "py:*request.GET.__getitem__"
@@ -43,6 +47,14 @@ rules:
       - "py:*render_template_string"
       - "py:*Response"
       - "py:*make_response"
+    # Explicit HTML-escapers only. The old "py:*escape" glob also matched
+    # html.unescape — the OPPOSITE of a sanitizer — so it is replaced with the
+    # canonical named escapers (COV-9).
     sanitizers:
-      - "py:*escape"
+      - "py:*markupsafe.escape"
+      - "py:*markupsafe.Markup"
+      - "py:html.escape"
+      - "py:*html.escape"
+      - "py:*flask.escape"
+      - "py:*cgi.escape"
     propagators: []

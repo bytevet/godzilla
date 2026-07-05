@@ -1,0 +1,4 @@
+# Expected findings for this sample (see test/README.md).
+findings:
+    - rule: js-command-injection
+      min: 1

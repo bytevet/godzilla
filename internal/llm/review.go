@@ -15,15 +15,22 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"godzilla/internal/analysis"
 	ir "godzilla/pkg/ir/v1"
 )
 
-// Verdict is a reviewer's judgment about a single finding.
+// Verdict is a reviewer's judgment about a single finding. Beyond the binary
+// false-positive decision, it can carry the model's self-confidence and a
+// one-sentence exploitability assessment (LLM-7) — surfaced on a KEPT finding so
+// a developer sees the reviewer's reasoning, not just a pass/drop.
 type Verdict struct {
-	FalsePositive bool
-	Reason        string
+	FalsePositive  bool
+	Reason         string
+	Confidence     float64 // model self-confidence 0..1 (0 if not provided)
+	Exploitability string  // one-sentence exploitability note (optional)
 }
 
 // Reviewer adjudicates a finding, given some surrounding source context, and
@@ -32,32 +39,148 @@ type Reviewer interface {
 	Review(ctx context.Context, f analysis.Finding, codeContext string) (Verdict, error)
 }
 
-// Filter reviews every finding whose Confidence is at or below reviewUpTo and
-// drops the ones the reviewer judges to be false positives. Findings above the
-// threshold (e.g. High confidence when reviewUpTo is Medium) are kept without
-// review. On a reviewer error the finding is KEPT — the reviewer must never
-// silently drop a real finding because of an LLM or network failure (fail open).
+// ReviewStats summarizes one review pass for auditability. It lets the caller
+// report exactly what the reviewer did — how many findings it adjudicated, how
+// many it suppressed, how many it could not review — so a nondeterministic
+// model's effect on the gate is never invisible.
+type ReviewStats struct {
+	Reviewed   int   // findings actually sent to the reviewer
+	Suppressed int   // findings the reviewer judged false positives (retained, flagged)
+	Errors     int   // reviewer errors (finding kept unreviewed, fail-open)
+	LowContext int   // findings kept unreviewed because no code context was available
+	Skipped    int   // findings past the per-scan review cap (kept unreviewed, fail-open)
+	FirstErr   error // first reviewer error, for a single actionable message
+}
+
+// ReviewConfig bounds a review pass so a large scan cannot stall or cost
+// unboundedly (LLM-5): reviews run through a bounded worker pool, each under a
+// per-call timeout, capped at a maximum number per scan (excess findings are
+// kept unreviewed — fail open).
+type ReviewConfig struct {
+	Concurrency int           // max concurrent reviews (default 8)
+	Timeout     time.Duration // per-review timeout (0 = none; default 30s)
+	MaxReviews  int           // cap on reviews per pass (0 = unlimited; default 200)
+}
+
+// DefaultReviewConfig returns the tuned defaults: 8-way concurrency, a 30s
+// per-review timeout, and a 200-finding cap so a pathological scan degrades to
+// "some findings kept unreviewed" rather than an unbounded bill or a stalled
+// pipeline.
+func DefaultReviewConfig() ReviewConfig {
+	return ReviewConfig{Concurrency: 8, Timeout: 30 * time.Second, MaxReviews: 200}
+}
+
+// Filter reviews every finding whose Confidence is at or below reviewUpTo. A
+// finding the reviewer judges a false positive is RETAINED but marked
+// Suppressed (with the reviewer's reason), not deleted — auditability over
+// silent deletion. Findings above the threshold are passed through unreviewed.
 //
-// It returns the surviving findings and the number of findings dropped.
-func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence) ([]analysis.Finding, int) {
+// Two safety properties hold. Fail-open: on a reviewer error the finding is
+// kept unreviewed — an LLM/network failure must never drop a real finding.
+// Never-blind: a finding with no readable code context is kept unreviewed
+// rather than judged on nothing, so an empty snippet can't cause a suppression.
+//
+// It returns all findings (surviving ones plus the suppressed-and-flagged ones)
+// and a ReviewStats describing the pass.
+func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence) ([]analysis.Finding, ReviewStats) {
+	return FilterWithConfig(ctx, r, findings, reviewUpTo, DefaultReviewConfig())
+}
+
+// FilterWithConfig is Filter with an explicit ReviewConfig. Reviews run through
+// a bounded worker pool (order-preserving output), each under a per-call
+// timeout, capped at cfg.MaxReviews per pass; findings past the cap are kept
+// unreviewed (fail open, counted in Skipped). The two safety properties of
+// Filter still hold: fail-open on error/timeout, and never-blind on empty
+// context.
+func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence, cfg ReviewConfig) ([]analysis.Finding, ReviewStats) {
+	var stats ReviewStats
 	if r == nil {
-		return findings, 0
+		return findings, stats
 	}
-	kept := make([]analysis.Finding, 0, len(findings))
-	dropped := 0
-	for _, f := range findings {
-		if !shouldReview(f.Confidence, reviewUpTo) {
-			kept = append(kept, f)
+	out := make([]analysis.Finding, len(findings))
+	copy(out, findings)
+
+	// Decide, in order, which findings to review and with what context.
+	type job struct {
+		idx int
+		cc  string
+	}
+	var jobs []job
+	for i := range out {
+		if !shouldReview(out[i].Confidence, reviewUpTo) {
 			continue
 		}
-		v, err := r.Review(ctx, f, codeContextFor(f))
-		if err != nil || !v.FalsePositive {
-			kept = append(kept, f)
+		cc := codeContextFor(out[i])
+		if strings.TrimSpace(cc) == "" {
+			stats.LowContext++ // never adjudicate (or drop) blind
 			continue
 		}
-		dropped++
+		jobs = append(jobs, job{idx: i, cc: cc})
 	}
-	return kept, dropped
+
+	// Cap the number of reviews per pass; the rest are kept unreviewed.
+	if cfg.MaxReviews > 0 && len(jobs) > cfg.MaxReviews {
+		stats.Skipped = len(jobs) - cfg.MaxReviews
+		jobs = jobs[:cfg.MaxReviews]
+	}
+
+	// Review concurrently, bounded, each under its own timeout. Only reads of
+	// out[idx] happen here; the suppression writes are applied afterward in
+	// original order, so there is no data race on out.
+	conc := cfg.Concurrency
+	if conc < 1 {
+		conc = 1
+	}
+	verdicts := make([]Verdict, len(jobs))
+	errs := make([]error, len(jobs))
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for k := range jobs {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rctx := ctx
+			if cfg.Timeout > 0 {
+				var cancel context.CancelFunc
+				rctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+				defer cancel()
+			}
+			verdicts[k], errs[k] = r.Review(rctx, out[jobs[k].idx], jobs[k].cc)
+		}(k)
+	}
+	wg.Wait()
+
+	// Apply results in original order for deterministic stats and output.
+	for k := range jobs {
+		stats.Reviewed++
+		if errs[k] != nil {
+			stats.Errors++
+			if stats.FirstErr == nil {
+				stats.FirstErr = errs[k]
+			}
+			continue // fail open
+		}
+		idx := jobs[k].idx
+		if verdicts[k].FalsePositive {
+			out[idx].Suppressed = true
+			out[idx].SuppressedBy = "llm-review"
+			out[idx].SuppressionReason = verdicts[k].Reason
+			stats.Suppressed++
+			continue
+		}
+		// Kept after review: annotate as LLM-confirmed with the reviewer's
+		// exploitability note (falling back to its reason), so a developer sees
+		// why it survived triage (LLM-7).
+		out[idx].ReviewConfirmed = true
+		if note := verdicts[k].Exploitability; note != "" {
+			out[idx].ReviewNote = note
+		} else {
+			out[idx].ReviewNote = verdicts[k].Reason
+		}
+	}
+	return out, stats
 }
 
 // shouldReview reports whether a finding of confidence c should be sent to the
@@ -86,24 +209,88 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	var b strings.Builder
 	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
 	b.WriteString("Decide whether it is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive.\n\n")
-	fmt.Fprintf(&b, "Rule: %s\n", f.RuleID)
-	fmt.Fprintf(&b, "Severity: %s\n", f.Severity)
-	fmt.Fprintf(&b, "CWE: %s\n", f.CWE)
-	fmt.Fprintf(&b, "Message: %s\n", f.Message)
-	fmt.Fprintf(&b, "Language: %s\n", f.Language)
-	fmt.Fprintf(&b, "Function: %s\n", f.Function)
-	fmt.Fprintf(&b, "Sink callee: %s\n", f.SinkCallee)
-	fmt.Fprintf(&b, "Source location: %s\n", posString(f.SourcePos))
-	fmt.Fprintf(&b, "Sink location: %s\n", posString(f.SinkPos))
+	writeFindingFacts(&b, f)
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
 		b.WriteString("\n")
 	}
 	b.WriteString("\nConsider whether the tainted data is actually attacker-controlled, whether an ")
-	b.WriteString("effective sanitizer or validation sits on the path, and whether the sink is genuinely dangerous.\n")
-	b.WriteString("Respond with ONLY a JSON object of the form ")
-	b.WriteString(`{"verdict": "true_positive" | "false_positive", "reason": "<one sentence>"}.`)
+	b.WriteString("effective sanitizer (one of the rule's sanitizers above, or an equivalent) sits on the ")
+	b.WriteString("path, and whether the sink is genuinely dangerous. ")
+	b.WriteString(calibration)
+	b.WriteString("\nRespond with ONLY a JSON object of the form ")
+	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
+	return b.String()
+}
+
+// calibration steers the model toward the recall-preserving default: when the
+// evidence is not decisive, keep the finding.
+const calibration = "If the evidence does not clearly show the finding is a false positive, answer true_positive."
+
+// writeFindingFacts writes the finding's identifying fields and reconstructed
+// taint path — the block shared verbatim by the one-shot and agentic prompts.
+func writeFindingFacts(b *strings.Builder, f analysis.Finding) {
+	fmt.Fprintf(b, "Rule: %s\n", f.RuleID)
+	fmt.Fprintf(b, "Severity: %s\n", f.Severity)
+	fmt.Fprintf(b, "CWE: %s\n", f.CWE)
+	fmt.Fprintf(b, "Message: %s\n", f.Message)
+	fmt.Fprintf(b, "Language: %s\n", f.Language)
+	fmt.Fprintf(b, "Function: %s\n", f.Function)
+	fmt.Fprintf(b, "Sink callee: %s\n", f.SinkCallee)
+	fmt.Fprintf(b, "Source location: %s\n", posString(f.SourcePos))
+	fmt.Fprintf(b, "Sink location: %s\n", posString(f.SinkPos))
+	if len(f.Steps) >= 2 {
+		b.WriteString("Taint path (source -> sink):\n")
+		for _, p := range f.Steps {
+			fmt.Fprintf(b, "  - %s\n", posString(p))
+		}
+	}
+	writeRuleDefinition(b, f)
+}
+
+// writeRuleDefinition adds the matched rule's own source/sanitizer vocabulary to
+// the prompt so the reviewer adjudicates by the rulepack's definition rather than
+// generic knowledge — e.g. it will not "clear" a finding for a sanitizer the
+// rule does not recognize, nor keep one an obvious rule sanitizer would clear
+// (LLM-8).
+func writeRuleDefinition(b *strings.Builder, f analysis.Finding) {
+	if len(f.RuleSources) == 0 && len(f.RuleSanitizers) == 0 {
+		return
+	}
+	b.WriteString("\nRule definition (canonical-name globs):\n")
+	if len(f.RuleSources) > 0 {
+		fmt.Fprintf(b, "  sources: %s\n", strings.Join(f.RuleSources, ", "))
+	}
+	if len(f.RuleSanitizers) > 0 {
+		fmt.Fprintf(b, "  sanitizers: %s\n", strings.Join(f.RuleSanitizers, ", "))
+	} else {
+		b.WriteString("  sanitizers: (none — this rule declares no neutralizing function)\n")
+	}
+}
+
+// buildAgenticPrompt renders the prompt for the tool-using reviewer. It states
+// the finding (like buildPrompt) but instructs the model to gather evidence with
+// the read-only tools before deciding — reading the callee, the sanitizer body,
+// the route registration, or grepping for a validator — then emit the same
+// strict JSON verdict. The safety default (unknown ⇒ true_positive) is stated
+// so the reviewer never suppresses on thin evidence.
+func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
+	var b strings.Builder
+	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
+	b.WriteString("You have read-only tools to investigate the code: read_file_range, find_function, and grep.\n")
+	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
+	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
+	writeFindingFacts(&b, f)
+	if strings.TrimSpace(codeContext) != "" {
+		b.WriteString("\nInitial code context:\n")
+		b.WriteString(codeContext)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nDecide whether this is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive. ")
+	b.WriteString(calibration + " (do not suppress on thin evidence).\n")
+	b.WriteString("When done investigating, respond with ONLY a JSON object of the form ")
+	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
 	return b.String()
 }
 
@@ -117,15 +304,21 @@ func parseVerdict(text string) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("no JSON object in reviewer response")
 	}
 	var raw struct {
-		Verdict string `json:"verdict"`
-		Reason  string `json:"reason"`
+		Verdict        string  `json:"verdict"`
+		Reason         string  `json:"reason"`
+		Confidence     float64 `json:"confidence"`
+		Exploitability string  `json:"exploitability"`
 	}
 	if err := json.Unmarshal([]byte(text[start:end+1]), &raw); err != nil {
 		return Verdict{}, fmt.Errorf("parsing reviewer response: %w", err)
 	}
-	v := Verdict{Reason: raw.Reason}
+	v := Verdict{Reason: raw.Reason, Confidence: raw.Confidence, Exploitability: raw.Exploitability}
+	// Leniency is allowed only in the KEEP direction. Dropping a finding is the
+	// one verdict that must be unambiguous, so require the exact canonical token
+	// and reject loose aliases like bare "false"/"fp" — anything unrecognized
+	// keeps the finding (LLM-8).
 	switch strings.ToLower(strings.TrimSpace(raw.Verdict)) {
-	case "false_positive", "false-positive", "false", "fp":
+	case "false_positive", "false-positive":
 		v.FalsePositive = true
 	default:
 		v.FalsePositive = false // conservative: unrecognized => keep
@@ -133,11 +326,40 @@ func parseVerdict(text string) (Verdict, error) {
 	return v, nil
 }
 
-// codeContextFor reads a few source lines around the sink (and source, if in a
-// different file) to give the reviewer something concrete to judge. Best-effort:
-// any file-read error yields an empty context rather than failing the review.
+// codeContextFor gathers the source lines the reviewer needs to judge a finding.
+// When the finding carries a reconstructed taint path (Steps), it snippets code
+// at EVERY hop along the path — so the reviewer can see any sanitizer/validation
+// that sits between source and sink, not just the two endpoints (the "context
+// poverty" that made interprocedural adjudication guesswork). Otherwise it falls
+// back to snippets at the sink and source. Best-effort: any file-read error is
+// skipped rather than failing the review; a fully empty context makes Filter
+// keep the finding unreviewed.
 func codeContextFor(f analysis.Finding) string {
 	var b strings.Builder
+	if len(f.Steps) >= 2 {
+		seen := map[string]bool{}
+		for i, p := range f.Steps {
+			key := fmt.Sprintf("%s:%d", p.GetFilename(), p.GetLine())
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if snip := snippet(p, 2); snip != "" {
+				label := "step"
+				switch i {
+				case 0:
+					label = "source"
+				case len(f.Steps) - 1:
+					label = "sink"
+				}
+				fmt.Fprintf(&b, "-- %s (%s) --\n", label, posString(p))
+				b.WriteString(snip)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+	}
 	if snip := snippet(f.SinkPos, 3); snip != "" {
 		b.WriteString("-- sink --\n")
 		b.WriteString(snip)

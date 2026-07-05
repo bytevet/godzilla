@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dop251/goja/file"
+	"github.com/dop251/goja/parser"
+
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -203,6 +206,20 @@ func TestConvertXSSSample(t *testing.T) {
 
 func TestConvertCommandInjectionSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/command_injection/app.js")
+
+	engine := analysis.NewEngine(commandInjectionRuleSet())
+	findings := engine.Analyze(prog)
+	requireFinding(t, findings, "js-command-injection")
+}
+
+// TestConvertBranchMergeDefault proves the statement-level "default if empty"
+// pattern (`if (!host) host = "localhost"`) no longer drops taint (FE-5).
+// Before branch-merge PHI flattening the reassignment inside the `if` killed
+// the tainted binding on the merge path (a false negative); lowerIfMerge now
+// PHI-merges both incoming values so the tainted branch stays live into the
+// execSync sink.
+func TestConvertBranchMergeDefault(t *testing.T) {
+	prog := mustConvert(t, "../../test/js/branch_merge_default/app.js")
 
 	engine := analysis.NewEngine(commandInjectionRuleSet())
 	findings := engine.Analyze(prog)
@@ -437,4 +454,38 @@ func functionNames(mod *ir.Module) []string {
 		names = append(names, fn.CanonicalName)
 	}
 	return names
+}
+
+// TestCollectRequireAliases covers FE-2's require-alias table: plain, aliased,
+// destructured, and require().member bindings.
+func TestCollectRequireAliases(t *testing.T) {
+	src := `var cp = require("child_process");
+var { exec, spawn } = require("child_process");
+var ex = require("child_process").execSync;
+var express = require("express");
+var local = require("./util");
+`
+	fset := &file.FileSet{}
+	prog, err := parser.ParseFile(fset, "a.js", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	a := collectRequireAliases(prog.Body)
+	want := map[string]string{
+		"cp":      "child_process",
+		"exec":    "child_process.exec",
+		"spawn":   "child_process.spawn",
+		"ex":      "child_process.execSync",
+		"express": "express",
+	}
+	for k, v := range want {
+		if a[k] != v {
+			t.Errorf("alias %q = %q, want %q", k, a[k], v)
+		}
+	}
+	// A relative require (./util) is a local module and must NOT be aliased, so
+	// cross-file resolution (a caller's util.fn -> js:util.fn) is preserved.
+	if _, ok := a["local"]; ok {
+		t.Errorf("relative require ./util should not create an alias, got %q", a["local"])
+	}
 }

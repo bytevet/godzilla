@@ -1,0 +1,9 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings:
+    - rule: go-weak-hash
+      min: 1
+      sink: md5
+    - rule: go-weak-cipher
+      min: 1
+      sink: des

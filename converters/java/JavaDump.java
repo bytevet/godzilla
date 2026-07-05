@@ -63,7 +63,14 @@ public class JavaDump {
     }
 
     static void dumpClass(ClassModel cm, StringBuilder sb) {
-        sb.append("{\"name\":").append(jstr(cm.thisClass().asInternalName())).append(",\"methods\":[");
+        // The SourceFile attribute names the original .java (e.g. "Login.java"),
+        // which the Go side resolves to a real path under the scan root so findings
+        // anchor to the source file, not the scan directory (FE-8).
+        String source = cm.findAttribute(java.lang.classfile.Attributes.sourceFile())
+            .map(a -> a.sourceFile().stringValue()).orElse("");
+        sb.append("{\"name\":").append(jstr(cm.thisClass().asInternalName()))
+          .append(",\"source\":").append(jstr(source))
+          .append(",\"methods\":[");
         boolean first = true;
         for (MethodModel mm : cm.methods()) {
             if (!first) sb.append(',');
@@ -83,10 +90,21 @@ public class JavaDump {
         if (codeOpt.isPresent()) {
             boolean first = true;
             int line = 0;
+            // Per-method label ids let the Go side rebuild the control-flow graph
+            // and merge the operand stack at branch joins (FE-4). A LabelTarget
+            // pseudo-element marks a branch destination; branch/switch targets are
+            // Labels resolved to the same ids.
+            IdentityHashMap<Label, Integer> labels = new IdentityHashMap<>();
             for (CodeElement e : codeOpt.get()) {
                 if (e instanceof LineNumber ln) { line = ln.line(); continue; }
-                if (!(e instanceof Instruction instr)) continue;
-                String rec = dumpInstr(instr, line);
+                String rec;
+                if (e instanceof LabelTarget lt) {
+                    rec = "{\"op\":\"LABEL\",\"id\":" + labelId(labels, lt.label()) + ",\"line\":" + line + "}";
+                } else if (e instanceof Instruction instr) {
+                    rec = dumpInstr(instr, line, labels);
+                } else {
+                    continue;
+                }
                 if (rec == null) continue;
                 if (!first) sb.append(',');
                 first = false;
@@ -129,8 +147,20 @@ public class JavaDump {
         return d;
     }
 
-    static String dumpInstr(Instruction instr, int line) {
+    // labelId assigns each branch-target Label a stable per-method integer id.
+    static int labelId(IdentityHashMap<Label, Integer> m, Label l) {
+        return m.computeIfAbsent(l, k -> m.size());
+    }
+
+    static String dumpInstr(Instruction instr, int line, IdentityHashMap<Label, Integer> labels) {
         String pos = ",\"line\":" + line;
+        if (instr instanceof BranchInstruction i)
+            return "{\"op\":\"BRANCH\",\"kind\":" + jstr(i.opcode().name())
+                + ",\"target\":" + labelId(labels, i.target()) + pos + "}";
+        if (instr instanceof TableSwitchInstruction i)
+            return switchJson(i.defaultTarget(), i.cases(), labels, pos);
+        if (instr instanceof LookupSwitchInstruction i)
+            return switchJson(i.defaultTarget(), i.cases(), labels, pos);
         if (instr instanceof InvokeInstruction i) {
             return "{\"op\":\"INVOKE\",\"kind\":" + jstr(i.opcode().name())
                 + ",\"owner\":" + jstr(i.owner().asInternalName())
@@ -177,8 +207,6 @@ public class JavaDump {
             return "{\"op\":\"RETURN\",\"kind\":" + jstr(i.opcode().name()) + pos + "}";
         if (instr instanceof ThrowInstruction i)
             return "{\"op\":\"THROW\"" + pos + "}";
-        if (instr instanceof BranchInstruction i)
-            return "{\"op\":\"BRANCH\",\"kind\":" + jstr(i.opcode().name()) + pos + "}";
         if (instr instanceof IncrementInstruction i)
             return "{\"op\":\"NOP\"" + pos + "}"; // iinc: no stack effect
         if (instr instanceof NopInstruction i)
@@ -186,6 +214,18 @@ public class JavaDump {
         // Everything else (switches, monitor, etc.): emit opcode name; the Go
         // simulator applies a stack-delta table so unmodeled ops stay consistent.
         return "{\"op\":\"OTHER\",\"kind\":" + jstr(instr.opcode().name()) + pos + "}";
+    }
+
+    // switchJson emits a SWITCH record with the label ids of its default arm and
+    // every case arm, so lower.go can wire each switch edge into the CFG.
+    static String switchJson(Label dflt, List<SwitchCase> cases, IdentityHashMap<Label, Integer> labels, String pos) {
+        StringBuilder sb = new StringBuilder("{\"op\":\"SWITCH\",\"default\":");
+        sb.append(labelId(labels, dflt)).append(",\"targets\":[");
+        for (int i = 0; i < cases.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(labelId(labels, cases.get(i).target()));
+        }
+        return sb.append(']').append(pos).append('}').toString();
     }
 
     static String jstr(String s) {

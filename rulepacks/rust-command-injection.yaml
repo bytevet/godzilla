@@ -17,6 +17,12 @@ rules:
       allow-list the program and arguments instead of passing user-controlled
       data to a shell.
     sources:
+      # axum extractors — request data arrives as typed handler params
+      # (Query/Path/Json/Form), synthesized as sources by the frontend (COV-7).
+      - "rust:axum::extract::Query"
+      - "rust:axum::extract::Path"
+      - "rust:axum::extract::Json"
+      - "rust:axum::extract::Form"
       # HTTP request accessors — the real attack surface (query/path params,
       # headers, request body). Matches a request object's accessor methods
       # across the common web frameworks plus a generic Request::{query,header,

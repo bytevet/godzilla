@@ -24,8 +24,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"godzilla/internal/buildpolicy"
+	"godzilla/internal/proc"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -45,6 +49,7 @@ type dumpDoc struct {
 
 type dumpClass struct {
 	Name    string       `json:"name"`
+	Source  string       `json:"source"` // SourceFile attribute, e.g. "Login.java" (FE-8)
 	Methods []dumpMethod `json:"methods"`
 }
 
@@ -71,14 +76,35 @@ type dumpInstr struct {
 	Cst   string `json:"cst"`
 	Slot  int    `json:"slot"`
 	Line  int    `json:"line"`
+	// Control-flow fields (FE-4). A LABEL pseudo-instruction carries ID (the
+	// branch-target identifier bound at this position). A BRANCH carries Target
+	// (the label id it jumps to). A SWITCH carries Default + Targets (the label
+	// ids of its default and case arms). These let lower.go rebuild the CFG and
+	// merge the operand stack / locals at control-flow joins with OP_CODE_PHI.
+	ID      int   `json:"id"`
+	Target  int   `json:"target"`
+	Default int   `json:"default"`
+	Targets []int `json:"targets"`
 }
 
 // ConvertFile lowers the Java at path (a file or directory) into a gIR program:
 // one ir.Module per class, one ir.Function per method.
+// minJDK is the lowest JDK the Java frontend supports: JavaDump.java uses the
+// java.lang.classfile API, standardized in JDK 24.
+const minJDK = 24
+
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	javaExe, err := exec.LookPath("java")
 	if err != nil {
-		return nil, fmt.Errorf("java not found on PATH (JDK 24+ required for the Java frontend): %w", err)
+		return nil, fmt.Errorf("java not found on PATH (JDK %d+ required for the Java frontend): %w", minJDK, err)
+	}
+
+	// Probe the JDK version up front: the common CI JDK (Temurin 17/21) is too
+	// old for the classfile API, and the failure would otherwise surface as an
+	// opaque compile error. Only hard-fail on a POSITIVE too-old detection; if the
+	// probe itself can't run, proceed and let the dump report the real error.
+	if major, ok := javaMajor(javaExe); ok && major < minJDK {
+		return nil, fmt.Errorf("the Java frontend requires JDK %d+ (JavaDump.java uses the java.lang.classfile API); found Java %d at %s — install a JDK %d+ or set JAVA_HOME to one", minJDK, major, javaExe, minJDK)
 	}
 
 	scriptPath, cleanup, err := writeHelperScript()
@@ -95,10 +121,18 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	inputs := resolveInputs(abs)
 
 	args := append([]string{scriptPath}, inputs...)
-	cmd := exec.Command(javaExe, args...)
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, javaExe, args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("java dump failed for %s: %w", path, err)
+		// cmd.Output() puts the helper's stderr (the actual javac/classfile
+		// diagnostic) on ExitError.Stderr; surface it instead of a bare exit code.
+		detail := ""
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			detail = "\n" + string(tail(ee.Stderr, 2000))
+		}
+		return nil, fmt.Errorf("java dump failed for %s: %w%s", path, err, detail)
 	}
 
 	var doc dumpDoc
@@ -106,12 +140,98 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		return nil, fmt.Errorf("parsing java dump for %s: %w", path, err)
 	}
 
-	filename := abs
+	// Resolve each class's SourceFile ("Login.java") to a real path under the
+	// scan root so findings anchor to the source file instead of the scan
+	// directory (FE-8). Fall back to the scan path when the source is unknown.
+	sourceIdx := indexJavaSources(abs)
 	prog := &ir.Program{Mode: "bytecode"}
 	for _, cl := range doc.Classes {
-		prog.Modules = append(prog.Modules, convertClass(cl, filename))
+		prog.Modules = append(prog.Modules, convertClass(cl, resolveJavaSource(abs, sourceIdx, cl.Source)))
 	}
 	return prog, nil
+}
+
+// indexJavaSources maps each .java file's base name to its path, under root (or
+// root's directory when root is a file). First match wins on a name collision.
+func indexJavaSources(root string) map[string]string {
+	idx := map[string]string{}
+	base := root
+	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
+		base = filepath.Dir(root)
+	}
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if walkignore.SkipDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".java") {
+			if _, seen := idx[d.Name()]; !seen {
+				idx[d.Name()] = p
+			}
+		}
+		return nil
+	})
+	return idx
+}
+
+// resolveJavaSource picks the source path for a class: its SourceFile base name
+// matched against the index, else the scan path (so a Pos is always populated).
+func resolveJavaSource(scanPath string, idx map[string]string, source string) string {
+	if source == "" {
+		return scanPath
+	}
+	if p, ok := idx[source]; ok {
+		return p
+	}
+	return scanPath
+}
+
+// javaMajor runs `java -version` and returns the launcher's major version. The
+// bool is false if the probe could not run or its output could not be parsed.
+func javaMajor(javaExe string) (int, bool) {
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	// `java -version` prints to stderr; CombinedOutput captures it.
+	out, err := exec.CommandContext(ctx, javaExe, "-version").CombinedOutput()
+	if err != nil {
+		return 0, false
+	}
+	return parseJavaMajor(string(out))
+}
+
+// parseJavaMajor extracts the major version from `java -version` output, e.g.
+// `openjdk version "24.0.1" 2025-...` -> 24, or the legacy `java version
+// "1.8.0_401"` -> 8. Returns false when no version token is found.
+func parseJavaMajor(out string) (int, bool) {
+	i := strings.Index(out, "version \"")
+	if i < 0 {
+		return 0, false
+	}
+	rest := out[i+len("version \""):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		return 0, false
+	}
+	parts := strings.FieldsFunc(rest[:j], func(r rune) bool { return r == '.' || r == '_' || r == '-' })
+	if len(parts) == 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	// The legacy "1.N" scheme (JDK <= 8): the real major is the second field.
+	if major == 1 && len(parts) > 1 {
+		if n, err := strconv.Atoi(parts[1]); err == nil {
+			major = n
+		}
+	}
+	return major, true
 }
 
 // writeHelperScript writes the embedded JavaDump.java to a temp file so `java`
@@ -148,6 +268,13 @@ func resolveInputs(abs string) []string {
 	}
 	sys, ok := detectBuildSystem(abs)
 	if !ok {
+		return []string{abs}
+	}
+	// Running the project's own build tool executes arbitrary code from the
+	// scanned repo (Maven plugins, Gradle build logic). Off by default; without
+	// opt-in, fall back to the in-process JDK-only compile.
+	if !buildpolicy.Allowed() {
+		fmt.Fprintf(os.Stderr, "godzilla: java: %s build not run under %s (set %s=1 or pass -allow-build to enable); using in-process source compile\n", sys.name, abs, buildpolicy.EnvAllowBuild)
 		return []string{abs}
 	}
 	outputs, err := buildProject(abs, sys)
@@ -214,7 +341,9 @@ func buildProject(dir string, sys buildSystem) ([]string, error) {
 		return nil, fmt.Errorf("neither ./%s wrapper nor %s on PATH", sys.wrapper, sys.tool)
 	}
 
-	cmd := exec.Command(name, sys.args...)
+	ctx, cancel := proc.BuildContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, sys.args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("%s %v: %w\n%s", name, sys.args, err, tail(out, 2000))
@@ -231,8 +360,7 @@ func classOutputDirs(root, suffix string) []string {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
-		switch d.Name() {
-		case ".git", ".gradle", "node_modules":
+		if walkignore.SkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if strings.HasSuffix(p, suffix) {

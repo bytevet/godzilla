@@ -41,6 +41,12 @@ type funcState struct {
 	// (e.g. "UserController."), empty for non-methods.
 	moduleName  string
 	methodClass string
+
+	// moduleAliases maps a require-bound name to its canonical module(.member)
+	// path (FE-2): "cp" -> "child_process" for `const cp = require('child_process')`,
+	// "exec" -> "child_process.exec" for a destructured require. resolveRequire
+	// rewrites a callee's root through it so module-anchored sink rules match.
+	moduleAliases map[string]string
 }
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
@@ -52,6 +58,25 @@ func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]strin
 		paramRegs:  map[string]bool{},
 		localFuncs: localFuncs,
 	}
+}
+
+// resolveRequire rewrites the root component of a dotted callee name through the
+// require-alias table, so `cp.exec` becomes `child_process.exec` and a
+// destructured `exec` becomes `child_process.exec` (FE-2). Unaliased roots and
+// "<dynamic>" pass through unchanged.
+func (fs *funcState) resolveRequire(dotted string) string {
+	if len(fs.moduleAliases) == 0 {
+		return dotted
+	}
+	root, rest, hasRest := strings.Cut(dotted, ".")
+	canon, ok := fs.moduleAliases[root]
+	if !ok {
+		return dotted
+	}
+	if hasRest {
+		return canon + "." + rest
+	}
+	return canon
 }
 
 func (fs *funcState) newReg() string {
@@ -147,7 +172,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -157,6 +182,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 
 	fs := newFuncState(filename, fset, nameOf, localFuncs)
 	fs.moduleName = moduleName
+	fs.moduleAliases = moduleAliases
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -280,10 +306,7 @@ func (fs *funcState) lowerBodyStmt(s ast.Statement) {
 	switch v := s.(type) {
 	case *ast.IfStatement:
 		fs.lowerExpr(v.Test)
-		fs.lowerBody(stmtList(v.Consequent))
-		if v.Alternate != nil {
-			fs.lowerBody(stmtList(v.Alternate))
-		}
+		fs.lowerIfMerge(v)
 	case *ast.ForStatement:
 		if v.Initializer != nil {
 			fs.lowerForInit(v.Initializer)
@@ -332,6 +355,58 @@ func (fs *funcState) lowerBodyStmt(s ast.Statement) {
 	default:
 		fs.lowerStmt(s)
 	}
+}
+
+// lowerIfMerge lowers an `if`/`else` statement's branches and PHI-merges the
+// bindings each side rebinds, so a name reassigned in one arm keeps its
+// pre-branch value live on the other path. Without this, the ubiquitous
+// defaulting pattern `if (!x) x = "default"` would overwrite a tainted `x`
+// with a last-write-wins env (a deterministic false negative) — the
+// statement-level analogue of the ConditionalExpression PHI above. There is no
+// CFG here, so both arms are lowered and their divergent bindings unioned.
+func (fs *funcState) lowerIfMerge(v *ast.IfStatement) {
+	before := cloneEnv(fs.env)
+	fs.lowerBody(stmtList(v.Consequent))
+	afterBody := fs.env
+	fs.env = cloneEnv(before)
+	if v.Alternate != nil {
+		fs.lowerBody(stmtList(v.Alternate))
+	}
+	afterElse := fs.env
+	merged := cloneEnv(afterElse)
+	names := map[string]bool{}
+	for k := range afterBody {
+		names[k] = true
+	}
+	for k := range afterElse {
+		names[k] = true
+	}
+	for name := range names {
+		bv, ev := afterBody[name], afterElse[name]
+		if bv == nil {
+			bv = before[name]
+		}
+		if ev == nil {
+			ev = before[name]
+		}
+		if bv == ev || bv == nil || ev == nil {
+			continue
+		}
+		inst := fs.newValueInst(v.Idx0())
+		inst.Op = ir.OpCode_OP_CODE_PHI
+		inst.Operands = []*ir.Value{bv, ev}
+		fs.emit(inst)
+		merged[name] = regValue(inst.Name)
+	}
+	fs.env = merged
+}
+
+func cloneEnv(env map[string]*ir.Value) map[string]*ir.Value {
+	out := make(map[string]*ir.Value, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
 }
 
 // lowerForInit lowers a `for(...)` loop's initializer clause, which may be a
@@ -831,7 +906,7 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // note on the js-ssrf sample's chained axios.get(...).then(...) handler.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
-	callee := "js:" + syntacticCallee(v.Callee)
+	callee := "js:" + fs.resolveRequire(syntacticCallee(v.Callee))
 	// A bare call to a top-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName; otherwise byKey
 	// never resolves it and taint does not flow through the local helper.
@@ -911,6 +986,16 @@ func syntacticCallee(e ast.Expression) string {
 			return syntacticCallee(v.Left) + "." + string(sl.Value)
 		}
 		return syntacticCallee(v.Left) + ".<dynamic>"
+	case *ast.SequenceExpression:
+		// esbuild's ES-module interop lowers a named-import call `fn(x)` to
+		// `(0, import_mod.fn)(x)` — the callee is a comma SequenceExpression whose
+		// LAST element (import_mod.fn) carries the real name. Recover it so
+		// import-based sources/sinks (e.g. `import {execSync} from ...`) still
+		// match; without this the callee collapses to "<dynamic>".
+		if n := len(v.Sequence); n > 0 {
+			return syntacticCallee(v.Sequence[n-1])
+		}
+		return "<dynamic>"
 	default:
 		return "<dynamic>"
 	}

@@ -1,7 +1,9 @@
 package java_converter
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -92,5 +94,84 @@ func TestConvertFile_SpringParamAnnotationSource(t *testing.T) {
 		if !saw {
 			t.Errorf("expected a synthesized parameter-source call %q in the lowered IR", callee)
 		}
+	}
+}
+
+// TestParseJavaMajor covers the `java -version` parser used by the FE-9 version
+// guard, including the legacy "1.8" scheme and unparseable input.
+func TestParseJavaMajor(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want int
+		ok   bool
+	}{
+		{"jdk24", `openjdk version "24.0.1" 2025-04-15`, 24, true},
+		{"jdk21", `openjdk version "21.0.3" 2024-04-16`, 21, true},
+		{"legacy 1.8", `java version "1.8.0_401"`, 8, true},
+		{"early access", `openjdk version "25-ea" 2025-09-16`, 25, true},
+		{"no version", "some unrelated output", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseJavaMajor(c.out)
+			if ok != c.ok || (ok && got != c.want) {
+				t.Errorf("parseJavaMajor(%q) = (%d,%v), want (%d,%v)", c.out, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestResolveJavaSource covers FE-8's SourceFile -> path resolution.
+func TestResolveJavaSource(t *testing.T) {
+	idx := map[string]string{"Login.java": "/proj/src/com/x/Login.java"}
+	if got := resolveJavaSource("/proj", idx, "Login.java"); got != "/proj/src/com/x/Login.java" {
+		t.Errorf("known source should resolve to its path, got %q", got)
+	}
+	// Unknown / empty source falls back to the scan path so a Pos is always set.
+	if got := resolveJavaSource("/proj", idx, "Other.java"); got != "/proj" {
+		t.Errorf("unknown source should fall back to scan path, got %q", got)
+	}
+	if got := resolveJavaSource("/proj", idx, ""); got != "/proj" {
+		t.Errorf("empty source should fall back to scan path, got %q", got)
+	}
+}
+
+// TestJavaSourceFilePositions is the FE-8 end-to-end guard: a two-file Java
+// project's findings/positions must anchor to each class's OWN .java file, not
+// the scan directory.
+func TestJavaSourceFilePositions(t *testing.T) {
+	requireJava(t)
+	dir := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("Alpha.java", "public class Alpha {\n  public String greet() { return \"a\"; }\n}\n")
+	write("Beta.java", "public class Beta {\n  public String hello() { return \"b\"; }\n}\n")
+
+	prog, err := NewConverter().ConvertFile(dir)
+	if err != nil {
+		t.Fatalf("ConvertFile: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, m := range prog.Modules {
+		for _, fn := range m.Functions {
+			for _, b := range fn.Blocks {
+				for _, in := range b.Instrs {
+					if in.Pos != nil && in.Pos.GetFilename() != "" {
+						base := filepath.Base(in.Pos.GetFilename())
+						seen[base] = true
+						if base == filepath.Base(dir) {
+							t.Errorf("position anchored to the scan directory, not a source file: %s", in.Pos.GetFilename())
+						}
+					}
+				}
+			}
+		}
+	}
+	if !seen["Alpha.java"] || !seen["Beta.java"] {
+		t.Errorf("expected positions in both Alpha.java and Beta.java, saw %v", seen)
 	}
 }

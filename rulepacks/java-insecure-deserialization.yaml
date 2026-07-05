@@ -1,0 +1,42 @@
+# Insecure deserialization (Java): untrusted data fed to a deserializer that can
+# instantiate arbitrary types, a classic path to remote code execution
+# (ObjectInputStream gadget chains, XMLDecoder, SnakeYAML, XStream).
+rules:
+  - id: java-insecure-deserialization
+    languages: [java]
+    severity: critical
+    cwe: CWE-502
+    message: >-
+      Untrusted data flows into an unsafe deserializer, which may allow
+      arbitrary object instantiation and remote code execution. Avoid
+      deserializing untrusted input; if unavoidable, use a format without
+      polymorphic type resolution and constrain allowed types (e.g. an
+      ObjectInputFilter, SnakeYAML SafeConstructor, or a JSON allowlist).
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getInputStream"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getReader"
+      - "java:*ServletRequest.getParameter"
+      - "java:*ServletRequest.getInputStream"
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    # The untrusted stream/string is logical arg 0: the ObjectInputStream is
+    # constructed around a tainted InputStream, or the parser is handed a tainted
+    # document directly.
+    sinks:
+      - "java:*java/io/ObjectInputStream.<init>#0"
+      - "java:*java/beans/XMLDecoder.<init>#0"
+      - "java:*Yaml.load#0"
+      - "java:*Yaml.loadAs#0"
+      - "java:*Yaml.loadAll#0"
+      - "java:*XStream.fromXML#0"
+    sanitizers: []
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"

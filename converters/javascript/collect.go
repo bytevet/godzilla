@@ -32,16 +32,14 @@ type pendingFunc struct {
 // `app.get(url, function(req,res){...})`), so collection here also walks
 // expression trees, not just statement lists.
 type collector struct {
-	filename   string
 	moduleName string
 	anonSeq    map[string]int
 	nameOf     map[ast.Node]string // node -> canonical name ("js:<module>.<qualname>")
 	order      []pendingFunc
 }
 
-func newCollector(filename, moduleName string) *collector {
+func newCollector(moduleName string) *collector {
 	return &collector{
-		filename:   filename,
 		moduleName: moduleName,
 		anonSeq:    map[string]int{},
 		nameOf:     map[ast.Node]string{},
@@ -363,7 +361,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		Language: "javascript",
 	}
 
-	c := newCollector(filename, moduleName)
+	c := newCollector(moduleName)
 	c.collectStmts(prog.Body, "")
 
 	// Top-level named functions: a bare call to one (helper(x)) must resolve to
@@ -378,9 +376,12 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		}
 	}
 
+	// Module-level require-alias table for FE-2 (cp.exec -> child_process.exec).
+	moduleAliases := collectRequireAliases(prog.Body)
+
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs))
+		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases))
 	}
 
 	moduleFn := &ir.Function{
@@ -392,6 +393,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	}
 	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
 	fs.moduleName = moduleName
+	fs.moduleAliases = moduleAliases
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 

@@ -1,0 +1,3 @@
+findings:
+    - rule: py-code-injection
+      min: 1

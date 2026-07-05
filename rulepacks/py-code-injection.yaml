@@ -1,0 +1,47 @@
+# Code injection (Python): untrusted input passed to a dynamic-evaluation
+# builtin (eval / exec / compile), which executes it as Python code — a direct
+# path to remote code execution.
+rules:
+  - id: py-code-injection
+    languages: [python]
+    severity: critical
+    cwe: CWE-95
+    message: >-
+      Untrusted input flows into eval()/exec()/compile(), which executes it as
+      Python code (remote code execution). Never evaluate user input as code; if
+      you must parse a literal, use ast.literal_eval, and dispatch on an
+      allowlist instead of dynamic evaluation.
+    sources:
+      - "py:*request.args.get"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
+      # Django request accessors.
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      # FastAPI / Starlette request accessors.
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
+      - "py:*request.form.get"
+      - "py:*request.values.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.__getitem__"
+    # Exact builtin names (no wildcard) so the SAFE ast.literal_eval — a distinct
+    # function that only parses literals — is not matched.
+    sinks:
+      - "py:eval"
+      - "py:exec"
+      - "py:compile"
+    sanitizers: []
+    propagators:
+      - "py:*.format"
+      - "py:*.join"

@@ -38,6 +38,38 @@ type Finding struct {
 	SourcePos  *ir.Position
 	SinkPos    *ir.Position
 	SinkCallee string
+
+	// RuleSanitizers and RuleSources are the matched rule's sanitizer/source
+	// globs, carried onto the finding so the LLM reviewer can adjudicate using the
+	// rulepack's OWN vocabulary (which documented sanitizer neutralizes this sink,
+	// what the sources are) instead of second-guessing from generic knowledge
+	// (LLM-8). Not serialized in reports.
+	RuleSanitizers []string
+	RuleSources    []string
+
+	// Steps is the ordered taint path from source to sink (inclusive), when it
+	// can be reconstructed intra-procedurally by walking the def-use chain. It
+	// powers SARIF codeFlows (which GitHub code scanning renders as a data-flow)
+	// and richer triage. Empty when only the endpoints are known (e.g. a flow
+	// whose middle crossed a function boundary).
+	Steps []*ir.Position
+
+	// Suppressed marks a finding that a downstream triage stage (the LLM
+	// reviewer) judged a false positive. A suppressed finding is RETAINED, not
+	// discarded: it does not count toward the gate, but it stays visible in
+	// reports with SuppressedBy/SuppressionReason so a nondeterministic model can
+	// never silently erase a finding. Auditability over silent deletion.
+	Suppressed        bool
+	SuppressedBy      string // what suppressed it, e.g. "llm-review"
+	SuppressionReason string // the reviewer's stated justification
+
+	// ReviewConfirmed marks a finding the LLM reviewer adjudicated as a TRUE
+	// positive (kept, not suppressed); ReviewNote carries the reviewer's
+	// exploitability/reasoning. This surfaces the value of a review on the
+	// findings it KEEPS — a confirmed interprocedural finding is higher-priority
+	// triage — instead of only recording the ones it drops (LLM-7).
+	ReviewConfirmed bool
+	ReviewNote      string
 }
 
 // String renders a one-line human-readable summary of the finding.

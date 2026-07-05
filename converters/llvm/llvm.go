@@ -69,16 +69,72 @@ func (fl *funcLowerer) lower(fn llvm.Value) *ir.Function {
 		out.Params = append(out.Params, &ir.Value{Kind: &ir.Value_RegName{RegName: fl.reg(p)}})
 	}
 
-	idx := int32(0)
+	// The command line is attacker-controlled input. For `main(int argc, char
+	// **argv)` synthesize a source CALL whose result is bound to the argv
+	// parameter, so every `argv[i]` read carries taint (the same trick the axum /
+	// Spring frontends use for framework-provided request data). The engine only
+	// introduces taint at a CALL matching a source glob (`c*:argv`), so this makes
+	// argv a real CLI/CGI source (COV-8) with no gIR or engine change.
+	var prologue *ir.Instruction
+	if fn.Name() == "main" && fn.ParamsCount() >= 2 {
+		argv := fn.Param(1)
+		src := fl.prefix + "argv"
+		r := fl.freshReg()
+		prologue = &ir.Instruction{
+			Name: r, Op: ir.OpCode_OP_CODE_CALL,
+			Call: &ir.CallCommon{Callee: src, Value: &ir.Value{Kind: &ir.Value_FuncName{FuncName: src}}},
+		}
+		fl.regs[argv] = r // uses of argv now resolve to the (tainted) source result
+	}
+
+	// Index the basic blocks first so a terminator's successor blocks resolve to
+	// block indices in the second pass.
+	blockIdx := map[llvm.BasicBlock]int32{}
+	var bbs []llvm.BasicBlock
 	for bb := fn.FirstBasicBlock(); !bb.IsNil(); bb = llvm.NextBasicBlock(bb) {
-		block := &ir.BasicBlock{Index: idx}
-		idx++
+		blockIdx[bb] = int32(len(bbs))
+		bbs = append(bbs, bb)
+	}
+
+	// Lower each block and wire its CFG edges (Preds/Succs). The flow-sensitive
+	// engine (ENG-2) propagates taint in reverse-post-order over these edges, so
+	// without them a branch between a source and a sink — `l = fgets(...); if (l)
+	// system(l);` — would strand the taint in the entry block (a false negative).
+	// A terminator's successor blocks appear among its operands as block values.
+	preds := make([][]int32, len(bbs))
+	for i, bb := range bbs {
+		block := &ir.BasicBlock{Index: int32(i)}
 		for in := bb.FirstInstruction(); !in.IsNil(); in = llvm.NextInstruction(in) {
 			if inst := fl.lowerInst(in); inst != nil {
 				block.Instrs = append(block.Instrs, inst)
+				if prologue != nil && prologue.Pos == nil {
+					prologue.Pos = inst.Pos // anchor the synthetic argv source to main's first line
+				}
+			}
+		}
+		if i == 0 && prologue != nil {
+			block.Instrs = append([]*ir.Instruction{prologue}, block.Instrs...)
+		}
+		if term := bb.LastInstruction(); !term.IsNil() {
+			seen := map[int32]bool{}
+			for k := 0; k < term.OperandsCount(); k++ {
+				op := term.Operand(k)
+				if !op.IsBasicBlock() {
+					continue
+				}
+				si, ok := blockIdx[op.AsBasicBlock()]
+				if !ok || seen[si] {
+					continue
+				}
+				seen[si] = true
+				block.Succs = append(block.Succs, si)
+				preds[si] = append(preds[si], int32(i))
 			}
 		}
 		out.Blocks = append(out.Blocks, block)
+	}
+	for i, ps := range preds {
+		out.Blocks[i].Preds = ps
 	}
 	return out
 }
@@ -202,9 +258,16 @@ func (fl *funcLowerer) reg(v llvm.Value) string {
 	if r, ok := fl.regs[v]; ok {
 		return r
 	}
+	r := fl.freshReg()
+	fl.regs[v] = r
+	return r
+}
+
+// freshReg mints a register name not bound to any LLVM value (used for
+// synthesized instructions such as the argv source CALL).
+func (fl *funcLowerer) freshReg() string {
 	r := fmt.Sprintf("v%d", fl.counter)
 	fl.counter++
-	fl.regs[v] = r
 	return r
 }
 

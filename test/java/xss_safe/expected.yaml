@@ -1,0 +1,2 @@
+# Escaped before output; no XSS.
+findings: []

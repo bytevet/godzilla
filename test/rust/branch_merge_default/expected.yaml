@@ -1,0 +1,6 @@
+# FE-5: env::args() -> `if host.is_empty() { host = "localhost" }` -> Command::arg.
+# The constant reassignment in the if-arm must not clobber the tainted binding at
+# the control-flow join. Fires once.
+findings:
+  - rule: rust-command-injection
+    min: 1

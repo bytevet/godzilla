@@ -1,0 +1,2 @@
+# ast.literal_eval only parses literals; not eval/exec/compile. No findings.
+findings: []

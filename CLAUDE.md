@@ -69,7 +69,12 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   JSON dump, then lowers it. Straight-line env-based lowering (documented limitations in the package doc).
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
   off an opaque base (`req.query`) become a synthetic source CALL so taint seeds correctly; chained calls
-  (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`.
+  (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`. **TypeScript/JSX/ESM**
+  (`.ts/.tsx/.jsx/.mjs/.cjs`) are handled by esbuild's in-process `Transform` (pure Go, no Node): it strips
+  TS types and lowers ES modules to CommonJS (`require`/`exports`, which the existing lowering already
+  understands) before goja parses, and a `go-sourcemap` consumer remaps finding positions back to the
+  original file (`transform.go`, `remapPositions`). esbuild's ESM-interop `(0, import_mod.fn)(x)` callee is
+  recovered by a `SequenceExpression` case in `syntacticCallee`. Plain `.js` skips the transform.
 - `converters/java/` — analyzes **JVM bytecode**. An embedded single-file helper (`JavaDump.java`, run
   via `java`, JDK 24+) compiles `.java` in-process (compiler API) and reads `.class` with the standard
   `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to
@@ -142,9 +147,14 @@ LOGICAL (receiver-excluded) argument fires — this is what prevents parameteriz
 the **top-level `rulepacks/`** directory and are embedded into the binary by `rulepacks/embed.go`
 (`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
-  insecure deserialization (CWE-502) and JS code injection (CWE-95).
+  insecure deserialization (CWE-502) and code injection (CWE-95: `eval`/`exec`/`compile`, exact-named
+  so the safe `ast.literal_eval` is not flagged), and JS code injection (CWE-95).
 - **Java** — SQLi, command injection, path traversal (CWE-22: `java.io` file streams/readers,
-  `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path).
+  `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path), XSS
+  (CWE-79: servlet/`PrintWriter` response writes; `HtmlUtils`/OWASP-`Encode`/`StringEscapeUtils`
+  sanitizers), SSRF (CWE-918: `java.net.URL`/`URI`, `RestTemplate`/`WebClient`/HttpClient/OkHttp),
+  open redirect (CWE-601: `sendRedirect`/`RedirectView`), insecure deserialization (CWE-502:
+  `ObjectInputStream`/`XMLDecoder`/SnakeYAML/XStream).
 - **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
   (rusqlite/sqlx/diesel), SSRF (reqwest/ureq).
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string

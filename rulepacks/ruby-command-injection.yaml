@@ -1,0 +1,45 @@
+# OS command injection (Ruby, CWE-78): untrusted request/CLI input flowing into
+# a shell execution. Ruby has many ways to spawn a shell (Kernel#system/exec/`,
+# %x, IO.popen, Open3.*), all of which interpret shell metacharacters when given
+# a single string.
+rules:
+  - id: ruby-command-injection
+    languages: [ruby]
+    severity: critical
+    cwe: CWE-78
+    message: >-
+      Untrusted input (request params, environment, CLI args) flows into a shell
+      command execution, which may allow OS command injection. Pass the command
+      and its arguments as a list (e.g. system("cmd", arg1, arg2)) so no shell is
+      invoked, and validate inputs.
+    sources:
+      - "ruby:params"                # params[:x] / params['x']
+      - "ruby:request.params"
+      - "ruby:request.query"
+      - "ruby:request.query_string"
+      - "ruby:request.cookies"
+      - "ruby:request.GET"
+      - "ruby:request.POST"
+      - "ruby:request.body"
+      - "ruby:*ENV*"
+    sinks:
+      # system/exec/spawn only invoke a shell when given a single command string;
+      # pin the command argument (#0) so the safe multi-arg form
+      # (system("ls", tainted)) — which never reaches a shell — is not flagged.
+      - "ruby:system#0"
+      - "ruby:exec#0"
+      - "ruby:spawn#0"
+      # A backtick / %x / popen literal is always a single shell string, so any
+      # tainted part is dangerous (bare = all args).
+      - "ruby:%x"                    # backtick / %x{} command literal
+      - "ruby:*.popen"
+      - "ruby:IO.popen"
+      - "ruby:Open3.*"
+    sanitizers:
+      - "ruby:Shellwords.escape"
+      - "ruby:Shellwords.shellescape"
+    propagators:
+      - "ruby:*.to_s"
+      - "ruby:*.strip"
+      - "ruby:*.chomp"
+      - "ruby:*.join"

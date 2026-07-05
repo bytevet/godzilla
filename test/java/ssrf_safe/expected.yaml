@@ -1,0 +1,2 @@
+# Constant URL; untrusted input never reaches the request target.
+findings: []

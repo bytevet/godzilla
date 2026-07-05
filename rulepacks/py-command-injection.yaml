@@ -12,6 +12,10 @@ rules:
       a shell interpreter (shell=True).
     sources:
       - "py:*request.args.get"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
       # Django request accessors.
       - "py:*request.GET.get"
       - "py:*request.GET.__getitem__"
@@ -37,6 +41,8 @@ rules:
       - "py:*.subprocess.*"
     # No built-in sanitizer neutralizes tainted input for shell command
     # construction; avoid passing tainted data to a shell entirely.
-    sanitizers: []
+    sanitizers:
+      - "py:shlex.quote"
+      - "py:*shlex.quote"
     propagators:
       - "py:*.join"

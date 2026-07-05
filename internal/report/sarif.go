@@ -33,28 +33,70 @@ type sarifTool struct {
 
 type sarifDriver struct {
 	Name           string      `json:"name"`
+	Version        string      `json:"version"`
 	InformationURI string      `json:"informationUri"`
 	Rules          []sarifRule `json:"rules"`
 }
 
 type sarifRule struct {
-	ID         string              `json:"id"`
-	Name       string              `json:"name"`
-	Properties sarifRuleProperties `json:"properties,omitempty"`
+	ID                   string              `json:"id"`
+	Name                 string              `json:"name"`
+	ShortDescription     *sarifMessage       `json:"shortDescription,omitempty"`
+	FullDescription      *sarifMessage       `json:"fullDescription,omitempty"`
+	DefaultConfiguration *sarifDefaultConfig `json:"defaultConfiguration,omitempty"`
+	HelpURI              string              `json:"helpUri,omitempty"`
+	Properties           sarifRuleProperties `json:"properties,omitempty"`
+}
+
+// sarifDefaultConfig sets a rule's default result level; GitHub code scanning
+// uses it when a result omits its own level.
+type sarifDefaultConfig struct {
+	Level string `json:"level"`
 }
 
 type sarifRuleProperties struct {
 	CWE string `json:"cwe,omitempty"`
+	// SecuritySeverity is a CVSS-like 0-10 string GitHub code scanning uses to
+	// filter and rank security results; without it, security alerts are not
+	// severity-sortable. Tags mark the result as a security finding.
+	SecuritySeverity string   `json:"security-severity,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
 }
 
 type sarifResult struct {
-	RuleID           string                 `json:"ruleId"`
-	RuleIndex        int                    `json:"ruleIndex"`
-	Level            string                 `json:"level"`
-	Message          sarifMessage           `json:"message"`
-	Locations        []sarifLocation        `json:"locations,omitempty"`
-	RelatedLocations []sarifRelatedLocation `json:"relatedLocations,omitempty"`
-	Properties       sarifResultProperties  `json:"properties,omitempty"`
+	RuleID              string                 `json:"ruleId"`
+	RuleIndex           int                    `json:"ruleIndex"`
+	Level               string                 `json:"level"`
+	Message             sarifMessage           `json:"message"`
+	Locations           []sarifLocation        `json:"locations,omitempty"`
+	RelatedLocations    []sarifRelatedLocation `json:"relatedLocations,omitempty"`
+	CodeFlows           []sarifCodeFlow        `json:"codeFlows,omitempty"`
+	Suppressions        []sarifSuppression     `json:"suppressions,omitempty"`
+	PartialFingerprints map[string]string      `json:"partialFingerprints,omitempty"`
+	Properties          sarifResultProperties  `json:"properties,omitempty"`
+}
+
+// sarifCodeFlow / threadFlow model the ordered source->sink taint path. GitHub
+// code scanning renders a codeFlow as a navigable data-flow trace.
+type sarifCodeFlow struct {
+	ThreadFlows []sarifThreadFlow `json:"threadFlows"`
+}
+
+type sarifThreadFlow struct {
+	Locations []sarifThreadFlowLocation `json:"locations"`
+}
+
+type sarifThreadFlowLocation struct {
+	Location sarifLocation `json:"location"`
+}
+
+// sarifSuppression records that a result was suppressed downstream (here, by
+// the LLM reviewer). SARIF consumers such as GitHub code scanning render a
+// suppressed result as dismissed rather than an open alert, so the finding
+// stays visible and auditable instead of vanishing.
+type sarifSuppression struct {
+	Kind          string `json:"kind"` // "external": suppressed outside the analysis tool proper
+	Justification string `json:"justification,omitempty"`
 }
 
 type sarifMessage struct {
@@ -85,8 +127,10 @@ type sarifRegion struct {
 }
 
 type sarifResultProperties struct {
-	Confidence string `json:"confidence,omitempty"`
-	CWE        string `json:"cwe,omitempty"`
+	Confidence      string `json:"confidence,omitempty"`
+	CWE             string `json:"cwe,omitempty"`
+	ReviewConfirmed bool   `json:"reviewConfirmed,omitempty"`
+	ReviewNote      string `json:"reviewNote,omitempty"`
 }
 
 // WriteSARIF renders findings as a SARIF 2.1.0 document to w. Findings are
@@ -104,11 +148,20 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 			continue
 		}
 		ruleIndex[f.RuleID] = len(sarifRules)
+		tags := []string{"security"}
+		if f.CWE != "" {
+			tags = append(tags, "external/cwe/"+strings.ToLower(f.CWE))
+		}
 		sarifRules = append(sarifRules, sarifRule{
-			ID:   f.RuleID,
-			Name: f.RuleID,
+			ID:                   f.RuleID,
+			Name:                 f.RuleID,
+			ShortDescription:     &sarifMessage{Text: f.Message},
+			DefaultConfiguration: &sarifDefaultConfig{Level: sarifLevel(f.Severity)},
+			HelpURI:              "https://github.com/bytevet/godzilla",
 			Properties: sarifRuleProperties{
-				CWE: f.CWE,
+				CWE:              f.CWE,
+				SecuritySeverity: securitySeverity(f.Severity),
+				Tags:             tags,
 			},
 		})
 	}
@@ -116,13 +169,16 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 	results := make([]sarifResult, 0, len(sorted))
 	for _, f := range sorted {
 		result := sarifResult{
-			RuleID:    f.RuleID,
-			RuleIndex: ruleIndex[f.RuleID],
-			Level:     sarifLevel(f.Severity),
-			Message:   sarifMessage{Text: f.Message},
+			RuleID:              f.RuleID,
+			RuleIndex:           ruleIndex[f.RuleID],
+			Level:               sarifLevel(f.Severity),
+			Message:             sarifMessage{Text: f.Message},
+			PartialFingerprints: map[string]string{"godzilla/v1": analysis.Fingerprint(f)},
 			Properties: sarifResultProperties{
-				Confidence: string(f.Confidence),
-				CWE:        f.CWE,
+				Confidence:      string(f.Confidence),
+				CWE:             f.CWE,
+				ReviewConfirmed: f.ReviewConfirmed,
+				ReviewNote:      f.ReviewNote,
 			},
 		}
 		if loc, ok := sarifLocationFor(f.SinkPos); ok {
@@ -130,6 +186,12 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 		}
 		if related, ok := sarifRelatedLocationFor(f.SourcePos); ok {
 			result.RelatedLocations = []sarifRelatedLocation{related}
+		}
+		if cf, ok := sarifCodeFlowFor(f.Steps); ok {
+			result.CodeFlows = []sarifCodeFlow{cf}
+		}
+		if f.Suppressed {
+			result.Suppressions = []sarifSuppression{{Kind: "external", Justification: f.SuppressionReason}}
 		}
 		results = append(results, result)
 	}
@@ -142,6 +204,7 @@ func WriteSARIF(w io.Writer, findings []analysis.Finding) error {
 				Tool: sarifTool{
 					Driver: sarifDriver{
 						Name:           "Godzilla",
+						Version:        Version,
 						InformationURI: "https://github.com/bytevet/godzilla",
 						Rules:          sarifRules,
 					},
@@ -169,6 +232,26 @@ func sarifLevel(sev rules.Severity) string {
 		return "note"
 	default:
 		return "none"
+	}
+}
+
+// securitySeverity maps a rule severity to the CVSS-like 0-10 string GitHub code
+// scanning uses to rank and filter security results (CI-4). Empty for an
+// unknown severity so no misleading score is emitted.
+func securitySeverity(sev rules.Severity) string {
+	switch rules.Severity(strings.ToLower(string(sev))) {
+	case rules.SeverityCritical:
+		return "9.0"
+	case rules.SeverityHigh:
+		return "7.0"
+	case rules.SeverityMedium:
+		return "5.0"
+	case rules.SeverityLow:
+		return "3.0"
+	case rules.SeverityInfo:
+		return "1.0"
+	default:
+		return ""
 	}
 }
 
@@ -207,6 +290,22 @@ func sarifURI(filename string) string {
 		}
 	}
 	return filepath.ToSlash(filename)
+}
+
+// sarifCodeFlowFor builds a SARIF codeFlow (one threadFlow) from the ordered
+// taint-path positions. Returns ok=false when there are fewer than two mappable
+// steps (nothing to render as a flow).
+func sarifCodeFlowFor(steps []*ir.Position) (sarifCodeFlow, bool) {
+	tfls := make([]sarifThreadFlowLocation, 0, len(steps))
+	for _, p := range steps {
+		if loc, ok := sarifLocationFor(p); ok {
+			tfls = append(tfls, sarifThreadFlowLocation{Location: loc})
+		}
+	}
+	if len(tfls) < 2 {
+		return sarifCodeFlow{}, false
+	}
+	return sarifCodeFlow{ThreadFlows: []sarifThreadFlow{{Locations: tfls}}}, true
 }
 
 // sarifRelatedLocationFor builds a SARIF related location (used for the

@@ -76,6 +76,10 @@ var (
 	indexRe = regexp.MustCompile(`^\(?\*?_(\d+)\[`)      // _3[_4] or (_3[_4])
 	derefRe = regexp.MustCompile(`^\(\*_(\d+)\)`)        // (*_9)
 	spanRe  = regexp.MustCompile(`at ([^ ]+\.rs):(\d+):(\d+)`)
+	blockRe = regexp.MustCompile(`^\s*(bb\d+)(\s*\(cleanup\))?\s*:\s*\{`) // block header
+	bbRefRe = regexp.MustCompile(`bb\d+`)                                 // a basic-block target
+	retEdge = regexp.MustCompile(`return:\s*(bb\d+)`)                     // call/drop normal edge
+	colonRe = regexp.MustCompile(`:{3,}`)                                 // ::: runs left by generic-stripping
 	// binOps are MIR BinaryOp/UnaryOp names; matched to distinguish an operator
 	// rvalue like `Add(copy _a, copy _b)` from an enum-variant constructor.
 	binOps = map[string]bool{
@@ -100,22 +104,195 @@ func lowerFn(body []string, filename string) *ir.Function {
 		ObjectName:    name,
 		CanonicalName: "rust:" + name,
 	}
+	// synthSources are the synthetic axum-extractor source CALLs; their position
+	// is patched to the function's after the body is lowered (a header line has
+	// no span, so firstPos is only known then).
+	var synthSources []*ir.Instruction
 	for i, p := range params {
 		v := regValue(fmt.Sprintf("p%d", i))
-		fn.Params = append(fn.Params, v)
-		st.env[p] = v
+		fn.Params = append(fn.Params, v) // preserve arity for interproc arg->param mapping
+		if src, ok := axumExtractorSource(p.typ); ok {
+			// An axum handler receives already-extracted, attacker-controlled data
+			// as a typed parameter (Query<T>/Path<T>/Json<T>/Form<T>); synthesize a
+			// source CALL whose result IS the parameter's value, so the taint engine
+			// seeds it (the same trick the Java @RequestParam frontend uses). COV-7.
+			reg := st.reg()
+			inst := &ir.Instruction{
+				Name: reg, Op: ir.OpCode_OP_CODE_CALL,
+				Call: &ir.CallCommon{Callee: src, Value: &ir.Value{Kind: &ir.Value_FuncName{FuncName: src}}},
+			}
+			st.instrs = append(st.instrs, inst)
+			synthSources = append(synthSources, inst)
+			st.env[p.local] = regValue(reg)
+			continue
+		}
+		st.env[p.local] = v
 	}
-	for _, ln := range body[1:] {
-		st.line(ln)
-	}
+	st.lowerBlocks(body[1:])
 	fn.Pos = st.firstPos
+	for _, s := range synthSources {
+		s.Pos = fn.Pos // best-effort: attribute the source to the handler's position
+	}
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: st.instrs}}
 	return fn
 }
 
-// parseHeader extracts a function's normalized name and its parameter locals
-// from a MIR header line, e.g. `fn build_cmd(_1: &str, _2: i32) -> String {`.
-func parseHeader(h string) (name string, params []string) {
+// mirBlock is one MIR basic block: its label, its statement/terminator lines,
+// and the normal-control-flow successors parsed from its terminator (unwind /
+// cleanup edges are excluded — see parseSuccs).
+type mirBlock struct {
+	label string
+	lines []string
+	succs []string
+}
+
+// lowerBlocks lowers a function body block-by-block, threading the value
+// environment along the control-flow graph so a local reassigned on only some
+// paths is PHI-merged at the join instead of last-write-wins overwritten (FE-5).
+// The prior linear flattener dropped taint through the ubiquitous "default if
+// empty" shape (`if x.is_empty() { x = "default" }`): the else-arm's constant
+// reassignment clobbered the tainted binding, and the post-join sink read the
+// constant. Now each join block (≥2 predecessors) emits an OP_CODE_PHI of the
+// incoming values, keeping the tainted path live.
+//
+// Straight-line code — including the call chains that MIR splits across blocks
+// via return edges — has one predecessor per block, so its env is copied
+// through unchanged and lowering is identical to before. A block whose only
+// predecessors are unwind/cleanup edges (not in the normal CFG) falls back to
+// the textually-previous block's exit env, never doing worse than the old
+// linear walk. Aggregates (st.agg) stay global (last-write-wins); merging them
+// across branches is a rarer case left as-is.
+func (st *lowerState) lowerBlocks(lines []string) {
+	preamble, blocks := splitMIRBlocks(lines)
+	for _, ln := range preamble {
+		st.line(ln) // decls/debug/scope — no env effect, but keep span discovery
+	}
+	preds := map[string][]string{}
+	for _, b := range blocks {
+		for _, s := range b.succs {
+			preds[s] = append(preds[s], b.label)
+		}
+	}
+	exitEnvs := map[string]map[string]*ir.Value{}
+	prevExit := st.env // linear fallback / bb0 seed (params + synthetic sources)
+	for _, blk := range blocks {
+		var known []string
+		for _, p := range preds[blk.label] {
+			if _, ok := exitEnvs[p]; ok {
+				known = append(known, p)
+			}
+		}
+		switch len(known) {
+		case 0:
+			st.env = cloneMIREnv(prevExit)
+		case 1:
+			st.env = cloneMIREnv(exitEnvs[known[0]])
+		default:
+			st.env = st.mergeBlockEnvs(known, exitEnvs)
+		}
+		for _, ln := range blk.lines {
+			st.line(ln)
+		}
+		exitEnvs[blk.label] = st.env
+		prevExit = st.env
+	}
+}
+
+// splitMIRBlocks partitions a function body into the preamble (local
+// declarations before the first block) and the list of basic blocks.
+func splitMIRBlocks(lines []string) (preamble []string, blocks []mirBlock) {
+	cur := -1
+	for _, ln := range lines {
+		if m := blockRe.FindStringSubmatch(ln); m != nil {
+			blocks = append(blocks, mirBlock{label: m[1]})
+			cur = len(blocks) - 1
+			continue
+		}
+		if cur < 0 {
+			preamble = append(preamble, ln)
+			continue
+		}
+		blocks[cur].lines = append(blocks[cur].lines, ln)
+		blocks[cur].succs = append(blocks[cur].succs, parseSuccs(ln)...)
+	}
+	return preamble, blocks
+}
+
+// parseSuccs extracts a terminator line's normal-control-flow successors. A call
+// or drop names its edges (`-> [return: bbR, unwind: bbU]`); only the return
+// edge is a normal successor (the unwind edge leads to cleanup blocks that never
+// reach a sink). A `goto`/`switchInt` (`-> bbN` / `-> [0: bbA, otherwise: bbZ]`)
+// has no `return:` label, so every listed block is a real successor. Non-
+// terminator lines have no `->` and yield nothing.
+func parseSuccs(line string) []string {
+	i := strings.Index(line, "->")
+	if i < 0 {
+		return nil
+	}
+	rest := line[i+2:]
+	if c := strings.Index(rest, "//"); c >= 0 {
+		rest = rest[:c]
+	}
+	if strings.Contains(rest, "return:") {
+		if m := retEdge.FindStringSubmatch(rest); m != nil {
+			return []string{m[1]}
+		}
+		return nil
+	}
+	return bbRefRe.FindAllString(rest, -1)
+}
+
+// mergeBlockEnvs computes a join block's entry environment from its already-
+// lowered predecessors, emitting an OP_CODE_PHI for every local that carries
+// divergent values across the incoming edges (identical bindings pass through).
+func (st *lowerState) mergeBlockEnvs(preds []string, exitEnvs map[string]map[string]*ir.Value) map[string]*ir.Value {
+	names := map[string]bool{}
+	for _, p := range preds {
+		for k := range exitEnvs[p] {
+			names[k] = true
+		}
+	}
+	out := make(map[string]*ir.Value, len(names))
+	for name := range names {
+		var distinct []*ir.Value
+		seen := map[*ir.Value]bool{}
+		for _, p := range preds {
+			v := exitEnvs[p][name]
+			if v == nil || seen[v] {
+				continue
+			}
+			seen[v] = true
+			distinct = append(distinct, v)
+		}
+		switch len(distinct) {
+		case 0:
+			// local bound in no predecessor's exit env — leave unset
+		case 1:
+			out[name] = distinct[0]
+		default:
+			out[name] = st.emit(st.reg(), ir.OpCode_OP_CODE_PHI, distinct, nil)
+		}
+	}
+	return out
+}
+
+func cloneMIREnv(env map[string]*ir.Value) map[string]*ir.Value {
+	out := make(map[string]*ir.Value, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
+}
+
+// mirParam is a lowered function parameter: its MIR local and its type text.
+type mirParam struct {
+	local string
+	typ   string
+}
+
+// parseHeader extracts a function's normalized name and its parameters (local +
+// type) from a MIR header line, e.g. `fn build_cmd(_1: &str, _2: i32) -> String {`.
+func parseHeader(h string) (name string, params []mirParam) {
 	h = strings.TrimSpace(h)
 	h = strings.TrimPrefix(h, "fn ")
 	open := indexAtDepth0(h, '(')
@@ -128,13 +305,35 @@ func parseHeader(h string) (name string, params []string) {
 		return name, nil
 	}
 	for _, part := range splitTop(h[open+1:closeIdx], ',') {
-		if id, _, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
+		if id, typ, ok := strings.Cut(strings.TrimSpace(part), ":"); ok {
 			if id = strings.TrimSpace(id); localRe.MatchString(id) {
-				params = append(params, id)
+				params = append(params, mirParam{local: id, typ: strings.TrimSpace(typ)})
 			}
 		}
 	}
 	return name, params
+}
+
+// axumExtractorSource maps an axum extractor parameter type to the canonical
+// source name Godzilla synthesizes for it. axum handlers take request data as
+// typed extractor parameters — Query<T>, Path<T>, Json<T>, Form<T> — so each is
+// a taint source. It keys on the extractor identifier immediately before the
+// generic `<`, so it matches both a bare `Query<..>` and a fully-qualified
+// `axum::extract::Query<..>`. Returns ok=false for any non-extractor type.
+func axumExtractorSource(typ string) (string, bool) {
+	lt := strings.IndexByte(typ, '<') // the extractor's own generic opener (first '<')
+	if lt < 0 {
+		return "", false
+	}
+	head := strings.TrimSpace(typ[:lt])
+	if i := strings.LastIndex(head, "::"); i >= 0 {
+		head = head[i+2:]
+	}
+	switch head {
+	case "Query", "Path", "Json", "Form":
+		return "rust:axum::extract::" + head, true
+	}
+	return "", false
 }
 
 func (st *lowerState) line(raw string) {
@@ -398,7 +597,7 @@ func normalizeName(s string) string {
 			}
 		}
 	}
-	out := regexp.MustCompile(`:{3,}`).ReplaceAllString(b.String(), "::")
+	out := colonRe.ReplaceAllString(b.String(), "::")
 	return strings.Trim(strings.TrimSpace(out), ":")
 }
 

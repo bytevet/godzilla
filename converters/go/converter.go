@@ -45,7 +45,15 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	cfg := &packages.Config{
-		Mode:  packages.LoadAllSyntax,
+		// LoadSyntax (not LoadAllSyntax): load full syntax + types for the TARGET
+		// packages, and only type information (from export data) for their
+		// dependencies. The taint engine never analyzes inside stdlib/third-party
+		// code — library behavior is modeled by rules (sources/sinks/propagators) —
+		// so parsing and SSA-building the whole dependency closure is pure waste.
+		// This, together with ssautil.Packages below (which builds SSA bodies only
+		// for the target packages), is what keeps a scan's cost proportional to the
+		// scanned code rather than to its dependency tree.
+		Mode:  packages.LoadSyntax,
 		Tests: false,
 		Dir:   dir,
 	}
@@ -65,7 +73,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	prog, pkgs := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
+	// ssautil.Packages (not AllPackages): create SSA for the TARGET packages
+	// only; dependencies contribute types but no function bodies. prog.Build()
+	// then builds just the target packages, so cost scales with the scanned code,
+	// not the dependency closure. Findings are unaffected: calls into libraries
+	// are matched by their canonical names in rules, not by analyzing their bodies.
+	prog, pkgs := ssautil.Packages(initial, ssa.InstantiateGenerics)
 	prog.Build()
 	c.program = prog
 	c.fset = initial[0].Fset

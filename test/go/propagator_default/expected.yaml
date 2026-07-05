@@ -1,0 +1,5 @@
+# Taint flows through strings.TrimSpace (a built-in default propagator) into the
+# exec sink; must fire despite no rule listing TrimSpace as a propagator (ENG-4).
+findings:
+    - rule: go-command-injection
+      min: 1

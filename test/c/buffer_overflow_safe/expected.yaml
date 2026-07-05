@@ -1,0 +1,3 @@
+# No findings expected: strncpy is bounded (a propagator, not an overflow sink)
+# and the tainted data never reaches an unbounded write.
+findings: []

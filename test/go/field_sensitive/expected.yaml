@@ -1,0 +1,2 @@
+# Only field A is tainted; the sink reads the clean field B (ENG-3). No findings.
+findings: []

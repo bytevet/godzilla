@@ -1,0 +1,45 @@
+# Non-dataflow (kind: dangerous-call) rules for cryptographic weaknesses in Go —
+# call-site-syntactic, near-zero false positives (COV-4).
+rules:
+  - id: go-weak-hash
+    kind: dangerous-call
+    languages: [go]
+    severity: medium
+    cwe: CWE-327
+    message: >-
+      Use of a cryptographically weak hash function (MD5 or SHA-1). Use SHA-256
+      or stronger for any security-sensitive hashing (signatures, integrity,
+      password derivation).
+    callees:
+      - "go:crypto/md5.New"
+      - "go:crypto/md5.Sum"
+      - "go:crypto/sha1.New"
+      - "go:crypto/sha1.Sum"
+
+  - id: go-weak-cipher
+    kind: dangerous-call
+    languages: [go]
+    severity: high
+    cwe: CWE-327
+    message: >-
+      Use of a broken or weak block cipher (DES/3DES/RC4). Use AES-GCM or
+      ChaCha20-Poly1305 for authenticated encryption.
+    callees:
+      - "go:crypto/des.NewCipher"
+      - "go:crypto/des.NewTripleDESCipher"
+      - "go:crypto/rc4.NewCipher"
+
+  - id: go-insecure-random
+    kind: dangerous-call
+    languages: [go]
+    severity: medium
+    cwe: CWE-338
+    message: >-
+      Use of math/rand to produce random bytes. For tokens, keys, nonces, salts,
+      or any secret, use crypto/rand — math/rand is deterministic and predictable.
+    # math/rand.Read (and a *Rand.Read receiver call) generates raw random bytes,
+    # which is almost always security-relevant; the ubiquitous Int/Intn/Float
+    # helpers are deliberately NOT flagged to keep this near-zero-FP.
+    callees:
+      - "go:math/rand.Read"
+      - "go:*math/rand*.Rand*.Read"

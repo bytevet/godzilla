@@ -46,6 +46,8 @@ import (
 	"sort"
 	"strings"
 
+	"godzilla/internal/proc"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -82,7 +84,16 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			if err != nil {
 				return err
 			}
-			if !d.IsDir() && strings.HasSuffix(p, ".py") {
+			if d.IsDir() {
+				if walkignore.SkipDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(p, ".py") && !walkignore.SkipFile(d.Name()) {
+				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
+					return nil
+				}
 				files = append(files, p)
 			}
 			return nil
@@ -190,7 +201,9 @@ func moduleNameFor(root, file string) string {
 // convertPythonFile runs the embedded pyast.py helper against file and lowers
 // the resulting JSON AST into one gIR Module.
 func (c *Converter) convertPythonFile(pythonExe, scriptPath, file, moduleName string) (*ir.Module, error) {
-	cmd := exec.Command(pythonExe, scriptPath, file)
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	cmd := exec.CommandContext(ctx, pythonExe, scriptPath, file)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

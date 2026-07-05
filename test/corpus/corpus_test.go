@@ -34,6 +34,8 @@ func TestCorpus(t *testing.T) {
 	clangAvailable := clangErr == nil
 	_, rustcErr := exec.LookPath("rustc")
 	rustcAvailable := rustcErr == nil
+	_, rubyErr := exec.LookPath("ruby")
+	rubyAvailable := rubyErr == nil
 
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
@@ -44,6 +46,9 @@ func TestCorpus(t *testing.T) {
 			}
 			if strings.HasPrefix(name, "python/") && !pythonAvailable {
 				t.Skip("python3 not on PATH; skipping Python sample")
+			}
+			if strings.HasPrefix(name, "ruby/") && !rubyAvailable {
+				t.Skip("ruby not on PATH; skipping Ruby sample")
 			}
 			if strings.HasPrefix(name, "java/") {
 				if !javaAvailable {
@@ -62,6 +67,9 @@ func TestCorpus(t *testing.T) {
 					if !buildToolAvailable(dir) {
 						t.Skip("no Maven/Gradle wrapper or mvn/gradle on PATH; skipping build sample")
 					}
+					// Running the sample's build tool is opt-in for safety; a build
+					// sample by definition needs it (restored after the subtest).
+					t.Setenv("GODZILLA_ALLOW_BUILD", "1")
 				}
 			}
 			if strings.HasPrefix(name, "c/") || strings.HasPrefix(name, "cpp/") {
@@ -83,6 +91,9 @@ func TestCorpus(t *testing.T) {
 					if _, err := exec.LookPath("cargo"); err != nil {
 						t.Skip("cargo not on PATH; skipping Cargo-based Rust sample")
 					}
+					// A Cargo project is analyzed by running cargo; that is build
+					// execution, opt-in for safety (restored after the subtest).
+					t.Setenv("GODZILLA_ALLOW_BUILD", "1")
 					if cargoHasDeps(dir) {
 						if os.Getenv("GODZILLA_RUST_E2E") == "" {
 							t.Skip("set GODZILLA_RUST_E2E=1 to run the real-crate Rust sample (needs cargo + network)")
@@ -109,6 +120,9 @@ func TestCorpus(t *testing.T) {
 				expected[ef.Rule] = true
 				if got[ef.Rule] < min {
 					t.Errorf("rule %q: want >= %d finding(s), got %d", ef.Rule, min, got[ef.Rule])
+				}
+				if !ef.matchesLocation(res.Findings) {
+					t.Errorf("rule %q: no finding matched the expected location (line=%d sink=%q)", ef.Rule, ef.Line, ef.Sink)
 				}
 			}
 			for rule, n := range got {

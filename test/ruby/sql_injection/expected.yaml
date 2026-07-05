@@ -1,0 +1,3 @@
+findings:
+  - rule: ruby-sql-injection
+    min: 1

@@ -7,6 +7,11 @@
 # (Homebrew keeps it keg-only, e.g. /opt/homebrew/opt/llvm/bin/llvm-config), plus
 # clang/rustc on PATH to produce IR at scan time.
 
+# Tool version stamped into the binary (and SARIF/JSON reports). Defaults to the
+# current git description; override with `make build VERSION=v1.2.3`.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION_LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+
 LLVM_CONFIG ?= llvm-config
 LLVM_LIBDIR := $(shell $(LLVM_CONFIG) --libdir 2>/dev/null)
 LLVM_ENV = CGO_ENABLED=1 \
@@ -20,7 +25,7 @@ LLVM_TAGS = -tags "llvm byollvm"
 
 # --- default (pure Go: Go/Python/JS/Java) ---
 build:
-	go build ./...
+	go build $(VERSION_LDFLAGS) ./...
 test:
 	go test ./...
 fmt:
@@ -42,4 +47,5 @@ test-llvm:
 # samples against whatever old JDK is on PATH and fail).
 gate-llvm: build-llvm
 	$(LLVM_ENV) go vet $(LLVM_TAGS) ./...
+	$(LLVM_ENV) go test $(LLVM_TAGS) ./converters/llvm/ ./converters/cpp/
 	$(LLVM_ENV) go test $(LLVM_TAGS) ./test/corpus/ -run 'TestCorpus/(c|cpp)/'

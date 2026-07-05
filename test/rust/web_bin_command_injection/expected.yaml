@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). A binary Cargo crate:
+# runs by default with cargo present (no external deps), like web_command_injection.
+findings:
+    - rule: rust-command-injection
+      min: 1
+      sink: Command

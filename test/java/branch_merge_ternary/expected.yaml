@@ -1,0 +1,6 @@
+# FE-4: getParameter -> `(name == null) ? "localhost" : name` ternary ->
+# Runtime.exec. The tainted branch of the ternary must survive the operand-stack
+# join. Fires once.
+findings:
+  - rule: java-command-injection
+    min: 1

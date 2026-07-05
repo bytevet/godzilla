@@ -1,0 +1,3 @@
+findings:
+    - rule: java-ssrf
+      min: 1

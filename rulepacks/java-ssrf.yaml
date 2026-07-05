@@ -1,0 +1,47 @@
+# SSRF (Java): untrusted input flowing into the URL of an outbound HTTP request,
+# letting an attacker point the server at internal/metadata endpoints. As with
+# the other languages this is CWE-918, so the engine's host-controllability
+# check applies: taint confined to the path/query of a FIXED host is suppressed,
+# and taint that can control the host/authority fires. (Java string concat drops
+# its makeConcat recipe in gIR, so the host cannot be proven fixed and the
+# finding conservatively stands — no real SSRF is lost.)
+rules:
+  - id: java-ssrf
+    languages: [java]
+    severity: high
+    cwe: CWE-918
+    message: >-
+      Untrusted input flows into the URL of an outbound HTTP request, which may
+      allow server-side request forgery (SSRF). Validate the target against an
+      allowlist of permitted hosts and reject internal/link-local addresses
+      before making the request.
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getParameterValues"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getQueryString"
+      - "java:*ServletRequest.getParameter"
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    # The request URL/URI is logical arg 0 in each case (receiver excluded).
+    sinks:
+      - "java:*java/net/URL.<init>#0"
+      - "java:*java/net/URI.create#0"
+      - "java:*RestTemplate.getForObject#0"
+      - "java:*RestTemplate.getForEntity#0"
+      - "java:*RestTemplate.exchange#0"
+      - "java:*RestTemplate.postForObject#0"
+      - "java:*WebClient*.uri#0"
+      - "java:*HttpGet.<init>#0"
+      - "java:*HttpPost.<init>#0"
+      - "java:*Request$Builder.url#0"
+    sanitizers: []
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"
+      - "java:*String.format"

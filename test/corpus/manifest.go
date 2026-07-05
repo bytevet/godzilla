@@ -19,7 +19,7 @@ import (
 
 // sampleLangs are the language subtrees under test/ scanned by the corpus,
 // relative to this package's directory (Go tests run with CWD = package dir).
-var sampleLangs = []string{"go", "python", "js", "java", "c", "cpp", "rust"}
+var sampleLangs = []string{"go", "python", "js", "java", "c", "cpp", "rust", "ruby"}
 
 // sampleDirs returns every immediate sample directory under test/{go,python,js},
 // as paths relative to this package (e.g. "../go/sql_injection").
@@ -105,9 +105,37 @@ type Expectation struct {
 }
 
 // ExpectedFinding says a rule must fire at least Min times (Min defaults to 1).
+// Line and Sink are OPTIONAL location assertions: when set, at least one finding
+// of that rule must land at that sink LINE and/or have a sink callee containing
+// that substring. This upgrades the oracle from "rule fired" to "rule fired at
+// the right place", catching a finding that reports the wrong location (which a
+// count-only oracle silently accepts).
 type ExpectedFinding struct {
 	Rule string `yaml:"rule"`
 	Min  int    `yaml:"min"`
+	Line int32  `yaml:"line,omitempty"`
+	Sink string `yaml:"sink,omitempty"`
+}
+
+// matchesLocation reports whether any finding of rule ef.Rule satisfies ef's
+// optional Line/Sink assertions. With neither set, it is vacuously true.
+func (ef ExpectedFinding) matchesLocation(findings []analysis.Finding) bool {
+	if ef.Line == 0 && ef.Sink == "" {
+		return true
+	}
+	for _, f := range findings {
+		if f.RuleID != ef.Rule {
+			continue
+		}
+		if ef.Line != 0 && (f.SinkPos == nil || f.SinkPos.GetLine() != ef.Line) {
+			continue
+		}
+		if ef.Sink != "" && !strings.Contains(f.SinkCallee, ef.Sink) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func loadExpectation(path string) (Expectation, error) {

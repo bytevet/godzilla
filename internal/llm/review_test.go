@@ -3,74 +3,173 @@ package llm
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"godzilla/internal/analysis"
+	ir "godzilla/pkg/ir/v1"
 )
 
 // mockReviewer marks findings whose RuleID is in fp as false positives, and
-// optionally returns an error for every call.
+// optionally returns an error for every call. It records how many times it was
+// called so tests can assert the empty-context guard skips the reviewer. The
+// call counter is mutex-guarded because Filter now reviews concurrently.
 type mockReviewer struct {
-	fp    map[string]bool
-	err   error
+	fp     map[string]bool
+	reason string
+	err    error
+
+	mu    sync.Mutex
 	calls int
 }
 
 func (m *mockReviewer) Review(_ context.Context, f analysis.Finding, _ string) (Verdict, error) {
+	m.mu.Lock()
 	m.calls++
+	m.mu.Unlock()
 	if m.err != nil {
 		return Verdict{}, m.err
 	}
-	return Verdict{FalsePositive: m.fp[f.RuleID]}, nil
+	return Verdict{FalsePositive: m.fp[f.RuleID], Reason: m.reason}, nil
+}
+
+func (m *mockReviewer) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// withContext returns a finding whose sink points at the package testdata file,
+// so codeContextFor yields a non-empty snippet and the reviewer is actually
+// consulted. Use this for any finding that should be reviewed.
+func withContext(ruleID string, c analysis.Confidence) analysis.Finding {
+	return analysis.Finding{
+		RuleID:     ruleID,
+		Confidence: c,
+		SinkPos:    &ir.Position{Filename: "testdata/sample.go", Line: 4, Column: 2},
+	}
+}
+
+// activeCount counts findings that were not suppressed.
+func activeCount(fs []analysis.Finding) int {
+	n := 0
+	for _, f := range fs {
+		if !f.Suppressed {
+			n++
+		}
+	}
+	return n
 }
 
 func TestFilter_KeepsHighConfidenceWithoutReview(t *testing.T) {
 	findings := []analysis.Finding{
-		{RuleID: "a", Confidence: analysis.ConfidenceHigh},
-		{RuleID: "b", Confidence: analysis.ConfidenceHigh},
+		withContext("a", analysis.ConfidenceHigh),
+		withContext("b", analysis.ConfidenceHigh),
 	}
 	m := &mockReviewer{fp: map[string]bool{"a": true, "b": true}}
-	kept, dropped := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if m.calls != 0 {
-		t.Errorf("high-confidence findings should not be reviewed, got %d calls", m.calls)
+	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
+	if m.callCount() != 0 {
+		t.Errorf("high-confidence findings should not be reviewed, got %d calls", m.callCount())
 	}
-	if len(kept) != 2 || dropped != 0 {
-		t.Errorf("expected all kept, got kept=%d dropped=%d", len(kept), dropped)
+	if activeCount(out) != 2 || stats.Suppressed != 0 {
+		t.Errorf("expected all kept, got active=%d suppressed=%d", activeCount(out), stats.Suppressed)
 	}
 }
 
-func TestFilter_DropsFalsePositives(t *testing.T) {
+func TestFilter_SuppressesFalsePositivesButRetainsThem(t *testing.T) {
 	findings := []analysis.Finding{
-		{RuleID: "real", Confidence: analysis.ConfidenceMedium},
-		{RuleID: "fp", Confidence: analysis.ConfidenceMedium},
-		{RuleID: "lowfp", Confidence: analysis.ConfidenceLow},
+		withContext("real", analysis.ConfidenceMedium),
+		withContext("fp", analysis.ConfidenceMedium),
+		withContext("lowfp", analysis.ConfidenceLow),
 	}
-	m := &mockReviewer{fp: map[string]bool{"fp": true, "lowfp": true}}
-	kept, dropped := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if m.calls != 3 {
-		t.Errorf("expected 3 reviews, got %d", m.calls)
+	m := &mockReviewer{fp: map[string]bool{"fp": true, "lowfp": true}, reason: "constant, not attacker-controlled"}
+	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
+	if m.callCount() != 3 {
+		t.Errorf("expected 3 reviews, got %d", m.callCount())
 	}
-	if dropped != 2 {
-		t.Errorf("expected 2 dropped, got %d", dropped)
+	if stats.Reviewed != 3 || stats.Suppressed != 2 {
+		t.Errorf("expected reviewed=3 suppressed=2, got reviewed=%d suppressed=%d", stats.Reviewed, stats.Suppressed)
 	}
-	if len(kept) != 1 || kept[0].RuleID != "real" {
-		t.Errorf("expected only 'real' kept, got %+v", kept)
+	// Nothing is deleted: all three findings are returned, two flagged with a reason.
+	if len(out) != 3 {
+		t.Fatalf("suppressed findings must be RETAINED, not deleted: got %d of 3", len(out))
+	}
+	if activeCount(out) != 1 {
+		t.Errorf("expected 1 active finding, got %d", activeCount(out))
+	}
+	for _, f := range out {
+		if f.RuleID == "fp" || f.RuleID == "lowfp" {
+			if !f.Suppressed {
+				t.Errorf("%q should be marked Suppressed", f.RuleID)
+			}
+			if f.SuppressedBy != "llm-review" || f.SuppressionReason == "" {
+				t.Errorf("%q missing suppression provenance: by=%q reason=%q", f.RuleID, f.SuppressedBy, f.SuppressionReason)
+			}
+		}
+		if f.RuleID == "real" && f.Suppressed {
+			t.Errorf("%q should remain active", f.RuleID)
+		}
 	}
 }
 
-func TestFilter_FailOpenOnError(t *testing.T) {
-	findings := []analysis.Finding{{RuleID: "x", Confidence: analysis.ConfidenceLow}}
+func TestFilter_NeverDropsWithoutCodeContext(t *testing.T) {
+	// A finding whose position points nowhere yields empty code context. Even a
+	// reviewer that WOULD suppress it must not be consulted, and the finding must
+	// be kept (never adjudicate blind).
+	findings := []analysis.Finding{{
+		RuleID:     "ctxless",
+		Confidence: analysis.ConfidenceMedium,
+		SinkPos:    &ir.Position{Filename: "testdata/does-not-exist.go", Line: 1},
+	}}
+	m := &mockReviewer{fp: map[string]bool{"ctxless": true}}
+	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
+	if m.callCount() != 0 {
+		t.Errorf("reviewer must not be called without code context, got %d calls", m.callCount())
+	}
+	if activeCount(out) != 1 || stats.Suppressed != 0 {
+		t.Errorf("empty-context finding must be kept, got active=%d suppressed=%d", activeCount(out), stats.Suppressed)
+	}
+	if stats.LowContext != 1 {
+		t.Errorf("expected LowContext=1, got %d", stats.LowContext)
+	}
+}
+
+func TestFilter_FailOpenOnErrorIsVisible(t *testing.T) {
+	findings := []analysis.Finding{withContext("x", analysis.ConfidenceLow)}
 	m := &mockReviewer{err: errors.New("network down")}
-	kept, dropped := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
-	if len(kept) != 1 || dropped != 0 {
-		t.Errorf("reviewer error must keep the finding, got kept=%d dropped=%d", len(kept), dropped)
+	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
+	if activeCount(out) != 1 || stats.Suppressed != 0 {
+		t.Errorf("reviewer error must keep the finding, got active=%d suppressed=%d", activeCount(out), stats.Suppressed)
+	}
+	if stats.Errors != 1 || stats.FirstErr == nil {
+		t.Errorf("reviewer error must be recorded for auditability, got errors=%d firstErr=%v", stats.Errors, stats.FirstErr)
+	}
+}
+
+func TestFilter_ReviewerNoopIsDetectable(t *testing.T) {
+	// A reviewer that errors on every finding (e.g. missing API key) must leave a
+	// detectable trace: every reviewed finding errored, so Errors == Reviewed.
+	findings := []analysis.Finding{
+		withContext("a", analysis.ConfidenceMedium),
+		withContext("b", analysis.ConfidenceMedium),
+	}
+	m := &mockReviewer{err: errors.New("401 unauthorized")}
+	out, stats := Filter(context.Background(), m, findings, analysis.ConfidenceMedium)
+	if activeCount(out) != 2 {
+		t.Errorf("no-op reviewer must keep everything, got active=%d", activeCount(out))
+	}
+	if stats.Reviewed == 0 || stats.Errors != stats.Reviewed {
+		t.Errorf("a total no-op should show Errors==Reviewed>0, got reviewed=%d errors=%d", stats.Reviewed, stats.Errors)
 	}
 }
 
 func TestFilter_NilReviewerIsNoop(t *testing.T) {
-	findings := []analysis.Finding{{RuleID: "x", Confidence: analysis.ConfidenceLow}}
-	kept, dropped := Filter(context.Background(), nil, findings, analysis.ConfidenceMedium)
-	if len(kept) != 1 || dropped != 0 {
+	findings := []analysis.Finding{withContext("x", analysis.ConfidenceLow)}
+	out, stats := Filter(context.Background(), nil, findings, analysis.ConfidenceMedium)
+	if len(out) != 1 || stats.Suppressed != 0 || stats.Reviewed != 0 {
 		t.Errorf("nil reviewer must pass findings through unchanged")
 	}
 }
@@ -83,9 +182,14 @@ func TestParseVerdict(t *testing.T) {
 		wantErr bool
 	}{
 		{"false positive", `{"verdict": "false_positive", "reason": "sanitized"}`, true, false},
+		{"false positive hyphen", `{"verdict": "false-positive", "reason": "x"}`, true, false},
 		{"true positive", `{"verdict": "true_positive", "reason": "reachable"}`, false, false},
 		{"surrounded by prose", "Sure!\n{\"verdict\":\"false_positive\",\"reason\":\"x\"}\nDone.", true, false},
 		{"unrecognized keeps", `{"verdict": "maybe", "reason": "unsure"}`, false, false},
+		// LLM-8: leniency only in the KEEP direction. A bare "false"/"fp" must NOT
+		// be read as a drop signal — anything but the exact canonical token keeps.
+		{"bare false keeps", `{"verdict": "false", "reason": "x"}`, false, false},
+		{"fp alias keeps", `{"verdict": "fp", "reason": "x"}`, false, false},
 		{"no json", "I cannot answer.", false, true},
 	}
 	for _, tc := range cases {
@@ -98,5 +202,70 @@ func TestParseVerdict(t *testing.T) {
 				t.Errorf("FalsePositive=%v want %v", v.FalsePositive, tc.wantFP)
 			}
 		})
+	}
+}
+
+func TestBuildPrompt_And_Context_IncludeTaintPath(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "h.go")
+	content := "package main\n" + // 1
+		"func h(r Req) {\n" + //   2
+		"  x := r.Query(\"q\")\n" + // 3 source
+		"  y := clean(x)\n" + //     4 intermediate
+		"  exec(y)\n" + //           5 sink
+		"}\n"
+	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := analysis.Finding{
+		RuleID:    "GO-CMDI",
+		Message:   "cmd injection",
+		SourcePos: &ir.Position{Filename: src, Line: 3, Column: 8},
+		SinkPos:   &ir.Position{Filename: src, Line: 5, Column: 3},
+		Steps: []*ir.Position{
+			{Filename: src, Line: 3, Column: 8},
+			{Filename: src, Line: 4, Column: 8},
+			{Filename: src, Line: 5, Column: 3},
+		},
+	}
+
+	cc := codeContextFor(f)
+	// Context must include a snippet at the INTERMEDIATE hop (line 4, the clean()
+	// call) — the whole point of feeding the path (LLM-2 context poverty).
+	if !strings.Contains(cc, "clean(x)") {
+		t.Errorf("code context missing the intermediate hop; got:\n%s", cc)
+	}
+	if !strings.Contains(cc, "-- source") || !strings.Contains(cc, "-- sink") {
+		t.Errorf("code context missing source/sink labels; got:\n%s", cc)
+	}
+
+	prompt := buildPrompt(f, cc)
+	if !strings.Contains(prompt, "Taint path (source -> sink):") {
+		t.Errorf("prompt missing the taint-path listing; got:\n%s", prompt)
+	}
+}
+
+// TestPromptIncludesRuleVocabulary checks that the matched rule's own source and
+// sanitizer globs plus the recall-preserving calibration reach the prompt, so
+// the reviewer adjudicates by the rulepack definition rather than generic
+// knowledge (LLM-8).
+func TestPromptIncludesRuleVocabulary(t *testing.T) {
+	f := analysis.Finding{
+		RuleID:         "GO-PT",
+		Message:        "path traversal",
+		RuleSources:    []string{"go:*net/url*.Get"},
+		RuleSanitizers: []string{"go:*filepath.Base"},
+		SinkPos:        &ir.Position{Filename: "a.go", Line: 1},
+	}
+	for _, p := range []string{buildPrompt(f, "ctx"), buildAgenticPrompt(f, "ctx")} {
+		if !strings.Contains(p, "go:*filepath.Base") {
+			t.Errorf("prompt missing the rule's sanitizer glob; got:\n%s", p)
+		}
+		if !strings.Contains(p, "go:*net/url*.Get") {
+			t.Errorf("prompt missing the rule's source glob; got:\n%s", p)
+		}
+		if !strings.Contains(p, "true_positive") {
+			t.Errorf("prompt missing the keep-direction calibration; got:\n%s", p)
+		}
 	}
 }

@@ -1,0 +1,35 @@
+# Open redirect (Java): untrusted input used as an HTTP redirect destination,
+# letting an attacker send users to an arbitrary external site (phishing).
+rules:
+  - id: java-open-redirect
+    languages: [java]
+    severity: medium
+    cwe: CWE-601
+    message: >-
+      Untrusted input flows into an HTTP redirect destination, which allows an
+      open redirect. Validate the target against an allowlist of known
+      hosts/paths, or only permit relative paths, instead of redirecting to a
+      user-controlled URL.
+    sources:
+      - "java:*System.getenv"
+      - "java:*HttpServletRequest.getParameter"
+      - "java:*HttpServletRequest.getParameterValues"
+      - "java:*HttpServletRequest.getHeader"
+      - "java:*HttpServletRequest.getQueryString"
+      - "java:*ServletRequest.getParameter"
+      - "java:*Cookie.getValue"
+      - "java:*bind/annotation/RequestParam"
+      - "java:*bind/annotation/PathVariable"
+      - "java:*bind/annotation/RequestBody"
+      - "java:*bind/annotation/RequestHeader"
+      - "java:*bind/annotation/CookieValue"
+    # The redirect target URL is logical arg 0.
+    sinks:
+      - "java:*HttpServletResponse.sendRedirect#0"
+      - "java:*RedirectView.<init>#0"
+      - "java:*RedirectView.setUrl#0"
+    sanitizers: []
+    propagators:
+      - "java:*String.concat"
+      - "java:*StringBuilder.append"
+      - "java:*StringBuilder.toString"

@@ -1,0 +1,5 @@
+# Expected findings for this sample (see test/README.md). Cross-function flow
+# via a return value; confidence (Medium) is asserted in the unit test.
+findings:
+    - rule: go-command-injection
+      min: 1
