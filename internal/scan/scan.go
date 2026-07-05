@@ -72,15 +72,43 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	findings := analysis.NewEngine(rs).Analyze(prog)
-	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
-	// etc.) evaluated in one syntactic pass alongside the taint engine (COV-4).
-	findings = append(findings, analysis.ScanDangerousCalls(prog, rs)...)
-	findings = append(findings, analysis.ScanSecrets(prog)...)
-	// Also scan raw config files (.env, compose, Dockerfile, CI YAML, ...) that
-	// no language frontend parses — the dominant hardcoded-secret vector.
-	findings = append(findings, analysis.ScanSecretsInFiles(path)...)
+	findings := runAnalyses(prog, rs, path)
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
+}
+
+// runAnalyses runs the four independent analysis passes over an already-lowered
+// program and returns their findings in a deterministic order. The passes read
+// the program (and the rule set) but never mutate shared state, so they run
+// concurrently: the taint engine already saturates cores on a many-rule scan,
+// but on smaller inputs the spare cores run the dangerous-call and secrets scans
+// in parallel instead of after it. The rule set is precompiled up front so the
+// engine and the dangerous-call pass don't race building per-rule matchers.
+// A nil filePath skips the raw-file secrets scan (callers that already did it).
+func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string) []analysis.Finding {
+	rs.Compile()
+	var (
+		taint, danger, secrets, fileSecrets []analysis.Finding
+		wg                                  sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).Analyze(prog) }()
+	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
+	// etc.) evaluated alongside the taint engine (COV-4).
+	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
+	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog) }()
+	if filePath != "" {
+		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
+		// language frontend parses — the dominant hardcoded-secret vector.
+		wg.Add(1)
+		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath) }()
+	}
+	wg.Wait()
+
+	findings := taint
+	findings = append(findings, danger...)
+	findings = append(findings, secrets...)
+	findings = append(findings, fileSecrets...)
+	return findings
 }
 
 // ScanFiles analyzes an explicit list of paths (a changed-files / pre-commit
@@ -118,9 +146,9 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 		merged.Modules = append(merged.Modules, prog.Modules...)
 		coverage = append(coverage, cov...)
 	}
-	findings = append(findings, analysis.NewEngine(rs).Analyze(merged)...)
-	findings = append(findings, analysis.ScanDangerousCalls(merged, rs)...)
-	findings = append(findings, analysis.ScanSecrets(merged)...)
+	// The per-path raw-file secrets scan already ran in the loop above, so pass an
+	// empty path to skip it here.
+	findings = append(findings, runAnalyses(merged, rs, "")...)
 	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
 }
 

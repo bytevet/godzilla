@@ -110,6 +110,17 @@ type RuleSet struct {
 	Rules []Rule `yaml:"rules"`
 }
 
+// Compile precompiles every rule's patterns (see Rule.Compile). Call it once,
+// single-threaded, before matching — in particular before running independent
+// analysis passes concurrently over the same rule set, so they don't race
+// building per-rule matchers (after this, all matcher access is read-only).
+// Idempotent.
+func (rs *RuleSet) Compile() {
+	for i := range rs.Rules {
+		rs.Rules[i].Compile()
+	}
+}
+
 // IsDangerousCall reports whether the rule is a non-dataflow, call-site rule.
 func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "dangerous-call") }
 

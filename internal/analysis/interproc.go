@@ -56,6 +56,26 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// it per rule (as before) wasted O(rules x functions) work.
 	methodImpls := buildMethodImpls(byKey)
 
+	// These three indexes are likewise rule-independent (derived only from the
+	// immutable call graph / function set), so build them ONCE here and share them
+	// read-only across the parallel per-rule analyses. Rebuilding them inside
+	// analyzeInterproc — as before — repeated an O(program) instruction walk and a
+	// large allocation per rule, which starved the goroutines' shared allocator and
+	// capped parallel scaling (~1.9x on 4 cores). callers is the reverse call graph;
+	// globalReaders maps a global name to the functions that read it (ENG-6); keys
+	// is the deterministic worklist seed order.
+	callers := buildCallers(cg)
+	globalReaders := buildGlobalReaders(byKey)
+	keys := make([]string, 0, len(byKey))
+	for name := range byKey {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	idx := &sharedIndex{
+		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
+		callers: callers, globalReaders: globalReaders, keys: keys,
+	}
+
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
 	// parallel analysis. This moves shape-classification (and the "#idx" sink
 	// parse) out of the hot per-(call-site × pattern) matching path — which then
@@ -79,7 +99,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = analyzeInterproc(cg, byKey, modByKey, methodImpls, &e.rs.Rules[i])
+			results[i] = analyzeInterproc(idx, &e.rs.Rules[i])
 		}(i)
 	}
 	wg.Wait()
@@ -174,30 +194,38 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 // analyzeInterproc runs the worklist-based inter-procedural taint analysis for
 // a single rule. State (parameter taint, return taint) grows monotonically, so
 // iteration converges.
-func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map[string]*ir.Module, methodImpls map[string][]string, rule *rules.Rule) []Finding {
-	paramTaint := map[string]map[int]*ir.Position{}
-	returnTaint := map[string]*ir.Position{}
-	globalTaint := map[string]*ir.Position{}
-	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
-	reported := map[*ir.Instruction]bool{}
-	var findings []Finding
+// sharedIndex holds the rule-independent indexes over the immutable program,
+// built once in Analyze and shared read-only across the parallel per-rule
+// analyses (no goroutine mutates them). Hoisting them here — rather than
+// rebuilding per rule — removes an O(program × rules) instruction walk and the
+// allocation that capped parallel scaling.
+type sharedIndex struct {
+	byKey         map[string]*ir.Function
+	modByKey      map[string]*ir.Module
+	methodImpls   map[string][]string
+	callers       map[string][]string // callee -> its callers (reverse call graph)
+	globalReaders map[string][]string // global name -> functions that read it (ENG-6)
+	keys          []string            // byKey names, sorted (deterministic worklist seed)
+}
 
-	// Reverse edges: callee -> callers, so a callee becoming taint-returning
-	// re-enqueues its callers.
+// buildCallers inverts the call graph: callee -> callers, so a callee becoming
+// taint-returning re-enqueues its callers.
+func buildCallers(cg *CallGraph) map[string][]string {
 	callers := map[string][]string{}
 	for caller, callees := range cg.Edges {
 		for _, callee := range callees {
 			callers[callee] = append(callers[callee], caller)
 		}
 	}
+	return callers
+}
 
-	// Global read index (ENG-6): global name -> every function that reads it, so a
-	// global becoming tainted re-enqueues exactly its readers. Built once over the
-	// immutable function set. This is the outer fixpoint over globals: the taint
-	// map is program-wide, so a store in one function must wake the reads in
-	// others. A read is any named instruction with a GlobalName operand (Go lowers
-	// a global read as UN_OP(MUL), others as LOAD); a STORE writes its global
-	// operand but has no result Name, so it is not counted as a reader.
+// buildGlobalReaders indexes global name -> every function that reads it (ENG-6),
+// so a global becoming tainted re-enqueues exactly its readers. A read is any
+// named instruction with a GlobalName operand (Go lowers a global read as
+// UN_OP(MUL), others as LOAD); a STORE writes its global operand but has no
+// result Name, so it is not counted as a reader.
+func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 	globalReaders := map[string][]string{}
 	for name, fn := range byKey {
 		for _, blk := range fn.Blocks {
@@ -216,6 +244,18 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 			}
 		}
 	}
+	return globalReaders
+}
+
+func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
+	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
+	callers, globalReaders := idx.callers, idx.globalReaders
+	paramTaint := map[string]map[int]*ir.Position{}
+	returnTaint := map[string]*ir.Position{}
+	globalTaint := map[string]*ir.Position{}
+	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
+	reported := map[*ir.Instruction]bool{}
+	var findings []Finding
 
 	queued := map[string]bool{}
 	var queue []string
@@ -232,13 +272,9 @@ func analyzeInterproc(cg *CallGraph, byKey map[string]*ir.Function, modByKey map
 		}
 	}
 
-	// Seed the worklist with every applicable function, in a deterministic order.
-	keys := make([]string, 0, len(byKey))
-	for name := range byKey {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-	for _, name := range keys {
+	// Seed the worklist with every applicable function, in the shared
+	// deterministic order.
+	for _, name := range idx.keys {
 		enqueue(name)
 	}
 
