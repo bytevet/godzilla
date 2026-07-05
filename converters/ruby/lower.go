@@ -504,16 +504,22 @@ func (fs *funcState) calleeFor(recv interface{}, method string) string {
 	return "ruby:" + method
 }
 
+// localCallee builds the canonical callee for a bare function call `name(...)`,
+// qualifying a local (top-level) def with the module name so cross-function
+// taint resolves to the function's canonical name; other names stay bare.
+func (fs *funcState) localCallee(name string) string {
+	if fs.localFuncs[name] {
+		return "ruby:" + fs.moduleName + "." + name
+	}
+	return "ruby:" + name
+}
+
 func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 	head := at(n, 1)
 	args := extractArgs(at(n, 2))
 	switch tag(head) {
 	case "fcall":
-		name := identName(at(head, 1))
-		callee := "ruby:" + name
-		if fs.localFuncs[name] {
-			callee = "ruby:" + fs.moduleName + "." + name
-		}
+		callee := fs.localCallee(identName(at(head, 1)))
 		var argVals []*ir.Value
 		for _, a := range args {
 			argVals = append(argVals, fs.lowerExpr(a))
@@ -526,11 +532,7 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 }
 
 func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
-	name := identName(at(n, 1))
-	callee := "ruby:" + name
-	if fs.localFuncs[name] {
-		callee = "ruby:" + fs.moduleName + "." + name
-	}
+	callee := fs.localCallee(identName(at(n, 1)))
 	var argVals []*ir.Value
 	for _, a := range extractArgs(at(n, 2)) {
 		argVals = append(argVals, fs.lowerExpr(a))
@@ -539,18 +541,9 @@ func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
 }
 
 func (fs *funcState) lowerCommandCall(n interface{}) *ir.Value {
-	// ["command_call", recv, ".", methodIdent, args]
-	recv := at(n, 1)
-	method := identName(at(n, 3))
-	if sourceMembers[method] && isRequestBase(recv) {
-		return fs.lowerCallExprVals("ruby:request."+method, nil, n)
-	}
-	recvVal := fs.lowerExpr(recv)
-	argVals := []*ir.Value{recvVal}
-	for _, a := range extractArgs(at(n, 4)) {
-		argVals = append(argVals, fs.lowerExpr(a))
-	}
-	return fs.lowerCallExprVals(fs.calleeFor(recv, method), argVals, n)
+	// ["command_call", recv, ".", methodIdent, args] — same recv/method layout
+	// as a `call` node, so lowerDotCall handles it once the args are unwrapped.
+	return fs.lowerDotCall(n, extractArgs(at(n, 4)))
 }
 
 // lowerMethodAddBlock lowers `call do |x| … end` / `call { … }` (Sinatra routes,

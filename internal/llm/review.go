@@ -209,22 +209,7 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	var b strings.Builder
 	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
 	b.WriteString("Decide whether it is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive.\n\n")
-	fmt.Fprintf(&b, "Rule: %s\n", f.RuleID)
-	fmt.Fprintf(&b, "Severity: %s\n", f.Severity)
-	fmt.Fprintf(&b, "CWE: %s\n", f.CWE)
-	fmt.Fprintf(&b, "Message: %s\n", f.Message)
-	fmt.Fprintf(&b, "Language: %s\n", f.Language)
-	fmt.Fprintf(&b, "Function: %s\n", f.Function)
-	fmt.Fprintf(&b, "Sink callee: %s\n", f.SinkCallee)
-	fmt.Fprintf(&b, "Source location: %s\n", posString(f.SourcePos))
-	fmt.Fprintf(&b, "Sink location: %s\n", posString(f.SinkPos))
-	if len(f.Steps) >= 2 {
-		b.WriteString("Taint path (source -> sink):\n")
-		for _, p := range f.Steps {
-			fmt.Fprintf(&b, "  - %s\n", posString(p))
-		}
-	}
-	writeRuleDefinition(&b, f)
+	writeFindingFacts(&b, f)
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
@@ -242,6 +227,27 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 // calibration steers the model toward the recall-preserving default: when the
 // evidence is not decisive, keep the finding.
 const calibration = "If the evidence does not clearly show the finding is a false positive, answer true_positive."
+
+// writeFindingFacts writes the finding's identifying fields and reconstructed
+// taint path — the block shared verbatim by the one-shot and agentic prompts.
+func writeFindingFacts(b *strings.Builder, f analysis.Finding) {
+	fmt.Fprintf(b, "Rule: %s\n", f.RuleID)
+	fmt.Fprintf(b, "Severity: %s\n", f.Severity)
+	fmt.Fprintf(b, "CWE: %s\n", f.CWE)
+	fmt.Fprintf(b, "Message: %s\n", f.Message)
+	fmt.Fprintf(b, "Language: %s\n", f.Language)
+	fmt.Fprintf(b, "Function: %s\n", f.Function)
+	fmt.Fprintf(b, "Sink callee: %s\n", f.SinkCallee)
+	fmt.Fprintf(b, "Source location: %s\n", posString(f.SourcePos))
+	fmt.Fprintf(b, "Sink location: %s\n", posString(f.SinkPos))
+	if len(f.Steps) >= 2 {
+		b.WriteString("Taint path (source -> sink):\n")
+		for _, p := range f.Steps {
+			fmt.Fprintf(b, "  - %s\n", posString(p))
+		}
+	}
+	writeRuleDefinition(b, f)
+}
 
 // writeRuleDefinition adds the matched rule's own source/sanitizer vocabulary to
 // the prompt so the reviewer adjudicates by the rulepack's definition rather than
@@ -275,22 +281,7 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("You have read-only tools to investigate the code: read_file_range, find_function, and grep.\n")
 	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
 	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
-	fmt.Fprintf(&b, "Rule: %s\n", f.RuleID)
-	fmt.Fprintf(&b, "Severity: %s\n", f.Severity)
-	fmt.Fprintf(&b, "CWE: %s\n", f.CWE)
-	fmt.Fprintf(&b, "Message: %s\n", f.Message)
-	fmt.Fprintf(&b, "Language: %s\n", f.Language)
-	fmt.Fprintf(&b, "Function: %s\n", f.Function)
-	fmt.Fprintf(&b, "Sink callee: %s\n", f.SinkCallee)
-	fmt.Fprintf(&b, "Source location: %s\n", posString(f.SourcePos))
-	fmt.Fprintf(&b, "Sink location: %s\n", posString(f.SinkPos))
-	if len(f.Steps) >= 2 {
-		b.WriteString("Taint path (source -> sink):\n")
-		for _, p := range f.Steps {
-			fmt.Fprintf(&b, "  - %s\n", posString(p))
-		}
-	}
-	writeRuleDefinition(&b, f)
+	writeFindingFacts(&b, f)
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nInitial code context:\n")
 		b.WriteString(codeContext)

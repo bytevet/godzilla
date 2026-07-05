@@ -190,10 +190,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 	merged := &ir.Program{Mode: "ssa"}
 	ranAny := false
 	var coverage []LangCoverage
-	frontends := []struct {
-		name    string
-		convert func(string) (*ir.Program, error)
-	}{
+	frontends := []frontend{
 		{"go", func(p string) (*ir.Program, error) { return go_converter.NewConverter().ConvertFile(p) }},
 		{"python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }},
 		{"javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }},
@@ -218,10 +215,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		}
 		ranAny = true
 		wg.Add(1)
-		go func(i int, fe struct {
-			name    string
-			convert func(string) (*ir.Program, error)
-		}) {
+		go func() {
 			defer wg.Done()
 			cov := LangCoverage{Language: fe.name, Detected: true}
 			prog, err := fe.convert(path)
@@ -233,7 +227,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 			}
 			cov.Converted = true
 			results[i] = &feResult{prog: prog, cov: cov}
-		}(i, fe)
+		}()
 	}
 	wg.Wait()
 	for _, r := range results {
@@ -249,6 +243,12 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		return nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
 	return merged, coverage, nil
+}
+
+// frontend pairs a language tag with the function that lowers a path to gIR.
+type frontend struct {
+	name    string
+	convert func(string) (*ir.Program, error)
 }
 
 // fileFrontend returns the language tag and conversion function for a single

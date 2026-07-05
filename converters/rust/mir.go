@@ -79,6 +79,7 @@ var (
 	blockRe = regexp.MustCompile(`^\s*(bb\d+)(\s*\(cleanup\))?\s*:\s*\{`) // block header
 	bbRefRe = regexp.MustCompile(`bb\d+`)                                 // a basic-block target
 	retEdge = regexp.MustCompile(`return:\s*(bb\d+)`)                     // call/drop normal edge
+	colonRe = regexp.MustCompile(`:{3,}`)                                 // ::: runs left by generic-stripping
 	// binOps are MIR BinaryOp/UnaryOp names; matched to distinguish an operator
 	// rvalue like `Add(copy _a, copy _b)` from an enum-variant constructor.
 	binOps = map[string]bool{
@@ -596,7 +597,7 @@ func normalizeName(s string) string {
 			}
 		}
 	}
-	out := regexp.MustCompile(`:{3,}`).ReplaceAllString(b.String(), "::")
+	out := colonRe.ReplaceAllString(b.String(), "::")
 	return strings.Trim(strings.TrimSpace(out), ":")
 }
 

@@ -8,10 +8,7 @@
 // that are too large or are obviously generated/minified bundles.
 package walkignore
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 // skipDirs are directory base names pruned from every source walk.
 var skipDirs = map[string]bool{
@@ -63,7 +60,3 @@ func SkipFile(name string) bool {
 	}
 	return false
 }
-
-// PruneDir is a convenience for a filepath.WalkDir callback: given a directory
-// entry's base name, it returns whether to skip it.
-func PruneDir(base string) bool { return SkipDir(filepath.Base(base)) }

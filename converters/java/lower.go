@@ -398,18 +398,23 @@ func (s *methodState) mergeStates(preds []int, exits []*simState, b block) simSt
 	}
 	pos := s.blockPos(b)
 	out := simState{stack: make([]*ir.Value, depth), locals: map[int]*ir.Value{}}
-	for i := 0; i < depth; i++ {
+	// collect gathers the distinct (dedup by pointer identity) incoming values
+	// across predecessors for one operand-stack slot or local.
+	collect := func(get func(p int) *ir.Value) []*ir.Value {
 		vals := make([]*ir.Value, 0, len(preds))
 		seen := map[*ir.Value]bool{}
 		for _, p := range preds {
-			v := exits[p].stack[i]
+			v := get(p)
 			if v == nil || seen[v] {
 				continue
 			}
 			seen[v] = true
 			vals = append(vals, v)
 		}
-		out.stack[i] = s.mergeVals(vals, pos)
+		return vals
+	}
+	for i := 0; i < depth; i++ {
+		out.stack[i] = s.mergeVals(collect(func(p int) *ir.Value { return exits[p].stack[i] }), pos)
 	}
 	slots := map[int]bool{}
 	for _, p := range preds {
@@ -418,17 +423,7 @@ func (s *methodState) mergeStates(preds []int, exits []*simState, b block) simSt
 		}
 	}
 	for slot := range slots {
-		vals := make([]*ir.Value, 0, len(preds))
-		seen := map[*ir.Value]bool{}
-		for _, p := range preds {
-			v := exits[p].locals[slot]
-			if v == nil || seen[v] {
-				continue
-			}
-			seen[v] = true
-			vals = append(vals, v)
-		}
-		if len(vals) > 0 {
+		if vals := collect(func(p int) *ir.Value { return exits[p].locals[slot] }); len(vals) > 0 {
 			out.locals[slot] = s.mergeVals(vals, pos)
 		}
 	}

@@ -560,6 +560,30 @@ func analyzeFunc(
 		args := inst.Call.GetArgs()
 		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
 
+		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
+		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
+		// Shared by the lowered-method branch and the CHA dynamic-dispatch loop
+		// below, which resolve different targets but seed them identically.
+		seedInvokeArgs := func(target string) {
+			if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
+				addEffect(target, 0, p)
+			}
+			for j, a := range args {
+				if p, ok := isTaintedArg(tainted, a); ok {
+					addEffect(target, j+1, p)
+				}
+			}
+		}
+		// pullReturnTaint taints this call's result register from target's return
+		// summary; taint entered via a callee return crossed a function boundary,
+		// so any finding it feeds must be Medium (interprocOrigins).
+		pullReturnTaint := func(target string) {
+			if ro := returnTaint[target]; ro != nil && inst.Name != "" {
+				markTainted(tainted, inst.Name, ro)
+				interprocOrigins[ro] = true
+			}
+		}
+
 		switch {
 		case rule.IsSanitizer(callee):
 			// A sanitizer neutralizes taint: its result is clean. Critically, we
@@ -638,14 +662,7 @@ func analyzeFunc(
 				// off-by-one that silently loses every cross-function instance
 				// flow. (Go interface INVOKEs name an abstract method absent from
 				// byKey, so they skip this and are handled by the CHA block below.)
-				if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
-					addEffect(callee, 0, p)
-				}
-				for j, a := range args {
-					if p, ok := isTaintedArg(tainted, a); ok {
-						addEffect(callee, j+1, p)
-					}
-				}
+				seedInvokeArgs(callee)
 			} else {
 				// Static/free function or Go method call: args already align with
 				// params (Args[0]==Params[0]==receiver for a Go method). isTaintedArg
@@ -658,12 +675,7 @@ func analyzeFunc(
 					}
 				}
 			}
-			if ro := returnTaint[callee]; ro != nil && inst.Name != "" {
-				markTainted(tainted, inst.Name, ro)
-				// Taint entered via a callee's return summary: this is a
-				// cross-function flow, so any finding it feeds must be Medium.
-				interprocOrigins[ro] = true
-			}
+			pullReturnTaint(callee)
 			// The callee fills tainted data into one of its out-parameters: taint
 			// the argument passed at that position (ENG-6b), using the same
 			// arg->param mapping as the seeding above (receiver = param 0 for an
@@ -695,18 +707,8 @@ func analyzeFunc(
 		// params shifted by one — param 0 is the receiver.
 		if inst.Call.GetIsInvoke() {
 			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
-				if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
-					addEffect(impl, 0, p)
-				}
-				for j, a := range args {
-					if p, ok := isTaintedArg(tainted, a); ok {
-						addEffect(impl, j+1, p)
-					}
-				}
-				if ro := returnTaint[impl]; ro != nil && inst.Name != "" {
-					markTainted(tainted, inst.Name, ro)
-					interprocOrigins[ro] = true // cross-function return -> Medium
-				}
+				seedInvokeArgs(impl)
+				pullReturnTaint(impl)
 			}
 		}
 	}
