@@ -113,6 +113,39 @@ $ godzilla scan ./test/go/sql_injection
 1 finding(s); 1 at/above "medium".
 ```
 
+## Run with Docker
+
+Prebuilt images ship with the toolchains a scan needs, so you can gate a repo
+without installing Go/Python/Ruby/Java/Rust yourself. They live on GHCR in two
+variants:
+
+| Image | Size | Scans |
+|---|---|---|
+| `ghcr.io/bytevet/godzilla` (`:latest`) | ~600–700 MB | Go · JavaScript/TS · Python · Ruby · secrets |
+| `ghcr.io/bytevet/godzilla:full` | ~1.5–2 GB | everything in slim **+ Java + Rust** |
+
+The entrypoint is `godzilla` and the default command is `scan .`, so mounting a
+repo at `/src` scans it immediately:
+
+```bash
+# Scan the current directory (exit 3 if it finds something at/above --fail-on)
+docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla
+
+# Write a SARIF report; any arguments override the default `scan .`
+docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
+  scan --sarif /src/results.sarif --fail-on high /src
+
+# Java/Rust need the full image
+docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
+```
+
+The slim image **skips** Java and Rust with a coverage warning rather than
+failing — use `:full` when you need them. Scanning a Go project that pulls
+dependencies needs network access for module fetch (or mount a warm
+`GOMODCACHE`). Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full`
+(full) track releases; `edge`/`edge-full` track `main`. Images are multi-arch
+(amd64 + arm64).
+
 ## Supported languages & detections
 
 | | Go | Python | JavaScript | Java | Rust |
