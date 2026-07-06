@@ -9,13 +9,13 @@ code is lowered to a language-neutral SSA IR called **gIR** (a Protobuf schema),
 engine runs over that IR regardless of source language. The full pipeline is implemented and working:
 
 ```
-source (Go / Python / JS / Java / Rust / C·C++) → frontend → gIR v2 → rule engine + taint analysis → findings → report / gate
+source (Go / Python / JS / Java / Rust / Ruby / C·C++) → frontend → gIR v2 → rule engine + taint analysis → findings → report / gate
                                                                                               └→ optional LLM review
 ```
 
-Six frontends — Go, Python, JavaScript, Java (JVM bytecode), Rust (rustc MIR), and C/C++ (LLVM IR, an
-opt-in cgo build) — plus an inter-procedural taint engine, a YAML rule engine, a secrets scanner, an
-HTML/JSON/SARIF report, and a pluggable LLM reviewer all exist and are tested.
+Seven frontends — Go, Python, JavaScript, Java (JVM bytecode), Rust (rustc MIR), Ruby (stdlib Ripper),
+and C/C++ (LLVM IR, an opt-in cgo build) — plus an inter-procedural taint engine, a YAML rule engine, a
+secrets scanner, an HTML/JSON/SARIF report, and a pluggable LLM reviewer all exist and are tested.
 
 ## Commands
 
@@ -30,7 +30,7 @@ go test ./...
 go test ./internal/analysis/
 go test ./converters/go/ -run TestGIRv2Metadata
 
-# Scan a project (directory or single .go/.py/.js/.java/.rs/.c/.cpp file). Exit codes:
+# Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.c/.cpp file). Exit codes:
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
 go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>
@@ -45,7 +45,7 @@ export PATH=$PATH:$(go env GOPATH)/bin
 go generate ./...
 ```
 
-Note: the vulnerable samples under `test/{go,python,js,java,rust,c,cpp}/*` are asserted test cases
+Note: the vulnerable samples under `test/{go,python,js,java,rust,ruby,c,cpp}/*` are asserted test cases
 (each carries an `expected.yaml`). The Go samples are each their own isolated module (own `go.mod`) —
 never add their dependencies to the root `go.mod`.
 
@@ -109,11 +109,16 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   so dependency MIR is not emitted. A build failure (e.g. an unfetchable dep offline) is a skipped
   frontend. Sources model the real attack surface — HTTP request accessors (`*Request::query|header|
   body`, actix `*HttpRequest::query_string|headers`) — with env/args as a secondary CLI/CGI source.
+- `converters/ruby/` — analyzes Ruby via the stdlib **Ripper**. An embedded helper (`rbdump.rb`, run
+  via `ruby`) parses `.rb` and prints Ripper's S-expression AST as JSON; `lower.go` lowers that tree
+  (straight-line, like Python/JS). Ripper ships with every MRI Ruby, so only a `ruby` on `PATH` is
+  needed — pure Go, in the default binary. Canonical names `ruby:<module>.<method>`; sources model an
+  untrusted HTTP request (Rails/Sinatra `params`), and backtick/`%x` shell literals are a command sink.
 - `converters/cpp/` + `converters/llvm/` — C/C++ via **LLVM IR** (clang `-O1 -g -emit-llvm`), lowered
   by the shared `converters/llvm` package. This is the opt-in **cgo** backend (`-tags "llvm byollvm"`
   + libLLVM), NOT in the default build; see the Makefile `*-llvm` targets. (Rust was formerly on this
   path too but moved to the pure-Go MIR frontend above.)
-- Both Python and JS name modules by their **path relative to the scan root** (`moduleNameFor`), so
+- Python, JS, and Ruby name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
 
 **Analysis (`internal/analysis/`).**
@@ -156,9 +161,15 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
   open redirect (CWE-601: `sendRedirect`/`RedirectView`), insecure deserialization (CWE-502:
   `ObjectInputStream`/`XMLDecoder`/SnakeYAML/XStream).
 - **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
-  (rusqlite/sqlx/diesel), SSRF (reqwest/ureq).
+  (rusqlite/sqlx/diesel), SSRF (reqwest/ureq), XSS (CWE-79), open redirect (CWE-601).
+- **Ruby** — SQL injection (CWE-89: ActiveRecord `execute`/`exec_query`/`find_by_sql`/raw `where`) and
+  command injection (CWE-78: `system`/`exec`/`spawn`/`IO.popen`/`Open3`, plus backtick/`%x` literals;
+  `Shellwords.escape` sanitizes).
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
-  (CWE-134).
+  (CWE-134), SQL injection (CWE-89), buffer overflow (unsafe `gets`/`strcpy`-family, CWE-242/120).
+- **Weak crypto / dangerous APIs** (`kind: dangerous-call`, non-dataflow call-site match — no taint) —
+  Go and Java: weak hash (MD5/SHA-1) and broken cipher (DES/3DES/RC4) at CWE-327, plus insecure RNG
+  (`math/rand` for secrets, CWE-338 — Go).
 
 `validate` rejects rules with an empty ID or an unrecognized severity.
 
@@ -189,7 +200,7 @@ and sets a severity-gated exit code.
 - **Canonical names are the cross-language join.** Frontends must emit stable `<lang>:...` FQNs; rules match
   them with globs. Adding a sink/source is usually a YAML edit, not code.
 - **Source mapping is mandatory** — every instruction/function/global populates `Pos`; it drives reporting.
-- **Isolated sample modules.** Vulnerable test code lives under `test/{go,python,js,java,rust,c,cpp}/`;
+- **Isolated sample modules.** Vulnerable test code lives under `test/{go,python,js,java,rust,ruby,c,cpp}/`;
   Go samples are isolated modules — never pollute the root `go.mod` with sample dependencies.
 - **Instruction coverage is tested by absence of fallback comments** — an unhandled SSA/AST node yields a
   `comment`/intrinsic like `unsupported instruction`; converter tests fail if one appears.
