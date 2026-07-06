@@ -13,10 +13,13 @@
 // basic block per method/def, branch bodies flattened in source order). Covered
 // expressions: literals, string interpolation, `+` concatenation, local
 // variable reads/assignments, method/command calls (with and without a
-// receiver), and index reads. The web request surface (`params[:x]`,
-// `params[...]`, `request.params/query/GET/POST/cookies`) lowers to a synthetic
-// source CALL so the engine seeds taint — the same trick the JS/Python
-// frontends use for opaque-base member reads. Unhandled nodes become an
+// receiver), and index reads. The web request surface lowers to a synthetic
+// source CALL so the engine seeds taint — the same opaque-base heuristic the
+// JS/Python frontends use: a member read / `[]` off a method parameter or a
+// free/unbound identifier named like a request object (`request.<accessor>`,
+// `req.<accessor>`, `params[:x]`, `cookies[:x]`) becomes a base-scoped source
+// CALL `ruby:<base>.<accessor>`, and the rulepack globs filter by framework,
+// so any accessor — not a fixed member list — is covered. Unhandled nodes become an
 // OP_CODE_INTRINSIC "ruby.unsupported" (expressions) or are dropped
 // (statements) rather than aborting conversion.
 package ruby_converter

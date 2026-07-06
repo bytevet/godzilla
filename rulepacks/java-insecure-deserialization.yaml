@@ -25,6 +25,14 @@ rules:
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
+      # JAX-RS resource-method parameter annotations (javax.ws.rs and
+      # jakarta.ws.rs — the `ws/rs` fragment matches both).
+      - "java:*ws/rs/QueryParam"
+      - "java:*ws/rs/PathParam"
+      - "java:*ws/rs/FormParam"
+      - "java:*ws/rs/HeaderParam"
+      - "java:*ws/rs/MatrixParam"
+      - "java:*ws/rs/CookieParam"
     # The untrusted stream/string is logical arg 0: the ObjectInputStream is
     # constructed around a tainted InputStream, or the parser is handed a tainted
     # document directly.

@@ -1,0 +1,3 @@
+# False-positive control: a @QueryParam value used as a bound PreparedStatement
+# parameter must produce no findings.
+findings: []

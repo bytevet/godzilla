@@ -1,0 +1,5 @@
+findings:
+    - rule: js-sqli
+      min: 1
+    - rule: js-command-injection
+      min: 1

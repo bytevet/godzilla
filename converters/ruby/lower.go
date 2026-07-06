@@ -185,6 +185,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 		v := regValue(p)
 		fn.Params = append(fn.Params, v)
 		fs.env[p] = v
+		fs.paramNames[p] = true
 	}
 	// def name params bodystmt → the body is the bodystmt at index 3.
 	fs.lowerBody(bodyStmts(at(defNode, 3)))
@@ -222,6 +223,11 @@ type funcState struct {
 	localFuncs map[string]bool
 	counter    int
 	env        map[string]*ir.Value
+	// paramNames is the set of this function's own parameter names. A member
+	// read / `[]` off a parameter (or off a free/unbound identifier) is an
+	// "opaque base" — see isOpaqueBase — and the first opportunity to introduce
+	// taint, mirroring the JS/Python frontends' opaque-base source heuristic.
+	paramNames map[string]bool
 	instrs     []*ir.Instruction
 }
 
@@ -231,6 +237,7 @@ func newFuncState(filename, moduleName string, localFuncs map[string]bool) *func
 		moduleName: moduleName,
 		localFuncs: localFuncs,
 		env:        map[string]*ir.Value{},
+		paramNames: map[string]bool{},
 	}
 }
 
@@ -432,13 +439,54 @@ func (fs *funcState) emitBinOp(left, right *ir.Value, n interface{}) *ir.Value {
 	return regValue(inst.Name)
 }
 
-// lowerAref lowers `base[index]`. When the base is the request-parameter hash
-// (`params[:x]`, `params['x']`), it becomes a synthetic source CALL so the
+// isOpaqueBase reports whether a receiver/base node refers to a value whose
+// origin is outside this function's own straight-line computation — either a
+// free/unbound identifier (a `vcall`, e.g. a framework accessor such as
+// Sinatra's `params`/`request` that Ripper cannot resolve to a local) or one of
+// this function's own parameters (a `var_ref` to a name in paramNames, e.g. a
+// Rails/Rack handler's `request`/`req` object). A member read / `[]` off such a
+// base is the first opportunity to introduce taint, mirroring the JS/Python
+// frontends' opaque-base heuristic (see converters/javascript/lower.go
+// isOpaqueBase). It deliberately does NOT treat an ordinary assigned local (a
+// `var_ref` not in paramNames) or a constant (`@const`) as opaque, so a local
+// happening to be named `params`, or a class like `User`, is not mistaken for
+// a request. Which opaque-base accessors actually seed taint is decided by the
+// rulepack source globs, not here.
+func (fs *funcState) isOpaqueBase(recv interface{}) (name string, ok bool) {
+	switch tag(recv) {
+	case "vcall":
+		if inner := at(recv, 1); tag(inner) == "@ident" {
+			return identName(inner), true
+		}
+	case "var_ref":
+		if inner := at(recv, 1); tag(inner) == "@ident" {
+			if n := identName(inner); fs.paramNames[n] {
+				return n, true
+			}
+		}
+	}
+	return "", false
+}
+
+// requestDotBases are the conventional names of a web request object across Ruby
+// frameworks. A member read off an opaque base with one of these names is
+// synthesized as a source CALL `ruby:<base>.<method>` (receiver-/base-scoped, so
+// the rulepack globs `ruby:request.*` / `ruby:req.*` filter by framework). Any
+// accessor is covered — the frontend no longer enumerates a fixed member list,
+// so Rack/Sinatra/Hanami accessors beyond the classic params/query/… set fire.
+var requestDotBases = map[string]bool{"request": true, "req": true, "params": true}
+
+// requestIndexBases are the conventional names of a request-controlled hash
+// indexed as `base[:x]` (Rails/Sinatra `params[...]`, `cookies[...]`).
+var requestIndexBases = map[string]bool{"params": true, "cookies": true}
+
+// lowerAref lowers `base[index]`. When the base is an opaque request hash
+// (`params[:x]`, `cookies['x']`), it becomes a synthetic source CALL so the
 // engine seeds taint; otherwise it is an INDEX whose taint flows from the base.
 func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	base := at(n, 1)
-	if baseName(base) == "params" {
-		return fs.lowerCallExprVals("ruby:params", nil, n)
+	if name, ok := fs.isOpaqueBase(base); ok && requestIndexBases[name] {
+		return fs.lowerCallExprVals("ruby:"+name, nil, n)
 	}
 	baseVal := fs.lowerExpr(base)
 	inst := fs.newValueInst(n)
@@ -448,29 +496,14 @@ func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	return regValue(inst.Name)
 }
 
-// baseName returns the identifier of a `vcall`/`var_ref` node, or "".
-func baseName(n interface{}) string {
-	switch tag(n) {
-	case "vcall", "var_ref":
-		return identName(at(n, 1))
-	}
-	return ""
-}
-
-// sourceMembers are request accessors that, read off a request-like receiver,
-// deliver attacker-controlled data.
-var sourceMembers = map[string]bool{
-	"params": true, "query": true, "query_string": true,
-	"cookies": true, "GET": true, "POST": true, "body": true,
-}
-
 // lowerDotCall lowers `recv.method(args?)`. args is nil for the no-arg `call`
-// form. A request accessor (`request.params`, `req.query`) becomes a source.
+// form. Any accessor off an opaque request base (`request.query_string`,
+// `req.params`) becomes a base-scoped source CALL `ruby:<base>.<method>`.
 func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 	recv := at(n, 1)
 	method := identName(at(n, 3))
-	if sourceMembers[method] && isRequestBase(recv) {
-		return fs.lowerCallExprVals("ruby:request."+method, nil, n)
+	if name, ok := fs.isOpaqueBase(recv); ok && requestDotBases[name] {
+		return fs.lowerCallExprVals("ruby:"+name+"."+method, nil, n)
 	}
 	// Lower the receiver first so a chained inner call (a.b(x).c) still emits.
 	recvVal := fs.lowerExpr(recv)
@@ -480,14 +513,6 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 		argVals = append(argVals, fs.lowerExpr(a))
 	}
 	return fs.lowerCallExprVals(callee, argVals, n)
-}
-
-func isRequestBase(recv interface{}) bool {
-	switch baseName(recv) {
-	case "request", "req", "params", "self":
-		return true
-	}
-	return false
 }
 
 // calleeFor builds a call's canonical callee: `ruby:<Const>.<method>` when the

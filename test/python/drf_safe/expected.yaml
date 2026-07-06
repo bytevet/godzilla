@@ -1,0 +1,3 @@
+# False-positive control: a parameterized query must produce no findings even
+# though request.data is a recognized source.
+findings: []

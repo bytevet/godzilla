@@ -1,0 +1,3 @@
+# False-positive control: a bare String parameter is not an axum extractor, so
+# it is not a taint source and nothing must fire.
+findings: []

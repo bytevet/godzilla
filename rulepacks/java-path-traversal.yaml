@@ -28,6 +28,14 @@ rules:
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
+      # JAX-RS resource-method parameter annotations (javax.ws.rs and
+      # jakarta.ws.rs — the `ws/rs` fragment matches both).
+      - "java:*ws/rs/QueryParam"
+      - "java:*ws/rs/PathParam"
+      - "java:*ws/rs/FormParam"
+      - "java:*ws/rs/HeaderParam"
+      - "java:*ws/rs/MatrixParam"
+      - "java:*ws/rs/CookieParam"
     sinks:
       # Stream/reader/writer constructors take the path as (receiver-excluded)
       # argument 0; a File is constructed from any of its path components.

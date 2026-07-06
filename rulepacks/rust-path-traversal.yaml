@@ -21,6 +21,9 @@ rules:
       - "rust:axum::extract::Path"
       - "rust:axum::extract::Json"
       - "rust:axum::extract::Form"
+      # Non-generic axum body/query extractors (raw query string / raw form body).
+      - "rust:axum::extract::RawQuery"
+      - "rust:axum::extract::RawForm"
       # HTTP request accessors — the real attack surface.
       - "rust:*Request::query"
       - "rust:*Request::header"
@@ -30,6 +33,13 @@ rules:
       - "rust:*HttpRequest::query_string"
       - "rust:*HttpRequest::headers"
       - "rust:*HttpRequest::match_info"
+      - "rust:*HttpRequest::uri"
+      - "rust:*HttpRequest::cookie"
+      # rocket/warp/generic request accessors — the URI, headers and cookies are
+      # all attacker-controlled (base-scoped to the request type).
+      - "rust:*Request::uri"
+      - "rust:*Request::headers"
+      - "rust:*Request::cookies"
       # Environment / CLI args — a real but secondary source (CLI tools, CGI).
       - "rust:var"
       - "rust:var_os"

@@ -25,6 +25,14 @@ rules:
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
+      # JAX-RS resource-method parameter annotations (javax.ws.rs and
+      # jakarta.ws.rs — the `ws/rs` fragment matches both).
+      - "java:*ws/rs/QueryParam"
+      - "java:*ws/rs/PathParam"
+      - "java:*ws/rs/FormParam"
+      - "java:*ws/rs/HeaderParam"
+      - "java:*ws/rs/MatrixParam"
+      - "java:*ws/rs/CookieParam"
     # The tainted string is the value written; it is logical arg 0 of the
     # response writer/stream call.
     sinks:

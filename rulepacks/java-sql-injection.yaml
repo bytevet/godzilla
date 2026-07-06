@@ -27,6 +27,16 @@ rules:
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
+      # JAX-RS resource-method parameter annotations (javax.ws.rs and
+      # jakarta.ws.rs — the `ws/rs` fragment matches both). Same synthesized
+      # source-CALL mechanism as the Spring set; anchored on the annotation
+      # package so an ordinary method ending in the token is not a source.
+      - "java:*ws/rs/QueryParam"
+      - "java:*ws/rs/PathParam"
+      - "java:*ws/rs/FormParam"
+      - "java:*ws/rs/HeaderParam"
+      - "java:*ws/rs/MatrixParam"
+      - "java:*ws/rs/CookieParam"
     # The query string is the first (receiver-excluded) argument; a
     # PreparedStatement's bound parameters (set via setString/setInt) are not
     # injection points, so a parameterized query is not flagged.
