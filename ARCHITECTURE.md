@@ -1,345 +1,263 @@
 # Godzilla Architecture & Design
 
-> Status: **implemented.** This document is the design/target architecture *and its rationale*; the
-> pipeline described here is now built and tested end-to-end — seven frontends (Go, Python, JavaScript,
-> Java, Rust, Ruby, C/C++), the Rule Engine, Analysis Engine, Report module, LLM reviewer, and CLI all exist.
-> §10 records the as-built status per component (including where the implementation diverged from the
-> original design intent — e.g. JS uses goja and Python uses `python3 ast`, not tree-sitter). See
-> `CLAUDE.md` for the concise package map and `spec.md` for the original product brief.
+> This document describes the **as-built** architecture and the reasoning behind
+> it. The whole pipeline — seven frontends (Go, Python, JavaScript, Java, Rust,
+> Ruby, C/C++), the rule engine, analysis engine, report module, LLM reviewer,
+> and CLI — is implemented and tested. See [CLAUDE.md](CLAUDE.md) for the
+> package-level code map and [docs/writing-rules.md](docs/writing-rules.md) for
+> rule authoring.
 
-Godzilla is a **rapid, multi-language SAST tool** built for CI/CD quality gates. Source code in any
-supported language is lowered to a single language-neutral IR (**gIR**), and one set of analysis
-engines runs over that IR regardless of source language. The headline goals from `spec.md` are:
+Godzilla is a **rapid, multi-language SAST tool** for CI/CD quality gates. Source
+code in any supported language is lowered to a single language-neutral IR
+(**gIR**), and one analysis core runs over that IR regardless of source language.
+The three design goals:
 
 1. **Ultra fast** — usable as a per-commit CI checkpoint.
-2. **Perfect signal/noise** — near-zero false positives at the gate.
+2. **High signal/noise** — few false positives at the gate.
 3. **Multi-language** — one analysis core, many frontends.
 
-These goals pull against each other (precision is expensive; speed favors approximation). The design
-below resolves that tension with **demand-driven analysis**, **tree-shaking**, and an **optional LLM
-reviewer** as the final false-positive backstop.
+These pull against each other (precision is expensive; speed favors
+approximation). The design resolves that tension with a small IR, tree-shaking,
+recall-oriented taint, and an optional LLM reviewer as a false-positive backstop.
 
----
+## Design principles
 
-## 1. Design decisions
+- **gIR is the contract.** A single language-neutral SSA IR sits between frontends
+  and analysis; no analysis pass ever branches on source language, only on gIR
+  structure and canonical symbol names. Getting the IR right first avoids reworking
+  every frontend and pass later.
+- **Small core + tagged intrinsics.** The opcode set stays tiny and universal;
+  every language-specific construct is an `INTRINSIC` carrying a canonical name that
+  rules and analysis interpret. No opcode is ever added for a single language.
+- **SSA is mandatory.** Frontends emit SSA with explicit `PHI` nodes, because
+  def-use chains make taint and dataflow dramatically simpler and faster.
+- **Canonical FQN + globs.** Every symbol has a stable `lang:module/path.Type.member`
+  name, so one rule shape matches equivalent APIs across languages.
+- **Inter-procedural taint.** The target vuln classes are source→sink flows that
+  cross function boundaries; the engine follows them via per-function summaries.
+- **In-process, single binary.** Frontends run in-process for fast startup and
+  trivial CI deployment; each merely shells out to a language toolchain where one is
+  unavoidable (Python/Java/Rust).
+- **Recall first, precision backstop.** Lowering favors catching the common
+  web-handler vulnerability shape; a confidence score plus the optional LLM reviewer
+  trim the residual false positives.
 
-Locked via a design interview. Each row records the choice and the primary reason.
-
-| Area | Decision | Rationale |
-|---|---|---|
-| First development focus | Language-neutral gIR + multi-language foundation | Getting the IR wrong forces rework of every frontend and every analysis pass; build it right first. |
-| IR shape | **Small universal core + tagged intrinsics** | Keeps the core tiny and neutral; language-specific behavior lives in named intrinsics that rules/analysis interpret. |
-| IR form | **SSA mandated** (frontends emit phi nodes) | SSA def-use chains make taint, dataflow, and pointer analysis dramatically simpler and faster. |
-| Symbol naming | **Canonical FQN + globs** | Cross-language rule reuse; a rule matches `*.Query` shapes across Go/Python/JS by stable names. |
-| Detection model | **Inter-procedural taint** (intra-proc as a stepping stone) | The target vuln classes are all source→sink flows that cross function boundaries. |
-| Pointer analysis | **Demand-driven (on-demand)** | Compute points-to only for values a taint query touches — precision where it matters, without whole-program cost. |
-| Frontend deployment | **In-process Go, single self-contained binary** | Fast startup and trivial CI deployment (no orchestration of external services). |
-| Parsing source | **Mixed per language** | Use the most accurate cheap source per language rather than forcing one representation. |
-| Python parsing | **Prefer local `python3` bytecode; fall back to tree-sitter** | CPython bytecode captures dynamic dispatch faithfully; tree-sitter keeps the tool runnable when Python is absent. |
-| JavaScript parsing | **tree-sitter** (embedded) → AST → SSA | Embeddable in the Go binary; no Node runtime required. |
-| Rules | **YAML**, three kinds: taint + pattern + dangerous-call | Taint rules for dataflow vulns; pattern rules for non-dataflow findings (secrets); dangerous-call rules for banned/weak APIs (weak crypto, insecure RNG). |
-| Initial vuln scope | Injection (SQLi + command), path traversal, XSS/SSRF, hardcoded secrets | Covers the existing samples and the highest-value web classes. |
-| Confidence & LLM | **Confidence scoring now; Claude reviewer later (pluggable)** | Build the routing hook immediately so the LLM stage drops in without pipeline changes. |
-| Reporting | **HTML first** + exit-code gating; JSON/SARIF later | HTML gives the richest triage experience; exit codes make it a real gate. |
-
----
-
-## 2. High-level architecture
+## High-level architecture
 
 ```
           ┌───────── Frontends (in-process Go, one binary) ─────────┐
  Go   ────► x/tools SSA ───┐
  Python ──► python3 ast  ──┤
  JS   ────► goja AST     ──┤
- Java ────► JVM bytecode ──┤─► lower ─► gIR v2 (core + intrinsics, canonical FQNs)
+ Java ────► JVM bytecode ──┤─► lower ─► gIR (core + intrinsics, canonical FQNs)
  Rust ────► rustc MIR    ──┤                            │
  Ruby ────► ruby Ripper  ──┤                            │
  C/C++ ───► LLVM IR (cgo) ─┘                            ▼
-                                    ┌──────────── Analysis Engine ────────────┐
-   YAML rules ──► Rule Engine ─────►│ call graph → (tree-shake) → inter-proc   │
-   (FQN globs)   (taint + pattern)  │ taint w/ value-flow + CHA alias tracking │
-                                    │ + confidence scoring                     │
-                                    └───────────────────┬──────────────────────┘
-                                                        ▼
+                                       ┌──────────── Analysis Engine ────────────┐
+   YAML rules ──► Rule Engine ────────►│ call graph → inter-procedural taint with │
+   (FQN globs)   (taint +              │ value-flow + CHA alias tracking          │
+                  dangerous-call)      │ + confidence scoring                     │
+                                       └───────────────────┬──────────────────────┘
+                                                           ▼
                               Findings ──► (optional LLM reviewer) ──► HTML/JSON/SARIF report + exit code
 ```
 
-The pipeline is a straight line: **Frontend → gIR → Rule Engine + Analysis Engine → Findings →
-Report**. gIR is the single contract between frontends and everything downstream. No analysis pass
-should ever branch on source language — only on gIR structure and intrinsic/symbol names.
+The pipeline is a straight line: **frontend → gIR → rule engine + analysis engine
+→ findings → report**. gIR is the single contract between frontends and everything
+downstream.
 
----
+## gIR — the core contract
 
-## 3. gIR v2 — the core contract
+gIR is a **small universal SSA core plus an intrinsic escape hatch**, defined in
+`proto/*.proto` (authoritative) and generated into `pkg/ir/v1/`.
 
-The current gIR is effectively a 1:1 mirror of Go SSA (dedicated opcodes for channels, `defer`,
-`go`, `select`, `range`, etc.). gIR v2 replaces that with a **small core plus an intrinsic escape
-hatch**.
+### Core opcodes
 
-### 3.1 Core opcodes (language-neutral)
-
-The complete opcode set stays small and universal:
+The opcode set stays small and language-neutral:
 
 - **Terminators:** `RET`, `JUMP`, `IF`, `SWITCH`, `UNREACHABLE`
 - **Memory:** `ALLOC`, `LOAD`, `STORE`
 - **Aggregates:** `FIELD` / `FIELD_ADDR`, `INDEX` / `INDEX_ADDR`
 - **Compute:** `BIN_OP`, `UN_OP`, `PHI`
-- **Calls:** `CALL` (statically resolved) and `INVOKE` (dynamic/virtual dispatch)
-- **Types:** `CONVERT`, `TYPE_ASSERT`, `MAKE_INTERFACE` (box a value into an interface/`any`)
+- **Calls:** `CALL` (static) and `INVOKE` (dynamic/virtual dispatch)
+- **Types:** `CONVERT`, `TYPE_ASSERT`, `MAKE_INTERFACE`, `EXTRACT`
 - **`INTRINSIC`** — the escape hatch (below)
 
-### 3.2 Intrinsics
+### Intrinsics
 
-Everything language-specific is an **`INTRINSIC`**: a call carrying a **canonical name** plus operands.
-The analysis engine and rules interpret intrinsics by name; the core has no opcode per language
-feature.
+Everything language-specific is an `INTRINSIC`: a call carrying a **canonical
+name** plus operands, which the engine and rules interpret by name. Examples: Go
+`go.chan.send`, `go.defer`, `go.range`; map ops; closures (`builtin.make_closure`);
+aggregate construction (`builtin.aggregate`). Intrinsics may declare default taint
+semantics in rules, so common propagators (concatenation, formatting) are handled
+uniformly. This keeps the core neutral while every language construct still has a
+home — no opcode per language feature.
 
-Examples of constructs that become intrinsics:
+### SSA is mandatory
 
-- Go: `go.chan.send`, `go.chan.recv`, `go.select`, `go.defer`, `go.go` (goroutine), `go.range`,
-  `go.map.update`, `go.builtin.append`
-- Python: `py.dict.__getitem__`, `py.attr.get`, `py.call.kw`, `py.magic.__add__`
-- JavaScript: `js.property.get`, `js.property.set`, `js.spread`, `js.template`
-- Cross-language: `builtin.sprintf`, `builtin.string.concat`, `builtin.len`
+Every frontend emits SSA: unique value definitions and explicit `PHI` nodes at
+control-flow joins. Frontends whose source is not already SSA run SSA construction
+during lowering.
 
-Intrinsics may declare **default taint semantics** in rules (e.g. `builtin.string.concat` and
-`builtin.sprintf` propagate taint from any tainted argument to the result), so the engine handles the
-common propagators uniformly.
+### Canonical symbol naming
 
-### 3.3 SSA is mandatory
-
-Every frontend emits SSA: unique value definitions and explicit `PHI` nodes at control-flow joins.
-Frontends whose source is not already SSA (Python bytecode, JS AST) run **SSA construction** during
-lowering. Braun et al.'s "Simple and Efficient Construction of Static Single Assignment Form" is the
-recommended algorithm because it builds SSA directly from an AST/bytecode walk without a separate
-dominance-frontier pass.
-
-### 3.4 Canonical symbol naming
-
-Every function, method, and global carries a **stable canonical fully-qualified name** so rules match
+Every function, method, and global carries a stable canonical FQN so rules match
 across languages:
 
 ```
 go:net/http.(*Request).FormValue
 py:flask.request.args.get
 js:express.Request.query
+rust:std::process::Command.arg
+ruby:params
 ```
 
-Scheme: `lang:module/path.Type.member`. Frontends own the mapping from their native naming to this
-scheme; the analysis core and rules only ever see canonical names. Rules match with globs
-(e.g. `*/http.*.FormValue`, `py:flask.request.*`).
+Scheme: `lang:module/path.Type.member`. Frontends own the mapping from native
+naming to this scheme; analysis and rules only ever see canonical names, matched
+with globs (`*` spans `/` and `.`).
 
-### 3.5 Source mapping
+### Source mapping
 
-Every instruction, function, and global carries a `Position` (file/line/column), as today. This is
-non-negotiable — it drives both reporting and the HTML path visualization.
+Every instruction, function, and global carries a `Position` (file/line/column).
+This is non-negotiable — it drives both reporting and the HTML path visualization.
 
----
+## Analysis engine
 
-## 4. Analysis Engine
+Inter-procedural taint tracking (`internal/analysis/`):
 
-Inter-procedural taint tracking with the following pipeline:
+1. **Call-graph construction.** Static `CALL`s resolve directly; `INVOKE` (dynamic
+   dispatch) resolves via class-hierarchy analysis (CHA) to every concrete method of
+   the named signature.
+2. **Taint propagation** over SSA def-use chains, from **sources** to **sinks**,
+   stopped by **sanitizers** and **validators** (guard predicates) and forwarded by
+   **propagators** (including intrinsic default semantics). `BIN_OP` is a universal
+   propagator so `+` concatenation carries taint.
+3. **Inter-procedural flow** via per-function summaries: a tainted argument taints
+   the callee's matching parameter, and a taint-returning function taints its
+   caller's call result.
+4. **Alias tracking** is approximated with value-flow (def-use + container taint for
+   aggregates/variadics) plus CHA — sound and sufficient for the target vuln classes,
+   short of a full demand-driven points-to.
+5. **Confidence scoring.** Intra-procedural findings are High; cross-function are
+   Medium. Low-confidence findings are the ones the LLM reviewer adjudicates.
 
-1. **Call-graph construction.** Static `CALL`s resolve directly. `INVOKE` (dynamic dispatch) targets
-   are resolved on demand via pointer analysis (below).
-2. **Tree-shaking (reachability pruning).** Starting from entry points and taint sources, prune
-   functions that cannot participate in any tainted flow. This is the primary speed lever — the
-   engine never analyzes unreachable code.
-3. **Taint propagation.** Over SSA def-use chains, propagate taint from **sources** to **sinks**,
-   killed by **sanitizers** and forwarded by **propagators** (including intrinsic default semantics).
-   Field-sensitive where type info allows.
-4. **Demand-driven pointer analysis.** Points-to sets are computed *only* for values a taint query
-   actually reaches (demand-driven Andersen / CFL-reachability style), rather than whole-program.
-   This keeps precision high on the paths that matter without paying for the rest of the program.
-5. **Confidence scoring.** Each finding gets a confidence based on path certainty — e.g. ambiguous
-   dynamic dispatch, possibly-bypassed sanitizer, or cross-file inference lower it. Low-confidence
-   findings are tagged for the (later) LLM reviewer.
+A reachability primitive (`CallGraph.Reachable`/`Roots`) exists as a tree-shaking
+lever. A regex-based **secrets scanner** (`ScanSecrets`, CWE-798) runs alongside
+taint over gIR string constants.
 
-**Implementation order:** build intra-procedural taint first (single-function flows) to get a working
-detector fast, then extend the same propagation to inter-procedural via call-graph traversal and
-per-function taint **summaries**.
+## Rule engine
 
----
+YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
 
-## 5. Rule Engine
+- **Taint rules** (default) — a source→sink dataflow spec with
+  sanitizers/validators/propagators. A sink may pin its injection-point argument
+  with `#<index>` to avoid parameterized-query false positives.
+- **Dangerous-call rules** (`kind: dangerous-call`) — a non-dataflow, call-site
+  match: any call to a banned/weak API (optionally gated on a constant argument) is a
+  finding. Backs the weak-crypto packs (weak hash/cipher CWE-327, insecure
+  `math/rand` CWE-338).
 
-YAML rules, loaded and matched against canonical symbols. Three rule kinds:
+Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
+not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
+`rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
+For the full authoring reference see [docs/writing-rules.md](docs/writing-rules.md).
 
-### 5.1 Taint rules
+## Frontends
 
-```yaml
-id: go-sql-injection
-languages: [go]
-severity: high
-cwe: CWE-89
-message: "Untrusted input flows into a SQL query"
-sources:
-  - "go:net/http.(*Request).FormValue"
-  - "go:net/http.Values.Get"
-sanitizers:
-  - "*/database/sql.Named"          # parameterized query helpers
-sinks:
-  - "*/database/sql.(*DB).Query"
-  - "*/database/sql.(*DB).Exec"
-propagators:
-  - "builtin.sprintf"               # taint flows through format strings
-  - "builtin.string.concat"
-```
+All frontends run **in-process** and emit gIR with canonical FQNs and SSA; the tool
+ships as a single Go binary. Only C/C++ needs cgo — the rest are pure Go, and
+Python/Java/Rust/Ruby merely shell out to a toolchain on `PATH`.
 
-Sources/sinks/sanitizers/propagators are all **FQN globs**, enabling one logical rule to cover
-multiple languages (or a shared cross-language rule with per-language symbol lists).
-
-### 5.2 Pattern rules (non-dataflow)
-
-For findings that are not source→sink flows — chiefly **hardcoded secrets** — a separate rule kind
-matches over gIR string constants (and optionally raw source) using regex / entropy checks. This path
-is deliberately distinct from taint so the dataflow engine stays focused.
-
-### 5.3 Dangerous-call rules (non-dataflow)
-
-`kind: dangerous-call` rules flag a call to a banned or weak API by canonical name alone — no taint
-required — so they are near-zero-false-positive and cheap. They back the **weak-crypto** packs (weak
-hash MD5/SHA-1, broken cipher DES/3DES/RC4 — CWE-327; insecure `math/rand` for secrets — CWE-338),
-matching `callees` globs with an optional `constArg` condition to restrict a match to a specific
-constant argument.
-
----
-
-## 6. Frontends
-
-All frontends run **in-process** and emit gIR v2 with canonical FQNs and SSA. The tool ships as a
-single Go binary. (Parsing choices below are **as built**; where they diverge from the original design
-intent — Python bytecode/tree-sitter, JS tree-sitter — see §10.)
-
-- **Go** — `converters/go/`, built on `golang.org/x/tools` SSA (already SSA). Emits the core+intrinsics
-  schema and `go:` canonical names; Go-specific opcodes collapse into intrinsics. Enumerates all
-  functions incl. closures via `ssautil.AllFunctions`.
-- **Python** — shells out to a local **`python3`** for an `ast` JSON dump, then lowers it (straight-line).
-  Emits `py:` names; errors if no `python3` is on `PATH` (the tree-sitter fallback was not built).
-- **JavaScript** — pure-Go parse via **goja** → AST → lower (straight-line). Emits `js:` names. (No
-  tree-sitter, so no cgo for JS.)
-- **Java** — `converters/java/`. An embedded single-file helper (`JavaDump.java`, run via a **JDK 24+**
-  `java`) compiles `.java` in-process and reads `.class` with the standard `java.lang.classfile` API,
-  emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to recover SSA. Analyzes JVM
-  **bytecode**, so it also scans `.class`/`.jar`. Emits `java:<owner>.<method>`.
-- **Rust** — `converters/rust/`. Shells out to **`rustc --emit=mir`** and lowers the textual MIR with a
-  straight-line value-forwarding pass. MIR (not LLVM IR) is used because it names the source-level API
-  (`std::env::var`, `Command::arg`) and assigns call results directly to locals — no `sret` indirection.
-  Pure Go, in the default binary. Emits `rust:<normalized-path>`.
-- **Ruby** — `converters/ruby/`. An embedded helper (`rbdump.rb`, run via **`ruby`**) parses with the
-  stdlib **Ripper** and prints its S-expression AST as JSON; `lower.go` lowers that tree (straight-line).
-  Ripper ships with every MRI Ruby, so only a `ruby` on `PATH` is needed. Pure Go, in the default binary.
+- **Go** (`converters/go/`) — `golang.org/x/tools` SSA (already SSA). Enumerates all
+  functions incl. closures via `ssautil.AllFunctions`, since vulnerable code often
+  lives in `http.HandleFunc` closures. Emits `go:` names.
+- **Python** (`converters/python/`) — shells out to `python3` for an `ast` JSON
+  dump, then lowers it (straight-line). Emits `py:` names; requires `python3`.
+- **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
+  lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node) before
+  parsing, with source maps remapping positions back. Emits `js:` names.
+- **Java** (`converters/java/`) — analyzes JVM **bytecode**. An embedded helper
+  (`JavaDump.java`, run via a JDK 24+ `java`) compiles `.java` in-process and reads
+  `.class` with `java.lang.classfile`; `lower.go` simulates the operand stack to
+  recover SSA. Maven/Gradle projects are built first so deps are on the classpath.
+  Emits `java:<owner>.<method>`.
+- **Rust** (`converters/rust/`) — shells out to `rustc --emit=mir` and lowers the
+  textual MIR (value-forwarding). MIR names the source-level API (`std::env::var`,
+  not the monomorphized internal) and assigns call results directly to locals (no
+  `sret` indirection), so no LLVM/cgo is needed. A `Cargo.toml` project is built with
+  `cargo` so framework deps resolve. Emits `rust:<normalized-path>`.
+- **Ruby** (`converters/ruby/`) — an embedded helper (`rbdump.rb`, run via `ruby`)
+  parses with the stdlib **Ripper** and emits its S-expression AST as JSON;
+  `lower.go` lowers that tree (straight-line). Ripper ships with every MRI Ruby.
   Emits `ruby:` names.
-- **C / C++** — `converters/cpp/` + shared `converters/llvm/`. clang compiles each unit to **LLVM IR**
-  (`-O1 -g`), parsed via libLLVM (`tinygo.org/x/go-llvm`) and lowered. This is the **opt-in cgo backend**
-  (`-tags "llvm byollvm"`), *not* in the default binary — the default ships a stub. Emits `c:`/`cpp:`.
+- **C / C++** (`converters/cpp/` + shared `converters/llvm/`) — clang compiles each
+  unit to **LLVM IR** (`-O1 -g`), parsed via libLLVM and lowered. This is the
+  **opt-in cgo backend** (`-tags "llvm byollvm"`), *not* in the default binary, which
+  ships a stub. Emits `c:`/`cpp:`.
 
-**Note on cgo:** only the C/C++ frontend needs cgo (libLLVM). Go/Python/JS/Java/Rust/Ruby are all pure Go
-and ship in the default single static binary; Python/Java/Rust/Ruby merely shell out to a toolchain on
-`PATH`.
+Python, JS, and Ruby name modules by their path relative to the scan root, so
+same-named functions in different files get distinct canonical names.
 
----
+## Confidence, LLM review, and reporting
 
-## 7. Confidence, LLM reviewer, and Reporting
+- **Confidence** — every finding is scored (intra = High, cross-function = Medium),
+  and the pipeline routes low-confidence findings to the reviewer stage.
+- **LLM reviewer** (`internal/llm/`) — a pluggable, Anthropic-backed stage that
+  adjudicates uncertain findings and discards false positives. Confidence-gated,
+  **fail-open** (never drops a finding on an API error), and off by default
+  (`--llm-review`).
+- **Report** (`internal/report/`) — a self-contained **HTML** report with severity,
+  confidence, and code snippets, plus **JSON** and **SARIF 2.1.0** (`--json` /
+  `--sarif`, the latter for GitHub code scanning). The CLI sets a severity-gated
+  process **exit code** so CI can gate on it.
 
-- **Confidence model (build now):** every finding is scored; the pipeline has an explicit hook to
-  route low-confidence findings to a reviewer stage.
-- **LLM reviewer (build later):** a pluggable stage that sends uncertain findings to Claude
-  (Anthropic API) for adjudication, discarding false positives. Optional and off the hot path — the
-  precision backstop for the "perfect signal/noise" goal.
-- **Report module:** **HTML** — findings with severity, confidence, code snippets (via `Position`), and
-  source→sink path visualization. The CLI sets a process **exit code** based on a severity threshold so
-  CI can gate on it. **JSON and SARIF 2.1.0** outputs are also implemented (`--json`/`--sarif`; SARIF
-  unlocks GitHub code scanning).
+## Implementation status
 
----
-
-## 8. Phased roadmap
-
-Each phase is independently verifiable.
-
-- **Phase 0 — Baseline.** Implement `cmd/godzilla/main.go` (currently empty), make `go build ./...`
-  green, add CI scaffolding.
-- **Phase 1 — gIR v2.** New proto schema (core opcodes + `INTRINSIC` + canonical `Symbol` +
-  finding/confidence types); regenerate bindings; refactor the Go frontend to emit it; golden tests on
-  the existing samples (no `unsupported instruction` fallbacks; intrinsics correctly tagged).
-- **Phase 2 — Rules + intra-procedural taint (Go vertical slice).** YAML loader + FQN glob matcher;
-  taint over SSA def-use within a function; detect SQL injection in the Go sample end-to-end.
-- **Phase 3 — Inter-procedural depth.** Call graph + tree-shaking; demand-driven points-to for
-  `INVOKE` resolution and field sensitivity; cross-call taint summaries; confidence scoring.
-- **Phase 4 — Python frontend.** `python3`→bytecode→SSA with tree-sitter fallback; `py:` rules;
-  validate taint on a Flask sample.
-- **Phase 5 — JavaScript frontend.** tree-sitter→SSA; `js:` rules; validate XSS/SSRF on an Express
-  sample.
-- **Phase 6 — Reports + secrets.** HTML report (path viz, snippets, severity/confidence) + exit-code
-  gating; add the pattern-rule path for hardcoded secrets.
-- **Phase 7 — LLM reviewer (later).** Pluggable Claude stage over low-confidence findings.
-
-The MVP vuln scope (injection, path traversal, XSS/SSRF, secrets) is delivered incrementally through
-rules across Phases 2–6.
-
----
-
-## 9. Key risks & tensions
-
-- **Speed vs. precision.** Inter-procedural + pointer analysis is precise but costly. Mitigations:
-  tree-shaking, demand-driven points-to, and the LLM reviewer as the residual-FP filter.
-- **gIR v2 churn.** The core+intrinsics schema is the foundation for two frontends and all analysis;
-  changes are expensive once frontends exist. Phase 1 exists to get it right before that cost lands.
-- **Python fidelity vs. deployment.** The `python3`-preferred / tree-sitter-fallback split means two
-  Python code paths and behavior that varies with the environment. Golden tests should cover both.
-- **cgo / static binary.** tree-sitter's C dependency complicates fully-static builds; needs a
-  deliberate build setup.
-- **Canonical naming drift.** Rule reuse depends on frontends producing stable, consistent FQNs. The
-  naming scheme should be specified precisely and covered by tests per frontend.
-
----
-
-## 10. Implementation status
-
-All phases below are implemented, tested, and validated end-to-end (every vuln class is detected across
-the languages that have samples). See `CLAUDE.md` for the package-level map.
+Every component below is implemented and tested end-to-end; every vuln class is
+detected across the languages that have samples.
 
 | Component | Status |
 |---|---|
-| gIR v2 (small core + intrinsics, SSA, canonical FQNs) | ✅ Done — `proto/`, `pkg/ir/v1/` |
-| Go frontend (x/tools SSA; funcs + methods + closures) | ✅ Done |
-| Python frontend (`python3` `ast` → gIR) | ✅ Done (straight-line lowering; tree-sitter fallback not built — errors if `python3` absent) |
-| JavaScript frontend (goja → gIR) | ✅ Done (straight-line lowering) |
-| Java frontend (JVM bytecode → gIR) | ✅ Done — embedded `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ `java` |
-| Rust frontend (rustc MIR → gIR) | ✅ Done — value-forwarding over MIR; pure Go, default binary; needs `rustc` |
-| Ruby frontend (Ripper AST → gIR) | ✅ Done — `rbdump.rb` Ripper dumper + straight-line lowering; pure Go, default binary; needs `ruby` |
-| C/C++ frontend (LLVM IR → gIR) | ✅ Done — **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
-| Rule engine (YAML, FQN globs, built-in rules) | ✅ Done — Go/Python/JS (SQLi, command injection, path traversal, SSRF, XSS, open redirect; + Py CWE-502 & CWE-95, JS CWE-95); Java & Rust (same web classes; Java adds CWE-502); Ruby (SQLi, command injection); C/C++ (command injection, path traversal, format string, SQLi, buffer overflow); non-dataflow **dangerous-call** packs (weak hash/cipher, insecure `math/rand`) for Go & Java |
-| Intra-procedural taint | ✅ Done |
-| Inter-procedural taint (call graph + summaries) | ✅ Done |
-| Tree-shaking (reachability pruning primitive) | ✅ `CallGraph.Reachable`/`Roots` implemented; not yet used to prune the analysis set |
-| Pointer analysis | ⚠️ Approximated — CHA for dynamic dispatch + value-flow alias tracking (def-use + container taint). A full **demand-driven Andersen points-to** (the interview's stated goal) is a documented future precision upgrade; the current approach is sound and sufficient for the target vuln classes |
-| Confidence scoring | ✅ Done — intra = High, cross-function = Medium |
-| Secrets (pattern) scanning | ✅ Done — regex over gIR string constants (CWE-798) |
-| HTML report + exit-code gating | ✅ Done — plus JSON and SARIF 2.1.0 output (`--json`/`--sarif`) for tooling / GitHub code scanning |
-| LLM reviewer (pluggable) | ✅ Done — Anthropic-backed, confidence-gated, fail-open; off by default (`--llm-review`) |
+| gIR (small core + intrinsics, SSA, canonical FQNs) | ✅ `proto/`, `pkg/ir/v1/` |
+| Go frontend (x/tools SSA; funcs + methods + closures) | ✅ |
+| Python frontend (`python3` `ast` → gIR) | ✅ straight-line lowering; requires `python3` |
+| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild) | ✅ straight-line lowering |
+| Java frontend (JVM bytecode → gIR) | ✅ `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ |
+| Rust frontend (rustc MIR → gIR) | ✅ value-forwarding over MIR; pure Go, default binary; needs `rustc` |
+| Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + straight-line lowering; pure Go, default binary; needs `ruby` |
+| C/C++ frontend (LLVM IR → gIR) | ✅ **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
+| Rule engine (YAML, FQN globs, built-in packs) | ✅ taint + dangerous-call kinds across Go/Python/JS/Java/Rust/Ruby/C·C++ (see the [detection matrix](README.md#supported-languages--detections)) |
+| Inter-procedural taint (call graph + summaries) | ✅ intra = High, cross-function = Medium confidence |
+| Tree-shaking (reachability pruning) | ⚠️ `CallGraph.Reachable`/`Roots` implemented; not yet used to prune the analysis set |
+| Pointer analysis | ⚠️ approximated (CHA + value-flow); a full demand-driven points-to is a future precision upgrade |
+| Secrets scanning | ✅ regex over gIR string constants (CWE-798) |
+| Report (HTML / JSON / SARIF) + exit-code gating | ✅ |
+| LLM reviewer (pluggable) | ✅ Anthropic-backed, confidence-gated, fail-open; off by default |
 
-**Known frontend limitations** (documented in each converter's package doc): Python and JS lowering is
-straight-line (control flow flattened into one conceptual iteration). Taint flows through the common
-expression forms — f-strings/template literals, `or`/`and`, ternary, walrus, object/array destructuring and
-tuple unpacking, optional chaining, `await`, tainted-iterable loop variables, and sources/sinks inside
-comprehensions, and class-based handlers with cross-method calls (`self.method(x)` / `this.method(x)`) —
-so the main remaining gap is taint carried across methods via instance attributes (`self.attr` /
-`this.attr`). This maximizes taint
-recall for the common web-handler vulnerability shape at the cost of path precision — consistent with the
-"recall-oriented analysis + LLM/confidence backstop" design.
+### Known limitations
 
-**Interface / dynamic dispatch — crossed inter-procedurally (CHA).** An `OP_CODE_INVOKE` call names the
-abstract interface method, so the taint transfer resolves it to every concrete method of that name
-(class-hierarchy analysis) and flows taint into each — with the receiver offset (invoke args exclude the
-receiver, which is `Call.Value`). This catches taint through interfaces (`http.Handler`, custom
-service/repository interfaces). It over-approximates (any same-named method matches), so such findings stay
-Medium confidence and lean on the confidence/LLM backstop. See `interproc.go` (`methodImpls`).
-
-**Known analysis limitations** (surfaced by review, tracked here):
-- **Go field-access sources aren't matchable.** A source read as a struct field (`r.URL.Path`,
-  `r.Header[...]`) lowers to `FIELD`/`INDEX` with no `Callee`, so rules (which match `Call.Callee`) can't
-  flag it. Method-call sources (`FormValue`, `Query().Get`, `Header.Get`, …) cover the common Go cases;
-  field-access sources would need a JS-style "opaque-base → synthetic source call" heuristic in the Go
-  frontend (the dead `go:*Request*.URL*` globs that claimed this were removed).
+- **Straight-line Python/JS lowering.** Control flow is flattened into one
+  conceptual iteration. Taint flows through the common expression forms (f-strings /
+  template literals, `or`/`and`, ternary, walrus, destructuring/unpacking, optional
+  chaining, `await`, tainted-iterable loop variables, comprehensions) and class-based
+  handlers with cross-method calls (`self.method(x)` / `this.method(x)`). The main
+  remaining gap is taint carried across methods via **instance attributes**
+  (`self.attr` / `this.attr`). This maximizes recall for the common web-handler shape
+  at the cost of path precision — consistent with the recall-first design.
+- **Context-insensitive dispatch (CHA).** An `INVOKE` names the abstract method, so
+  the taint transfer resolves it to every concrete method of that name and flows taint
+  into each (with the receiver offset handled). This catches taint through interfaces
+  but over-approximates, so such findings stay Medium confidence.
+- **SSRF host-awareness.** An SSRF finding is suppressed when the untrusted value
+  only reaches the **path or query of a fixed host** — reconstructed from
+  concatenation and format strings (including Rust's packed `fmt::Arguments`
+  template). It is conservative: it drops a finding only when a constant
+  `scheme://host/…` prefix is *proven* to precede the taint, so no real SSRF is lost.
+  The one construction whose literal template is absent from gIR — Java string `+`
+  (`makeConcatWithConstants`) — keeps firing (a possible false positive over a fixed
+  host, never a false negative).
+- **Go field-access sources.** A source read as a struct field (`r.URL.Path`) lowers
+  to `FIELD`/`INDEX` with no `Callee`, so rules (which match `Call.Callee`) can't flag
+  it. Method-call sources (`FormValue`, `Query().Get`, `Header.Get`) cover the common
+  Go cases; field-access sources would need a synthetic-source heuristic like the one
+  the JS frontend uses for opaque-base member reads.

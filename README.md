@@ -32,31 +32,26 @@ flowchart LR
 ## Features
 
 - **Multi-language, one engine.** Go, Python, JavaScript, Java, Rust, and Ruby
-  frontends (plus C/C++ in the opt-in cgo build) all emit the same gIR; the taint
-  engine and rules are language-agnostic.
+  (plus C/C++ in an opt-in cgo build) all emit the same gIR; the taint engine and
+  rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
-  calls (source → sanitizer → sink) with a call graph and function summaries.
-  Each finding carries a **confidence** (High for intra-procedural, Medium for
-  cross-function).
+  calls (source → sanitizer → sink). Each finding carries a **confidence** — High
+  for intra-procedural, Medium for cross-function.
 - **YAML rules, sink-argument aware.** Sources / sinks / sanitizers / propagators
-  are canonical-name globs. Sinks can pin the exact injection-point argument
-  (`"go:*database/sql*.Query#0"`), so a parameterized query
-  `db.Query("... = ?", userInput)` is **not** a false positive.
-- **Built-in rule packs** for SQL injection, command injection, path traversal,
-  SSRF, reflected XSS, open redirect, insecure deserialization, and code
-  injection (`eval`), plus non-dataflow checks: **weak crypto** (MD5/SHA-1,
-  DES/RC4, `math/rand`) and a regex-based **hardcoded-secrets** scanner.
-- **CI-friendly.** Human-readable findings, a self-contained **HTML report**,
-  **JSON** and **SARIF 2.1.0** output (for GitHub code scanning / custom tooling),
-  and a severity-gated **exit code**.
+  are canonical-name globs. A sink can pin its injection-point argument
+  (`"go:*database/sql*.Query#0"`), so a parameterized `db.Query("... = ?", x)` is
+  **not** a false positive. See [docs/writing-rules.md](docs/writing-rules.md).
+- **Batteries included.** Built-in packs for SQL injection, command injection,
+  path traversal, SSRF, XSS, open redirect, insecure deserialization, and code
+  injection, plus non-dataflow checks for **weak crypto** and **hardcoded
+  secrets**.
+- **CI-friendly output.** Human-readable findings, a self-contained **HTML
+  report**, **JSON** and **SARIF 2.1.0** (for GitHub code scanning), and a
+  severity-gated **exit code**.
 - **Optional LLM review.** A pluggable stage sends low-confidence findings to
   Claude to trim false positives; it fails open and is off by default.
-- **Single self-contained binary.** The Go and JavaScript frontends are pure Go;
-  Python, Java, Rust, and Ruby shell out to the toolchain already on `PATH`
-  (`python3`, a JDK `java`, `rustc`, `ruby`) and degrade gracefully when it is
-  absent. C/C++ is an
-  opt-in cgo build (libLLVM). No frontend adds a runtime dependency to *run* the
-  binary — only to analyze that language.
+- **Single self-contained binary.** Go/JS/Ruby-parsing is pure Go; Python, Java,
+  and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
 ## Install
 
@@ -67,7 +62,8 @@ go build -o godzilla ./cmd/godzilla
 
 Requires **Go 1.25+**. Scanning Python, Ruby, Java, or Rust also needs that
 language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`;
-each degrades gracefully when absent.
+each degrades gracefully when absent. Or skip install entirely and
+[run with Docker](#run-with-docker).
 
 ## Quick start
 
@@ -87,14 +83,12 @@ godzilla scan --rules myrules.yaml --summary ./path/to/project
 # Triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
 godzilla scan --llm-review ./path/to/project
 
-# Changed-files mode: scan only what a commit touched (one process, one gate).
-# Pass several paths, or feed a list on stdin with -files - for a pre-commit hook:
+# Changed-files mode: gate only what a commit touched (one process, one gate)
 git diff --name-only --cached | godzilla scan -files -
 ```
 
-**Pre-commit hook** (`.git/hooks/pre-commit`): gate a commit on only its staged
-files — no re-paying frontend startup per file, and a docs-only commit passes
-cleanly:
+**Pre-commit hook** (`.git/hooks/pre-commit`) — gate a commit on only its staged
+files, so a docs-only commit passes cleanly:
 
 ```bash
 #!/bin/sh
@@ -103,8 +97,6 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
 `--fail-on` (default: `medium`). Use the exit code as your CI gate.
-
-### Example
 
 ```
 $ godzilla scan ./test/go/sql_injection
@@ -119,8 +111,7 @@ $ godzilla scan ./test/go/sql_injection
 ## Run with Docker
 
 Prebuilt images ship with the toolchains a scan needs, so you can gate a repo
-without installing Go/Python/Ruby/Java/Rust yourself. They live on GHCR in two
-variants:
+without installing anything. They live on GHCR in two variants:
 
 | Image | Size | Scans |
 |---|---|---|
@@ -131,10 +122,10 @@ The entrypoint is `godzilla` and the default command is `scan .`, so mounting a
 repo at `/src` scans it immediately:
 
 ```bash
-# Scan the current directory (exit 3 if it finds something at/above --fail-on)
+# Scan the current directory (exit 3 on a finding at/above --fail-on)
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla
 
-# Write a SARIF report; any arguments override the default `scan .`
+# Any arguments override the default `scan .`
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
   scan --sarif /src/results.sarif --fail-on high /src
 
@@ -143,11 +134,8 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
 ```
 
 The slim image **skips** Java and Rust with a coverage warning rather than
-failing — use `:full` when you need them. Scanning a Go project that pulls
-dependencies needs network access for module fetch (or mount a warm
-`GOMODCACHE`). Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full`
-(full) track releases; `edge`/`edge-full` track `main`. Images are multi-arch
-(amd64 + arm64).
+failing. Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full` (full) track
+releases; `edge`/`edge-full` track `main`. Images are multi-arch (amd64 + arm64).
 
 ## Supported languages & detections
 
@@ -165,84 +153,36 @@ dependencies needs network access for module fetch (or mount a warm
 | Weak crypto | ✅ | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
-> scan over gIR string constants; **weak crypto** (CWE-327/338) is a non-dataflow
-> call-site check — both run independently of the taint engine. C/C++ (opt-in cgo
-> build) adds command injection, path traversal, format string, SQL injection,
-> and buffer-overflow checks; see below.
+> scan over gIR string constants, independent of the taint engine.
 
-Notes on the compiled languages:
+- **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
+  JDK 24+ `java` on `PATH`. Maven/Gradle projects are built first so third-party
+  deps are on the classpath.
+- **Rust** analyzes **rustc MIR** and ships in the default binary — only `rustc`
+  is needed. A `Cargo.toml` project is built so web-framework request accessors
+  are recognized as sources.
+- **C / C++** are analyzed via **LLVM IR** — an opt-in **cgo** build
+  (`make build-llvm`, needs libLLVM + clang), *not* in the default binary. Adds
+  command injection, path traversal, format string, SQL injection, and
+  buffer-overflow checks.
 
-**Java** is analyzed at the JVM-bytecode level: an embedded single-file helper
-(`java JavaDump.java`) compiles `.java` sources in-process and reads `.class`
-files with the standard `java.lang.classfile` API, and Godzilla simulates the
-operand stack to recover SSA values. Needs a **JDK 24+** `java` on `PATH`;
-sources that require a classpath are best scanned as compiled `.class`/`.jar`.
-
-**Rust** is analyzed via **rustc MIR** (Mid-level IR), in the **default pure-Go
-binary** — only `rustc` is needed at scan time (like Python needs `python3`).
-Godzilla runs `rustc --emit=mir` and lowers the textual MIR with a straight-line
-value-forwarding pass. MIR, unlike Rust's LLVM IR, names the source-level public
-API (`std::env::var`, `Command::arg` — not the internal, version-unstable
-`std::env::__var`) and assigns call results directly to locals (no `sret`
-out-pointer indirection), so command injection and path traversal are detected
-today, with taint flowing through `format!`. Emitting MIR skips codegen, so it is
-fast (~40 ms/file). A scan target with a `Cargo.toml` is built with `cargo` so a
-**web-framework** dependency resolves and its request accessors (an untrusted
-HTTP query param / header / body) are recognized as taint sources — the real
-attack surface. Samples that pull an external crate over the network are opt-in
-(`GODZILLA_RUST_E2E=1`), like Java's Spring build sample.
-
-**C / C++** are analyzed via **LLVM IR**: clang compiles each unit to IR
-(`-O1 -g`), parsed with libLLVM and lowered to gIR. This is an opt-in **cgo**
-build — `make build-llvm` (or `go build -tags "llvm byollvm"` with libLLVM CGO
-flags) — *not* in the default binary, which ships a stub for C/C++. Needs libLLVM
-+ clang. Command injection (`system`/`popen`/`exec*`), path traversal
-(`fopen`/`open`), format-string (`printf`-family), SQL injection, and
-buffer-overflow risks (unsafe `gets`/`strcpy`-family calls) are detected; taint
-flows through primitive (`char*`) values. C++ code that routes untrusted data
-through heap aggregates (`std::string`) is not yet tracked.
+Full frontend details are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Writing rules
 
-A rule is a source→sink taint spec matched against canonical fully-qualified
-names (`<lang>:module/path.Type.Member`). Globs use `*` (matches across `/` and
-`.`); a sink may append `#<argIndex>` to restrict the injection point to a
-specific (receiver-excluded) argument.
-
-```yaml
-rules:
-  - id: my-sql-injection
-    languages: [go]
-    severity: high
-    cwe: CWE-89
-    message: Untrusted input reaches a SQL query.
-    sources:
-      - "go:*net/http*.Request*.FormValue"
-      - "go:*net/url*.Get"
-    sinks:
-      - "go:*database/sql*.Query#0"        # only the query string; bound params are safe
-      - "go:*database/sql*.QueryContext#1" # ctx is arg 0, query is arg 1
-    sanitizers: []
-    propagators:
-      - "go:fmt.Sprintf"
-      - "go:strings.Join"
-```
-
-Pass a file with `--rules`; it is merged with the built-in packs (see the
-top-level `rulepacks/` directory).
+A rule is a source→sink taint spec (or a non-dataflow `dangerous-call` check)
+matched against canonical `<lang>:module.Type.member` names. Adding a detection is
+usually a few lines of YAML in [`rulepacks/`](rulepacks); pass your own with
+`--rules`. See the **[rule-authoring guide](docs/writing-rules.md)**.
 
 ## How it works
 
-- **gIR** (`proto/`, generated into `pkg/ir/v1/`) is a small, language-neutral SSA
-  opcode core plus an `INTRINSIC` escape hatch for language-specific constructs.
-  Functions carry stable canonical names (`<lang>:module.Type.Member`) so rules
-  join across languages.
-- **Frontends** (`converters/{go,python,javascript,java,rust,ruby,cpp,llvm}/`)
-  lower each language to gIR.
+- **gIR** (`proto/` → `pkg/ir/v1/`) is a small language-neutral SSA core plus an
+  `INTRINSIC` escape hatch, with stable canonical names so rules join across languages.
+- **Frontends** (`converters/*`) lower each language to gIR.
 - **Analysis** (`internal/analysis/`) builds a call graph and runs inter-procedural
-  taint, plus a pattern-based secrets scan.
-- **Rules** (`internal/rules/`), **report** (`internal/report/`), **LLM reviewer**
-  (`internal/llm/`), and the **CLI** (`cmd/godzilla/`) sit on top.
+  taint, plus the secrets scan.
+- **Rules**, **report**, **LLM reviewer**, and the **CLI** sit on top.
 
 ```mermaid
 flowchart TD
@@ -255,72 +195,30 @@ flowchart TD
     REV --> REP
 ```
 
-The full design rationale is in [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Development
-
-```bash
-go build ./...          # build everything
-go test ./...           # unit tests + the sample corpus + isolated-module builds
-go test -short ./...    # same, skipping the slow isolated-module (cgo) builds
-go vet ./...
-gofmt -l cmd converters internal test/corpus
-
-# Regenerate gIR bindings after editing proto/*.proto (needs protoc + protoc-gen-go)
-export PATH=$PATH:$(go env GOPATH)/bin
-go generate ./...
-```
-
-Vulnerable samples live under `test/{go,python,js,java,rust,ruby,c,cpp}/` (Go
-samples are each their own isolated module so sample dependencies never touch the
-root `go.mod`). Every sample is an asserted test case: it carries an
-`expected.yaml` and `go test ./...` checks that the scanner reproduces exactly
-those findings (no misses, no new false positives). The corpus **skips** a
-language whose toolchain is absent (`python3`/`java`/`rustc`/`ruby`, or
-`-tags llvm`+clang for C/C++), so the default run stays green anywhere. See [test/README.md](test/README.md) for the
-corpus and how to add a sample.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and rationale.
 
 ## Status & limitations
 
 Godzilla is functional and covered by tests, but deliberately scoped:
 
-- The **Python and JavaScript frontends lower straight-line code** — control flow
-  is flattened into one conceptual pass. Taint still flows through the common
-  expression forms: f-strings / template literals, `or`/`and` and the ternary
-  (`a if c else b` / `?:`), the walrus operator, object and array destructuring
-  (`const { id } = req.query`, `const [x] = arr`, `a, b = ...`), optional chaining
-  (`req.body?.user?.name`), `await`, loop variables bound from a tainted iterable,
-  and sources/sinks inside comprehensions. Class-based handlers are analyzed and
-  cross-method calls resolve (`self.method(x)` / `this.method(x)`); the main
-  remaining gap is taint carried across methods through **instance attributes**
-  (`self.attr` / `this.attr`). This favors recall for the common web-handler
-  shape.
-- Taint is **inter-procedural but context-insensitive**. Interface/dynamic
-  dispatch *is* threaded through the taint transfer: class-hierarchy analysis
-  (CHA) maps an interface call to its concrete implementations, so taint crosses
-  `iface.Method(userInput)`. Because CHA is an over-approximation, a call may be
-  resolved to more implementations than are reachable at runtime.
-- **SSRF (CWE-918) is host-aware.** An SSRF finding is suppressed when the
-  untrusted value only reaches the **path or query of a fixed host** —
-  `http.Get("https://api.example.com/" + userPath)`, the `fmt.Sprintf`
-  equivalent, or Rust `format!("https://api.example.com/{}", p)` — because the
-  request cannot be redirected to an attacker host. The check reconstructs the
-  URL from concatenation and format strings (including Rust's packed
-  `fmt::Arguments` template) and is conservative: it drops a finding only when a
-  constant `scheme://host/…` prefix is *proven* to precede the taint. The one
-  construction whose literal template is not present in gIR — **Java string `+`**
-  (`makeConcatWithConstants`) — can't be introspected, so it keeps firing
-  (potential false positive over a fixed host, never a false negative).
-- Pointer analysis is approximated (value-flow + CHA), not a full demand-driven
-  points-to.
+- **Python/JS lowering is straight-line** — control flow is flattened into one
+  conceptual pass. Taint still flows through the common expression forms and
+  class-based handlers; the main gap is taint carried across methods via instance
+  attributes (`self.attr` / `this.attr`).
+- **Taint is inter-procedural but context-insensitive.** Interface/dynamic
+  dispatch is threaded via class-hierarchy analysis (an over-approximation).
+- **SSRF is host-aware** — a finding is suppressed when the taint only reaches the
+  path/query of a *proven* fixed host, conservatively (never a false negative).
+- **Pointer analysis is approximated** (value-flow + CHA), not full points-to.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) §10 for the current implementation status.
+See the [implementation status](ARCHITECTURE.md#implementation-status) for the
+per-component detail.
 
 ## Contributing
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first areas:
-new built-in rules (often just YAML), a new language frontend, or improving
-frontend fidelity.
+new built-in rules (often just YAML — [guide](docs/writing-rules.md)), a new
+language frontend, or improving frontend fidelity.
 
 ## License
 
