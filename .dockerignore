@@ -1,0 +1,31 @@
+# Keep the build context to what `go build ./cmd/godzilla` actually needs
+# (cmd/, converters/ + its embedded pyast.py/rbdump.rb/JavaDump.java, internal/,
+# pkg/, rulepacks/ + its //go:embed *.yaml, go.mod, go.sum). Everything below is
+# either not compiled into the binary or would bloat the context / bust caching.
+
+.git
+.github
+.dockerignore
+Dockerfile
+
+# Test fixtures are not built into the binary and include large cargo target
+# caches (test/rust/**/target).
+test/
+
+# Local build artifacts and reports.
+/godzilla
+*.sarif
+*.html
+dist/
+bin/
+
+# Docs the binary doesn't embed.
+*.md
+BACKLOG.md
+LICENSE
+
+# Editor / OS cruft.
+.vscode/
+.idea/
+*.swp
+.DS_Store

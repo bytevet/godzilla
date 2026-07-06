@@ -1,0 +1,21 @@
+version: 2
+
+# Keep the deliberately-pinned Docker base images (Dockerfile) and the pinned
+# GitHub Actions (ci.yml, release.yml, security.yml) current via reviewable PRs,
+# so we get reproducible pins without `latest`'s silent drift.
+updates:
+  # Base images: golang:1.25-bookworm, debian:bookworm-slim, eclipse-temurin:25-jdk.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: docker
+
+  # Action versions used across the workflows (actions/*, docker/*, etc.).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

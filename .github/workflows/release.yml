@@ -1,0 +1,84 @@
+name: Publish images
+
+# Build the scan-ready container images and publish them to GHCR.
+#   push tag v* → versioned + moving tags (slim: X.Y.Z, X.Y, latest / full: …-full, full)
+#   push main   → edge / edge-full
+#   pull_request → build both variants for a smoke test, but never push.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+# Only the latest run per ref needs to finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write        # push to ghcr.io/${{ github.repository }}
+
+jobs:
+  images:
+    name: ${{ matrix.variant }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # slim is the default variant: its moving tag is `latest`, no suffix.
+          - variant: slim
+            suffix: ''
+            release_moving: latest
+          # full carries a `-full` suffix and uses `full` as its moving tag.
+          - variant: full
+            suffix: '-full'
+            release_moving: full
+    steps:
+      - uses: actions/checkout@v7
+
+      # QEMU + buildx give us linux/arm64 emulation for multi-arch images.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # No login (and no push) on pull_request — GITHUB_TOKEN is read-only there.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compute the tag/label set. flavor.latest=false so `latest` is only ever
+      # emitted by the explicit type=raw rule below (and only for the slim
+      # variant on a version tag); suffix appends `-full` to every full tag.
+      - name: Derive tags & labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=edge,branch=main
+            type=raw,value=${{ matrix.release_moving }},suffix=,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.variant }}
+          # arm64 emulation is slow; only build it for the real (pushed) images.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
