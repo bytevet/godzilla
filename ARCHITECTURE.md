@@ -257,7 +257,11 @@ detected across the languages that have samples.
   (`makeConcatWithConstants`) — keeps firing (a possible false positive over a fixed
   host, never a false negative).
 - **Go field-access sources.** A source read as a struct field (`r.URL.Path`) lowers
-  to `FIELD`/`INDEX` with no `Callee`, so rules (which match `Call.Callee`) can't flag
-  it. Method-call sources (`FormValue`, `Query().Get`, `Header.Get`) cover the common
-  Go cases; field-access sources would need a synthetic-source heuristic like the one
-  the JS frontend uses for opaque-base member reads.
+  to `FIELD`/`INDEX` with no `Callee`, so a rule (which matches `Call.Callee`) cannot
+  flag it directly. The Go frontend closes this for HTTP handlers by synthesizing a
+  request-object source: a function taking both `http.ResponseWriter` and
+  `*http.Request` gets its request parameter tainted at entry (`addHTTPRequestSource`),
+  so whole-object taint flows to every field read off it — the same boundary-source
+  idea the JS/Java/Rust frontends use. Field reads off request objects that reach the
+  handler by other means (a custom framework context we don't recognize) still rely on
+  method-accessor rules.

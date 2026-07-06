@@ -35,6 +35,53 @@ func TestConvertFile(t *testing.T) {
 	}
 }
 
+// TestHTTPRequestSourceSynthesis verifies the frontend injects a synthetic
+// request-object source (go:@net/http.Request) at the entry of an HTTP handler
+// (a func taking http.ResponseWriter + *http.Request), and does NOT inject it in
+// a plain function. This is what makes field-access reads off the request
+// (r.URL.Path) — which have no callee to match a rule — carry taint.
+func TestHTTPRequestSourceSynthesis(t *testing.T) {
+	conv := NewConverter()
+	prog, err := conv.ConvertFile("../../test/go/field_access_source/main.go")
+	if err != nil {
+		t.Fatalf("failed to convert file: %v", err)
+	}
+
+	hasRequestSource := func(f *ir.Function) bool {
+		for _, b := range f.Blocks {
+			for _, inst := range b.Instrs {
+				if inst.Call != nil && inst.Call.Callee == httpRequestSourceCallee {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var sawHandler, sawPlain bool
+	for _, mod := range prog.Modules {
+		for _, f := range mod.Functions {
+			if strings.Contains(f.Name, "main$") { // the http.HandleFunc closure
+				sawHandler = true
+				if !hasRequestSource(f) {
+					t.Errorf("handler %s is missing the synthetic request source %q", f.Name, httpRequestSourceCallee)
+				}
+			} else if f.ObjectName == "main" {
+				sawPlain = true
+				if hasRequestSource(f) {
+					t.Errorf("non-handler %s should not have a synthetic request source", f.Name)
+				}
+			}
+		}
+	}
+	if !sawHandler {
+		t.Error("did not find the handler closure in the converted IR")
+	}
+	if !sawPlain {
+		t.Error("did not find the main function in the converted IR")
+	}
+}
+
 func TestConvertComplexFile(t *testing.T) {
 	conv := NewConverter()
 	prog, err := conv.ConvertFile("../../test/go/complex_logic/main.go")

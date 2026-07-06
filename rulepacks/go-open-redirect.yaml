@@ -15,16 +15,43 @@ rules:
       - "go:*net/http*.Request*.Cookie"
       - "go:*net/http*.Request*.PathValue"
       - "go:*net/http*.Request*.PostFormValue"
-      # Web-framework request accessors (Gin, Echo, Chi).
+      # Synthetic request-object source: the frontend taints an HTTP handler's
+      # *http.Request parameter (converters/go addHTTPRequestSource), so field
+      # reads off it (r.URL.Path, r.Form, r.Body, …) — which no method rule can
+      # match — are covered for net/http and any router built on it (chi,
+      # gorilla/mux, …).
+      - "go:@net/http.Request"
+      # Web-framework request accessors, receiver-type-scoped so they never
+      # collide with a same-named sink (e.g. sql.DB.Query).
+      # Gin (github.com/gin-gonic/gin).
       - "go:*gin-gonic/gin.Context*.Query"
       - "go:*gin-gonic/gin.Context*.DefaultQuery"
+      - "go:*gin-gonic/gin.Context*.QueryArray"
+      - "go:*gin-gonic/gin.Context*.QueryMap"
+      - "go:*gin-gonic/gin.Context*.GetQuery"
       - "go:*gin-gonic/gin.Context*.Param"
       - "go:*gin-gonic/gin.Context*.PostForm"
+      - "go:*gin-gonic/gin.Context*.DefaultPostForm"
       - "go:*gin-gonic/gin.Context*.GetHeader"
+      # Echo (github.com/labstack/echo).
       - "go:*labstack/echo*Context*.QueryParam"
+      - "go:*labstack/echo*Context*.QueryParams"
       - "go:*labstack/echo*Context*.Param"
       - "go:*labstack/echo*Context*.FormValue"
+      - "go:*labstack/echo*Context*.FormParams"
+      # Chi (github.com/go-chi/chi).
       - "go:*go-chi/chi*.URLParam"
+      # Gorilla mux (github.com/gorilla/mux) — path variables.
+      - "go:*gorilla/mux.Vars"
+      # Fiber (github.com/gofiber/fiber) — *fiber.Ctx.
+      - "go:*gofiber/fiber*.Ctx*.Query"
+      - "go:*gofiber/fiber*.Ctx*.Params"
+      - "go:*gofiber/fiber*.Ctx*.FormValue"
+      - "go:*gofiber/fiber*.Ctx*.Cookies"
+      - "go:*gofiber/fiber*.Ctx*.Get"
+      # fasthttp (github.com/valyala/fasthttp) — *fasthttp.RequestCtx.
+      - "go:*fasthttp.RequestCtx*.FormValue"
+      - "go:*fasthttp.RequestCtx*.UserValue"
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
     sinks:
       - "go:*net/http.Redirect#2"

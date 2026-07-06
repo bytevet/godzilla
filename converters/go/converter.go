@@ -171,7 +171,87 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		irFunc.Blocks = append(irFunc.Blocks, c.convertBlock(b))
 	}
 
+	c.addHTTPRequestSource(f, irFunc)
+
 	return irFunc
+}
+
+// httpRequestSourceCallee is the canonical name of the synthetic source the
+// frontend injects for an HTTP handler's *http.Request parameter (see
+// addHTTPRequestSource). It is listed as a source in the Go rule packs, so every
+// read off the request object carries taint — including field reads like
+// r.URL.Path / r.Form / r.Body that no method-call rule can match (the
+// documented "Go field-access sources aren't matchable" gap).
+const httpRequestSourceCallee = "go:@net/http.Request"
+
+// addHTTPRequestSource injects a synthetic request-object source at the entry of
+// an HTTP handler so its *http.Request parameter is tainted. It mirrors the
+// parameter-source synthesis the Rust (axum typed params) and Java (@RequestParam)
+// frontends already do: the register defined by the synthetic source CALL is the
+// parameter's own name, so the engine (which seeds taint by register name) marks
+// the request tainted at function entry and whole-object taint flows to every
+// field read off it.
+//
+// A handler is a function taking BOTH an http.ResponseWriter and an
+// *http.Request (net/http, chi, gorilla/mux, and any router built on them). The
+// ResponseWriter requirement keeps this from tainting helpers that merely pass an
+// *http.Request around or that build an OUTBOUND request (http.NewRequest), which
+// are not attacker-controlled. Frameworks that hand the handler a context value
+// instead (gin/echo/fiber) are covered by the rule-pack accessor globs.
+func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
+	reqName, ok := handlerRequestParam(f)
+	if !ok || reqName == "" || len(irFunc.Blocks) == 0 {
+		return
+	}
+	src := &ir.Instruction{
+		Name:    reqName,
+		Op:      ir.OpCode_OP_CODE_CALL,
+		Pos:     irFunc.Pos,
+		Comment: "http-request-source",
+		Call: &ir.CallCommon{
+			Callee: httpRequestSourceCallee,
+			Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: httpRequestSourceCallee}},
+		},
+	}
+	entry := irFunc.Blocks[0]
+	entry.Instrs = append([]*ir.Instruction{src}, entry.Instrs...)
+}
+
+// handlerRequestParam returns the register name of an HTTP handler's
+// *net/http.Request parameter, if the function looks like a handler — i.e. it
+// also takes an http.ResponseWriter.
+func handlerRequestParam(f *ssa.Function) (string, bool) {
+	var reqName string
+	var hasWriter, hasRequest bool
+	for _, p := range f.Params {
+		switch {
+		case isNamedTypePtr(p.Type(), "net/http", "Request"):
+			hasRequest = true
+			reqName = p.Name()
+		case isNamedType(p.Type(), "net/http", "ResponseWriter"):
+			hasWriter = true
+		}
+	}
+	return reqName, hasWriter && hasRequest
+}
+
+// isNamedTypePtr reports whether t is a pointer to the named type pkgPath.name.
+func isNamedTypePtr(t types.Type, pkgPath, name string) bool {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	return isNamedType(ptr.Elem(), pkgPath, name)
+}
+
+// isNamedType reports whether t is the named (defined) type pkgPath.name.
+func isNamedType(t types.Type, pkgPath, name string) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
 }
 
 func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {

@@ -1,0 +1,6 @@
+# gorilla/mux path variable (mux.Vars) reaches an os/exec sink.
+findings:
+    - rule: go-command-injection
+      min: 1
+      line: 16
+      sink: Command
