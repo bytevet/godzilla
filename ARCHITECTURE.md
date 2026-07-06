@@ -1,8 +1,8 @@
 # Godzilla Architecture & Design
 
 > Status: **implemented.** This document is the design/target architecture *and its rationale*; the
-> pipeline described here is now built and tested end-to-end — six frontends (Go, Python, JavaScript,
-> Java, Rust, C/C++), the Rule Engine, Analysis Engine, Report module, LLM reviewer, and CLI all exist.
+> pipeline described here is now built and tested end-to-end — seven frontends (Go, Python, JavaScript,
+> Java, Rust, Ruby, C/C++), the Rule Engine, Analysis Engine, Report module, LLM reviewer, and CLI all exist.
 > §10 records the as-built status per component (including where the implementation diverged from the
 > original design intent — e.g. JS uses goja and Python uses `python3 ast`, not tree-sitter). See
 > `CLAUDE.md` for the concise package map and `spec.md` for the original product brief.
@@ -37,7 +37,7 @@ Locked via a design interview. Each row records the choice and the primary reaso
 | Parsing source | **Mixed per language** | Use the most accurate cheap source per language rather than forcing one representation. |
 | Python parsing | **Prefer local `python3` bytecode; fall back to tree-sitter** | CPython bytecode captures dynamic dispatch faithfully; tree-sitter keeps the tool runnable when Python is absent. |
 | JavaScript parsing | **tree-sitter** (embedded) → AST → SSA | Embeddable in the Go binary; no Node runtime required. |
-| Rules | **YAML**, two kinds: taint + pattern | Taint rules for dataflow vulns; pattern rules for non-dataflow findings (secrets). |
+| Rules | **YAML**, three kinds: taint + pattern + dangerous-call | Taint rules for dataflow vulns; pattern rules for non-dataflow findings (secrets); dangerous-call rules for banned/weak APIs (weak crypto, insecure RNG). |
 | Initial vuln scope | Injection (SQLi + command), path traversal, XSS/SSRF, hardcoded secrets | Covers the existing samples and the highest-value web classes. |
 | Confidence & LLM | **Confidence scoring now; Claude reviewer later (pluggable)** | Build the routing hook immediately so the LLM stage drops in without pipeline changes. |
 | Reporting | **HTML first** + exit-code gating; JSON/SARIF later | HTML gives the richest triage experience; exit codes make it a real gate. |
@@ -50,9 +50,10 @@ Locked via a design interview. Each row records the choice and the primary reaso
           ┌───────── Frontends (in-process Go, one binary) ─────────┐
  Go   ────► x/tools SSA ───┐
  Python ──► python3 ast  ──┤
- JS   ────► goja AST     ──┤─► lower ─► gIR v2 (core + intrinsics, canonical FQNs)
- Java ────► JVM bytecode ──┤                            │
+ JS   ────► goja AST     ──┤
+ Java ────► JVM bytecode ──┤─► lower ─► gIR v2 (core + intrinsics, canonical FQNs)
  Rust ────► rustc MIR    ──┤                            │
+ Ruby ────► ruby Ripper  ──┤                            │
  C/C++ ───► LLVM IR (cgo) ─┘                            ▼
                                     ┌──────────── Analysis Engine ────────────┐
    YAML rules ──► Rule Engine ─────►│ call graph → (tree-shake) → inter-proc   │
@@ -162,7 +163,7 @@ per-function taint **summaries**.
 
 ## 5. Rule Engine
 
-YAML rules, loaded and matched against canonical symbols. Two rule kinds:
+YAML rules, loaded and matched against canonical symbols. Three rule kinds:
 
 ### 5.1 Taint rules
 
@@ -194,6 +195,14 @@ For findings that are not source→sink flows — chiefly **hardcoded secrets** 
 matches over gIR string constants (and optionally raw source) using regex / entropy checks. This path
 is deliberately distinct from taint so the dataflow engine stays focused.
 
+### 5.3 Dangerous-call rules (non-dataflow)
+
+`kind: dangerous-call` rules flag a call to a banned or weak API by canonical name alone — no taint
+required — so they are near-zero-false-positive and cheap. They back the **weak-crypto** packs (weak
+hash MD5/SHA-1, broken cipher DES/3DES/RC4 — CWE-327; insecure `math/rand` for secrets — CWE-338),
+matching `callees` globs with an optional `constArg` condition to restrict a match to a specific
+constant argument.
+
 ---
 
 ## 6. Frontends
@@ -217,12 +226,17 @@ intent — Python bytecode/tree-sitter, JS tree-sitter — see §10.)
   straight-line value-forwarding pass. MIR (not LLVM IR) is used because it names the source-level API
   (`std::env::var`, `Command::arg`) and assigns call results directly to locals — no `sret` indirection.
   Pure Go, in the default binary. Emits `rust:<normalized-path>`.
+- **Ruby** — `converters/ruby/`. An embedded helper (`rbdump.rb`, run via **`ruby`**) parses with the
+  stdlib **Ripper** and prints its S-expression AST as JSON; `lower.go` lowers that tree (straight-line).
+  Ripper ships with every MRI Ruby, so only a `ruby` on `PATH` is needed. Pure Go, in the default binary.
+  Emits `ruby:` names.
 - **C / C++** — `converters/cpp/` + shared `converters/llvm/`. clang compiles each unit to **LLVM IR**
   (`-O1 -g`), parsed via libLLVM (`tinygo.org/x/go-llvm`) and lowered. This is the **opt-in cgo backend**
   (`-tags "llvm byollvm"`), *not* in the default binary — the default ships a stub. Emits `c:`/`cpp:`.
 
-**Note on cgo:** only the C/C++ frontend needs cgo (libLLVM). Go/Python/JS/Java/Rust are all pure Go and
-ship in the default single static binary; Python/Java/Rust merely shell out to a toolchain on `PATH`.
+**Note on cgo:** only the C/C++ frontend needs cgo (libLLVM). Go/Python/JS/Java/Rust/Ruby are all pure Go
+and ship in the default single static binary; Python/Java/Rust/Ruby merely shell out to a toolchain on
+`PATH`.
 
 ---
 
@@ -294,8 +308,9 @@ the languages that have samples). See `CLAUDE.md` for the package-level map.
 | JavaScript frontend (goja → gIR) | ✅ Done (straight-line lowering) |
 | Java frontend (JVM bytecode → gIR) | ✅ Done — embedded `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ `java` |
 | Rust frontend (rustc MIR → gIR) | ✅ Done — value-forwarding over MIR; pure Go, default binary; needs `rustc` |
+| Ruby frontend (Ripper AST → gIR) | ✅ Done — `rbdump.rb` Ripper dumper + straight-line lowering; pure Go, default binary; needs `ruby` |
 | C/C++ frontend (LLVM IR → gIR) | ✅ Done — **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
-| Rule engine (YAML, FQN globs, built-in rules) | ✅ Done — Go/Python/JS packs (SQLi, command injection, path traversal, SSRF, XSS, open redirect, + Py CWE-502 / JS CWE-95); Java (SQLi, command injection); Rust (command injection, path traversal); C/C++ (command injection, path traversal, format string) |
+| Rule engine (YAML, FQN globs, built-in rules) | ✅ Done — Go/Python/JS (SQLi, command injection, path traversal, SSRF, XSS, open redirect; + Py CWE-502 & CWE-95, JS CWE-95); Java & Rust (same web classes; Java adds CWE-502); Ruby (SQLi, command injection); C/C++ (command injection, path traversal, format string, SQLi, buffer overflow); non-dataflow **dangerous-call** packs (weak hash/cipher, insecure `math/rand`) for Go & Java |
 | Intra-procedural taint | ✅ Done |
 | Inter-procedural taint (call graph + summaries) | ✅ Done |
 | Tree-shaking (reachability pruning primitive) | ✅ `CallGraph.Reachable`/`Roots` implemented; not yet used to prune the analysis set |

@@ -43,8 +43,9 @@ flowchart LR
   (`"go:*database/sql*.Query#0"`), so a parameterized query
   `db.Query("... = ?", userInput)` is **not** a false positive.
 - **Built-in rule packs** for SQL injection, command injection, path traversal,
-  SSRF, reflected XSS, open redirect, insecure deserialization (Python), and
-  code injection (JS `eval`), plus a regex-based **hardcoded-secrets** scanner.
+  SSRF, reflected XSS, open redirect, insecure deserialization, and code
+  injection (`eval`), plus non-dataflow checks: **weak crypto** (MD5/SHA-1,
+  DES/RC4, `math/rand`) and a regex-based **hardcoded-secrets** scanner.
 - **CI-friendly.** Human-readable findings, a self-contained **HTML report**,
   **JSON** and **SARIF 2.1.0** output (for GitHub code scanning / custom tooling),
   and a severity-gated **exit code**.
@@ -64,12 +65,14 @@ go install godzilla/cmd/godzilla@latest    # or, from a clone:
 go build -o godzilla ./cmd/godzilla
 ```
 
-Requires **Go 1.25+**. Scanning Python prefers a `python3` on `PATH`.
+Requires **Go 1.25+**. Scanning Python, Ruby, Java, or Rust also needs that
+language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`;
+each degrades gracefully when absent.
 
 ## Quick start
 
 ```bash
-# Scan a directory (or a single .go/.py/.js file) with the built-in rules
+# Scan a directory (or a single source file) with the built-in rules
 godzilla scan ./path/to/project
 
 # Write an HTML report and fail the build only on high+ severity
@@ -148,20 +151,24 @@ dependencies needs network access for module fetch (or mount a warm
 
 ## Supported languages & detections
 
-| | Go | Python | JavaScript | Java | Rust |
-|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild | JVM bytecode (`java.lang.classfile`) | rustc MIR |
-| SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Command injection | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Reflected XSS | ✅ | ✅ | ✅ | ✅ | — |
-| Open redirect | ✅ | ✅ | ✅ | ✅ | — |
-| Insecure deserialization | — | ✅ | — | ✅ | — |
-| Code injection (`eval`) | — | ✅ | ✅ | — | — |
+| | Go | Python | JavaScript | Java | Rust | Ruby |
+|---|---|---|---|---|---|---|
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
+| SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Insecure deserialization | — | ✅ | — | ✅ | — | — |
+| Code injection (`eval`) | — | ✅ | ✅ | — | — | — |
+| Weak crypto | ✅ | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
-> scan over gIR string constants — independent of the taint engine.
+> scan over gIR string constants; **weak crypto** (CWE-327/338) is a non-dataflow
+> call-site check — both run independently of the taint engine. C/C++ (opt-in cgo
+> build) adds command injection, path traversal, format string, SQL injection,
+> and buffer-overflow checks; see below.
 
 Notes on the compiled languages:
 
@@ -190,9 +197,10 @@ attack surface. Samples that pull an external crate over the network are opt-in
 build — `make build-llvm` (or `go build -tags "llvm byollvm"` with libLLVM CGO
 flags) — *not* in the default binary, which ships a stub for C/C++. Needs libLLVM
 + clang. Command injection (`system`/`popen`/`exec*`), path traversal
-(`fopen`/`open`), and format-string (`printf`-family) are detected; taint flows
-through primitive (`char*`) values. C++ code that routes untrusted data through
-heap aggregates (`std::string`) is not yet tracked.
+(`fopen`/`open`), format-string (`printf`-family), SQL injection, and
+buffer-overflow risks (unsafe `gets`/`strcpy`-family calls) are detected; taint
+flows through primitive (`char*`) values. C++ code that routes untrusted data
+through heap aggregates (`std::string`) is not yet tracked.
 
 ## Writing rules
 
@@ -229,8 +237,8 @@ top-level `rulepacks/` directory).
   opcode core plus an `INTRINSIC` escape hatch for language-specific constructs.
   Functions carry stable canonical names (`<lang>:module.Type.Member`) so rules
   join across languages.
-- **Frontends** (`converters/{go,python,javascript,java,rust,cpp,llvm}/`) lower
-  each language to gIR.
+- **Frontends** (`converters/{go,python,javascript,java,rust,ruby,cpp,llvm}/`)
+  lower each language to gIR.
 - **Analysis** (`internal/analysis/`) builds a call graph and runs inter-procedural
   taint, plus a pattern-based secrets scan.
 - **Rules** (`internal/rules/`), **report** (`internal/report/`), **LLM reviewer**
@@ -263,13 +271,13 @@ export PATH=$PATH:$(go env GOPATH)/bin
 go generate ./...
 ```
 
-Vulnerable samples live under `test/{go,python,js,java,rust,c,cpp}/` (Go samples
-are each their own isolated module so sample dependencies never touch the root
-`go.mod`). Every sample is an asserted test case: it carries an `expected.yaml`
-and `go test ./...` checks that the scanner reproduces exactly those findings (no
-misses, no new false positives). The corpus **skips** a language whose toolchain
-is absent (`python3`/`java`/`rustc`, or `-tags llvm`+clang for C/C++), so the
-default run stays green anywhere. See [test/README.md](test/README.md) for the
+Vulnerable samples live under `test/{go,python,js,java,rust,ruby,c,cpp}/` (Go
+samples are each their own isolated module so sample dependencies never touch the
+root `go.mod`). Every sample is an asserted test case: it carries an
+`expected.yaml` and `go test ./...` checks that the scanner reproduces exactly
+those findings (no misses, no new false positives). The corpus **skips** a
+language whose toolchain is absent (`python3`/`java`/`rustc`/`ruby`, or
+`-tags llvm`+clang for C/C++), so the default run stays green anywhere. See [test/README.md](test/README.md) for the
 corpus and how to add a sample.
 
 ## Status & limitations

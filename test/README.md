@@ -13,6 +13,7 @@ test/
   java/<case>/    *.java, or a Maven/Gradle project  (needs a JDK 24+ `java`;
                                      build-tool projects are opt-in, see below)
   rust/<case>/    main.rs            (needs `rustc`)
+  ruby/<case>/    app.rb             (needs `ruby`)
   c/<case>/       *.c                (opt-in: -tags llvm + clang)
   cpp/<case>/     *.cpp              (opt-in: -tags llvm + clang)
   corpus/         the Go test harness that scans every sample and checks results
@@ -26,8 +27,8 @@ framework has at least one true-positive sample and, where precision is at stake
 
 Each sample directory carries an **`expected.yaml`** declaring what the scan must
 produce for it. The corpus **skips** a language's samples when its toolchain is
-absent (`python3`/`java`/`rustc`) or, for C/C++, when the binary was built without
-`-tags llvm` — so `go test ./...` stays green on a minimal environment.
+absent (`python3`/`java`/`rustc`/`ruby`) or, for C/C++, when the binary was built
+without `-tags llvm` — so `go test ./...` stays green on a minimal environment.
 
 **Java build-tool samples.** A Java sample may be a full Maven (`pom.xml`) or Gradle
 (`build.gradle`) project rather than loose `.java`: the Java frontend builds it with
