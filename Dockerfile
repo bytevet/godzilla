@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 # builder — compile the pure-Go binary (CGO disabled: portable, static).
 # ---------------------------------------------------------------------------
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 
 # Warm the module cache in its own layer so source-only edits don't re-download.
