@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	ir "godzilla/pkg/ir/v1"
 	"golang.org/x/tools/go/packages"
@@ -19,6 +20,13 @@ type Converter struct {
 	fset    *token.FileSet
 
 	typeCache map[types.Type]*ir.Type
+
+	// routeHandlers maps a function registered as an HTTP route handler
+	// (passed to a router's GET/POST/Handle/Use/... call) to the register name
+	// of its request/context parameter, so addHTTPRequestSource can taint the
+	// request object even for a framework whose context type we have no rules
+	// for. Populated by collectRouteHandlers.
+	routeHandlers map[*ssa.Function]string
 }
 
 func NewConverter() *Converter {
@@ -82,6 +90,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	prog.Build()
 	c.program = prog
 	c.fset = initial[0].Fset
+	c.routeHandlers = collectRouteHandlers(prog)
 
 	// pkg.Members only exposes package-level funcs, not methods or anonymous
 	// function literals (closures) — and vulnerable code frequently lives inside
@@ -192,14 +201,19 @@ const httpRequestSourceCallee = "go:@net/http.Request"
 // the request tainted at function entry and whole-object taint flows to every
 // field read off it.
 //
-// A handler is a function taking BOTH an http.ResponseWriter and an
-// *http.Request (net/http, chi, gorilla/mux, and any router built on them). The
-// ResponseWriter requirement keeps this from tainting helpers that merely pass an
-// *http.Request around or that build an OUTBOUND request (http.NewRequest), which
-// are not attacker-controlled. Frameworks that hand the handler a context value
-// instead (gin/echo/fiber) are covered by the rule-pack accessor globs.
+// A handler is either (a) a function taking BOTH an http.ResponseWriter and an
+// *http.Request (net/http, chi, gorilla/mux, and any router built on them), or
+// (b) a function registered at a router's GET/POST/Handle/Use/... call
+// (collectRouteHandlers) — which covers a framework context value like
+// *gin.Context / echo.Context / *fiber.Ctx, and any framework we have no rules
+// for. Case (a)'s ResponseWriter requirement keeps this from tainting helpers
+// that merely pass an *http.Request around or build an OUTBOUND request
+// (http.NewRequest), which are not attacker-controlled.
 func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 	reqName, ok := handlerRequestParam(f)
+	if !ok {
+		reqName, ok = c.routeHandlers[f]
+	}
 	if !ok || reqName == "" || len(irFunc.Blocks) == 0 {
 		return
 	}
@@ -252,6 +266,108 @@ func isNamedType(t types.Type, pkgPath, name string) bool {
 	}
 	obj := named.Obj()
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
+}
+
+// routingVerbs are the method names (lowercased) that register an HTTP handler
+// across the common Go routers — the near-universal REST verbs plus stdlib
+// Handle/HandleFunc and middleware Use/Any/All. A call to a method with one of
+// these names that is passed a function value is treated as a route
+// registration, which is how the frontend recognizes a handler for a framework
+// context type it has no other knowledge of.
+var routingVerbs = map[string]bool{
+	"get": true, "post": true, "put": true, "delete": true, "patch": true,
+	"head": true, "options": true, "connect": true, "trace": true,
+	"any": true, "all": true, "handle": true, "handlefunc": true, "use": true,
+}
+
+// collectRouteHandlers finds functions registered as HTTP route handlers and
+// maps each to the register name of its request/context parameter. A handler is
+// a function value passed to a call whose method name is a routing verb
+// (r.GET("/x", h), app.Post(..., h), mux.HandleFunc(..., h), e.Use(mw), …).
+func collectRouteHandlers(prog *ssa.Program) map[*ssa.Function]string {
+	handlers := map[*ssa.Function]string{}
+	for fn := range ssautil.AllFunctions(prog) {
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				call, ok := instr.(*ssa.Call)
+				if !ok {
+					continue
+				}
+				common := call.Common()
+				if !routingVerbs[strings.ToLower(routingMethodName(common))] {
+					continue
+				}
+				for _, arg := range common.Args {
+					h := handlerFuncArg(arg)
+					if h == nil {
+						continue
+					}
+					if reg, ok := contextParam(h); ok {
+						handlers[h] = reg
+					}
+				}
+			}
+		}
+	}
+	return handlers
+}
+
+// routingMethodName returns the method name of a call, for both interface
+// (invoke) and concrete method calls, or "" for a non-method call.
+func routingMethodName(cc *ssa.CallCommon) string {
+	if cc.Method != nil {
+		return cc.Method.Name()
+	}
+	if fn, ok := cc.Value.(*ssa.Function); ok && fn.Signature.Recv() != nil {
+		return fn.Name()
+	}
+	return ""
+}
+
+// handlerFuncArg returns the underlying *ssa.Function of a call argument that is
+// a function value — a named/anonymous function passed directly, or a closure
+// (MakeClosure) over one — or nil if the argument is not a function value.
+func handlerFuncArg(arg ssa.Value) *ssa.Function {
+	switch v := arg.(type) {
+	case *ssa.Function:
+		return v
+	case *ssa.MakeClosure:
+		if fn, ok := v.Fn.(*ssa.Function); ok {
+			return fn
+		}
+	}
+	return nil
+}
+
+// contextParam returns the register name of a handler's request/context
+// parameter: the first parameter that is a pointer to a named type or a named
+// interface (e.g. *http.Request, *gin.Context, echo.Context, *fiber.Ctx),
+// excluding http.ResponseWriter.
+func contextParam(h *ssa.Function) (string, bool) {
+	for _, p := range h.Params {
+		t := p.Type()
+		if isNamedType(t, "net/http", "ResponseWriter") {
+			continue
+		}
+		if isRequestLikeType(t) && p.Name() != "" {
+			return p.Name(), true
+		}
+	}
+	return "", false
+}
+
+// isRequestLikeType reports whether t is a value we can call accessor methods on
+// — a pointer to a named type, or a named interface type.
+func isRequestLikeType(t types.Type) bool {
+	if ptr, ok := t.(*types.Pointer); ok {
+		_, ok := ptr.Elem().(*types.Named)
+		return ok
+	}
+	if named, ok := t.(*types.Named); ok {
+		_, isIface := named.Underlying().(*types.Interface)
+		return isIface
+	}
+	return false
 }
 
 func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {

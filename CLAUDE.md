@@ -64,7 +64,13 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 **Frontends (all in-process, single binary).**
 - `converters/go/` — uses `golang.org/x/tools` SSA. `ConvertFile` accepts a file or directory and
   enumerates **all** functions via `ssautil.AllFunctions` (package funcs, methods, and closures — vulnerable
-  code often lives in `http.HandleFunc` closures, so closure coverage is essential).
+  code often lives in `http.HandleFunc` closures, so closure coverage is essential). Dependency bodies are
+  **not** lowered (`LoadSyntax` + `ssautil.Packages`), so library behavior is modeled by rules, not analyzed.
+  `addHTTPRequestSource` synthesizes a request-object source (`go:@net/http.Request`) at an HTTP handler's
+  entry — a func taking `http.ResponseWriter`+`*http.Request`, or one registered via a routing verb
+  (`collectRouteHandlers`: `r.GET`/`.Post`/`.HandleFunc`/`.Use`/…) — binding the request/context parameter so
+  field reads off it are tainted (fixes the field-access-source gap) and, with the engine's request-object
+  rule, framework accessors (`c.Query()`) are covered even for an unmodeled framework.
 - `converters/python/` — shells out to `python3` (`converters/python/pyast.py`, embedded) to get an `ast`
   JSON dump, then lowers it. Straight-line env-based lowering (documented limitations in the package doc).
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
@@ -129,6 +135,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
+  **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from the synthetic
+  request source (`go:@net/http.Request`, see the Go frontend) carries **request-object provenance**
+  (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
+  as untrusted (result tainted, pointer out-args filled), even for a web framework with **no rules**. Gated on
+  provenance so ordinary taint is untouched, and only for unresolved/external callees.
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
   sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
   `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed

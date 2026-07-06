@@ -82,6 +82,41 @@ func TestHTTPRequestSourceSynthesis(t *testing.T) {
 	}
 }
 
+// TestRouteHandlerSourceSynthesis verifies that a handler registered via a
+// routing verb (r.GET) on an UNKNOWN framework context type gets the synthetic
+// request-object source, which is what unlocks the engine's method-sugar rule
+// for frameworks we have no rules for.
+func TestRouteHandlerSourceSynthesis(t *testing.T) {
+	conv := NewConverter()
+	prog, err := conv.ConvertFile("../../test/go/unknown_framework")
+	if err != nil {
+		t.Fatalf("failed to convert dir: %v", err)
+	}
+	var sawHandler bool
+	for _, mod := range prog.Modules {
+		for _, f := range mod.Functions {
+			if !strings.Contains(f.Name, "main$") { // the r.GET(...) closure
+				continue
+			}
+			sawHandler = true
+			found := false
+			for _, b := range f.Blocks {
+				for _, inst := range b.Instrs {
+					if inst.Call != nil && inst.Call.Callee == httpRequestSourceCallee {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Errorf("route-registered handler %s is missing the synthetic request source %q", f.Name, httpRequestSourceCallee)
+			}
+		}
+	}
+	if !sawHandler {
+		t.Error("did not find the route-registered handler closure in the converted IR")
+	}
+}
+
 func TestConvertComplexFile(t *testing.T) {
 	conv := NewConverter()
 	prog, err := conv.ConvertFile("../../test/go/complex_logic/main.go")

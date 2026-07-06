@@ -1,0 +1,2 @@
+# Request taint reaches only the bound parameter of a parameterized query: CLEAN.
+findings: []

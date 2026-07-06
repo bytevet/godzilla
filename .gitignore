@@ -40,6 +40,12 @@ bin/
 !/test/go/*/go.sum
 !/test/go/*/expected.yaml
 !/test/go/*/.gitignore
+# A sample may embed a nested Go module (a stand-in for an external framework,
+# so its bodies are not lowered); allow-list that module's sources too.
+!/test/go/*/*/
+!/test/go/*/*/*.go
+!/test/go/*/*/go.mod
+!/test/go/*/*/go.sum
 
 # Cargo build artifacts left in Rust sample dirs by the frontend's cargo build.
 /test/rust/*/target/
