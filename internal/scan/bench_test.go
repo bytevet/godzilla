@@ -1,15 +1,16 @@
 package scan
 
 import (
+	"strings"
 	"testing"
 
-	go_converter "godzilla/converters/go"
 	"godzilla/internal/rules/loader"
 )
 
-// BenchmarkScan_GoWithDeps scans a dependency-bearing Go sample (gin + gorm). It
-// tracks the PERF-2 win (analysis scoped to the target package, not the whole
-// dependency closure); a regression here shows up as a large slowdown.
+// BenchmarkScan_GoWithDeps scans a dependency-bearing Go sample (gin + gorm).
+// Dependency bodies are now lowered so taint flows through them; the cost is kept
+// in check by demand-driven analysis (a dependency function is analyzed only when
+// taint reaches it — see Engine.ScopeSeed). A large regression shows up here.
 func BenchmarkScan_GoWithDeps(b *testing.B) {
 	rs, err := loader.Builtin()
 	if err != nil {
@@ -37,23 +38,37 @@ func BenchmarkScan_GoSimple(b *testing.B) {
 	}
 }
 
-// TestGoAnalysisScopedToTargetPackages is a DETERMINISTIC perf-regression guard
-// for PERF-2 (non-flaky, unlike a wall-clock assertion). The Go frontend must
-// build SSA only for the scanned package(s), not the transitive dependency
-// closure. gin_gorm imports gin + gorm (thousands of functions); if scoping
-// regressed to ssautil.AllPackages/LoadAllSyntax, the converted program would
-// balloon to thousands of functions. A tight bound catches that.
-func TestGoAnalysisScopedToTargetPackages(t *testing.T) {
-	prog, err := go_converter.NewConverter().ConvertFile("../../test/go/gin_gorm")
+// TestGoFindingsScopedToUserCode is the invariant for dependency lowering: the
+// Go frontend DOES lower third-party bodies (so taint flows through gin/gorm),
+// so the converted program is large — but every reported finding must sit in
+// USER code, never inside a lowered dependency. If the finding-scope regressed,
+// analyzing library internals would surface library-internal noise.
+func TestGoFindingsScopedToUserCode(t *testing.T) {
+	rs, err := loader.Builtin()
 	if err != nil {
-		t.Fatalf("convert gin_gorm: %v", err)
+		t.Fatal(err)
 	}
+	res, err := Scan("../../test/go/gin_gorm", rs)
+	if err != nil {
+		t.Fatalf("scan gin_gorm: %v", err)
+	}
+	// Dependency bodies are lowered now (the feature) — the program is large.
 	n := 0
-	for _, m := range prog.Modules {
+	for _, m := range res.Program.Modules {
 		n += len(m.Functions)
 	}
-	if n > 100 {
-		t.Errorf("Go analysis is not scoped to the target package: %d functions converted "+
-			"for gin_gorm (expected a handful). PERF-2 (LoadSyntax + ssautil.Packages) may have regressed.", n)
+	if n < 100 {
+		t.Errorf("expected dependency bodies to be lowered (thousands of functions); got %d — "+
+			"dep-lowering (LoadAllSyntax + ssautil.AllPackages) may have regressed", n)
+	}
+	// But no finding may be scoped into a dependency.
+	if len(res.Findings) == 0 {
+		t.Fatal("expected findings in gin_gorm")
+	}
+	for _, f := range res.Findings {
+		if strings.Contains(f.Package, "gin-gonic") || strings.Contains(f.Package, "gorm.io") ||
+			strings.Contains(f.Package, "golang.org/x/") {
+			t.Errorf("finding scoped into a dependency package %q: %s in %s", f.Package, f.RuleID, f.Function)
+		}
 	}
 }

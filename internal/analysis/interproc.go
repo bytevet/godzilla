@@ -74,6 +74,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, keys: keys,
+		reportable: e.reportable,
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -222,6 +223,10 @@ type sharedIndex struct {
 	callers       map[string][]string // callee -> its callers (reverse call graph)
 	globalReaders map[string][]string // global name -> functions that read it (ENG-6)
 	keys          []string            // byKey names, sorted (deterministic worklist seed)
+	// reportable, when non-empty, restricts the initial worklist seed to functions
+	// whose module is user-authored; dependency functions are then reached
+	// demand-driven via callEffects. Empty seeds every function.
+	reportable map[string]bool
 }
 
 // buildCallers inverts the call graph: callee -> callers, so a callee becoming
@@ -289,9 +294,21 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		}
 	}
 
-	// Seed the worklist with every applicable function, in the shared
-	// deterministic order.
+	// Seed the worklist. Normally every function is seeded (so an intra-procedural
+	// source->sink flow is found wherever it lives). When a reportable scope is set
+	// (dependencies were lowered), seed ONLY user-authored functions: a dependency
+	// function is then analyzed DEMAND-DRIVEN — enqueued only when taint reaches it
+	// through a call (addEffect -> enqueue below) — so we pay for library code only
+	// on the taint paths that actually traverse it, not the whole closure.
 	for _, name := range idx.keys {
+		// Skip only a Go DEPENDENCY function (a Go module not in the user's
+		// reportable set) — it is reached demand-driven. Non-Go modules and Go
+		// user code are always seeded, so other languages are unaffected.
+		if len(idx.reportable) > 0 {
+			if mod := idx.modByKey[name]; mod != nil && mod.Language == "go" && !idx.reportable[mod.Name] {
+				continue
+			}
+		}
 		enqueue(name)
 	}
 
@@ -764,6 +781,7 @@ func analyzeFunc(
 						Message:        rule.Message,
 						Language:       mod.Language,
 						Function:       fn.CanonicalName,
+						Package:        fn.PackageName,
 						SourcePos:      pos,
 						SinkPos:        inst.Pos,
 						SinkCallee:     callee,

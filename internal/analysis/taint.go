@@ -12,11 +12,25 @@ import (
 // Analysis is inter-procedural; see interproc.go for the orchestration.
 type Engine struct {
 	rs *rules.RuleSet
+	// reportable, when non-empty, restricts the worklist SEED to functions in
+	// these (user-authored) packages: dependency functions are then analyzed
+	// DEMAND-DRIVEN — only when taint actually reaches them via a call — instead
+	// of proactively analyzing the whole lowered dependency closure. Empty means
+	// seed every function (the default when no dependencies were lowered).
+	reportable map[string]bool
 }
 
 // NewEngine builds an Engine that will evaluate every rule in rs.
 func NewEngine(rs *rules.RuleSet) *Engine {
 	return &Engine{rs: rs}
+}
+
+// ScopeSeed restricts the worklist seed to the given (user-authored) packages,
+// so lowered dependency functions are analyzed only when taint reaches them.
+// Returns the engine for chaining. A nil/empty set seeds every function.
+func (e *Engine) ScopeSeed(reportable map[string]bool) *Engine {
+	e.reportable = reportable
+	return e
 }
 
 // intrinsicPropagators is the set of language-specific OP_CODE_INTRINSIC

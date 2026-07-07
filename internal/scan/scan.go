@@ -68,11 +68,11 @@ func (r Result) Failed() []LangCoverage {
 // returned findings are pre-LLM-review; the CLI applies that optional stage.
 // Result.Coverage records which frontends ran and which failed.
 func Scan(path string, rs *rules.RuleSet) (Result, error) {
-	prog, coverage, err := convert(path)
+	prog, coverage, targetPkgs, err := convert(path)
 	if err != nil {
 		return Result{}, err
 	}
-	findings := runAnalyses(prog, rs, path)
+	findings := scopeFindings(runAnalyses(prog, rs, path, targetPkgs), targetPkgs)
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
 }
 
@@ -84,14 +84,16 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 // in parallel instead of after it. The rule set is precompiled up front so the
 // engine and the dangerous-call pass don't race building per-rule matchers.
 // A nil filePath skips the raw-file secrets scan (callers that already did it).
-func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string) []analysis.Finding {
+func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkgs map[string]bool) []analysis.Finding {
 	rs.Compile()
 	var (
 		taint, danger, secrets, fileSecrets []analysis.Finding
 		wg                                  sync.WaitGroup
 	)
 	wg.Add(3)
-	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).Analyze(prog) }()
+	// ScopeSeed makes dependency functions analyzed demand-driven (only when taint
+	// reaches them) when deps were lowered; a nil/empty set seeds every function.
+	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).ScopeSeed(targetPkgs).Analyze(prog) }()
 	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
 	// etc.) evaluated alongside the taint engine (COV-4).
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
@@ -126,6 +128,7 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	merged := &ir.Program{Mode: "ssa"}
 	var coverage []LangCoverage
 	var findings []analysis.Finding
+	targetPkgs := map[string]bool{}
 	for _, p := range paths {
 		findings = append(findings, analysis.ScanSecretsInFiles(p)...)
 		info, err := os.Stat(p)
@@ -138,17 +141,20 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 				continue // non-source file: secrets already scanned, no dataflow
 			}
 		}
-		prog, cov, err := convert(p)
+		prog, cov, tp, err := convert(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
 			continue
 		}
 		merged.Modules = append(merged.Modules, prog.Modules...)
 		coverage = append(coverage, cov...)
+		for pkg := range tp {
+			targetPkgs[pkg] = true
+		}
 	}
 	// The per-path raw-file secrets scan already ran in the loop above, so pass an
 	// empty path to skip it here.
-	findings = append(findings, runAnalyses(merged, rs, "")...)
+	findings = append(findings, scopeFindings(runAnalyses(merged, rs, "", targetPkgs), targetPkgs)...)
 	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
 }
 
@@ -156,7 +162,7 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 // coverage-free façade over convert, retained for callers that do not need the
 // per-language conversion status.
 func Convert(path string) (*ir.Program, error) {
-	prog, _, err := convert(path)
+	prog, _, _, err := convert(path)
 	return prog, err
 }
 
@@ -168,22 +174,22 @@ func Convert(path string) (*ir.Program, error) {
 // on present source is warned about on stderr AND recorded as a failed-coverage
 // entry, so the caller can choose to fail the gate rather than report a false
 // "clean".
-func convert(path string) (*ir.Program, []LangCoverage, error) {
+func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, or .rs)", path)
+			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, or .rs)", path)
 		}
-		prog, err := conv(path)
+		prog, targetPkgs, err := conv(path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return prog, []LangCoverage{{Language: lang, Detected: true, Converted: true}}, nil
+		return prog, []LangCoverage{{Language: lang, Detected: true, Converted: true}}, targetPkgs, nil
 	}
 
 	present := detectLanguages(path)
@@ -191,21 +197,22 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 	ranAny := false
 	var coverage []LangCoverage
 	frontends := []frontend{
-		{"go", func(p string) (*ir.Program, error) { return go_converter.NewConverter().ConvertFile(p) }},
-		{"python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }},
-		{"javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }},
-		{"java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }},
-		{"cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }},
-		{"rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }},
-		{"ruby", func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }},
+		{"go", goConvert},
+		{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) })},
+		{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) })},
+		{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) })},
+		{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) })},
+		{"rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) })},
+		{"ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) })},
 	}
 	// Present frontends are independent (separate converters, separate source
 	// sets), so run them concurrently. Results are collected per frontend index
 	// and merged in frontend order, keeping module order and coverage
 	// deterministic.
 	type feResult struct {
-		prog *ir.Program
-		cov  LangCoverage
+		prog       *ir.Program
+		cov        LangCoverage
+		targetPkgs map[string]bool
 	}
 	results := make([]*feResult, len(frontends))
 	var wg sync.WaitGroup
@@ -218,7 +225,7 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		go func() {
 			defer wg.Done()
 			cov := LangCoverage{Language: fe.name, Detected: true}
-			prog, err := fe.convert(path)
+			prog, targetPkgs, err := fe.convert(path)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
 				cov.Err = err.Error()
@@ -226,10 +233,11 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 				return
 			}
 			cov.Converted = true
-			results[i] = &feResult{prog: prog, cov: cov}
+			results[i] = &feResult{prog: prog, cov: cov, targetPkgs: targetPkgs}
 		}()
 	}
 	wg.Wait()
+	targetPkgs := map[string]bool{}
 	for _, r := range results {
 		if r == nil {
 			continue
@@ -238,37 +246,80 @@ func convert(path string) (*ir.Program, []LangCoverage, error) {
 		if r.prog != nil {
 			merged.Modules = append(merged.Modules, r.prog.Modules...)
 		}
+		for p := range r.targetPkgs {
+			targetPkgs[p] = true
+		}
 	}
 	if !ranAny {
-		return nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
+		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
-	return merged, coverage, nil
+	return merged, coverage, targetPkgs, nil
 }
 
 // frontend pairs a language tag with the function that lowers a path to gIR.
+// convert returns the lowered program and, for frontends that lower dependency
+// bodies (Go), the set of user-authored package paths so findings inside lowered
+// dependencies can be scoped out; nil for frontends that don't lower deps.
 type frontend struct {
 	name    string
-	convert func(string) (*ir.Program, error)
+	convert func(string) (*ir.Program, map[string]bool, error)
+}
+
+// goConvert lowers a Go path and returns its target (user-authored) package set,
+// so scopeFindings can drop findings whose sink sits inside a lowered dependency.
+func goConvert(p string) (*ir.Program, map[string]bool, error) {
+	c := go_converter.NewConverter()
+	prog, err := c.ConvertFile(p)
+	return prog, c.TargetPackages(), err
+}
+
+// noDepConvert adapts a frontend that does not lower dependency bodies (every
+// frontend except Go) to the frontend.convert signature — it has no dependency
+// findings to scope, so it returns a nil target-package set.
+func noDepConvert(conv func(string) (*ir.Program, error)) func(string) (*ir.Program, map[string]bool, error) {
+	return func(p string) (*ir.Program, map[string]bool, error) {
+		prog, err := conv(p)
+		return prog, nil, err
+	}
+}
+
+// scopeFindings drops Go findings whose sink function lives in a lowered
+// dependency package (not user code). Dependencies are lowered so taint flows
+// THROUGH them, but a sink reached inside a library is noise, not an actionable
+// finding. Non-Go findings, and Go findings with no recorded package, are kept.
+// A no-op when targetGoPkgs is empty (nothing was dep-lowered).
+func scopeFindings(findings []analysis.Finding, targetGoPkgs map[string]bool) []analysis.Finding {
+	if len(targetGoPkgs) == 0 {
+		return findings
+	}
+	kept := findings[:0]
+	for _, f := range findings {
+		if f.Language == "go" && f.Package != "" && !targetGoPkgs[f.Package] {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 // fileFrontend returns the language tag and conversion function for a single
 // source file, or a nil function for an unsupported extension.
-func fileFrontend(path string) (string, func(string) (*ir.Program, error)) {
+func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bool, error)) {
 	switch {
 	case strings.HasSuffix(path, ".go"):
-		return "go", func(p string) (*ir.Program, error) { return go_converter.NewConverter().ConvertFile(p) }
+		return "go", goConvert
 	case strings.HasSuffix(path, ".py"):
-		return "python", func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }
+		return "python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) })
 	case isJSFamilyFile(path):
-		return "javascript", func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }
+		return "javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) })
 	case strings.HasSuffix(path, ".java"), strings.HasSuffix(path, ".class"):
-		return "java", func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }
+		return "java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) })
 	case isCppFile(path):
-		return "cpp", func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }
+		return "cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) })
 	case strings.HasSuffix(path, ".rs"):
-		return "rust", func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }
+		return "rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) })
 	case strings.HasSuffix(path, ".rb"):
-		return "ruby", func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }
+		return "ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) })
 	}
 	return "", nil
 }

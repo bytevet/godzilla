@@ -64,8 +64,14 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 **Frontends (all in-process, single binary).**
 - `converters/go/` — uses `golang.org/x/tools` SSA. `ConvertFile` accepts a file or directory and
   enumerates **all** functions via `ssautil.AllFunctions` (package funcs, methods, and closures — vulnerable
-  code often lives in `http.HandleFunc` closures, so closure coverage is essential). Dependency bodies are
-  **not** lowered (`LoadSyntax` + `ssautil.Packages`), so library behavior is modeled by rules, not analyzed.
+  code often lives in `http.HandleFunc` closures, so closure coverage is essential). Third-party **dependency
+  bodies ARE lowered** (`LoadAllSyntax` + `ssautil.AllPackages`) so taint flows THROUGH library/utility code
+  instead of dropping at it (a class of false negatives); the Go **stdlib** is skipped (modeled by rules).
+  Two things keep this affordable: findings are **scoped to user code** (`internal/scan` `scopeFindings` +
+  `Finding.Package`; a sink reached inside a library is not reported), and dependency functions are analyzed
+  **demand-driven** (`Engine.ScopeSeed` seeds only user functions; a dependency function is analyzed only when
+  taint reaches it), so analysis cost doesn't scale with the dependency closure. Function lowering runs
+  concurrently (per-worker `typeCache`). The residual cost is the x/tools SSA build of the dep closure.
   `addHTTPRequestSource` synthesizes a request-object source (`go:@net/http.Request`) at an HTTP handler's
   entry — a func taking `http.ResponseWriter`+`*http.Request`, or one registered via a routing verb
   (`collectRouteHandlers`: `r.GET`/`.Post`/`.HandleFunc`/`.Use`/…) — binding the request/context parameter so
