@@ -150,7 +150,13 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   (a `reqEffects`/`paramReqTaint` summary channel mirroring the taint one), so the `*http.Request` direct-method
   source globs (`FormValue`/`Cookie`/`PathValue`/`PostFormValue`) are redundant and removed; the kept Go request
   sources are the synthetic `go:@net/http.Request`, `net/http.Header.Get` (a field sub-object), `net/url.Values.Get`,
-  and the free-function accessors (`chi.URLParam`, `mux.Vars`).
+  and the free-function accessors (`chi.URLParam`, `mux.Vars`). Method sugar only fires for external callees, so a
+  **lowered** framework (gin/echo/… whose bodies dep-lowering analyzes) instead carries taint through its own code —
+  but that code bottoms out in stdlib request parsers that are NOT lowered (gin's `c.Query` → `c.Request.URL.Query()`
+  then a `queryCache[key]` map read), dropping taint there. The fix is framework-agnostic and lives in the rules:
+  the net/http+net/url request accessors (`net/url.URL.Query`, `net/url.Values.Get`, `net/http.Request.FormValue`/
+  `Cookie`/…, `net/http.Header.Get`) are **default propagators** (`internal/rules/propagators.go`) — they only
+  forward already-present request taint, so any unmodeled framework built on net/http is covered at no FP cost.
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
   sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
   `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed

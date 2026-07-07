@@ -1,0 +1,4 @@
+# Safe control for stdlib_wrap: the lowered framework accessor returns a constant
+# and never reads the request, so no taint reaches the sink. The request-accessor
+# default propagators only forward existing taint, so this must stay clean.
+findings: []
