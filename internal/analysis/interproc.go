@@ -140,6 +140,13 @@ type funcResult struct {
 	findings      []Finding
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
+	// reqEffects records that a request-object-tainted value (see reqTainted) was
+	// passed as an argument to a lowered callee, so the callee's matching
+	// parameter becomes a request object too — this is what carries the
+	// request-object method-sugar coverage across function boundaries (e.g. a
+	// handler passing *http.Request / *gin.Context to a helper that calls an
+	// accessor on it). Mirrors callEffects, but for provenance rather than taint.
+	reqEffects    []callEffect
 	globalEffects []globalEffect
 	// taintsParamMemory[i] is set when the function writes tainted data into
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
@@ -260,6 +267,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
 	paramTaint := map[string]map[int]*ir.Position{}
+	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
 	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
@@ -298,7 +306,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -313,6 +321,21 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if m == nil {
 				m = map[int]*ir.Position{}
 				paramTaint[ce.callee] = m
+			}
+			if _, exists := m[ce.param]; !exists {
+				m[ce.param] = ce.origin
+				enqueue(ce.callee)
+			}
+		}
+
+		// Request-object provenance flowing into a callee parameter (PR4): merged
+		// and re-enqueued exactly like callEffects, so a request object passed to a
+		// helper makes that helper's parameter a request object too.
+		for _, ce := range res.reqEffects {
+			m := paramReqTaint[ce.callee]
+			if m == nil {
+				m = map[int]*ir.Position{}
+				paramReqTaint[ce.callee] = m
 			}
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
@@ -436,6 +459,7 @@ func analyzeFunc(
 	fn *ir.Function,
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
+	reqSeeds map[int]*ir.Position,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
 	paramMemTaint map[string]map[int]*ir.Position,
@@ -485,6 +509,17 @@ func analyzeFunc(
 			}
 		}
 	}
+	// Seed request-object provenance passed in from callers (inter-procedural):
+	// a parameter that a caller filled with a request object is itself a request
+	// object here, so accessor method calls on it are covered by the method-sugar
+	// rule even across the call boundary.
+	for idx, origin := range reqSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				reqTainted[reg] = origin
+			}
+		}
+	}
 
 	var res funcResult
 	effectSeen := map[string]bool{}
@@ -496,6 +531,30 @@ func analyzeFunc(
 		}
 		effectSeen[key] = true
 		res.callEffects = append(res.callEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+
+	// addReqEffect mirrors addEffect but records request-object provenance flowing
+	// into a callee parameter (see funcResult.reqEffects). Keyed separately so it
+	// does not collide with the taint-effect dedup.
+	reqEffectSeen := map[string]bool{}
+	addReqEffect := func(callee string, param int, origin *ir.Position) {
+		key := callee + "#" + strconv.Itoa(param)
+		if reqEffectSeen[key] {
+			return
+		}
+		reqEffectSeen[key] = true
+		res.reqEffects = append(res.reqEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
+		if v == nil {
+			return nil, false
+		}
+		if reg := v.GetRegName(); reg != "" {
+			if pos, ok := reqTainted[reg]; ok {
+				return pos, true
+			}
+		}
+		return nil, false
 	}
 
 	// ENG-6(a): taint through package/module-level globals. A store of tainted
@@ -635,9 +694,15 @@ func analyzeFunc(
 			if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
 				addEffect(target, 0, p)
 			}
+			if p, ok := reqTaintedArg(inst.Call.GetValue()); ok {
+				addReqEffect(target, 0, p)
+			}
 			for j, a := range args {
 				if p, ok := isTaintedArg(tainted, a); ok {
 					addEffect(target, j+1, p)
+				}
+				if p, ok := reqTaintedArg(a); ok {
+					addReqEffect(target, j+1, p)
 				}
 			}
 		}
@@ -745,6 +810,9 @@ func analyzeFunc(
 				for j, a := range args {
 					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(callee, j, p)
+					}
+					if p, ok := reqTaintedArg(a); ok {
+						addReqEffect(callee, j, p)
 					}
 				}
 			}

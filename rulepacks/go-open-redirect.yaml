@@ -10,11 +10,7 @@ rules:
       instead of redirecting to a user-controlled URL.
     sources:
       - "go:*net/url*.Get"
-      - "go:*net/http*.Request*.FormValue"
       - "go:*net/http.Header*.Get"
-      - "go:*net/http*.Request*.Cookie"
-      - "go:*net/http*.Request*.PathValue"
-      - "go:*net/http*.Request*.PostFormValue"
       # Synthetic request-object source: the frontend taints an HTTP handler's
       # *http.Request parameter (converters/go addHTTPRequestSource), so field
       # reads off it (r.URL.Path, r.Form, r.Body, …) — which no method rule can

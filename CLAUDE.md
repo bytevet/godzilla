@@ -139,7 +139,12 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   request source (`go:@net/http.Request`, see the Go frontend) carries **request-object provenance**
   (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
   as untrusted (result tainted, pointer out-args filled), even for a web framework with **no rules**. Gated on
-  provenance so ordinary taint is untouched, and only for unresolved/external callees.
+  provenance so ordinary taint is untouched, and only for unresolved/external callees. Provenance is
+  **inter-procedural** — a request object passed to a helper makes that helper's parameter a request object too
+  (a `reqEffects`/`paramReqTaint` summary channel mirroring the taint one), so the `*http.Request` direct-method
+  source globs (`FormValue`/`Cookie`/`PathValue`/`PostFormValue`) are redundant and removed; the kept Go request
+  sources are the synthetic `go:@net/http.Request`, `net/http.Header.Get` (a field sub-object), `net/url.Values.Get`,
+  and the free-function accessors (`chi.URLParam`, `mux.Vars`).
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
   sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
   `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed
