@@ -1,0 +1,2 @@
+# filepath.Base sanitizes the request field before the sink: must be CLEAN.
+findings: []

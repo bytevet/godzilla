@@ -1,0 +1,7 @@
+# The request accessor lives in a helper (name), so this only fires when
+# request-object provenance flows across the call boundary (PR4 inter-proc
+# provenance), with the *http.Request.FormValue source glob removed.
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command

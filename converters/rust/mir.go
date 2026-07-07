@@ -316,21 +316,38 @@ func parseHeader(h string) (name string, params []mirParam) {
 
 // axumExtractorSource maps an axum extractor parameter type to the canonical
 // source name Godzilla synthesizes for it. axum handlers take request data as
-// typed extractor parameters — Query<T>, Path<T>, Json<T>, Form<T> — so each is
-// a taint source. It keys on the extractor identifier immediately before the
-// generic `<`, so it matches both a bare `Query<..>` and a fully-qualified
-// `axum::extract::Query<..>`. Returns ok=false for any non-extractor type.
+// typed extractor parameters, so each is a taint source. Two shapes are matched:
+//
+//   - Generic extractors — Query<T>, Path<T>, Json<T>, Form<T> — keyed on the
+//     extractor identifier immediately before the generic `<`, so both a bare
+//     `Query<..>` and a fully-qualified `axum::extract::Query<..>` match.
+//   - Non-generic body/query extractors — RawQuery (the raw query string) and
+//     RawForm (the raw form body) — matched by their bare type name. These names
+//     are axum-specific, so matching them does not risk the false positives a
+//     bare `String`/`Bytes` request-body param would (those common types are
+//     deliberately NOT treated as sources).
+//
+// Returns ok=false for any non-extractor type.
 func axumExtractorSource(typ string) (string, bool) {
-	lt := strings.IndexByte(typ, '<') // the extractor's own generic opener (first '<')
-	if lt < 0 {
+	typ = strings.TrimSpace(typ)
+	if lt := strings.IndexByte(typ, '<'); lt >= 0 { // the extractor's own generic opener
+		head := strings.TrimSpace(typ[:lt])
+		if i := strings.LastIndex(head, "::"); i >= 0 {
+			head = head[i+2:]
+		}
+		switch head {
+		case "Query", "Path", "Json", "Form":
+			return "rust:axum::extract::" + head, true
+		}
 		return "", false
 	}
-	head := strings.TrimSpace(typ[:lt])
+	// Non-generic extractor: match the bare type name (RawQuery / RawForm only).
+	head := typ
 	if i := strings.LastIndex(head, "::"); i >= 0 {
 		head = head[i+2:]
 	}
 	switch head {
-	case "Query", "Path", "Json", "Form":
+	case "RawQuery", "RawForm":
 		return "rust:axum::extract::" + head, true
 	}
 	return "", false

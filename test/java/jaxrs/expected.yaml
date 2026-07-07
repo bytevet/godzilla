@@ -1,0 +1,5 @@
+findings:
+    - rule: java-sql-injection
+      min: 1
+    - rule: java-command-injection
+      min: 1

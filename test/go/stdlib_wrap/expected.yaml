@@ -1,0 +1,8 @@
+# An UNKNOWN framework (external webctx module) whose accessor bottoms out in the
+# stdlib request parser (c.Request.URL.Query()). Taint reaches the command sink
+# only because the net/http+net/url request accessors are modeled as default
+# propagators — otherwise the flow dies inside the lowered library at .Query().
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command

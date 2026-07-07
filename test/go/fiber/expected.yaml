@@ -1,0 +1,6 @@
+# Fiber *fiber.Ctx.Query reaches an os/exec sink.
+findings:
+    - rule: go-command-injection
+      min: 1
+      line: 17
+      sink: Command

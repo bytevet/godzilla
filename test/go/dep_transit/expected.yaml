@@ -1,0 +1,6 @@
+# Taint flows THROUGH a dependency function (util.Transform) into a command sink;
+# fires only because dependency bodies are lowered (was a false negative before).
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command

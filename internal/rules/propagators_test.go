@@ -17,6 +17,15 @@ func TestIsDefaultPropagator(t *testing.T) {
 		"java:java/lang/StringBuilder.append",
 		"rust:*String::to_lowercase",
 		"rust:str::trim",
+		// Go net/http + net/url request accessors (canonical format is pkg-inside
+		// parens, e.g. "go:(*net/url.URL).Query" — see rule.go / converter.go).
+		// These carry request taint through a lowered framework's stdlib parsing.
+		"go:(*net/url.URL).Query",          // *url.URL -> url.Values (the gin path)
+		"go:net/url.ParseQuery",            // string -> url.Values
+		"go:(net/url.Values).Get",          // url.Values -> string
+		"go:(*net/http.Request).FormValue", // *http.Request -> string
+		"go:(*net/http.Request).Cookie",    // *http.Request -> *http.Cookie
+		"go:(net/http.Header).Get",         // http.Header -> string
 	}
 	for _, c := range shouldMatch {
 		if !IsDefaultPropagator(c) {
@@ -25,12 +34,11 @@ func TestIsDefaultPropagator(t *testing.T) {
 	}
 
 	shouldNotMatch := []string{
-		"go:os/exec.Command",               // a sink, must not propagate by default
-		"go:database/sql.(*DB).Query",      // a sink
-		"go:net/http.(*Request).FormValue", // a source
-		"py:os.system",                     // a sink
-		"js:child_process.exec",            // a sink
-		"go:strings.Contains",              // returns bool, not a taint carrier we list
+		"go:os/exec.Command",          // a sink, must not propagate by default
+		"go:(*database/sql.DB).Query", // a sink — the net/url*.Query glob must not leak onto it
+		"py:os.system",                // a sink
+		"js:child_process.exec",       // a sink
+		"go:strings.Contains",         // returns bool, not a taint carrier we list
 	}
 	for _, c := range shouldNotMatch {
 		if IsDefaultPropagator(c) {

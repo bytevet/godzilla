@@ -74,10 +74,12 @@
 //     correctly when referenced by name in an unrelated function: callee
 //     names are built purely syntactically (see above) and never depend on
 //     environment/closure resolution.
-//   - Classes are not modeled at all (ClassDeclaration/ClassLiteral are
-//     skipped); this is a bigger gap than converters/python, which at least
-//     lowers methods. Only function declarations, function expressions, and
-//     arrow functions become ir.Function values.
+//   - Classes are modeled at the method level: collectClass (wired into
+//     collectStmt for ClassDeclaration and collectExpr for ClassLiteral) lowers
+//     each class method as its own function named "<Class>.<method>", so
+//     class-based handlers are analyzed. Only non-method class-body statements
+//     (fields/static initializers) remain unmodeled. Function declarations,
+//     function expressions, and arrow functions also become ir.Function values.
 //   - Destructuring (ObjectPattern/ArrayPattern) binding targets and
 //     parameters are not modeled: a destructured declaration's initializer
 //     is still lowered (for its side effects / taint discovery) but the

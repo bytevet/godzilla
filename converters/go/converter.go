@@ -6,7 +6,10 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
+	"sync"
 
 	ir "godzilla/pkg/ir/v1"
 	"golang.org/x/tools/go/packages"
@@ -19,7 +22,25 @@ type Converter struct {
 	fset    *token.FileSet
 
 	typeCache map[types.Type]*ir.Type
+
+	// routeHandlers maps a function registered as an HTTP route handler
+	// (passed to a router's GET/POST/Handle/Use/... call) to the register name
+	// of its request/context parameter, so addHTTPRequestSource can taint the
+	// request object even for a framework whose context type we have no rules
+	// for. Populated by collectRouteHandlers.
+	routeHandlers map[*ssa.Function]string
+
+	// targetPkgs is the set of user-authored (scanned) package import paths.
+	// Dependency bodies are lowered so taint flows through them, but findings are
+	// scoped back to these packages so a sink reached inside a library is not
+	// reported. Populated by ConvertFile.
+	targetPkgs map[string]bool
 }
+
+// TargetPackages returns the set of user-authored package import paths from the
+// most recent ConvertFile. Everything else in the returned program is a lowered
+// dependency, whose findings the caller suppresses (see internal/scan).
+func (c *Converter) TargetPackages() map[string]bool { return c.targetPkgs }
 
 func NewConverter() *Converter {
 	return &Converter{
@@ -45,15 +66,14 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	cfg := &packages.Config{
-		// LoadSyntax (not LoadAllSyntax): load full syntax + types for the TARGET
-		// packages, and only type information (from export data) for their
-		// dependencies. The taint engine never analyzes inside stdlib/third-party
-		// code — library behavior is modeled by rules (sources/sinks/propagators) —
-		// so parsing and SSA-building the whole dependency closure is pure waste.
-		// This, together with ssautil.Packages below (which builds SSA bodies only
-		// for the target packages), is what keeps a scan's cost proportional to the
-		// scanned code rather than to its dependency tree.
-		Mode:  packages.LoadSyntax,
+		// LoadAllSyntax: load full syntax + types for the TARGET packages AND the
+		// whole dependency closure, so ssautil.AllPackages below can build SSA
+		// bodies for third-party libraries too. Taint then flows THROUGH an
+		// unmodeled library/utility function instead of dropping at it (a class of
+		// false negatives). Findings are scoped back to user code downstream
+		// (targetPkgs), and the Go stdlib is skipped at lowering time (modeled by
+		// rules) to bound the cost.
+		Mode:  packages.LoadAllSyntax | packages.NeedModule,
 		Tests: false,
 		Dir:   dir,
 	}
@@ -73,54 +93,173 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// ssautil.Packages (not AllPackages): create SSA for the TARGET packages
-	// only; dependencies contribute types but no function bodies. prog.Build()
-	// then builds just the target packages, so cost scales with the scanned code,
-	// not the dependency closure. Findings are unaffected: calls into libraries
-	// are matched by their canonical names in rules, not by analyzing their bodies.
-	prog, pkgs := ssautil.Packages(initial, ssa.InstantiateGenerics)
+	// ssautil.AllPackages: create SSA for the target packages AND their whole
+	// dependency closure, so prog.Build() builds third-party library bodies and
+	// AllFunctions yields them — the engine can then flow taint through a library
+	// call instead of dropping at it. (The returned slice is just the initial
+	// packages; the dependencies live in prog, enumerated via AllFunctions below.)
+	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
 	prog.Build()
 	c.program = prog
 	c.fset = initial[0].Fset
+	// AllFunctions is a full-program traversal (now covering the whole lowered
+	// dependency closure); compute it once and share it between route-handler
+	// detection and the per-package function grouping below.
+	allFns := ssautil.AllFunctions(prog)
+	c.routeHandlers = collectRouteHandlers(allFns)
+
+	// Classify every loaded package by its module (go/packages NeedModule):
+	//   - stdlib (nil Module) is NOT lowered — modeled by rules, and lowering its
+	//     whole closure would dominate the cost;
+	//   - the user's own module(s) — reportable: findings here are surfaced;
+	//   - third-party modules — lowered so taint flows through their bodies, but
+	//     findings inside them are scoped out downstream (noise, not actionable).
+	// Keying on the MODULE (not a package-path heuristic) is why a single-word
+	// module path like `abccc` or one of the user's own sibling packages is not
+	// mistaken for the stdlib. Reportable = the scanned packages plus everything
+	// sharing their module, so scanning a subdir still reports the whole module.
+	initialPaths := make(map[string]bool, len(initial))
+	targetModules := map[string]bool{}
+	for _, p := range initial {
+		initialPaths[p.PkgPath] = true
+		if p.Module != nil {
+			targetModules[p.Module.Path] = true
+		}
+	}
+	stdlibPkgs := map[string]bool{}
+	reportable := map[string]bool{}
+	seenPkg := map[string]bool{}
+	var classify func(p *packages.Package)
+	classify = func(p *packages.Package) {
+		if p == nil || seenPkg[p.PkgPath] {
+			return
+		}
+		seenPkg[p.PkgPath] = true
+		switch {
+		case initialPaths[p.PkgPath]:
+			reportable[p.PkgPath] = true
+		case p.Module == nil:
+			stdlibPkgs[p.PkgPath] = true
+		case targetModules[p.Module.Path]:
+			reportable[p.PkgPath] = true
+		}
+		for _, imp := range p.Imports {
+			classify(imp)
+		}
+	}
+	for _, p := range initial {
+		classify(p)
+	}
+	c.targetPkgs = reportable
 
 	// pkg.Members only exposes package-level funcs, not methods or anonymous
 	// function literals (closures) — and vulnerable code frequently lives inside
 	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
 	// function/method/closure; group them by their defining package.
 	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
-	for fn := range ssautil.AllFunctions(prog) {
+	for fn := range allFns {
 		if fn.Pkg != nil {
 			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
 		}
 	}
 
-	irProg := &ir.Program{
-		Mode: "ssa",
-	}
-
-	for _, pkg := range pkgs {
-		if pkg == nil {
+	// Lower the target packages and every non-stdlib dependency (third-party
+	// bodies, so taint flows through them). We do NOT tree-shake before lowering:
+	// with demand-driven analysis (the engine analyzes a dependency function only
+	// when taint reaches it — see Engine.ScopeSeed), the analysis cost no longer
+	// scales with the lowered set, so a reachability pre-pass (RTA) only added
+	// overhead. The remaining cost is the lowering itself, which is parallelized
+	// below. The stdlib is skipped (modeled by rules).
+	var pkgList []*ssa.Package
+	for pkg := range funcsByPkg {
+		if pkg == nil || pkg.Pkg == nil {
 			continue
 		}
-		irMod := c.convertPackage(pkg, funcsByPkg[pkg])
-		irProg.Modules = append(irProg.Modules, irMod)
+		if stdlibPkgs[pkg.Pkg.Path()] {
+			continue // stdlib: modeled by rules, not lowered
+		}
+		pkgList = append(pkgList, pkg)
 	}
+	sort.Slice(pkgList, func(i, j int) bool { return pkgList[i].Pkg.Path() < pkgList[j].Pkg.Path() })
+
+	// Build each module's shell (name, types, globals) sequentially on the main
+	// converter, and collect its functions in deterministic order.
+	irProg := &ir.Program{Mode: "ssa"}
+	type modWork struct {
+		mod   *ir.Module
+		funcs []*ssa.Function
+	}
+	works := make([]modWork, 0, len(pkgList))
+	for _, pkg := range pkgList {
+		funcs := funcsByPkg[pkg]
+		sort.Slice(funcs, func(i, j int) bool { return funcs[i].String() < funcs[j].String() })
+		mod := &ir.Module{Name: pkg.Pkg.Path(), Language: "go"}
+		c.addPackageMembers(mod, pkg)
+		mod.Functions = make([]*ir.Function, len(funcs))
+		works = append(works, modWork{mod, funcs})
+		irProg.Modules = append(irProg.Modules, mod)
+	}
+
+	// Convert functions concurrently — the dominant remaining cost once deps are
+	// lowered. Each worker uses its OWN Converter (own typeCache): the cache is
+	// pure memoization, so per-worker copies need no lock and cannot race, while
+	// the read-only program/fset/routeHandlers are shared. Output is
+	// deterministic: functions are pre-sorted and written to fixed slice indices.
+	type fnJob struct {
+		mod *ir.Module
+		idx int
+		fn  *ssa.Function
+	}
+	var jobs []fnJob
+	for _, w := range works {
+		for i, fn := range w.funcs {
+			jobs = append(jobs, fnJob{w.mod, i, fn})
+		}
+	}
+	nWorkers := runtime.GOMAXPROCS(0)
+	if nWorkers > len(jobs) {
+		nWorkers = len(jobs)
+	}
+	if nWorkers < 1 {
+		nWorkers = 1
+	}
+	jobCh := make(chan fnJob)
+	var wg sync.WaitGroup
+	for i := 0; i < nWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := c.worker()
+			for j := range jobCh {
+				j.mod.Functions[j.idx] = w.convertFunction(j.fn)
+			}
+		}()
+	}
+	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	wg.Wait()
 
 	return irProg, nil
 }
 
-func (c *Converter) convertPackage(pkg *ssa.Package, funcs []*ssa.Function) *ir.Module {
-	mod := &ir.Module{
-		Name:     pkg.Pkg.Path(),
-		Language: "go",
+// worker returns a lightweight Converter that shares this converter's read-only
+// setup (program, fset, route handlers) but has its own typeCache, so it can
+// lower functions concurrently without locking or racing on the shared cache.
+// targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
+// on the top-level converter, never on the worker path.
+func (c *Converter) worker() *Converter {
+	return &Converter{
+		program:       c.program,
+		fset:          c.fset,
+		typeCache:     make(map[types.Type]*ir.Type),
+		routeHandlers: c.routeHandlers,
 	}
+}
 
-	// Deterministic output: functions come from a map, so sort them.
-	sort.Slice(funcs, func(i, j int) bool { return funcs[i].String() < funcs[j].String() })
-	for _, fn := range funcs {
-		mod.Functions = append(mod.Functions, c.convertFunction(fn))
-	}
-
+// addPackageMembers lowers a package's exported types and globals into mod.
+func (c *Converter) addPackageMembers(mod *ir.Module, pkg *ssa.Package) {
 	for _, member := range pkg.Members {
 		switch m := member.(type) {
 		case *ssa.Type:
@@ -133,8 +272,6 @@ func (c *Converter) convertPackage(pkg *ssa.Package, funcs []*ssa.Function) *ir.
 			})
 		}
 	}
-
-	return mod
 }
 
 func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
@@ -171,7 +308,194 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		irFunc.Blocks = append(irFunc.Blocks, c.convertBlock(b))
 	}
 
+	c.addHTTPRequestSource(f, irFunc)
+
 	return irFunc
+}
+
+// httpRequestSourceCallee is the canonical name of the synthetic source the
+// frontend injects for an HTTP handler's *http.Request parameter (see
+// addHTTPRequestSource). It is listed as a source in the Go rule packs, so every
+// read off the request object carries taint — including field reads like
+// r.URL.Path / r.Form / r.Body that no method-call rule can match (the
+// documented "Go field-access sources aren't matchable" gap).
+const httpRequestSourceCallee = "go:@net/http.Request"
+
+// addHTTPRequestSource injects a synthetic request-object source at the entry of
+// an HTTP handler so its *http.Request parameter is tainted. It mirrors the
+// parameter-source synthesis the Rust (axum typed params) and Java (@RequestParam)
+// frontends already do: the register defined by the synthetic source CALL is the
+// parameter's own name, so the engine (which seeds taint by register name) marks
+// the request tainted at function entry and whole-object taint flows to every
+// field read off it.
+//
+// A handler is either (a) a function taking BOTH an http.ResponseWriter and an
+// *http.Request (net/http, chi, gorilla/mux, and any router built on them), or
+// (b) a function registered at a router's GET/POST/Handle/Use/... call
+// (collectRouteHandlers) — which covers a framework context value like
+// *gin.Context / echo.Context / *fiber.Ctx, and any framework we have no rules
+// for. Case (a)'s ResponseWriter requirement keeps this from tainting helpers
+// that merely pass an *http.Request around or build an OUTBOUND request
+// (http.NewRequest), which are not attacker-controlled.
+func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
+	reqName, ok := handlerRequestParam(f)
+	if !ok {
+		reqName, ok = c.routeHandlers[f]
+	}
+	if !ok || reqName == "" || len(irFunc.Blocks) == 0 {
+		return
+	}
+	src := &ir.Instruction{
+		Name:    reqName,
+		Op:      ir.OpCode_OP_CODE_CALL,
+		Pos:     irFunc.Pos,
+		Comment: "http-request-source",
+		Call: &ir.CallCommon{
+			Callee: httpRequestSourceCallee,
+			Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: httpRequestSourceCallee}},
+		},
+	}
+	entry := irFunc.Blocks[0]
+	entry.Instrs = append([]*ir.Instruction{src}, entry.Instrs...)
+}
+
+// handlerRequestParam returns the register name of an HTTP handler's
+// *net/http.Request parameter, if the function looks like a handler — i.e. it
+// also takes an http.ResponseWriter.
+func handlerRequestParam(f *ssa.Function) (string, bool) {
+	var reqName string
+	var hasWriter, hasRequest bool
+	for _, p := range f.Params {
+		switch {
+		case isNamedTypePtr(p.Type(), "net/http", "Request"):
+			hasRequest = true
+			reqName = p.Name()
+		case isNamedType(p.Type(), "net/http", "ResponseWriter"):
+			hasWriter = true
+		}
+	}
+	return reqName, hasWriter && hasRequest
+}
+
+// isNamedTypePtr reports whether t is a pointer to the named type pkgPath.name.
+func isNamedTypePtr(t types.Type, pkgPath, name string) bool {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	return isNamedType(ptr.Elem(), pkgPath, name)
+}
+
+// isNamedType reports whether t is the named (defined) type pkgPath.name.
+func isNamedType(t types.Type, pkgPath, name string) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
+}
+
+// routingVerbs are the method names (lowercased) that register an HTTP handler
+// across the common Go routers — the near-universal REST verbs plus stdlib
+// Handle/HandleFunc and middleware Use/Any/All. A call to a method with one of
+// these names that is passed a function value is treated as a route
+// registration, which is how the frontend recognizes a handler for a framework
+// context type it has no other knowledge of.
+var routingVerbs = map[string]bool{
+	"get": true, "post": true, "put": true, "delete": true, "patch": true,
+	"head": true, "options": true, "connect": true, "trace": true,
+	"any": true, "all": true, "handle": true, "handlefunc": true, "use": true,
+}
+
+// collectRouteHandlers finds functions registered as HTTP route handlers and
+// maps each to the register name of its request/context parameter. A handler is
+// a function value passed to a call whose method name is a routing verb
+// (r.GET("/x", h), app.Post(..., h), mux.HandleFunc(..., h), e.Use(mw), …).
+func collectRouteHandlers(allFns map[*ssa.Function]bool) map[*ssa.Function]string {
+	handlers := map[*ssa.Function]string{}
+	for fn := range allFns {
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				call, ok := instr.(*ssa.Call)
+				if !ok {
+					continue
+				}
+				common := call.Common()
+				if !routingVerbs[strings.ToLower(routingMethodName(common))] {
+					continue
+				}
+				for _, arg := range common.Args {
+					h := handlerFuncArg(arg)
+					if h == nil {
+						continue
+					}
+					if reg, ok := contextParam(h); ok {
+						handlers[h] = reg
+					}
+				}
+			}
+		}
+	}
+	return handlers
+}
+
+// routingMethodName returns the method name of a call, for both interface
+// (invoke) and concrete method calls, or "" for a non-method call.
+func routingMethodName(cc *ssa.CallCommon) string {
+	if cc.Method != nil {
+		return cc.Method.Name()
+	}
+	if fn, ok := cc.Value.(*ssa.Function); ok && fn.Signature.Recv() != nil {
+		return fn.Name()
+	}
+	return ""
+}
+
+// handlerFuncArg returns the underlying *ssa.Function of a call argument that is
+// a function value — a named/anonymous function passed directly, or a closure
+// (MakeClosure) over one — or nil if the argument is not a function value.
+func handlerFuncArg(arg ssa.Value) *ssa.Function {
+	switch v := arg.(type) {
+	case *ssa.Function:
+		return v
+	case *ssa.MakeClosure:
+		if fn, ok := v.Fn.(*ssa.Function); ok {
+			return fn
+		}
+	}
+	return nil
+}
+
+// contextParam returns the register name of a handler's request/context
+// parameter: the first parameter that is a pointer to a named type or a named
+// interface (e.g. *http.Request, *gin.Context, echo.Context, *fiber.Ctx),
+// excluding http.ResponseWriter.
+func contextParam(h *ssa.Function) (string, bool) {
+	for _, p := range h.Params {
+		t := p.Type()
+		if isNamedType(t, "net/http", "ResponseWriter") {
+			continue
+		}
+		if isRequestLikeType(t) && p.Name() != "" {
+			return p.Name(), true
+		}
+	}
+	return "", false
+}
+
+// isRequestLikeType reports whether t is a value we can call accessor methods on
+// — a pointer to a named type, or a named interface type.
+func isRequestLikeType(t types.Type) bool {
+	if ptr, ok := t.(*types.Pointer); ok {
+		_, ok := ptr.Elem().(*types.Named)
+		return ok
+	}
+	if named, ok := t.(*types.Named); ok {
+		_, isIface := named.Underlying().(*types.Interface)
+		return isIface
+	}
+	return false
 }
 
 func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {

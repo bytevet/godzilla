@@ -1,0 +1,8 @@
+# Field-access source (r.URL.Path) reaches a path-traversal sink via the
+# frontend's synthetic *http.Request source (addHTTPRequestSource) — a field
+# read has no Callee, so it was previously unmatchable.
+findings:
+    - rule: go-path-traversal
+      min: 1
+      line: 17
+      sink: Open

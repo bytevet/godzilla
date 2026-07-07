@@ -23,7 +23,7 @@ func cmdiRules() *rules.RuleSet {
 		Severity:  rules.SeverityCritical,
 		CWE:       "CWE-78",
 		Message:   "command injection",
-		Sources:   []string{"ruby:params", "ruby:request.*"},
+		Sources:   []string{"ruby:params", "ruby:request.*", "ruby:req.*"},
 		Sinks:     []string{"ruby:system#0", "ruby:%x"},
 	}}}
 }

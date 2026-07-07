@@ -7,7 +7,7 @@
 // adding a dependency. Per the project's "prefer python3" decision, it shells
 // out to an embedded helper script (pyast.py, see //go:embed below) that
 // parses the file with the Python standard library's `ast` module and prints
-// a compact JSON tree; convertModule/convertFunction/convertStmt/convertExpr
+// a compact JSON tree; convertModule/convertFunction/lowerStmt/lowerExpr
 // below turn that JSON into gIR.
 //
 // A tree-sitter (or other pure-Go parser) fallback for environments without
@@ -25,11 +25,11 @@
 //   - Classes are only partially modeled: methods (`def` inside a `class`)
 //     become functions named "<Class>.<method>", but other class-body
 //     statements (class attributes, nested classes, decorators) are ignored.
-//   - Expression coverage is intentionally narrow (calls, attribute/subscript
-//     reads, binary/unary ops, f-strings, str.format, constants, names).
-//     Comprehensions, lambdas, boolean/comparison operators, container
-//     literals, unpacking assignment, decorators, and `async`/`await` are not
-//     specifically modeled; unhandled expression/statement kinds become an
+//   - Expression coverage covers calls, attribute/subscript reads, binary/unary
+//     and boolean operators, comprehensions, container literals, unpacking
+//     assignment, walrus (`:=`), `await`, f-strings, str.format, constants, and
+//     names. Lambdas, comparison operators, and decorators are not specifically
+//     modeled; unhandled expression/statement kinds become an
 //     OP_CODE_INTRINSIC "py.unsupported" node (expressions) or are silently
 //     dropped (statements), rather than aborting conversion.
 package py_converter

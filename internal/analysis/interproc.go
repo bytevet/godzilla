@@ -74,6 +74,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, keys: keys,
+		reportable: e.reportable,
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -140,6 +141,13 @@ type funcResult struct {
 	findings      []Finding
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
+	// reqEffects records that a request-object-tainted value (see reqTainted) was
+	// passed as an argument to a lowered callee, so the callee's matching
+	// parameter becomes a request object too — this is what carries the
+	// request-object method-sugar coverage across function boundaries (e.g. a
+	// handler passing *http.Request / *gin.Context to a helper that calls an
+	// accessor on it). Mirrors callEffects, but for provenance rather than taint.
+	reqEffects    []callEffect
 	globalEffects []globalEffect
 	// taintsParamMemory[i] is set when the function writes tainted data into
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
@@ -215,6 +223,10 @@ type sharedIndex struct {
 	callers       map[string][]string // callee -> its callers (reverse call graph)
 	globalReaders map[string][]string // global name -> functions that read it (ENG-6)
 	keys          []string            // byKey names, sorted (deterministic worklist seed)
+	// reportable, when non-empty, restricts the initial worklist seed to functions
+	// whose module is user-authored; dependency functions are then reached
+	// demand-driven via callEffects. Empty seeds every function.
+	reportable map[string]bool
 }
 
 // buildCallers inverts the call graph: callee -> callers, so a callee becoming
@@ -260,6 +272,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
 	paramTaint := map[string]map[int]*ir.Position{}
+	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
 	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
@@ -281,9 +294,21 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		}
 	}
 
-	// Seed the worklist with every applicable function, in the shared
-	// deterministic order.
+	// Seed the worklist. Normally every function is seeded (so an intra-procedural
+	// source->sink flow is found wherever it lives). When a reportable scope is set
+	// (dependencies were lowered), seed ONLY user-authored functions: a dependency
+	// function is then analyzed DEMAND-DRIVEN — enqueued only when taint reaches it
+	// through a call (addEffect -> enqueue below) — so we pay for library code only
+	// on the taint paths that actually traverse it, not the whole closure.
 	for _, name := range idx.keys {
+		// Skip only a Go DEPENDENCY function (a Go module not in the user's
+		// reportable set) — it is reached demand-driven. Non-Go modules and Go
+		// user code are always seeded, so other languages are unaffected.
+		if len(idx.reportable) > 0 {
+			if mod := idx.modByKey[name]; mod != nil && mod.Language == "go" && !idx.reportable[mod.Name] {
+				continue
+			}
+		}
 		enqueue(name)
 	}
 
@@ -298,7 +323,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -313,6 +338,21 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if m == nil {
 				m = map[int]*ir.Position{}
 				paramTaint[ce.callee] = m
+			}
+			if _, exists := m[ce.param]; !exists {
+				m[ce.param] = ce.origin
+				enqueue(ce.callee)
+			}
+		}
+
+		// Request-object provenance flowing into a callee parameter (PR4): merged
+		// and re-enqueued exactly like callEffects, so a request object passed to a
+		// helper makes that helper's parameter a request object too.
+		for _, ce := range res.reqEffects {
+			m := paramReqTaint[ce.callee]
+			if m == nil {
+				m = map[int]*ir.Position{}
+				paramReqTaint[ce.callee] = m
 			}
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
@@ -371,6 +411,63 @@ func propagatorOperands(inst *ir.Instruction) []*ir.Value {
 	return args
 }
 
+// requestObjectSource is the canonical name of the synthetic source the Go
+// frontend injects for an HTTP handler's request object (converters/go
+// addHTTPRequestSource). Taint seeded from it additionally carries
+// request-object provenance (reqTainted), which unlocks the framework-agnostic
+// accessor rule below: a method call on a request object yields untrusted data
+// even for a web framework we have no rules for.
+const requestObjectSource = "go:@net/http.Request"
+
+func isRequestObjectSource(callee string) bool { return callee == requestObjectSource }
+
+// methodReceiverReg returns the register of a method call's receiver, or "" if
+// the call is not a method call whose receiver we can identify. For an INVOKE
+// (interface/virtual dispatch) the receiver is Call.Value; for a Go static
+// method call the callee is printed as "go:(recv).Method" and the receiver is
+// Args[0]. Free-function calls (no parenthesized receiver, not an invoke) return
+// "" so their first argument is never mistaken for a receiver.
+func methodReceiverReg(inst *ir.Instruction) string {
+	if inst.Call.GetIsInvoke() {
+		return inst.Call.GetValue().GetRegName()
+	}
+	if strings.HasPrefix(inst.Call.GetCallee(), "go:(") {
+		if args := inst.Call.GetArgs(); len(args) > 0 {
+			return args[0].GetRegName()
+		}
+	}
+	return ""
+}
+
+// methodOutParamArgs returns a method call's real arguments (receiver excluded),
+// for out-parameter tainting like c.Bind(&dst). A Go static method call keeps
+// the receiver in Args[0], so its real args are Args[1:]; an INVOKE keeps the
+// receiver in Call.Value, so all Args are real.
+func methodOutParamArgs(inst *ir.Instruction) []*ir.Value {
+	args := inst.Call.GetArgs()
+	if !inst.Call.GetIsInvoke() && strings.HasPrefix(inst.Call.GetCallee(), "go:(") && len(args) > 0 {
+		return args[1:]
+	}
+	return args
+}
+
+// isAddressArg reports whether reg is defined by an address-producing
+// instruction (&x, &s.f, &a[i], or an alloc) — i.e. a plausible out-parameter
+// target such as the &dst in c.Bind(&dst).
+func isAddressArg(defs map[string]*ir.Instruction, reg string) bool {
+	def := defs[reg]
+	if def == nil {
+		return false
+	}
+	switch def.GetOp() {
+	case ir.OpCode_OP_CODE_ALLOC, ir.OpCode_OP_CODE_FIELD_ADDR, ir.OpCode_OP_CODE_INDEX_ADDR:
+		return true
+	case ir.OpCode_OP_CODE_UN_OP:
+		return def.GetUnOp() == ir.UnOpKind_UN_OP_ADDR
+	}
+	return false
+}
+
 // analyzeFunc runs the intra-procedural fixpoint for one function, seeded with
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
@@ -379,6 +476,7 @@ func analyzeFunc(
 	fn *ir.Function,
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
+	reqSeeds map[int]*ir.Position,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
 	paramMemTaint map[string]map[int]*ir.Position,
@@ -409,12 +507,33 @@ func analyzeFunc(
 	// confidenceFor consults it so all cross-function findings are Medium (and
 	// thus seen by the LLM reviewer).
 	interprocOrigins := map[*ir.Position]bool{}
+
+	// reqTainted records registers holding a request object (a value seeded from
+	// a request-object source, e.g. an HTTP handler's *http.Request or a
+	// route-registered framework context). It is function-scoped and monotonic —
+	// request-object-ness is a property of the value, not a per-block fact — so it
+	// is NOT reset by the flow-sensitive block driver like `tainted` is. It gates
+	// the request-object method-sugar rule in handleCall so that ordinary taint is
+	// never affected.
+	reqTainted := map[string]*ir.Position{}
+
 	seedState := taintState{}
 	for idx, origin := range seeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
 				seedState[reg] = origin
 				interprocOrigins[origin] = true
+			}
+		}
+	}
+	// Seed request-object provenance passed in from callers (inter-procedural):
+	// a parameter that a caller filled with a request object is itself a request
+	// object here, so accessor method calls on it are covered by the method-sugar
+	// rule even across the call boundary.
+	for idx, origin := range reqSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				reqTainted[reg] = origin
 			}
 		}
 	}
@@ -429,6 +548,30 @@ func analyzeFunc(
 		}
 		effectSeen[key] = true
 		res.callEffects = append(res.callEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+
+	// addReqEffect mirrors addEffect but records request-object provenance flowing
+	// into a callee parameter (see funcResult.reqEffects). Keyed separately so it
+	// does not collide with the taint-effect dedup.
+	reqEffectSeen := map[string]bool{}
+	addReqEffect := func(callee string, param int, origin *ir.Position) {
+		key := callee + "#" + strconv.Itoa(param)
+		if reqEffectSeen[key] {
+			return
+		}
+		reqEffectSeen[key] = true
+		res.reqEffects = append(res.reqEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
+		if v == nil {
+			return nil, false
+		}
+		if reg := v.GetRegName(); reg != "" {
+			if pos, ok := reqTainted[reg]; ok {
+				return pos, true
+			}
+		}
+		return nil, false
 	}
 
 	// ENG-6(a): taint through package/module-level globals. A store of tainted
@@ -558,7 +701,13 @@ func analyzeFunc(
 		}
 		callee := inst.Call.GetCallee()
 		args := inst.Call.GetArgs()
+		// Classify the callee once. These globs are the engine's hottest per-(call
+		// × rule) work; the switch below and the request-object method-sugar gate
+		// both consult the same predicates, so compute them a single time.
 		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
+		isSan := rule.IsSanitizer(callee)
+		isSrc := rule.IsSource(callee)
+		isProp := rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee)
 
 		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
 		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
@@ -568,9 +717,15 @@ func analyzeFunc(
 			if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
 				addEffect(target, 0, p)
 			}
+			if p, ok := reqTaintedArg(inst.Call.GetValue()); ok {
+				addReqEffect(target, 0, p)
+			}
 			for j, a := range args {
 				if p, ok := isTaintedArg(tainted, a); ok {
 					addEffect(target, j+1, p)
+				}
+				if p, ok := reqTaintedArg(a); ok {
+					addReqEffect(target, j+1, p)
 				}
 			}
 		}
@@ -585,16 +740,22 @@ func analyzeFunc(
 		}
 
 		switch {
-		case rule.IsSanitizer(callee):
+		case isSan:
 			// A sanitizer neutralizes taint: its result is clean. Critically, we
 			// must NOT fall through to the inter-procedural summary blocks below —
 			// when the sanitizer is a function lowered from the scanned repo
 			// (byKey[callee] != nil), that path would re-taint the sanitizer's
 			// result from its own return summary and defeat the sanitizer. Stop here.
 			return
-		case rule.IsSource(callee):
+		case isSrc:
 			if inst.Name != "" {
 				markTainted(tainted, inst.Name, inst.Pos)
+				// Request-object sources additionally carry provenance so the
+				// method-sugar rule below can treat accessor calls on the request
+				// object as sources — even for a framework we have no rules for.
+				if isRequestObjectSource(callee) {
+					reqTainted[inst.Name] = inst.Pos
+				}
 			}
 		case isSink:
 			inj := injectableArgs(sinkArgs, callee, args)
@@ -626,6 +787,7 @@ func analyzeFunc(
 						Message:        rule.Message,
 						Language:       mod.Language,
 						Function:       fn.CanonicalName,
+						Package:        fn.PackageName,
 						SourcePos:      pos,
 						SinkPos:        inst.Pos,
 						SinkCallee:     callee,
@@ -635,7 +797,7 @@ func analyzeFunc(
 					})
 				}
 			}
-		case rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee):
+		case isProp:
 			// A propagating call carries taint from any of its operands to its
 			// result. This covers the rule's own propagators, a Rust concat-add
 			// call (`String + &str` lowered to `Add::add` — the call-shaped
@@ -673,6 +835,9 @@ func analyzeFunc(
 					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(callee, j, p)
 					}
+					if p, ok := reqTaintedArg(a); ok {
+						addReqEffect(callee, j, p)
+					}
 				}
 			}
 			pullReturnTaint(callee)
@@ -709,6 +874,33 @@ func analyzeFunc(
 			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
 				seedInvokeArgs(impl)
 				pullReturnTaint(impl)
+			}
+		}
+
+		// Request-object method sugar (framework-agnostic accessor coverage): a
+		// method call whose receiver is a request object — c.Query(), c.Param(),
+		// c.Bind(&dst) on a value seeded from a request-object source — yields
+		// untrusted data, even for a web framework we have no rules for. This is
+		// the typed-Go analogue of the JS "every member read off req is a source"
+		// heuristic. It is gated on request-object provenance (reqTainted), so
+		// ordinary taint is unaffected, and only fires for an unresolved/external
+		// callee that the switch above did not already classify as a
+		// source/sink/sanitizer/propagator.
+		if byKey[callee] == nil && !isSink && !isSrc && !isSan && !isProp {
+			if recv := methodReceiverReg(inst); recv != "" {
+				if origin, ok := reqTainted[recv]; ok {
+					if inst.Name != "" {
+						markTainted(tainted, inst.Name, origin)
+					}
+					// c.Bind(&dst): the accessor fills untrusted data into a
+					// pointer argument's memory. Restrict to address-typed args so
+					// a by-value argument is never falsely tainted.
+					for _, a := range methodOutParamArgs(inst) {
+						if reg := a.GetRegName(); reg != "" && isAddressArg(defs, reg) {
+							taintCallerArg(a, origin)
+						}
+					}
+				}
 			}
 		}
 	}

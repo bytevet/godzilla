@@ -1,0 +1,3 @@
+# Value passes through a dependency function that ignores it (returns a constant),
+# so taint does not reach the sink: CLEAN.
+findings: []

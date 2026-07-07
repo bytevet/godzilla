@@ -16,7 +16,7 @@ import (
 // positive. Intra-procedural source->sink flows are High; flows that cross a
 // function boundary (taint entering through a parameter) are Medium, since the
 // context-insensitive summary merges all call sites and may over-approximate.
-// Lower-confidence findings are the ones the (future) LLM reviewer triages.
+// Lower-confidence findings are the ones the LLM reviewer triages.
 type Confidence string
 
 const (
@@ -35,6 +35,7 @@ type Finding struct {
 	Message    string
 	Language   string
 	Function   string // enclosing function's CanonicalName
+	Package    string // enclosing function's package (for user-code scoping; see internal/scan)
 	SourcePos  *ir.Position
 	SinkPos    *ir.Position
 	SinkCallee string

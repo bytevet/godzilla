@@ -87,6 +87,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 							Message:    d.rule.Message,
 							Language:   lang,
 							Function:   fn.GetCanonicalName(),
+							Package:    fn.GetPackageName(),
 							SinkPos:    inst.GetPos(),
 							SinkCallee: callee,
 						})

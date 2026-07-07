@@ -12,14 +12,17 @@ rules:
       database driver, which may allow SQL injection. Use parameterized queries
       (where("col = ?", value) or where(col: value)) instead of interpolating
       input into the SQL string.
+    # Request sources are base-scoped: the frontend synthesizes a source CALL
+    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base
+    # (a handler parameter or a free framework accessor), so these globs match a
+    # whole framework's request object rather than a fixed member list.
     sources:
-      - "ruby:params"
-      - "ruby:request.params"
-      - "ruby:request.query"
-      - "ruby:request.cookies"
-      - "ruby:request.GET"
-      - "ruby:request.POST"
-      - "ruby:request.body"
+      - "ruby:params"          # params[:x] / params['x']
+      - "ruby:cookies"         # cookies[:x]
+      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
+      - "ruby:cookies.*"
+      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
+      - "ruby:req.*"           # conventional `req` request receiver
     sinks:
       - "ruby:*execute"              # connection.execute("... #{x}")
       - "ruby:*exec_query"

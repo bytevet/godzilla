@@ -28,6 +28,11 @@ rules:
       - "py:*request.query_params.__getitem__"
       - "py:*request.query_params.get"
       - "py:*request.path_params.__getitem__"
+      - "py:*request.path_params.get"
+      # Django REST Framework: request.data (the parsed request body).
+      - "py:*request.data"
+      - "py:*request.data.get"
+      - "py:*request.data.__getitem__"
       - "py:*request.json"
       - "py:*request.form"
       - "py:*request.get_json"
@@ -53,7 +58,6 @@ rules:
     sanitizers:
       - "py:*markupsafe.escape"
       - "py:*markupsafe.Markup"
-      - "py:html.escape"
       - "py:*html.escape"
       - "py:*flask.escape"
       - "py:*cgi.escape"

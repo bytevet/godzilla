@@ -64,7 +64,19 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 **Frontends (all in-process, single binary).**
 - `converters/go/` — uses `golang.org/x/tools` SSA. `ConvertFile` accepts a file or directory and
   enumerates **all** functions via `ssautil.AllFunctions` (package funcs, methods, and closures — vulnerable
-  code often lives in `http.HandleFunc` closures, so closure coverage is essential).
+  code often lives in `http.HandleFunc` closures, so closure coverage is essential). Third-party **dependency
+  bodies ARE lowered** (`LoadAllSyntax` + `ssautil.AllPackages`) so taint flows THROUGH library/utility code
+  instead of dropping at it (a class of false negatives); the Go **stdlib** is skipped (modeled by rules).
+  Two things keep this affordable: findings are **scoped to user code** (`internal/scan` `scopeFindings` +
+  `Finding.Package`; a sink reached inside a library is not reported), and dependency functions are analyzed
+  **demand-driven** (`Engine.ScopeSeed` seeds only user functions; a dependency function is analyzed only when
+  taint reaches it), so analysis cost doesn't scale with the dependency closure. Function lowering runs
+  concurrently (per-worker `typeCache`). The residual cost is the x/tools SSA build of the dep closure.
+  `addHTTPRequestSource` synthesizes a request-object source (`go:@net/http.Request`) at an HTTP handler's
+  entry — a func taking `http.ResponseWriter`+`*http.Request`, or one registered via a routing verb
+  (`collectRouteHandlers`: `r.GET`/`.Post`/`.HandleFunc`/`.Use`/…) — binding the request/context parameter so
+  field reads off it are tainted (fixes the field-access-source gap) and, with the engine's request-object
+  rule, framework accessors (`c.Query()`) are covered even for an unmodeled framework.
 - `converters/python/` — shells out to `python3` (`converters/python/pyast.py`, embedded) to get an `ast`
   JSON dump, then lowers it. Straight-line env-based lowering (documented limitations in the package doc).
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
@@ -129,6 +141,22 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
+  **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from the synthetic
+  request source (`go:@net/http.Request`, see the Go frontend) carries **request-object provenance**
+  (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
+  as untrusted (result tainted, pointer out-args filled), even for a web framework with **no rules**. Gated on
+  provenance so ordinary taint is untouched, and only for unresolved/external callees. Provenance is
+  **inter-procedural** — a request object passed to a helper makes that helper's parameter a request object too
+  (a `reqEffects`/`paramReqTaint` summary channel mirroring the taint one), so the `*http.Request` direct-method
+  source globs (`FormValue`/`Cookie`/`PathValue`/`PostFormValue`) are redundant and removed; the kept Go request
+  sources are the synthetic `go:@net/http.Request`, `net/http.Header.Get` (a field sub-object), `net/url.Values.Get`,
+  and the free-function accessors (`chi.URLParam`, `mux.Vars`). Method sugar only fires for external callees, so a
+  **lowered** framework (gin/echo/… whose bodies dep-lowering analyzes) instead carries taint through its own code —
+  but that code bottoms out in stdlib request parsers that are NOT lowered (gin's `c.Query` → `c.Request.URL.Query()`
+  then a `queryCache[key]` map read), dropping taint there. The fix is framework-agnostic and lives in the rules:
+  the net/http+net/url request accessors (`net/url.URL.Query`, `net/url.Values.Get`, `net/http.Request.FormValue`/
+  `Cookie`/…, `net/http.Header.Get`) are **default propagators** (`internal/rules/propagators.go`) — they only
+  forward already-present request taint, so any unmodeled framework built on net/http is covered at no FP cost.
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
   sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
   `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed
@@ -138,7 +166,7 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   cannot redirect the request. Deliberately conservative: it suppresses only when the fixed host is *proven*;
   an opaque or unrecoverable construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is
   dropped from gIR) keeps firing, so no real SSRF is lost.
-- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch) + `Reachable`/`Roots` (tree-shaking primitive).
+- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
   (CWE-798).
 - `finding.go` — the `Finding` type shared across the pipeline.
@@ -177,7 +205,7 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 auto-escaped HTML report with code snippets; `WriteJSON` and `WriteSARIF` (SARIF 2.1.0, severity→level) emit
 machine-readable output for tooling / GitHub code scanning. `llm` is the pluggable reviewer: `review.go` is
 dependency-free (interface, confidence-gated `Filter` with fail-open semantics, prompt builder, verdict
-parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-opus-4-8`, override via
+parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-haiku-4-5`, override via
 `GODZILLA_LLM_MODEL`).
 
 **CLI (`cmd/godzilla/main.go`).** `scan` dispatches to frontends by extension (or runs all on a directory

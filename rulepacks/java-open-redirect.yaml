@@ -12,7 +12,6 @@ rules:
       user-controlled URL.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getParameterValues"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
@@ -23,6 +22,14 @@ rules:
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
+      # JAX-RS resource-method parameter annotations (javax.ws.rs and
+      # jakarta.ws.rs — the `ws/rs` fragment matches both).
+      - "java:*ws/rs/QueryParam"
+      - "java:*ws/rs/PathParam"
+      - "java:*ws/rs/FormParam"
+      - "java:*ws/rs/HeaderParam"
+      - "java:*ws/rs/MatrixParam"
+      - "java:*ws/rs/CookieParam"
     # The redirect target URL is logical arg 0.
     sinks:
       - "java:*HttpServletResponse.sendRedirect#0"

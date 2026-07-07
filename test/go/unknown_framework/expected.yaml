@@ -1,0 +1,10 @@
+# An UNKNOWN framework (external miniweb module, zero rulepack entries): the
+# handler is recognized via route registration (r.GET) and c.Query()/c.Bind()
+# are treated as untrusted by the engine's request-object method-sugar rule.
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command
+    - rule: go-sql-injection
+      min: 1
+      sink: Query

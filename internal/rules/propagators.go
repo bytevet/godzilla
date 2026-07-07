@@ -26,6 +26,19 @@ var defaultPropagatorGlobs = []string{
 	"go:*strings.Builder*.String", "go:*strings.Builder*.Write*",
 	"go:*fmt.Sprintf", "go:*fmt.Sprint", "go:*fmt.Sprintln",
 	"go:*net/url.QueryEscape", "go:*net/url.QueryUnescape", "go:*net/url.PathEscape", "go:*net/url.PathUnescape",
+	// net/http + net/url request accessors: carry request taint through a lowered
+	// framework's INTERNAL stdlib parsing. A framework wraps the request in its own
+	// context type (gin.Context, echo.Context, …) and reads it via these stdlib
+	// helpers — e.g. gin's c.Query bottoms out in c.Request.URL.Query() — but the
+	// stdlib is not lowered, so without these the flow dies inside the library and
+	// only frameworks with an explicit accessor source glob are covered. Modeled as
+	// propagators (not sources): the receiver is Call.Value, already tainted only
+	// when it derives from a request source, so ordinary code is untouched.
+	"go:*net/url*.Query", "go:*net/url*.ParseQuery", "go:*net/url.Values*.Get",
+	"go:*net/http.Request*.FormValue", "go:*net/http.Request*.PostFormValue",
+	"go:*net/http.Request*.FormFile", "go:*net/http.Request*.Cookie",
+	"go:*net/http.Request*.Referer", "go:*net/http.Request*.UserAgent",
+	"go:*net/http.Header*.Get", "go:*net/http.Header*.Values",
 
 	// --- Python: str methods / builtins ---
 	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",
@@ -49,9 +62,16 @@ var defaultPropagatorGlobs = []string{
 	"rust:*to_str", "rust:*as_str", "rust:*into_string",
 }
 
+// defaultPropagatorMatchers is defaultPropagatorGlobs precompiled once at init.
+// IsDefaultPropagator runs on the hot per-(call-site × rule) classification path
+// inside the parallel per-rule goroutines, so matching precompiled shape-matchers
+// (like rule-owned globs after Rule.Compile) avoids the ~48 mutexed globCache
+// lookups a raw MatchAny would do on every invocation.
+var defaultPropagatorMatchers = classifyAll(defaultPropagatorGlobs)
+
 // IsDefaultPropagator reports whether callee is one of the built-in,
 // taint-preserving library transforms that carry taint from argument to result
 // regardless of the active rule. See defaultPropagatorGlobs.
 func IsDefaultPropagator(callee string) bool {
-	return MatchAny(defaultPropagatorGlobs, callee)
+	return matchAnyCompiled(defaultPropagatorMatchers, callee)
 }

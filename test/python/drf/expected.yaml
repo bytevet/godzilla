@@ -1,0 +1,5 @@
+findings:
+    - rule: py-sql-injection
+      min: 1
+    - rule: py-command-injection
+      min: 1
