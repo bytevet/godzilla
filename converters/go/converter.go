@@ -101,7 +101,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 	stdlibPkgs := map[string]bool{}
 	reportable := map[string]bool{}
-	var thirdParty []string
+	var extraRoots []string // every non-stdlib package the pattern didn't match
 	seenPkg := map[string]bool{}
 	var classify func(p *packages.Package)
 	classify = func(p *packages.Package) {
@@ -115,9 +115,13 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		case p.Module == nil:
 			stdlibPkgs[p.PkgPath] = true
 		case targetModules[p.Module.Path]:
+			// Same module as the scan target but outside the pattern (e.g.
+			// scanning a subdir): still reportable, and it must be a Phase-B
+			// root so its body keeps being lowered from source.
 			reportable[p.PkgPath] = true
+			extraRoots = append(extraRoots, p.PkgPath)
 		default:
-			thirdParty = append(thirdParty, p.PkgPath)
+			extraRoots = append(extraRoots, p.PkgPath) // third-party
 		}
 		for _, imp := range p.Imports {
 			classify(imp)
@@ -126,17 +130,19 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	for _, p := range meta {
 		classify(p)
 	}
-	sort.Strings(thirdParty) // deterministic Phase-B roots
+	sort.Strings(extraRoots) // deterministic Phase-B roots
 	c.targetPkgs = reportable
 
-	// Phase B loads SYNTAX only where bodies are actually lowered: the target
-	// pattern plus every third-party package, passed as explicit roots. The
-	// stdlib is deliberately NOT a root and NeedDeps is NOT set, so it arrives
-	// as compiled export data — identical types to source-checking it, but with
-	// no stdlib parsing or typechecking, and (having no syntax) its SSA packages
-	// are created bodyless by ssautil.AllPackages, so prog.Build() skips stdlib
-	// bodies too. Third-party roots load from source and resolve each other
-	// in-memory, exactly like user packages.
+	// Phase B loads SYNTAX only where bodies are actually lowered: EVERY
+	// non-stdlib package in the closure — the target pattern plus the explicit
+	// extraRoots (third-party deps and same-module packages outside the
+	// pattern). The stdlib is deliberately NOT a root and NeedDeps is NOT set,
+	// so it arrives as compiled export data — identical types to
+	// source-checking it, but with no stdlib parsing or typechecking, and (with
+	// no syntax) its SSA packages are created bodyless below, so prog.Build()
+	// skips stdlib bodies too. Making every lowered package an explicit ROOT
+	// (never a bare dep) is what keeps its Syntax+TypesInfo complete without
+	// NeedDeps; source roots resolve each other in-memory, exactly as before.
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
@@ -144,7 +150,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		Tests: false,
 		Dir:   dir,
 	}
-	initial, err := packages.Load(cfg, append([]string{pattern}, thirdParty...)...)
+	initial, err := packages.Load(cfg, append([]string{pattern}, extraRoots...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -160,13 +166,42 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// ssautil.AllPackages: create SSA for every loaded package. User and
-	// third-party roots have syntax, so prog.Build() builds their bodies and
-	// AllFunctions yields them — the engine can then flow taint through a library
-	// call instead of dropping at it. Stdlib packages (export data, no syntax)
-	// are created bodyless: their declarations still resolve callee names and
-	// method sets, but nothing is built or lowered for them.
-	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
+	// Create SSA for every loaded package. Non-stdlib roots have syntax, so
+	// prog.Build() builds their bodies and AllFunctions yields them — the engine
+	// can then flow taint through a library call instead of dropping at it.
+	// Stdlib packages (export data, no syntax) are created bodyless: their
+	// declarations still resolve callee names and method sets, but nothing is
+	// built or lowered for them.
+	//
+	// This replaces ssautil.AllPackages, which only visits the go/packages
+	// graph — and without NeedDeps that graph is truncated at the roots' direct
+	// imports. Export data can reference packages BEYOND that frontier (e.g. a
+	// type alias into a transitive stdlib package), and the SSA builder panics
+	// on any referenced-but-uncreated package, so we additionally create the
+	// full transitive types.Package closure (types-only) of every import.
+	prog := ssa.NewProgram(initial[0].Fset, ssa.InstantiateGenerics)
+	created := map[*types.Package]bool{}
+	var createTypesOnly func(tp *types.Package)
+	createTypesOnly = func(tp *types.Package) {
+		if tp == nil || created[tp] {
+			return
+		}
+		created[tp] = true
+		for _, imp := range tp.Imports() {
+			createTypesOnly(imp)
+		}
+		prog.CreatePackage(tp, nil, nil, true)
+	}
+	packages.Visit(initial, nil, func(p *packages.Package) {
+		if p.Types == nil || p.IllTyped || created[p.Types] {
+			return
+		}
+		created[p.Types] = true
+		for _, imp := range p.Types.Imports() {
+			createTypesOnly(imp)
+		}
+		prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
+	})
 	prog.Build()
 	c.program = prog
 	c.fset = initial[0].Fset
