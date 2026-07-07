@@ -16,7 +16,6 @@ rules:
       under a fixed base directory) before opening it.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
       - "java:*ServletRequest.getParameter"

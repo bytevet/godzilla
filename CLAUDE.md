@@ -166,7 +166,7 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   cannot redirect the request. Deliberately conservative: it suppresses only when the fixed host is *proven*;
   an opaque or unrecoverable construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is
   dropped from gIR) keeps firing, so no real SSRF is lost.
-- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch) + `Reachable`/`Roots` (tree-shaking primitive).
+- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
   (CWE-798).
 - `finding.go` — the `Finding` type shared across the pipeline.
@@ -205,7 +205,7 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 auto-escaped HTML report with code snippets; `WriteJSON` and `WriteSARIF` (SARIF 2.1.0, severity→level) emit
 machine-readable output for tooling / GitHub code scanning. `llm` is the pluggable reviewer: `review.go` is
 dependency-free (interface, confidence-gated `Filter` with fail-open semantics, prompt builder, verdict
-parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-opus-4-8`, override via
+parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-haiku-4-5`, override via
 `GODZILLA_LLM_MODEL`).
 
 **CLI (`cmd/godzilla/main.go`).** `scan` dispatches to frontends by extension (or runs all on a directory

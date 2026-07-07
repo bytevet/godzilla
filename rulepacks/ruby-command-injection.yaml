@@ -35,7 +35,6 @@ rules:
       # tainted part is dangerous (bare = all args).
       - "ruby:%x"                    # backtick / %x{} command literal
       - "ruby:*.popen"
-      - "ruby:IO.popen"
       - "ruby:Open3.*"
     sanitizers:
       - "ruby:Shellwords.escape"

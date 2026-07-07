@@ -14,8 +14,6 @@ rules:
       ObjectInputFilter, SnakeYAML SafeConstructor, or a JSON allowlist).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
-      - "java:*HttpServletRequest.getInputStream"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getReader"
       - "java:*ServletRequest.getParameter"

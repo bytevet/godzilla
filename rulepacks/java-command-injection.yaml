@@ -11,7 +11,6 @@ rules:
       fixed argument list and validate inputs.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
       - "java:*ServletRequest.getParameter"

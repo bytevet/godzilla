@@ -14,8 +14,11 @@
 // Scope: std-based flows compile standalone (env / fs / process / io). Sources
 // or sinks that live in third-party crates (web frameworks, DB drivers) need
 // those crates available at scan time, like Godzilla's other compiled-language
-// frontends; single .rs files are compiled directly here (Cargo-crate driving
-// is a follow-up).
+// frontends; single .rs files are compiled directly here. A directory
+// containing a Cargo.toml is built with `cargo rustc -- --emit=mir`
+// (convertCargo) so its dependency crates resolve and calls are named by their
+// real crate paths — opt-in via buildpolicy, since cargo runs the repo's build
+// scripts and proc-macros.
 package rust_converter
 
 import (

@@ -12,7 +12,6 @@ rules:
       user-controlled URL.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getParameterValues"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"

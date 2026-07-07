@@ -53,5 +53,3 @@ rules:
     sanitizers: []
     propagators:
       - "py:*.join"
-      - "py:os.path.join"
-      - "py:*os.path.join"

@@ -57,8 +57,4 @@ rules:
     # construction; avoid passing tainted data to exec entirely.
     sanitizers: []
     propagators:
-      - "go:fmt.Sprintf"
-      - "go:fmt.Sprint"
-      - "go:fmt.Sprintf*"
       - "go:strings.Join"
-      - "go:strings.Replace*"

@@ -58,7 +58,6 @@ rules:
     sanitizers:
       - "py:*markupsafe.escape"
       - "py:*markupsafe.Markup"
-      - "py:html.escape"
       - "py:*html.escape"
       - "py:*flask.escape"
       - "py:*cgi.escape"

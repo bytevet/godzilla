@@ -1,13 +1,14 @@
 //go:build llvm
 
-// Package llvm_converter lowers LLVM IR (as produced by clang for C/C++ or rustc
-// for Rust) into Godzilla's language-neutral gIR, so the one taint engine
-// analyzes native/systems code the same way it analyzes Go/Python/JS. LLVM IR is
-// already SSA, so the mapping is direct.
+// Package llvm_converter lowers LLVM IR (as produced by clang for C/C++) into
+// Godzilla's language-neutral gIR, so the one taint engine analyzes
+// native/systems code the same way it analyzes Go/Python/JS. LLVM IR is already
+// SSA, so the mapping is direct. (Rust no longer flows through this path; it has
+// a pure-Go MIR frontend in converters/rust.)
 //
 // This package is compiled only under the `llvm` build tag (it binds libLLVM via
-// cgo through tinygo.org/x/go-llvm). The C/C++/Rust frontends provide a no-op
-// stub for the default pure-Go build. See converters/cpp and converters/rust.
+// cgo through tinygo.org/x/go-llvm). The C/C++ frontend provides a no-op stub
+// for the default pure-Go build. See converters/cpp.
 package llvm_converter
 
 import (
@@ -19,13 +20,13 @@ import (
 )
 
 // DemangleFunc turns a raw LLVM symbol into a readable, canonical member name
-// (without the language prefix). See demangle.go for the C/C++/Rust variants.
+// (without the language prefix). See demangle.go for the C/C++ variants.
 type DemangleFunc func(string) string
 
 // Lower parses the LLVM IR at irPath and lowers it to a gIR module. srcFile is
 // the original source path used for finding positions; lang is the module
-// Language tag ("c"/"cpp"/"rust"); prefix is the canonical-name prefix
-// ("c:"/"cpp:"/"rust:"); demangle normalizes symbol names.
+// Language tag ("c"/"cpp"); prefix is the canonical-name prefix
+// ("c:"/"cpp:"); demangle normalizes symbol names.
 func Lower(irPath, srcFile, lang, prefix string, demangle DemangleFunc) (*ir.Module, error) {
 	ctx := llvm.NewContext()
 	buf, err := llvm.NewMemoryBufferFromFile(irPath)
@@ -36,7 +37,7 @@ func Lower(irPath, srcFile, lang, prefix string, demangle DemangleFunc) (*ir.Mod
 	if err != nil {
 		return nil, fmt.Errorf("parsing IR %s: %w", irPath, err)
 	}
-	// The C/C++/Rust drivers emit the IR at -O1, which runs mem2reg, so locals
+	// The C/C++ driver emits the IR at -O1, which runs mem2reg, so locals
 	// are already SSA registers (no in-process pass needed).
 
 	out := &ir.Module{Name: srcFile, Language: lang}

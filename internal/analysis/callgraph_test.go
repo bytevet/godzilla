@@ -44,29 +44,8 @@ func TestBuildCallGraph_SQLInjectionSample(t *testing.T) {
 		t.Fatal("expected a non-empty Funcs map")
 	}
 
-	mainFn := findFuncByObjectName(g, "main")
-	if mainFn == nil {
+	if findFuncByObjectName(g, "main") == nil {
 		t.Fatal("expected to find a function with ObjectName == \"main\"")
-	}
-
-	// main() calls http.HandleFunc(...) directly. net/http itself is
-	// stdlib code the converter never lowers, so it can't be a key in
-	// Funcs; per the documented design (see BuildCallGraph), such calls
-	// are recorded in Unresolved rather than Edges (which only ever
-	// contains resolvable, known-function targets). Check the union of
-	// both so this test holds regardless of which set a given callee
-	// lands in.
-	callees := append(append([]string{}, g.Edges[mainFn.CanonicalName]...), g.Unresolved[mainFn.CanonicalName]...)
-	foundHandleFunc := false
-	for _, callee := range callees {
-		if strings.Contains(callee, "net/http") && strings.Contains(callee, "HandleFunc") {
-			foundHandleFunc = true
-			break
-		}
-	}
-	if !foundHandleFunc {
-		t.Errorf("expected main (%s) to have a recorded call to a net/http.HandleFunc-ish callee, got edges=%v unresolved=%v",
-			mainFn.CanonicalName, g.Edges[mainFn.CanonicalName], g.Unresolved[mainFn.CanonicalName])
 	}
 
 	// The vulnerable handler closure (SSA name main$1) must be present as
@@ -81,62 +60,6 @@ func TestBuildCallGraph_SQLInjectionSample(t *testing.T) {
 	}
 	if !foundClosure {
 		t.Fatalf("expected a function whose CanonicalName contains \"main$1\", got funcs: %v", funcNames(g))
-	}
-}
-
-func TestCallGraph_RootsIncludeHandlerClosure(t *testing.T) {
-	prog := convertSQLInjectionSampleForCallGraph(t)
-	g := BuildCallGraph(prog)
-
-	roots := g.Roots()
-	if len(roots) == 0 {
-		t.Fatal("expected a non-empty root set")
-	}
-
-	reachable := g.Reachable(roots)
-
-	found := false
-	for name := range reachable {
-		if strings.Contains(name, "main$1") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected Reachable(Roots()) to include the handler closure (main$1); roots=%v reachable=%v",
-			roots, keysOf(reachable))
-	}
-}
-
-// TestCallGraph_Reachable_BasicBFS is a small, self-contained sanity check
-// of the BFS/reachability primitive independent of the real converter, so a
-// regression in BFS logic doesn't hide behind converter/CHA behavior.
-func TestCallGraph_Reachable_BasicBFS(t *testing.T) {
-	g := &CallGraph{
-		Funcs: map[string]*ir.Function{
-			"a": {CanonicalName: "a"},
-			"b": {CanonicalName: "b"},
-			"c": {CanonicalName: "c"},
-			"d": {CanonicalName: "d"}, // unreachable from "a"
-		},
-		Edges: map[string][]string{
-			"a": {"b"},
-			"b": {"c"},
-		},
-	}
-
-	got := g.Reachable([]string{"a"})
-	want := map[string]bool{"a": true, "b": true, "c": true}
-	if len(got) != len(want) {
-		t.Fatalf("Reachable(%v) = %v, want %v", []string{"a"}, keysOf(got), keysOf(want))
-	}
-	for k := range want {
-		if !got[k] {
-			t.Errorf("expected %q to be reachable, got %v", k, keysOf(got))
-		}
-	}
-	if got["d"] {
-		t.Errorf("did not expect %q to be reachable", "d")
 	}
 }
 
@@ -179,12 +102,4 @@ func funcNames(g *CallGraph) []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-func keysOf(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

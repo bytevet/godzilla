@@ -210,6 +210,9 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
 	b.WriteString("Decide whether it is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive.\n\n")
 	writeFindingFacts(&b, f)
+	// This guard exists purely for direct-call robustness (e.g. unit tests): on
+	// the Filter path an empty codeContext never reaches here, since
+	// FilterWithConfig skips any finding with a blank codeContextFor before Review.
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
@@ -220,9 +223,14 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("path, and whether the sink is genuinely dangerous. ")
 	b.WriteString(calibration)
 	b.WriteString("\nRespond with ONLY a JSON object of the form ")
-	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
+	b.WriteString(verdictJSONFormat)
 	return b.String()
 }
+
+// verdictJSONFormat is the strict JSON verdict schema requested from the
+// reviewer. Shared verbatim by the one-shot and agentic prompts so parseVerdict
+// reads back the same shape regardless of which prompt produced it.
+const verdictJSONFormat = `{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`
 
 // calibration steers the model toward the recall-preserving default: when the
 // evidence is not decisive, keep the finding.
@@ -282,6 +290,9 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
 	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
 	writeFindingFacts(&b, f)
+	// This guard exists purely for direct-call robustness (e.g. unit tests): on
+	// the Filter path an empty codeContext never reaches here, since
+	// FilterWithConfig skips any finding with a blank codeContextFor before Review.
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nInitial code context:\n")
 		b.WriteString(codeContext)
@@ -290,7 +301,7 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("\nDecide whether this is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive. ")
 	b.WriteString(calibration + " (do not suppress on thin evidence).\n")
 	b.WriteString("When done investigating, respond with ONLY a JSON object of the form ")
-	b.WriteString(`{"verdict": "true_positive" | "false_positive", "confidence": 0.0-1.0, "exploitability": "<one sentence: how it could be exploited, or why not>", "reason": "<one sentence>"}.`)
+	b.WriteString(verdictJSONFormat)
 	return b.String()
 }
 

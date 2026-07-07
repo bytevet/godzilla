@@ -11,7 +11,6 @@ rules:
       parameters instead of concatenating user input into the query string.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
       - "java:*ServletRequest.getParameter"

@@ -701,7 +701,13 @@ func analyzeFunc(
 		}
 		callee := inst.Call.GetCallee()
 		args := inst.Call.GetArgs()
+		// Classify the callee once. These globs are the engine's hottest per-(call
+		// × rule) work; the switch below and the request-object method-sugar gate
+		// both consult the same predicates, so compute them a single time.
 		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
+		isSan := rule.IsSanitizer(callee)
+		isSrc := rule.IsSource(callee)
+		isProp := rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee)
 
 		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
 		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
@@ -734,14 +740,14 @@ func analyzeFunc(
 		}
 
 		switch {
-		case rule.IsSanitizer(callee):
+		case isSan:
 			// A sanitizer neutralizes taint: its result is clean. Critically, we
 			// must NOT fall through to the inter-procedural summary blocks below —
 			// when the sanitizer is a function lowered from the scanned repo
 			// (byKey[callee] != nil), that path would re-taint the sanitizer's
 			// result from its own return summary and defeat the sanitizer. Stop here.
 			return
-		case rule.IsSource(callee):
+		case isSrc:
 			if inst.Name != "" {
 				markTainted(tainted, inst.Name, inst.Pos)
 				// Request-object sources additionally carry provenance so the
@@ -791,7 +797,7 @@ func analyzeFunc(
 					})
 				}
 			}
-		case rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee):
+		case isProp:
 			// A propagating call carries taint from any of its operands to its
 			// result. This covers the rule's own propagators, a Rust concat-add
 			// call (`String + &str` lowered to `Add::add` — the call-shaped
@@ -880,10 +886,7 @@ func analyzeFunc(
 		// ordinary taint is unaffected, and only fires for an unresolved/external
 		// callee that the switch above did not already classify as a
 		// source/sink/sanitizer/propagator.
-		if byKey[callee] == nil && !isSink &&
-			!rule.IsSource(callee) && !rule.IsSanitizer(callee) &&
-			!rule.IsPropagator(callee) && !isConcatAddCallee(callee) &&
-			!rules.IsDefaultPropagator(callee) {
+		if byKey[callee] == nil && !isSink && !isSrc && !isSan && !isProp {
 			if recv := methodReceiverReg(inst); recv != "" {
 				if origin, ok := reqTainted[recv]; ok {
 					if inst.Name != "" {

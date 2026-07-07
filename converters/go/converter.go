@@ -102,7 +102,11 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	prog.Build()
 	c.program = prog
 	c.fset = initial[0].Fset
-	c.routeHandlers = collectRouteHandlers(prog)
+	// AllFunctions is a full-program traversal (now covering the whole lowered
+	// dependency closure); compute it once and share it between route-handler
+	// detection and the per-package function grouping below.
+	allFns := ssautil.AllFunctions(prog)
+	c.routeHandlers = collectRouteHandlers(allFns)
 
 	// Classify every loaded package by its module (go/packages NeedModule):
 	//   - stdlib (nil Module) is NOT lowered — modeled by rules, and lowering its
@@ -153,7 +157,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
 	// function/method/closure; group them by their defining package.
 	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
-	for fn := range ssautil.AllFunctions(prog) {
+	for fn := range allFns {
 		if fn.Pkg != nil {
 			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
 		}
@@ -199,7 +203,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Convert functions concurrently — the dominant remaining cost once deps are
 	// lowered. Each worker uses its OWN Converter (own typeCache): the cache is
 	// pure memoization, so per-worker copies need no lock and cannot race, while
-	// the read-only program/fset/routeHandlers/targetPkgs are shared. Output is
+	// the read-only program/fset/routeHandlers are shared. Output is
 	// deterministic: functions are pre-sorted and written to fixed slice indices.
 	type fnJob struct {
 		mod *ir.Module
@@ -241,16 +245,16 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 }
 
 // worker returns a lightweight Converter that shares this converter's read-only
-// setup (program, fset, route handlers, target packages) but has its own
-// typeCache, so it can lower functions concurrently without locking or racing on
-// the shared cache.
+// setup (program, fset, route handlers) but has its own typeCache, so it can
+// lower functions concurrently without locking or racing on the shared cache.
+// targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
+// on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
 	return &Converter{
 		program:       c.program,
 		fset:          c.fset,
 		typeCache:     make(map[types.Type]*ir.Type),
 		routeHandlers: c.routeHandlers,
-		targetPkgs:    c.targetPkgs,
 	}
 }
 
@@ -408,9 +412,9 @@ var routingVerbs = map[string]bool{
 // maps each to the register name of its request/context parameter. A handler is
 // a function value passed to a call whose method name is a routing verb
 // (r.GET("/x", h), app.Post(..., h), mux.HandleFunc(..., h), e.Use(mw), …).
-func collectRouteHandlers(prog *ssa.Program) map[*ssa.Function]string {
+func collectRouteHandlers(allFns map[*ssa.Function]bool) map[*ssa.Function]string {
 	handlers := map[*ssa.Function]string{}
-	for fn := range ssautil.AllFunctions(prog) {
+	for fn := range allFns {
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
 				call, ok := instr.(*ssa.Call)

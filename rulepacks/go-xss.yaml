@@ -52,15 +52,10 @@ rules:
       - "go:*fasthttp.RequestCtx*.UserValue"
     sinks:
       - "go:*net/http*.ResponseWriter*.Write"
-      - "go:fmt.Fprintf"
       - "go:fmt.Fprint*"
       - "go:io.WriteString"
     sanitizers:
       - "go:*html.EscapeString"
       - "go:*html/template*"
     propagators:
-      - "go:fmt.Sprintf"
-      - "go:fmt.Sprint"
-      - "go:fmt.Sprintf*"
       - "go:strings.Join"
-      - "go:strings.Replace*"

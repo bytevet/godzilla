@@ -17,8 +17,9 @@ The three design goals:
 3. **Multi-language** — one analysis core, many frontends.
 
 These pull against each other (precision is expensive; speed favors
-approximation). The design resolves that tension with a small IR, tree-shaking,
-recall-oriented taint, and an optional LLM reviewer as a false-positive backstop.
+approximation). The design resolves that tension with a small IR, demand-driven
+analysis scoping, recall-oriented taint, and an optional LLM reviewer as a
+false-positive backstop.
 
 ## Design principles
 
@@ -141,9 +142,10 @@ Inter-procedural taint tracking (`internal/analysis/`):
 5. **Confidence scoring.** Intra-procedural findings are High; cross-function are
    Medium. Low-confidence findings are the ones the LLM reviewer adjudicates.
 
-A reachability primitive (`CallGraph.Reachable`/`Roots`) exists as a tree-shaking
-lever. A regex-based **secrets scanner** (`ScanSecrets`, CWE-798) runs alongside
-taint over gIR string constants.
+Analysis cost is scoped **demand-driven**: `Engine.ScopeSeed` seeds only user
+functions, so a lowered dependency function is analyzed only when taint actually
+reaches it (see the Go frontend's dependency lowering). A regex-based **secrets
+scanner** (`ScanSecrets`, CWE-798) runs alongside taint over gIR string constants.
 
 ## Rule engine
 
@@ -228,7 +230,7 @@ detected across the languages that have samples.
 | C/C++ frontend (LLVM IR → gIR) | ✅ **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
 | Rule engine (YAML, FQN globs, built-in packs) | ✅ taint + dangerous-call kinds across Go/Python/JS/Java/Rust/Ruby/C·C++ (see the [detection matrix](README.md#supported-languages--detections)) |
 | Inter-procedural taint (call graph + summaries) | ✅ intra = High, cross-function = Medium confidence |
-| Tree-shaking (reachability pruning) | ⚠️ `CallGraph.Reachable`/`Roots` implemented; not yet used to prune the analysis set |
+| Analysis scoping | ✅ demand-driven: `Engine.ScopeSeed` seeds only user functions, so a lowered dependency is analyzed only when taint reaches it |
 | Pointer analysis | ⚠️ approximated (CHA + value-flow); a full demand-driven points-to is a future precision upgrade |
 | Secrets scanning | ✅ regex over gIR string constants (CWE-798) |
 | Report (HTML / JSON / SARIF) + exit-code gating | ✅ |

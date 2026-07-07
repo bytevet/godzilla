@@ -3,7 +3,6 @@
 package llvm_converter
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/ianlancetaylor/demangle"
@@ -30,15 +29,4 @@ func CppDemangle(sym string) string {
 		return strings.TrimSpace(demangle.Filter(name, demangle.NoParams, demangle.NoTemplateParams))
 	}
 	return strings.TrimPrefix(name, "_")
-}
-
-// rustHash matches the trailing legacy-mangling disambiguator (e.g. "::h1a2b...")
-// that we drop for a stable canonical name.
-var rustHash = regexp.MustCompile(`::h[0-9a-f]+$`)
-
-// RustDemangle demangles a Rust symbol (legacy `_ZN...` or v0 `_R...`) to a
-// readable path like `std::process::Command::new`, dropping the trailing hash.
-func RustDemangle(sym string) string {
-	name := demangle.Filter(stripLLVM(sym), demangle.NoParams, demangle.NoTemplateParams)
-	return strings.TrimSpace(rustHash.ReplaceAllString(name, ""))
 }

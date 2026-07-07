@@ -62,11 +62,13 @@ func (r Result) Failed() []LangCoverage {
 	return failed
 }
 
-// Scan lowers the source at path to gIR and runs the taint engine (with rs) plus
-// the non-dataflow secrets scanner over it. path may be a single .go/.py/.js
-// file or a directory (every present language is converted and merged). The
-// returned findings are pre-LLM-review; the CLI applies that optional stage.
-// Result.Coverage records which frontends ran and which failed.
+// Scan lowers the source at path to gIR and runs the taint engine (with rs)
+// alongside the non-dataflow dangerous-call (weak-crypto / insecure-RNG) and
+// hardcoded-secrets passes over it. path may be a single
+// .go/.py/.js/.java/.rs/.rb/.c/.cpp file or a directory (every present language
+// is converted and merged). The returned findings are pre-LLM-review; the CLI
+// applies that optional stage. Result.Coverage records which frontends ran and
+// which failed.
 func Scan(path string, rs *rules.RuleSet) (Result, error) {
 	prog, coverage, targetPkgs, err := convert(path)
 	if err != nil {
@@ -158,14 +160,6 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
 }
 
-// Convert lowers source at path into a single gIR program. It is the
-// coverage-free façade over convert, retained for callers that do not need the
-// per-language conversion status.
-func Convert(path string) (*ir.Program, error) {
-	prog, _, _, err := convert(path)
-	return prog, err
-}
-
 // convert lowers source at path into a single gIR program and reports per-
 // language coverage. For a .go/.py/.js file it runs the matching frontend; for
 // a directory it runs every frontend whose language is present and merges the
@@ -183,7 +177,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, or .rs)", path)
+			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, .rs, or .rb)", path)
 		}
 		prog, targetPkgs, err := conv(path)
 		if err != nil {
@@ -196,15 +190,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	merged := &ir.Program{Mode: "ssa"}
 	ranAny := false
 	var coverage []LangCoverage
-	frontends := []frontend{
-		{"go", goConvert},
-		{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) })},
-		{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) })},
-		{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) })},
-		{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) })},
-		{"rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) })},
-		{"ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) })},
-	}
+	frontends := languageFrontends
 	// Present frontends are independent (separate converters, separate source
 	// sets), so run them concurrently. Results are collected per frontend index
 	// and merged in frontend order, keeping module order and coverage
@@ -256,13 +242,37 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	return merged, coverage, targetPkgs, nil
 }
 
-// frontend pairs a language tag with the function that lowers a path to gIR.
-// convert returns the lowered program and, for frontends that lower dependency
-// bodies (Go), the set of user-authored package paths so findings inside lowered
+// frontend pairs a language tag with the function that lowers a path to gIR and
+// the predicate that recognizes that language's single-file extensions. convert
+// returns the lowered program and, for frontends that lower dependency bodies
+// (Go), the set of user-authored package paths so findings inside lowered
 // dependencies can be scoped out; nil for frontends that don't lower deps.
 type frontend struct {
 	name    string
 	convert func(string) (*ir.Program, map[string]bool, error)
+	matches func(path string) bool
+}
+
+// languageFrontends is the single source of truth for the language→frontend
+// mapping used by convert (directory scan, run in this order), fileFrontend
+// (single-file dispatch), and detectLanguages (which languages are present).
+// The order is significant: it fixes module and coverage ordering for directory
+// scans, so keep go/python/javascript/java/cpp/rust/ruby as-is. The Go entry
+// uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
+var languageFrontends = []frontend{
+	{"go", goConvert, func(p string) bool { return strings.HasSuffix(p, ".go") }},
+	{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }),
+		func(p string) bool { return strings.HasSuffix(p, ".py") }},
+	{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }),
+		isJSFamilyFile},
+	{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }),
+		func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
+	{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }),
+		isCppFile},
+	{"rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }),
+		func(p string) bool { return strings.HasSuffix(p, ".rs") }},
+	{"ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }),
+		func(p string) bool { return strings.HasSuffix(p, ".rb") }},
 }
 
 // goConvert lowers a Go path and returns its target (user-authored) package set,
@@ -303,23 +313,13 @@ func scopeFindings(findings []analysis.Finding, targetGoPkgs map[string]bool) []
 }
 
 // fileFrontend returns the language tag and conversion function for a single
-// source file, or a nil function for an unsupported extension.
+// source file, or a nil function for an unsupported extension. It dispatches off
+// the shared languageFrontends table (first match wins, in table order).
 func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bool, error)) {
-	switch {
-	case strings.HasSuffix(path, ".go"):
-		return "go", goConvert
-	case strings.HasSuffix(path, ".py"):
-		return "python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) })
-	case isJSFamilyFile(path):
-		return "javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) })
-	case strings.HasSuffix(path, ".java"), strings.HasSuffix(path, ".class"):
-		return "java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) })
-	case isCppFile(path):
-		return "cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) })
-	case strings.HasSuffix(path, ".rs"):
-		return "rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) })
-	case strings.HasSuffix(path, ".rb"):
-		return "ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) })
+	for _, fe := range languageFrontends {
+		if fe.matches(path) {
+			return fe.name, fe.convert
+		}
 	}
 	return "", nil
 }
@@ -356,7 +356,7 @@ func isCppFile(path string) bool {
 }
 
 // detectLanguages walks dir and reports which supported languages have source
-// files present (skipping vendor/node_modules/.git), so Convert only runs the
+// files present (skipping vendor/node_modules/.git), so convert only runs the
 // relevant frontends.
 func detectLanguages(dir string) map[string]bool {
 	present := map[string]bool{}
@@ -370,21 +370,11 @@ func detectLanguages(dir string) map[string]bool {
 			}
 			return nil
 		}
-		switch {
-		case strings.HasSuffix(p, ".go"):
-			present["go"] = true
-		case strings.HasSuffix(p, ".py"):
-			present["python"] = true
-		case isJSFamilyFile(p):
-			present["javascript"] = true
-		case strings.HasSuffix(p, ".java"), strings.HasSuffix(p, ".class"):
-			present["java"] = true
-		case isCppFile(p):
-			present["cpp"] = true
-		case strings.HasSuffix(p, ".rs"):
-			present["rust"] = true
-		case strings.HasSuffix(p, ".rb"):
-			present["ruby"] = true
+		for _, fe := range languageFrontends {
+			if fe.matches(p) {
+				present[fe.name] = true
+				break
+			}
 		}
 		return nil
 	})

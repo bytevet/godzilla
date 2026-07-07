@@ -62,9 +62,16 @@ var defaultPropagatorGlobs = []string{
 	"rust:*to_str", "rust:*as_str", "rust:*into_string",
 }
 
+// defaultPropagatorMatchers is defaultPropagatorGlobs precompiled once at init.
+// IsDefaultPropagator runs on the hot per-(call-site × rule) classification path
+// inside the parallel per-rule goroutines, so matching precompiled shape-matchers
+// (like rule-owned globs after Rule.Compile) avoids the ~48 mutexed globCache
+// lookups a raw MatchAny would do on every invocation.
+var defaultPropagatorMatchers = classifyAll(defaultPropagatorGlobs)
+
 // IsDefaultPropagator reports whether callee is one of the built-in,
 // taint-preserving library transforms that carry taint from argument to result
 // regardless of the active rule. See defaultPropagatorGlobs.
 func IsDefaultPropagator(callee string) bool {
-	return MatchAny(defaultPropagatorGlobs, callee)
+	return matchAnyCompiled(defaultPropagatorMatchers, callee)
 }

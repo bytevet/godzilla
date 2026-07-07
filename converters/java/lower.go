@@ -44,9 +44,10 @@ func convertMethod(className string, m dumpMethod, filename string) *ir.Function
 	// Local-slot layout: for an instance method, slot 0 is the receiver `this`
 	// (the engine maps an INVOKE receiver to param 0), then the declared
 	// parameters. Each is bound to a parameter register so a tainted argument at
-	// a call site flows into the callee. (Long/double occupy two slots, but taint
-	// is width-agnostic, so we advance one slot per parameter — sufficient for the
-	// reference/int-heavy handler code that matters.)
+	// a call site flows into the callee. Slot advancement uses slotWidth(pt):
+	// long/double occupy two local slots, everything else one, so subsequent
+	// parameters land on their correct slots (see the `slot += slotWidth(pt)`
+	// below). Taint itself is width-agnostic — the width only affects slot index.
 	slot := 0
 	if !m.Static {
 		this := regValue("this")

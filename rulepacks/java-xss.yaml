@@ -14,7 +14,6 @@ rules:
       auto-escapes by context.
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameter"
       - "java:*HttpServletRequest.getParameterValues"
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
@@ -38,7 +37,6 @@ rules:
     sinks:
       - "java:*PrintWriter.print#0"
       - "java:*PrintWriter.println#0"
-      - "java:*PrintWriter.write#0"
       - "java:*PrintWriter.append#0"
       - "java:*Writer.write#0"
       - "java:*ServletOutputStream.print#0"
@@ -47,7 +45,6 @@ rules:
       - "java:*HtmlUtils.htmlEscape"
       - "java:*StringEscapeUtils.escapeHtml*"
       - "java:*Encode.forHtml*"
-      - "java:*Encode.forHtmlAttribute*"
       - "java:*ESAPI*encodeForHTML*"
     propagators:
       - "java:*String.concat"

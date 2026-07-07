@@ -59,8 +59,4 @@ rules:
     # the fix is allow-listing the destination host, not escaping.
     sanitizers: []
     propagators:
-      - "go:fmt.Sprintf"
-      - "go:fmt.Sprint"
-      - "go:fmt.Sprintf*"
       - "go:strings.Join"
-      - "go:strings.Replace*"
