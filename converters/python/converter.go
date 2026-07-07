@@ -43,8 +43,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
@@ -145,16 +147,41 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// batch (a single syntax error in an unrelated file shouldn't hide every
 	// other file's findings). Skip it, log a warning to stderr, and keep
 	// going; only fail if not a single file in the tree converted.
+	//
+	// Parsing is batched: the file list is split into contiguous chunks — one
+	// `python3 pyast.py --batch <chunk...>` invocation each, run concurrently —
+	// so interpreter startup is paid per chunk, not per file (the dominant cost
+	// of the old file-at-a-time loop). Results land at fixed indices, so module
+	// order stays the sorted file order regardless of chunk completion order.
+	results := make([]pyFileResult, len(files))
+	nWorkers := runtime.GOMAXPROCS(0)
+	if nWorkers > len(files) {
+		nWorkers = len(files)
+	}
+	chunk := (len(files) + nWorkers - 1) / nWorkers
+	var wg sync.WaitGroup
+	for start := 0; start < len(files); start += chunk {
+		end := start + chunk
+		if end > len(files) {
+			end = len(files)
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
+		}(start, end)
+	}
+	wg.Wait()
+
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
-	for _, f := range files {
-		mod, err := c.convertPythonFile(pythonExe, scriptPath, f, moduleNameFor(root, f))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", f, err)
-			convertErrs = append(convertErrs, err.Error())
+	for i, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", files[i], r.err)
+			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}
-		prog.Modules = append(prog.Modules, mod)
+		prog.Modules = append(prog.Modules, r.mod)
 	}
 
 	if len(prog.Modules) == 0 {
@@ -163,6 +190,49 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	return prog, nil
+}
+
+// pyFileResult is one file's outcome within a batch chunk.
+type pyFileResult struct {
+	mod *ir.Module
+	err error
+}
+
+// convertPythonChunk parses a contiguous chunk of files with a single
+// `pyast.py --batch` invocation (one JSON document per file, argv order) and
+// lowers each, writing into out (index-aligned with files). A process-level
+// failure marks every file in the chunk; a per-file parse failure marks only
+// that file, mirroring the old file-at-a-time error semantics.
+func (c *Converter) convertPythonChunk(pythonExe, scriptPath, root string, files []string, out []pyFileResult) {
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	args := append([]string{scriptPath, "--batch"}, files...)
+	cmd := exec.CommandContext(ctx, pythonExe, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if runErr := cmd.Run(); runErr != nil {
+		for i, f := range files {
+			out[i].err = fmt.Errorf("py_converter: python3 failed parsing %s: %v (stderr: %s)", f, runErr, strings.TrimSpace(stderr.String()))
+		}
+		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	dec.UseNumber()
+	for i, f := range files {
+		var root_ astNode
+		if err := dec.Decode(&root_); err != nil {
+			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", f, err)
+			continue
+		}
+		if errMsg, ok := root_["error"]; ok {
+			out[i].err = fmt.Errorf("py_converter: failed to parse %s: %v", f, errMsg)
+			continue
+		}
+		out[i].mod = convertModule(root_, f, moduleNameFor(root, f))
+	}
 }
 
 // writeHelperScript materializes the embedded pyast.py into a temp file so it

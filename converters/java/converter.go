@@ -17,6 +17,7 @@
 package java_converter
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"godzilla/internal/buildpolicy"
 	"godzilla/internal/proc"
@@ -103,15 +105,11 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// old for the classfile API, and the failure would otherwise surface as an
 	// opaque compile error. Only hard-fail on a POSITIVE too-old detection; if the
 	// probe itself can't run, proceed and let the dump report the real error.
-	if major, ok := javaMajor(javaExe); ok && major < minJDK {
+	// The probe result is cached per launcher path — spawning a JVM just to read
+	// its version (~150ms) is pure overhead on every scan after the first.
+	if major, ok := javaMajorCached(javaExe); ok && major < minJDK {
 		return nil, fmt.Errorf("the Java frontend requires JDK %d+ (JavaDump.java uses the java.lang.classfile API); found Java %d at %s — install a JDK %d+ or set JAVA_HOME to one", minJDK, major, javaExe, minJDK)
 	}
-
-	scriptPath, cleanup, err := writeHelperScript()
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
 
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -120,7 +118,23 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	inputs := resolveInputs(abs)
 
-	args := append([]string{scriptPath}, inputs...)
+	// Prefer the once-per-process precompiled helper: running `java
+	// JavaDump.java` (source-file mode) bootstraps the compiler and recompiles
+	// the helper on EVERY invocation (~0.5-1s); `java -cp <classes> JavaDump`
+	// skips that entirely. Identical helper source, identical JSON — only the
+	// launch mode differs. Falls back to source-file mode if javac is
+	// unavailable or the one-time compile failed.
+	var args []string
+	if classDir := compiledHelperDir(javaExe); classDir != "" {
+		args = append([]string{"-cp", classDir, "JavaDump"}, inputs...)
+	} else {
+		scriptPath, cleanup, err := writeHelperScript()
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		args = append([]string{scriptPath}, inputs...)
+	}
 	ctx, cancel := proc.ParseContext()
 	defer cancel()
 	cmd := exec.CommandContext(ctx, javaExe, args...)
@@ -189,6 +203,106 @@ func resolveJavaSource(scanPath string, idx map[string]string, source string) st
 		return p
 	}
 	return scanPath
+}
+
+// javaMajorCached memoizes javaMajor per launcher path for the process
+// lifetime: the JDK under a fixed path does not change mid-run, and the probe
+// costs a full JVM spawn.
+func javaMajorCached(javaExe string) (int, bool) {
+	type probe struct {
+		major int
+		ok    bool
+	}
+	if v, ok := javaProbeCache.Load(javaExe); ok {
+		p := v.(probe)
+		return p.major, p.ok
+	}
+	major, ok := javaMajor(javaExe)
+	javaProbeCache.Store(javaExe, probe{major, ok})
+	return major, ok
+}
+
+var javaProbeCache sync.Map // launcher path -> probe
+
+// compiledHelperDir returns a directory containing the compiled JavaDump.class,
+// or "" — in which case the caller uses source-file mode, exactly as before.
+//
+// The compiled helper lives in a persistent per-user cache keyed by the helper
+// source hash + JDK major, so every later scan — including a fresh CLI process
+// — skips source-file mode's per-invocation helper recompile (~0.5-1s). On a
+// cache miss the CURRENT invocation still uses source-file mode (never slower
+// than the status quo) while ONE background goroutine compiles and atomically
+// publishes the cache for everyone after. Any failure (no javac, no cache dir,
+// compile error) simply leaves the cache unpublished: the fallback path always
+// works and reports the real diagnostic.
+func compiledHelperDir(javaExe string) string {
+	major, ok := javaMajorCached(javaExe)
+	if !ok || major < minJDK {
+		return "" // unknown/too-old JDK: no stable cache key, use the fallback
+	}
+	dir := helperCacheDir(major)
+	if dir == "" {
+		return ""
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "JavaDump.class")); err == nil && fi.Size() > 0 {
+		return dir
+	}
+	v, _ := helperCompiles.LoadOrStore(dir, new(sync.Once))
+	v.(*sync.Once).Do(func() { go compileHelperInto(javaExe, dir) })
+	return ""
+}
+
+// helperCompiles ensures at most one background helper compile per cache dir
+// per process.
+var helperCompiles sync.Map // cache dir -> *sync.Once
+
+// helperCacheDir is the per-user cache directory for the compiled helper,
+// keyed by the embedded source's hash and the JDK major so a helper update or
+// JDK switch never reuses stale classes. "" if no cache location is available.
+func helperCacheDir(major int) string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	if base == "" {
+		return ""
+	}
+	sum := sha256.Sum256(javaDumpSource)
+	return filepath.Join(base, "godzilla", fmt.Sprintf("javadump-%x-jdk%d", sum[:8], major))
+}
+
+// compileHelperInto compiles the embedded JavaDump.java with the launcher's
+// sibling javac (falling back to PATH) into a temp dir and atomically renames
+// it to dir. Losing a publish race to a concurrent process is fine — the
+// winner's classes are identical by construction (same source hash in the key).
+func compileHelperInto(javaExe, dir string) {
+	javacExe := filepath.Join(filepath.Dir(javaExe), "javac")
+	if _, err := os.Stat(javacExe); err != nil {
+		if javacExe, err = exec.LookPath("javac"); err != nil {
+			return
+		}
+	}
+	srcPath, cleanup, err := writeHelperScript()
+	if err != nil {
+		return
+	}
+	defer cleanup()
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return
+	}
+	tmpDir, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".tmp-")
+	if err != nil {
+		return
+	}
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	if err := exec.CommandContext(ctx, javacExe, "-d", tmpDir, srcPath).Run(); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return
+	}
+	if err := os.Rename(tmpDir, dir); err != nil {
+		_ = os.RemoveAll(tmpDir) // a concurrent process already published
+	}
 }
 
 // javaMajor runs `java -version` and returns the launcher's major version. The

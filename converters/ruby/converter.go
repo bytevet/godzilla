@@ -33,8 +33,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
@@ -118,22 +120,89 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	// Directory batch: one unparseable file must not abort the whole batch.
+	// Parsing is chunked — one `ruby rbdump.rb --batch <chunk...>` invocation
+	// per chunk, run concurrently — so interpreter startup is paid per chunk,
+	// not per file. Results land at fixed indices, keeping module order the
+	// sorted file order.
+	results := make([]rbFileResult, len(files))
+	nWorkers := runtime.GOMAXPROCS(0)
+	if nWorkers > len(files) {
+		nWorkers = len(files)
+	}
+	chunk := (len(files) + nWorkers - 1) / nWorkers
+	var wg sync.WaitGroup
+	for start := 0; start < len(files); start += chunk {
+		end := start + chunk
+		if end > len(files) {
+			end = len(files)
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])
+		}(start, end)
+	}
+	wg.Wait()
+
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
-	for _, f := range files {
-		mod, err := c.convertRubyFile(rubyExe, scriptPath, f, moduleNameFor(root, f))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ruby_converter: skipping %s: %v\n", f, err)
-			convertErrs = append(convertErrs, err.Error())
+	for i, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "ruby_converter: skipping %s: %v\n", files[i], r.err)
+			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}
-		prog.Modules = append(prog.Modules, mod)
+		prog.Modules = append(prog.Modules, r.mod)
 	}
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("ruby_converter: no Ruby files under %s converted successfully (%d failed): %s",
 			abs, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 	return prog, nil
+}
+
+// rbFileResult is one file's outcome within a batch chunk.
+type rbFileResult struct {
+	mod *ir.Module
+	err error
+}
+
+// convertRubyChunk parses a contiguous chunk of files with a single
+// `rbdump.rb --batch` invocation (one JSON document per file, argv order) and
+// lowers each, writing into out (index-aligned with files). A process-level
+// failure marks every file in the chunk; a per-file parse failure marks only
+// that file, mirroring the old file-at-a-time error semantics.
+func (c *Converter) convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rbFileResult) {
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	args := append([]string{scriptPath, "--batch"}, files...)
+	cmd := exec.CommandContext(ctx, rubyExe, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		for i, f := range files {
+			out[i].err = fmt.Errorf("ruby_converter: ruby failed parsing %s: %v (stderr: %s)", f, err, strings.TrimSpace(stderr.String()))
+		}
+		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	dec.UseNumber()
+	for i, f := range files {
+		var node interface{}
+		if err := dec.Decode(&node); err != nil {
+			out[i].err = fmt.Errorf("ruby_converter: failed to parse rbdump.rb output for %s: %w", f, err)
+			continue
+		}
+		if obj, ok := node.(map[string]interface{}); ok {
+			if msg, ok := obj["error"]; ok {
+				out[i].err = fmt.Errorf("ruby_converter: failed to parse %s: %v", f, msg)
+				continue
+			}
+		}
+		out[i].mod = convertModule(node, f, moduleNameFor(root, f))
+	}
 }
 
 // writeHelperScript materializes the embedded rbdump.rb into a temp file.
