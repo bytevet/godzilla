@@ -65,19 +65,86 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		dir, pattern = filepath.Dir(abs), "."
 	}
 
-	cfg := &packages.Config{
-		// LoadAllSyntax: load full syntax + types for the TARGET packages AND the
-		// whole dependency closure, so ssautil.AllPackages below can build SSA
-		// bodies for third-party libraries too. Taint then flows THROUGH an
-		// unmodeled library/utility function instead of dropping at it (a class of
-		// false negatives). Findings are scoped back to user code downstream
-		// (targetPkgs), and the Go stdlib is skipped at lowering time (modeled by
-		// rules) to bound the cost.
-		Mode:  packages.LoadAllSyntax | packages.NeedModule,
+	// Two-phase load, so dependency bodies are lowered WITHOUT paying for the
+	// stdlib. Phase A is a metadata-only `go list` (no parsing, no typechecking):
+	// it discovers the dependency closure and classifies every package by MODULE
+	// (go/packages NeedModule):
+	//   - stdlib (nil Module) is NOT lowered — modeled by rules. Its bodies are
+	//     never read downstream, so loading its source and building its SSA
+	//     (which LoadAllSyntax did) was pure overhead;
+	//   - the user's own module(s) — reportable: findings here are surfaced;
+	//   - third-party modules — lowered so taint flows through their bodies, but
+	//     findings inside them are scoped out downstream (noise, not actionable).
+	// Keying on the MODULE (not a package-path heuristic) is why a single-word
+	// module path like `abccc` or one of the user's own sibling packages is not
+	// mistaken for the stdlib. Reportable = the scanned packages plus everything
+	// sharing their module, so scanning a subdir still reports the whole module.
+	metaCfg := &packages.Config{
+		Mode:  packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
 		Tests: false,
 		Dir:   dir,
 	}
-	initial, err := packages.Load(cfg, pattern)
+	meta, err := packages.Load(metaCfg, pattern)
+	if err != nil {
+		return nil, err
+	}
+	if len(meta) == 0 {
+		return nil, fmt.Errorf("no Go packages found under %s", dir)
+	}
+	initialPaths := make(map[string]bool, len(meta))
+	targetModules := map[string]bool{}
+	for _, p := range meta {
+		initialPaths[p.PkgPath] = true
+		if p.Module != nil {
+			targetModules[p.Module.Path] = true
+		}
+	}
+	stdlibPkgs := map[string]bool{}
+	reportable := map[string]bool{}
+	var thirdParty []string
+	seenPkg := map[string]bool{}
+	var classify func(p *packages.Package)
+	classify = func(p *packages.Package) {
+		if p == nil || seenPkg[p.PkgPath] {
+			return
+		}
+		seenPkg[p.PkgPath] = true
+		switch {
+		case initialPaths[p.PkgPath]:
+			reportable[p.PkgPath] = true
+		case p.Module == nil:
+			stdlibPkgs[p.PkgPath] = true
+		case targetModules[p.Module.Path]:
+			reportable[p.PkgPath] = true
+		default:
+			thirdParty = append(thirdParty, p.PkgPath)
+		}
+		for _, imp := range p.Imports {
+			classify(imp)
+		}
+	}
+	for _, p := range meta {
+		classify(p)
+	}
+	sort.Strings(thirdParty) // deterministic Phase-B roots
+	c.targetPkgs = reportable
+
+	// Phase B loads SYNTAX only where bodies are actually lowered: the target
+	// pattern plus every third-party package, passed as explicit roots. The
+	// stdlib is deliberately NOT a root and NeedDeps is NOT set, so it arrives
+	// as compiled export data — identical types to source-checking it, but with
+	// no stdlib parsing or typechecking, and (having no syntax) its SSA packages
+	// are created bodyless by ssautil.AllPackages, so prog.Build() skips stdlib
+	// bodies too. Third-party roots load from source and resolve each other
+	// in-memory, exactly like user packages.
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
+			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
+		Tests: false,
+		Dir:   dir,
+	}
+	initial, err := packages.Load(cfg, append([]string{pattern}, thirdParty...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -93,11 +160,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// ssautil.AllPackages: create SSA for the target packages AND their whole
-	// dependency closure, so prog.Build() builds third-party library bodies and
+	// ssautil.AllPackages: create SSA for every loaded package. User and
+	// third-party roots have syntax, so prog.Build() builds their bodies and
 	// AllFunctions yields them — the engine can then flow taint through a library
-	// call instead of dropping at it. (The returned slice is just the initial
-	// packages; the dependencies live in prog, enumerated via AllFunctions below.)
+	// call instead of dropping at it. Stdlib packages (export data, no syntax)
+	// are created bodyless: their declarations still resolve callee names and
+	// method sets, but nothing is built or lowered for them.
 	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
 	prog.Build()
 	c.program = prog
@@ -107,50 +175,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// detection and the per-package function grouping below.
 	allFns := ssautil.AllFunctions(prog)
 	c.routeHandlers = collectRouteHandlers(allFns)
-
-	// Classify every loaded package by its module (go/packages NeedModule):
-	//   - stdlib (nil Module) is NOT lowered — modeled by rules, and lowering its
-	//     whole closure would dominate the cost;
-	//   - the user's own module(s) — reportable: findings here are surfaced;
-	//   - third-party modules — lowered so taint flows through their bodies, but
-	//     findings inside them are scoped out downstream (noise, not actionable).
-	// Keying on the MODULE (not a package-path heuristic) is why a single-word
-	// module path like `abccc` or one of the user's own sibling packages is not
-	// mistaken for the stdlib. Reportable = the scanned packages plus everything
-	// sharing their module, so scanning a subdir still reports the whole module.
-	initialPaths := make(map[string]bool, len(initial))
-	targetModules := map[string]bool{}
-	for _, p := range initial {
-		initialPaths[p.PkgPath] = true
-		if p.Module != nil {
-			targetModules[p.Module.Path] = true
-		}
-	}
-	stdlibPkgs := map[string]bool{}
-	reportable := map[string]bool{}
-	seenPkg := map[string]bool{}
-	var classify func(p *packages.Package)
-	classify = func(p *packages.Package) {
-		if p == nil || seenPkg[p.PkgPath] {
-			return
-		}
-		seenPkg[p.PkgPath] = true
-		switch {
-		case initialPaths[p.PkgPath]:
-			reportable[p.PkgPath] = true
-		case p.Module == nil:
-			stdlibPkgs[p.PkgPath] = true
-		case targetModules[p.Module.Path]:
-			reportable[p.PkgPath] = true
-		}
-		for _, imp := range p.Imports {
-			classify(imp)
-		}
-	}
-	for _, p := range initial {
-		classify(p)
-	}
-	c.targetPkgs = reportable
 
 	// pkg.Members only exposes package-level funcs, not methods or anonymous
 	// function literals (closures) — and vulnerable code frequently lives inside
@@ -288,6 +312,9 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		irFunc.Signature = c.convertSignature(f.Signature)
 	}
 
+	if n := len(f.Params) + len(f.FreeVars); n > 0 {
+		irFunc.Params = make([]*ir.Value, 0, n)
+	}
 	for _, p := range f.Params {
 		irFunc.Params = append(irFunc.Params, &ir.Value{
 			Kind: &ir.Value_RegName{RegName: p.Name()},
@@ -304,6 +331,9 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		})
 	}
 
+	if n := len(f.Blocks); n > 0 {
+		irFunc.Blocks = make([]*ir.BasicBlock, 0, n)
+	}
 	for _, b := range f.Blocks {
 		irFunc.Blocks = append(irFunc.Blocks, c.convertBlock(b))
 	}
@@ -504,24 +534,38 @@ func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {
 		Comment: b.Comment,
 	}
 
-	for _, p := range b.Preds {
-		irBlock.Preds = append(irBlock.Preds, int32(p.Index))
+	if n := len(b.Preds); n > 0 {
+		irBlock.Preds = make([]int32, n)
+		for i, p := range b.Preds {
+			irBlock.Preds[i] = int32(p.Index)
+		}
 	}
-	for _, s := range b.Succs {
-		irBlock.Succs = append(irBlock.Succs, int32(s.Index))
+	if n := len(b.Succs); n > 0 {
+		irBlock.Succs = make([]int32, n)
+		for i, s := range b.Succs {
+			irBlock.Succs[i] = int32(s.Index)
+		}
 	}
 
-	for _, inst := range b.Instrs {
-		irBlock.Instrs = append(irBlock.Instrs, c.convertInstruction(inst))
+	// Slab-allocate the block's instructions: one exact-sized backing array
+	// instead of one heap object per instruction — the converter's dominant
+	// allocation (every SSA instruction of every lowered function). The slab is
+	// never appended to or copied after pointers are taken, so the pointers stay
+	// stable; output is value-identical to individual allocations.
+	slab := make([]ir.Instruction, len(b.Instrs))
+	irBlock.Instrs = make([]*ir.Instruction, len(b.Instrs))
+	for i, inst := range b.Instrs {
+		c.convertInstructionInto(&slab[i], inst)
+		irBlock.Instrs[i] = &slab[i]
 	}
 
 	return irBlock
 }
 
-func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
-	irInst := &ir.Instruction{
-		Pos: c.convertPos(inst.Pos()),
-	}
+// convertInstructionInto lowers one SSA instruction into irInst (caller-provided
+// storage, see the slab in convertBlock). irInst must be zero-valued.
+func (c *Converter) convertInstructionInto(irInst *ir.Instruction, inst ssa.Instruction) {
+	irInst.Pos = c.convertPos(inst.Pos())
 
 	if val, ok := inst.(ssa.Value); ok {
 		irInst.Name = val.Name()
@@ -679,8 +723,6 @@ func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
 	default:
 		irInst.Comment = fmt.Sprintf("unsupported instruction: %T", inst)
 	}
-
-	return irInst
 }
 
 // blockName is the gIR label for an SSA basic block ("b<index>"); the
@@ -735,8 +777,11 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
 		cc.Callee = "builtin." + b.Name()
 	}
-	for _, arg := range call.Args {
-		cc.Args = append(cc.Args, c.convertValue(arg))
+	if n := len(call.Args); n > 0 {
+		cc.Args = make([]*ir.Value, n)
+		for i, arg := range call.Args {
+			cc.Args[i] = c.convertValue(arg)
+		}
 	}
 	return cc
 }
