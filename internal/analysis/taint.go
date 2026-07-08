@@ -95,7 +95,7 @@ func buildDefs(fn *ir.Function) map[string]*ir.Instruction {
 // "taint, then overwrite with a constant, then use" false positive that a
 // monotonic (never-un-taint) model cannot. It is applied only to non-escaping
 // allocs — where no alias can hold the taint — so no real flow is lost.
-func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position, nonEscaping map[string]bool) {
+func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState, nonEscaping map[string]bool) {
 	operands := inst.GetOperands()
 	if len(operands) < 2 {
 		return
@@ -124,7 +124,7 @@ func visitStore(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted m
 // clearFieldPaths removes every one-level access-path key (base#f…, base#*)
 // rooted at base from the taint state — the field-precise companion to clearing
 // base itself in a strong update.
-func clearFieldPaths(tainted map[string]*ir.Position, base string) {
+func clearFieldPaths(tainted taintState, base string) {
 	prefix := base + "#"
 	for k := range tainted {
 		if strings.HasPrefix(k, prefix) {
@@ -154,7 +154,7 @@ func fieldAnyKey(base string) string {
 // seeding a callee parameter: either the whole value is tainted, or the value is
 // a struct with at least one tainted field. Field reads use isTainted (precise);
 // only cross-call seeding uses this broader check.
-func isTaintedArg(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool) {
+func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 	if pos, ok := isTainted(tainted, v); ok {
 		return pos, true
 	}
@@ -192,7 +192,7 @@ func isAggregateAccess(def *ir.Instruction) bool {
 // container), since elements can't be statically distinguished (variadic slice
 // packing), and nested field accesses fall back to whole-container too (a
 // one-level path can't name them precisely), preserving recall.
-func taintContainer(defs map[string]*ir.Instruction, tainted map[string]*ir.Position, reg string, pos *ir.Position) {
+func taintContainer(defs map[string]*ir.Instruction, tainted taintState, reg string, pos *ir.Position) {
 	seen := map[string]bool{}
 	for reg != "" && !seen[reg] {
 		seen[reg] = true
@@ -275,7 +275,7 @@ func rootBaseReg(defs map[string]*ir.Instruction, reg string) string {
 // or a seeded parameter). This is what stops a tainted p.A from falsely tainting
 // a read of the clean p.B (ENG-3), while still flagging p.A and any field of a
 // wholly-untrusted struct.
-func visitFieldRead(inst *ir.Instruction, tainted map[string]*ir.Position) {
+func visitFieldRead(inst *ir.Instruction, tainted taintState) {
 	if inst.Name == "" {
 		return
 	}
@@ -299,7 +299,7 @@ func visitFieldRead(inst *ir.Instruction, tainted map[string]*ir.Position) {
 	}
 }
 
-func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position) {
+func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState) {
 	if inst.Intrinsic == "go.map.update" {
 		visitMapUpdate(inst, defs, tainted)
 		return
@@ -315,7 +315,7 @@ func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 // go.map.lookup read observes it. go.map.update is a void instruction, so
 // there is no result register to taint — we taint the map operand instead,
 // mirroring visitStore.
-func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted map[string]*ir.Position) {
+func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState) {
 	ops := inst.GetOperands()
 	if len(ops) < 3 {
 		return
@@ -340,7 +340,7 @@ func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 // is bounded and stops at a register with no tainted operand (a source result, a
 // seeded parameter, or an opaque value), so the result may be a partial
 // intra-procedural segment — good enough to render a data flow.
-func reconstructPath(defs map[string]*ir.Instruction, tainted map[string]*ir.Position, argReg string, srcPos, sinkPos *ir.Position) []*ir.Position {
+func reconstructPath(defs map[string]*ir.Instruction, tainted taintState, argReg string, srcPos, sinkPos *ir.Position) []*ir.Position {
 	var rev []*ir.Position // sink -> ... -> source order while walking
 	if sinkPos != nil {
 		rev = append(rev, sinkPos)
@@ -373,7 +373,7 @@ func reconstructPath(defs map[string]*ir.Instruction, tainted map[string]*ir.Pos
 
 // firstTaintedOperandReg returns the register name of def's first tainted
 // operand (including the receiver of a method call), or "" if none.
-func firstTaintedOperandReg(tainted map[string]*ir.Position, def *ir.Instruction) string {
+func firstTaintedOperandReg(tainted taintState, def *ir.Instruction) string {
 	if def.Call != nil {
 		if v := def.Call.GetValue(); v != nil {
 			if reg := v.GetRegName(); reg != "" {
@@ -410,7 +410,7 @@ func samePos(a, b *ir.Position) bool {
 
 // isTainted reports whether operand v refers to a tainted register, and if
 // so, the Position it originated from.
-func isTainted(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool) {
+func isTainted(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 	if v == nil {
 		return nil, false
 	}
@@ -422,33 +422,23 @@ func isTainted(tainted map[string]*ir.Position, v *ir.Value) (*ir.Position, bool
 	return pos, ok
 }
 
-// firstTaintedReg returns the register of the first tainted value in vals.
-func firstTaintedReg(tainted map[string]*ir.Position, vals []*ir.Value) string {
+// firstTainted scans vals in order and returns the register and origin
+// Position of the first tainted value found. Both were previously separate
+// scans (firstTaintedReg / firstTaintedOrigin) with the identical predicate,
+// run back-to-back over the same slice on the sink path.
+func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Position, ok bool) {
 	for _, v := range vals {
-		if reg := v.GetRegName(); reg != "" {
-			if _, ok := tainted[reg]; ok {
-				return reg
-			}
+		if p, hit := isTainted(tainted, v); hit {
+			return v.GetRegName(), p, true
 		}
 	}
-	return ""
-}
-
-// firstTaintedOrigin scans vals in order and returns the origin Position of
-// the first tainted value found.
-func firstTaintedOrigin(tainted map[string]*ir.Position, vals []*ir.Value) (*ir.Position, bool) {
-	for _, v := range vals {
-		if pos, ok := isTainted(tainted, v); ok {
-			return pos, true
-		}
-	}
-	return nil, false
+	return "", nil, false
 }
 
 // markTainted records reg as tainted with the given origin, unless it is
 // already tainted (taint is monotonic; the first-recorded origin wins so
 // fixpoint iteration keeps converging).
-func markTainted(tainted map[string]*ir.Position, reg string, pos *ir.Position) {
+func markTainted(tainted taintState, reg string, pos *ir.Position) {
 	if reg == "" {
 		return
 	}
@@ -460,11 +450,11 @@ func markTainted(tainted map[string]*ir.Position, reg string, pos *ir.Position) 
 
 // markTaintFromOperands marks `name` tainted (with the origin of the first
 // tainted operand) if name is non-empty and any operand is tainted.
-func markTaintFromOperands(tainted map[string]*ir.Position, name string, operands []*ir.Value) {
+func markTaintFromOperands(tainted taintState, name string, operands []*ir.Value) {
 	if name == "" {
 		return
 	}
-	if pos, ok := firstTaintedOrigin(tainted, operands); ok {
+	if _, pos, ok := firstTainted(tainted, operands); ok {
 		markTainted(tainted, name, pos)
 	}
 }

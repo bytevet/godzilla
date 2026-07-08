@@ -33,11 +33,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
-	"sync"
 
+	"godzilla/internal/chunks"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -112,11 +111,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	if !info.IsDir() {
-		mod, err := c.convertRubyFile(rubyExe, scriptPath, files[0], moduleNameFor(root, files[0]))
-		if err != nil {
-			return nil, err
+		results := make([]rbFileResult, 1)
+		c.convertRubyChunk(rubyExe, scriptPath, root, files, results)
+		if results[0].err != nil {
+			return nil, results[0].err
 		}
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}, nil
+		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
 	}
 
 	// Directory batch: one unparseable file must not abort the whole batch.
@@ -125,24 +125,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// not per file. Results land at fixed indices, keeping module order the
 	// sorted file order.
 	results := make([]rbFileResult, len(files))
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers > len(files) {
-		nWorkers = len(files)
-	}
-	chunk := (len(files) + nWorkers - 1) / nWorkers
-	var wg sync.WaitGroup
-	for start := 0; start < len(files); start += chunk {
-		end := start + chunk
-		if end > len(files) {
-			end = len(files)
-		}
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])
-		}(start, end)
-	}
-	wg.Wait()
+	chunks.Run(len(files), func(start, end int) {
+		c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])
+	})
 
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
@@ -232,30 +217,4 @@ func moduleNameFor(root, file string) string {
 		rel = filepath.Base(file)
 	}
 	return filepath.ToSlash(strings.TrimSuffix(rel, ".rb"))
-}
-
-// convertRubyFile runs rbdump.rb against file and lowers the JSON sexp to gIR.
-func (c *Converter) convertRubyFile(rubyExe, scriptPath, file, moduleName string) (*ir.Module, error) {
-	ctx, cancel := proc.ParseContext()
-	defer cancel()
-	cmd := exec.CommandContext(ctx, rubyExe, scriptPath, file)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ruby_converter: ruby failed parsing %s: %v (stderr: %s)", file, err, strings.TrimSpace(stderr.String()))
-	}
-
-	var root interface{}
-	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	dec.UseNumber()
-	if err := dec.Decode(&root); err != nil {
-		return nil, fmt.Errorf("ruby_converter: failed to parse rbdump.rb output for %s: %w", file, err)
-	}
-	if obj, ok := root.(map[string]interface{}); ok {
-		if msg, ok := obj["error"]; ok {
-			return nil, fmt.Errorf("ruby_converter: failed to parse %s: %v", file, msg)
-		}
-	}
-	return convertModule(root, file, moduleName), nil
 }

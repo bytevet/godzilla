@@ -2,8 +2,9 @@ package analysis
 
 import (
 	"fmt"
+	"maps"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,11 +67,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// is the deterministic worklist seed order.
 	callers := buildCallers(cg)
 	globalReaders := buildGlobalReaders(byKey)
-	keys := make([]string, 0, len(byKey))
-	for name := range byKey {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(byKey))
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, keys: keys,
@@ -444,11 +441,10 @@ func methodReceiverReg(inst *ir.Instruction) string {
 // the receiver in Args[0], so its real args are Args[1:]; an INVOKE keeps the
 // receiver in Call.Value, so all Args are real.
 func methodOutParamArgs(inst *ir.Instruction) []*ir.Value {
-	args := inst.Call.GetArgs()
-	if !inst.Call.GetIsInvoke() && strings.HasPrefix(inst.Call.GetCallee(), "go:(") && len(args) > 0 {
-		return args[1:]
+	if inst.Call.GetIsInvoke() {
+		return inst.Call.GetArgs()
 	}
-	return args
+	return logicalArgs(inst.Call.GetCallee(), inst.Call.GetArgs())
 }
 
 // isAddressArg reports whether reg is defined by an address-producing
@@ -759,7 +755,7 @@ func analyzeFunc(
 			}
 		case isSink:
 			inj := injectableArgs(sinkArgs, callee, args)
-			if pos, ok := firstTaintedOrigin(tainted, inj); ok && !reported[inst] {
+			if srcReg, pos, ok := firstTainted(tainted, inj); ok && !reported[inst] {
 				// ENG-9: suppress when a validator guard on this flow's source
 				// value dominates the sink on the path taken to reach it. The check
 				// is left un-reported (not marked) so a later iteration re-evaluates
@@ -778,7 +774,7 @@ func analyzeFunc(
 					// (e.g. once an interprocedural summary taints the host segment).
 					// Leaving reported unset on suppression lets that real flow fire.
 					reported[inst] = true
-					steps := reconstructPath(defs, tainted, firstTaintedReg(tainted, inj), pos, inst.Pos)
+					steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
 					res.findings = append(res.findings, Finding{
 						RuleID:         rule.ID,
 						Severity:       rule.Severity,
@@ -960,7 +956,7 @@ func analyzeFunc(
 			}
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:
-			if pos, ok := firstTaintedOrigin(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
+			if _, pos, ok := firstTainted(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
 				res.returnsOrigin = pos
 			}
 		default:

@@ -43,11 +43,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
-	"sync"
 
+	"godzilla/internal/chunks"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -66,9 +65,7 @@ func NewConverter() *Converter {
 
 // ConvertFile lowers the Python source at path into gIR. path may be either a
 // single .py file or a directory (all *.py files under it are converted
-// recursively, one gIR Module per file). Requires python3 on PATH; if it is
-// not found, an error is returned (a tree-sitter based fallback is a
-// documented future path, not implemented here).
+// recursively, one gIR Module per file). Requires python3 on PATH.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -114,7 +111,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	pythonExe, err := exec.LookPath("python3")
 	if err != nil {
-		return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source; a tree-sitter fallback is a documented future path but not implemented): %w", err)
+		return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source): %w", err)
 	}
 
 	scriptPath, cleanup, err := writeHelperScript()
@@ -136,11 +133,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Single-file mode (path pointed directly at a .py file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
 	if !info.IsDir() {
-		mod, err := c.convertPythonFile(pythonExe, scriptPath, files[0], moduleNameFor(root, files[0]))
-		if err != nil {
-			return nil, err
+		results := make([]pyFileResult, 1)
+		c.convertPythonChunk(pythonExe, scriptPath, root, files, results)
+		if results[0].err != nil {
+			return nil, results[0].err
 		}
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}, nil
+		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
 	}
 
 	// Directory batch mode: one unparseable .py file must not abort the whole
@@ -154,24 +152,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// of the old file-at-a-time loop). Results land at fixed indices, so module
 	// order stays the sorted file order regardless of chunk completion order.
 	results := make([]pyFileResult, len(files))
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers > len(files) {
-		nWorkers = len(files)
-	}
-	chunk := (len(files) + nWorkers - 1) / nWorkers
-	var wg sync.WaitGroup
-	for start := 0; start < len(files); start += chunk {
-		end := start + chunk
-		if end > len(files) {
-			end = len(files)
-		}
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
-		}(start, end)
-	}
-	wg.Wait()
+	chunks.Run(len(files), func(start, end int) {
+		c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
+	})
 
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
@@ -266,32 +249,4 @@ func moduleNameFor(root, file string) string {
 		rel = filepath.Base(file)
 	}
 	return filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
-}
-
-// convertPythonFile runs the embedded pyast.py helper against file and lowers
-// the resulting JSON AST into one gIR Module.
-func (c *Converter) convertPythonFile(pythonExe, scriptPath, file, moduleName string) (*ir.Module, error) {
-	ctx, cancel := proc.ParseContext()
-	defer cancel()
-	cmd := exec.CommandContext(ctx, pythonExe, scriptPath, file)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	runErr := cmd.Run()
-	if runErr != nil {
-		return nil, fmt.Errorf("py_converter: python3 failed parsing %s: %v (stderr: %s)", file, runErr, strings.TrimSpace(stderr.String()))
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	dec.UseNumber()
-	var root astNode
-	if err := dec.Decode(&root); err != nil {
-		return nil, fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", file, err)
-	}
-	if errMsg, ok := root["error"]; ok {
-		return nil, fmt.Errorf("py_converter: failed to parse %s: %v", file, errMsg)
-	}
-
-	return convertModule(root, file, moduleName), nil
 }

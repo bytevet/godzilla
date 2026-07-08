@@ -38,7 +38,7 @@ false-positive backstop.
   cross function boundaries; the engine follows them via per-function summaries.
 - **In-process, single binary.** Frontends run in-process for fast startup and
   trivial CI deployment; each merely shells out to a language toolchain where one is
-  unavoidable (Python/Java/Rust).
+  unavoidable (Python/Java/Rust/Ruby).
 - **Recall first, precision backstop.** Lowering favors catching the common
   web-handler vulnerability shape; a confidence score plus the optional LLM reviewer
   trim the residual false positives.
@@ -76,7 +76,7 @@ gIR is a **small universal SSA core plus an intrinsic escape hatch**, defined in
 
 The opcode set stays small and language-neutral:
 
-- **Terminators:** `RET`, `JUMP`, `IF`, `SWITCH`, `UNREACHABLE`
+- **Terminators:** `RET`, `JUMP`, `IF`, `SWITCH`, `PANIC`, `UNREACHABLE`
 - **Memory:** `ALLOC`, `LOAD`, `STORE`
 - **Aggregates:** `FIELD` / `FIELD_ADDR`, `INDEX` / `INDEX_ADDR`
 - **Compute:** `BIN_OP`, `UN_OP`, `PHI`

@@ -161,9 +161,10 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 }
 
 // convert lowers source at path into a single gIR program and reports per-
-// language coverage. For a .go/.py/.js file it runs the matching frontend; for
-// a directory it runs every frontend whose language is present and merges the
-// modules they produce (a repo may mix languages), tolerating a frontend that
+// language coverage. For a single source file it runs the matching frontend
+// (dispatched via languageFrontends); for a directory it runs every frontend
+// whose language is present and merges the modules they produce (a repo may
+// mix languages), tolerating a frontend that
 // finds nothing as long as at least one yields modules. A frontend that fails
 // on present source is warned about on stderr AND recorded as a failed-coverage
 // entry, so the caller can choose to fail the gate rather than report a false
@@ -188,7 +189,6 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 
 	present := detectLanguages(path)
 	merged := &ir.Program{Mode: "ssa"}
-	ranAny := false
 	var coverage []LangCoverage
 	frontends := languageFrontends
 	// Present frontends are independent (separate converters, separate source
@@ -206,7 +206,6 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 		if !present[fe.name] {
 			continue
 		}
-		ranAny = true
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -236,7 +235,9 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 			targetPkgs[p] = true
 		}
 	}
-	if !ranAny {
+	// Every launched frontend goroutine records a result on both its success and
+	// failure paths, so "no frontend ran" is exactly "coverage is empty".
+	if len(coverage) == 0 {
 		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
 	return merged, coverage, targetPkgs, nil

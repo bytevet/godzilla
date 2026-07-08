@@ -247,14 +247,15 @@ func compiledHelperDir(javaExe string) string {
 	if fi, err := os.Stat(filepath.Join(dir, "JavaDump.class")); err == nil && fi.Size() > 0 {
 		return dir
 	}
-	v, _ := helperCompiles.LoadOrStore(dir, new(sync.Once))
-	v.(*sync.Once).Do(func() { go compileHelperInto(javaExe, dir) })
+	if _, loaded := helperCompiles.LoadOrStore(dir, struct{}{}); !loaded {
+		go compileHelperInto(javaExe, dir)
+	}
 	return ""
 }
 
 // helperCompiles ensures at most one background helper compile per cache dir
 // per process.
-var helperCompiles sync.Map // cache dir -> *sync.Once
+var helperCompiles sync.Map // cache dir -> started marker
 
 // helperCacheDir is the per-user cache directory for the compiled helper,
 // keyed by the embedded source's hash and the JDK major so a helper update or
@@ -305,9 +306,14 @@ func compileHelperInto(javaExe, dir string) {
 	}
 }
 
-// javaMajor runs `java -version` and returns the launcher's major version. The
-// bool is false if the probe could not run or its output could not be parsed.
+// javaMajor returns the launcher's major version. It first tries the JDK's
+// `release` file (standard since JDK 9; avoids a ~30-40ms JVM spawn per fresh
+// process) and falls back to spawning `java -version`. The bool is false if
+// neither probe could determine the version.
 func javaMajor(javaExe string) (int, bool) {
+	if major, ok := javaMajorFromReleaseFile(javaExe); ok {
+		return major, true
+	}
 	ctx, cancel := proc.ParseContext()
 	defer cancel()
 	// `java -version` prints to stderr; CombinedOutput captures it.
@@ -346,6 +352,36 @@ func parseJavaMajor(out string) (int, bool) {
 		}
 	}
 	return major, true
+}
+
+// javaMajorFromReleaseFile reads the major version from the JDK's `release`
+// file (<jdk>/release, sibling of the launcher's bin/ directory; standard
+// since JDK 9), whose JAVA_VERSION="..." line carries the same version string
+// `java -version` prints. Returns false on any failure (missing file, no
+// JAVA_VERSION line, unparseable value) so the caller falls back to spawning
+// the JVM.
+func javaMajorFromReleaseFile(javaExe string) (int, bool) {
+	resolved, err := filepath.EvalSymlinks(javaExe)
+	if err != nil {
+		return 0, false
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(resolved), "..", "release"))
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		val, ok := strings.CutPrefix(strings.TrimSpace(line), `JAVA_VERSION="`)
+		if !ok {
+			continue
+		}
+		val, ok = strings.CutSuffix(val, `"`)
+		if !ok {
+			return 0, false
+		}
+		// Reuse the `java -version` parser on the quoted value.
+		return parseJavaMajor(`version "` + val + `"`)
+	}
+	return 0, false
 }
 
 // writeHelperScript writes the embedded JavaDump.java to a temp file so `java`

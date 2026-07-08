@@ -3,17 +3,23 @@
 a compact JSON tree on stdout.
 
 This script is embedded into the Go binary via //go:embed and executed as
-`python3 pyast.py <file.py>` by converters/python/converter.go, which builds
-gIR from the JSON it prints. It has no dependencies beyond the Python 3
-standard library (ast, json, sys) so it works with any python3 on PATH.
+`python3 pyast.py [--batch] <file.py> [more...]` by
+converters/python/converter.go, which builds gIR from the JSON it prints. It
+has no dependencies beyond the Python 3 standard library (ast, json, sys) so
+it works with any python3 on PATH.
 
 Output shape
 ------------
-On success, prints a single JSON object to stdout:
+Each file's document is a single JSON object:
 
     {"kind": "Module", "body": [<stmt>, ...]}
 
-On a parse error, prints {"error": "<message>"} to stdout and exits 1.
+or, when that file failed to parse/read, {"error": "<message>"}.
+
+Batch mode (--batch): one JSON document per line, in argv order, always exit
+0 — a per-file failure is that file's own {"error": ...} line. Single-file
+mode (no flag): historical behavior — the bare document on stdout and exit 1
+on failure.
 
 Every statement/expression node is a JSON object with a "kind" field and a
 "pos": {"line": <1-based>, "col": <1-based>} field (Python's col_offset is
