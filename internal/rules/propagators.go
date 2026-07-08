@@ -39,6 +39,15 @@ var defaultPropagatorGlobs = []string{
 	"go:*net/http.Request*.FormFile", "go:*net/http.Request*.Cookie",
 	"go:*net/http.Request*.Referer", "go:*net/http.Request*.UserAgent",
 	"go:*net/http.Header*.Get", "go:*net/http.Header*.Values",
+	// html/template trusted-string conversions (synthesized as CALLs by the Go
+	// frontend, see emitTemplateTrustedConv). They are XSS SINKS in go-xss, but
+	// for every OTHER rule they must still forward taint arg->result exactly as
+	// the plain type conversion did, so a flow that passes through one before
+	// reaching a different sink is not lost. (The switch checks sink before
+	// propagator, so the go-xss sink still wins for that rule.)
+	"go:html/template.HTML", "go:html/template.HTMLAttr", "go:html/template.JS",
+	"go:html/template.JSStr", "go:html/template.URL", "go:html/template.CSS",
+	"go:html/template.Srcset",
 
 	// --- Python: str methods / builtins ---
 	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",

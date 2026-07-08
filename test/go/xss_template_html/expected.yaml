@@ -1,0 +1,8 @@
+# Reflected XSS via html/template.HTML: the request-derived search term is
+# converted to the trusted-string type template.HTML, which bypasses the
+# package's context-aware auto-escaping and renders unescaped. The conversion is
+# not a call, so the frontend synthesizes a go:html/template.HTML sink CALL.
+findings:
+    - rule: go-xss
+      min: 1
+      sink: HTML

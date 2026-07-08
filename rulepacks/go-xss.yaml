@@ -54,8 +54,24 @@ rules:
       - "go:*net/http*.ResponseWriter*.Write"
       - "go:fmt.Fprint*"
       - "go:io.WriteString"
+      # html/template trusted-string CONVERSIONS bypass the package's context
+      # -aware auto-escaping, so converting untrusted data to one is XSS (gosec
+      # G203). A conversion carries no callee, so the Go frontend synthesizes a
+      # CALL `go:html/template.<Type>` (converters/go emitTemplateTrustedConv)
+      # for the sink to match; a constant/escaped arg is untainted and never
+      # fires, so precision is preserved.
+      - "go:html/template.HTML"
+      - "go:html/template.HTMLAttr"
+      - "go:html/template.JS"
+      - "go:html/template.JSStr"
+      - "go:html/template.URL"
+      - "go:html/template.CSS"
+      - "go:html/template.Srcset"
     sanitizers:
       - "go:*html.EscapeString"
-      - "go:*html/template*"
+      # html/template's ESCAPER functions neutralize; scoped to *Escape* so it
+      # does NOT swallow the trusted-type conversions above (which are the one
+      # UNSAFE html/template operation, modeled as sinks).
+      - "go:*html/template*Escape*"
     propagators:
       - "go:strings.Join"
