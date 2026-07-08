@@ -28,13 +28,11 @@ type Converter struct {
 	// reads are race-free.
 	baseTypes map[types.Type]*ir.Type
 
-	// fnNames memoizes ssa.Function.String() for every function enumerated by
-	// AllFunctions. Like baseTypes it is fully built before workers start and
-	// shared read-only; fnOverflow is each converter's private cache for the
-	// rare function OUTSIDE that set (e.g. a synthetic wrapper materialized
-	// during lowering), so workers never write shared state.
-	fnNames    map[*ssa.Function]string
-	fnOverflow map[*ssa.Function]string
+	// fnNames lazily memoizes ssa.Function.String() — rendering it re-runs
+	// RelString/TypeString every time, and the same name is consulted by sort
+	// comparisons and per callee reference. Per-converter and private, exactly
+	// like typeCache.
+	fnNames map[*ssa.Function]string
 
 	// valueCache interns the *ir.Value operand wrappers per function (cleared at
 	// the top of convertFunction): the same ssa.Value is typically referenced by
@@ -64,23 +62,18 @@ func (c *Converter) TargetPackages() map[string]bool { return c.targetPkgs }
 func NewConverter() *Converter {
 	return &Converter{
 		typeCache:  make(map[types.Type]*ir.Type),
-		fnOverflow: make(map[*ssa.Function]string),
+		fnNames:    make(map[*ssa.Function]string),
 		valueCache: make(map[ssa.Value]*ir.Value),
 	}
 }
 
-// fnString returns f.String(), memoized: the shared read-only fnNames map for
-// the enumerated program functions, the converter-private fnOverflow for
-// anything outside it.
+// fnString returns f.String(), memoized per converter.
 func (c *Converter) fnString(f *ssa.Function) string {
 	if s, ok := c.fnNames[f]; ok {
 		return s
 	}
-	if s, ok := c.fnOverflow[f]; ok {
-		return s
-	}
 	s := f.String()
-	c.fnOverflow[f] = s
+	c.fnNames[f] = s
 	return s
 }
 
@@ -133,7 +126,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
 		}
 	}
-	c.fnNames = make(map[*ssa.Function]string)
 
 	return c.lowerModules(funcsByPkg, stdlibPkgs), nil
 }
@@ -315,20 +307,7 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 	totalFuncs := 0
 	for _, pkg := range pkgList {
 		funcs := funcsByPkg[pkg]
-		// Memoize ssa.Function.String() for exactly the functions being lowered:
-		// rendering it re-runs RelString/TypeString each time, and the name is
-		// consulted O(n log n) times by the sort plus once per Name /
-		// CanonicalName / callee reference during lowering — one of the largest
-		// allocation sources in the frontend. Filled here, sequentially, BEFORE
-		// any worker starts, then shared read-only (workers keep a private
-		// overflow map for functions outside this set: stdlib callees, synthetic
-		// wrappers). Deliberately NOT filled for the whole AllFunctions set —
-		// that would render thousands of bodyless stdlib declarations no one
-		// ever names.
-		for _, fn := range funcs {
-			c.fnNames[fn] = fn.String()
-		}
-		sort.Slice(funcs, func(i, j int) bool { return c.fnNames[funcs[i]] < c.fnNames[funcs[j]] })
+		sort.Slice(funcs, func(i, j int) bool { return c.fnString(funcs[i]) < c.fnString(funcs[j]) })
 		mod := &ir.Module{Name: pkg.Pkg.Path(), Language: "go"}
 		c.addPackageMembers(mod, pkg)
 		mod.Functions = make([]*ir.Function, len(funcs))
@@ -391,8 +370,7 @@ func (c *Converter) worker() *Converter {
 		fset:          c.fset,
 		typeCache:     make(map[types.Type]*ir.Type),
 		baseTypes:     c.typeCache,
-		fnNames:       c.fnNames,
-		fnOverflow:    make(map[*ssa.Function]string),
+		fnNames:       make(map[*ssa.Function]string),
 		valueCache:    make(map[ssa.Value]*ir.Value),
 		routeHandlers: c.routeHandlers,
 	}

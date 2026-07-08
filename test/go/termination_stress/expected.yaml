@@ -1,0 +1,17 @@
+# Termination regression sample: every function here is a cyclic shape that
+# could non-terminate a naive fixpoint analyzer (direct + mutual recursion,
+# CFG back-edges with self-referential PHIs, strong-update oscillation, a
+# cyclic value of a self-referential type, a global publish/read cycle woven
+# into recursion). The primary assertion is that the scan COMPLETES — a
+# regression in any termination guard hangs the corpus test and fails the
+# suite on its timeout.
+#
+# Five of the six sink calls detect (spin / ping / loopConcat / flipFlop /
+# storeAndCall). viaList is a KNOWN miss: the taint sits on the struct's val
+# field and is read back through the cyclic next field, which field-sensitive
+# tracking (ENG-3) deliberately does not conflate. A count below 5 signals a
+# recall regression in cyclic flows.
+findings:
+    - rule: go-command-injection
+      min: 5
+      sink: Command
