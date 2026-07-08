@@ -83,7 +83,7 @@ func buildGuardIndex(fn *ir.Function, rule *rules.Rule, defs map[string]*ir.Inst
 // source origin (so it is the SAME untrusted value that was checked). The origin
 // match ties the guard to this specific flow, so validating one value does not
 // suppress an unrelated tainted sink.
-func (gi *guardIndex) guarded(sinkIdx int32, o *ir.Position, tainted map[string]*ir.Position) bool {
+func (gi *guardIndex) guarded(sinkIdx int32, o *ir.Position, tainted taintState) bool {
 	if gi == nil {
 		return false
 	}

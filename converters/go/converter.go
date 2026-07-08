@@ -18,10 +18,27 @@ import (
 )
 
 type Converter struct {
-	program *ssa.Program
-	fset    *token.FileSet
+	fset *token.FileSet
 
 	typeCache map[types.Type]*ir.Type
+
+	// baseTypes is a read-only view of the main converter's typeCache, shared
+	// with workers. It is fully built (sequentially, by addPackageMembers)
+	// before any worker starts, and never written afterwards, so concurrent
+	// reads are race-free.
+	baseTypes map[types.Type]*ir.Type
+
+	// fnNames lazily memoizes ssa.Function.String() — rendering it re-runs
+	// RelString/TypeString every time, and the same name is consulted by sort
+	// comparisons and per callee reference. Per-converter and private, exactly
+	// like typeCache.
+	fnNames map[*ssa.Function]string
+
+	// valueCache interns the *ir.Value operand wrappers per function (cleared at
+	// the top of convertFunction): the same ssa.Value is typically referenced by
+	// many instructions, and the wrappers are immutable once emitted, so reusing
+	// one object per value halves the converter's smallest-object churn.
+	valueCache map[ssa.Value]*ir.Value
 
 	// routeHandlers maps a function registered as an HTTP route handler
 	// (passed to a router's GET/POST/Handle/Use/... call) to the register name
@@ -44,8 +61,20 @@ func (c *Converter) TargetPackages() map[string]bool { return c.targetPkgs }
 
 func NewConverter() *Converter {
 	return &Converter{
-		typeCache: make(map[types.Type]*ir.Type),
+		typeCache:  make(map[types.Type]*ir.Type),
+		fnNames:    make(map[*ssa.Function]string),
+		valueCache: make(map[ssa.Value]*ir.Value),
 	}
+}
+
+// fnString returns f.String(), memoized per converter.
+func (c *Converter) fnString(f *ssa.Function) string {
+	if s, ok := c.fnNames[f]; ok {
+		return s
+	}
+	s := f.String()
+	c.fnNames[f] = s
+	return s
 }
 
 // ConvertFile lowers the Go package(s) at path into gIR. path may be either a
@@ -65,69 +94,81 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		dir, pattern = filepath.Dir(abs), "."
 	}
 
-	cfg := &packages.Config{
-		// LoadAllSyntax: load full syntax + types for the TARGET packages AND the
-		// whole dependency closure, so ssautil.AllPackages below can build SSA
-		// bodies for third-party libraries too. Taint then flows THROUGH an
-		// unmodeled library/utility function instead of dropping at it (a class of
-		// false negatives). Findings are scoped back to user code downstream
-		// (targetPkgs), and the Go stdlib is skipped at lowering time (modeled by
-		// rules) to bound the cost.
-		Mode:  packages.LoadAllSyntax | packages.NeedModule,
-		Tests: false,
-		Dir:   dir,
-	}
-	initial, err := packages.Load(cfg, pattern)
+	// Two-phase load, so dependency bodies are lowered WITHOUT paying for the
+	// stdlib: Phase A (classifyPackages) is a metadata-only `go list` that
+	// classifies the closure by module; Phase B (loadAndBuildSSA) loads syntax
+	// for every non-stdlib package as an explicit root and builds SSA, with the
+	// stdlib arriving as export data (bodyless SSA packages).
+	reportable, stdlibPkgs, extraRoots, err := classifyPackages(dir, pattern)
 	if err != nil {
 		return nil, err
 	}
-	if len(initial) == 0 {
-		return nil, fmt.Errorf("no Go packages found under %s", dir)
-	}
-	// Some packages failed to load cleanly (type/parse errors). PrintErrors
-	// dumps the specifics to stderr; conversion continues on whatever built so
-	// partial/vulnerable code still converts. Route our summary line to stderr
-	// too — a stdout write would corrupt machine-readable output when the user
-	// pipes findings (e.g. `godzilla scan > out.txt`).
-	if packages.PrintErrors(initial) > 0 {
-		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
-	}
+	c.targetPkgs = reportable
 
-	// ssautil.AllPackages: create SSA for the target packages AND their whole
-	// dependency closure, so prog.Build() builds third-party library bodies and
-	// AllFunctions yields them — the engine can then flow taint through a library
-	// call instead of dropping at it. (The returned slice is just the initial
-	// packages; the dependencies live in prog, enumerated via AllFunctions below.)
-	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
-	prog.Build()
-	c.program = prog
-	c.fset = initial[0].Fset
+	prog, fset, err := loadAndBuildSSA(dir, pattern, extraRoots)
+	if err != nil {
+		return nil, err
+	}
+	c.fset = fset
 	// AllFunctions is a full-program traversal (now covering the whole lowered
 	// dependency closure); compute it once and share it between route-handler
 	// detection and the per-package function grouping below.
 	allFns := ssautil.AllFunctions(prog)
 	c.routeHandlers = collectRouteHandlers(allFns)
 
-	// Classify every loaded package by its module (go/packages NeedModule):
-	//   - stdlib (nil Module) is NOT lowered — modeled by rules, and lowering its
-	//     whole closure would dominate the cost;
-	//   - the user's own module(s) — reportable: findings here are surfaced;
-	//   - third-party modules — lowered so taint flows through their bodies, but
-	//     findings inside them are scoped out downstream (noise, not actionable).
-	// Keying on the MODULE (not a package-path heuristic) is why a single-word
-	// module path like `abccc` or one of the user's own sibling packages is not
-	// mistaken for the stdlib. Reportable = the scanned packages plus everything
-	// sharing their module, so scanning a subdir still reports the whole module.
-	initialPaths := make(map[string]bool, len(initial))
+	// pkg.Members only exposes package-level funcs, not methods or anonymous
+	// function literals (closures) — and vulnerable code frequently lives inside
+	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
+	// function/method/closure; group them by their defining package.
+	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
+	for fn := range allFns {
+		if fn.Pkg != nil {
+			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
+		}
+	}
+
+	return c.lowerModules(funcsByPkg, stdlibPkgs), nil
+}
+
+// classifyPackages is Phase A of the two-phase load: a metadata-only `go list`
+// (no parsing, no typechecking) that discovers the dependency closure and
+// classifies every package by MODULE (go/packages NeedModule):
+//   - stdlib (nil Module) is NOT lowered — modeled by rules. Its bodies are
+//     never read downstream, so loading its source and building its SSA
+//     (which LoadAllSyntax did) was pure overhead;
+//   - the user's own module(s) — reportable: findings here are surfaced;
+//   - third-party modules — lowered so taint flows through their bodies, but
+//     findings inside them are scoped out downstream (noise, not actionable).
+//
+// Keying on the MODULE (not a package-path heuristic) is why a single-word
+// module path like `abccc` or one of the user's own sibling packages is not
+// mistaken for the stdlib. Reportable = the scanned packages plus everything
+// sharing their module, so scanning a subdir still reports the whole module.
+// extraRoots is every non-stdlib package the pattern didn't match — Phase B
+// loads them as explicit syntax roots.
+func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bool, extraRoots []string, err error) {
+	metaCfg := &packages.Config{
+		Mode:  packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+		Tests: false,
+		Dir:   dir,
+	}
+	meta, err := packages.Load(metaCfg, pattern)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(meta) == 0 {
+		return nil, nil, nil, fmt.Errorf("no Go packages found under %s", dir)
+	}
+	initialPaths := make(map[string]bool, len(meta))
 	targetModules := map[string]bool{}
-	for _, p := range initial {
+	for _, p := range meta {
 		initialPaths[p.PkgPath] = true
 		if p.Module != nil {
 			targetModules[p.Module.Path] = true
 		}
 	}
-	stdlibPkgs := map[string]bool{}
-	reportable := map[string]bool{}
+	stdlibPkgs = map[string]bool{}
+	reportable = map[string]bool{}
 	seenPkg := map[string]bool{}
 	var classify func(p *packages.Package)
 	classify = func(p *packages.Package) {
@@ -141,35 +182,107 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		case p.Module == nil:
 			stdlibPkgs[p.PkgPath] = true
 		case targetModules[p.Module.Path]:
+			// Same module as the scan target but outside the pattern (e.g.
+			// scanning a subdir): still reportable, and it must be a Phase-B
+			// root so its body keeps being lowered from source.
 			reportable[p.PkgPath] = true
+			extraRoots = append(extraRoots, p.PkgPath)
+		default:
+			extraRoots = append(extraRoots, p.PkgPath) // third-party
 		}
 		for _, imp := range p.Imports {
 			classify(imp)
 		}
 	}
-	for _, p := range initial {
+	for _, p := range meta {
 		classify(p)
 	}
-	c.targetPkgs = reportable
+	sort.Strings(extraRoots) // deterministic Phase-B roots
+	return reportable, stdlibPkgs, extraRoots, nil
+}
 
-	// pkg.Members only exposes package-level funcs, not methods or anonymous
-	// function literals (closures) — and vulnerable code frequently lives inside
-	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
-	// function/method/closure; group them by their defining package.
-	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
-	for fn := range allFns {
-		if fn.Pkg != nil {
-			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
-		}
+// loadAndBuildSSA is Phase B of the two-phase load: it loads SYNTAX only where
+// bodies are actually lowered — the target pattern plus the explicit extraRoots
+// (third-party deps and same-module packages outside the pattern) — and builds
+// the SSA program. The stdlib is deliberately NOT a root and NeedDeps is NOT
+// set, so it arrives as compiled export data — identical types to
+// source-checking it, but with no stdlib parsing or typechecking, and (with no
+// syntax) its SSA packages are created bodyless, so prog.Build() skips stdlib
+// bodies too. Making every lowered package an explicit ROOT (never a bare dep)
+// is what keeps its Syntax+TypesInfo complete without NeedDeps; source roots
+// resolve each other in-memory, exactly as before.
+func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *token.FileSet, error) {
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
+			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
+		Tests: false,
+		Dir:   dir,
+	}
+	initial, err := packages.Load(cfg, append([]string{pattern}, extraRoots...)...)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(initial) == 0 {
+		return nil, nil, fmt.Errorf("no Go packages found under %s", dir)
+	}
+	// Some packages failed to load cleanly (type/parse errors). PrintErrors
+	// dumps the specifics to stderr; conversion continues on whatever built so
+	// partial/vulnerable code still converts. Route our summary line to stderr
+	// too — a stdout write would corrupt machine-readable output when the user
+	// pipes findings (e.g. `godzilla scan > out.txt`).
+	if packages.PrintErrors(initial) > 0 {
+		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// Lower the target packages and every non-stdlib dependency (third-party
-	// bodies, so taint flows through them). We do NOT tree-shake before lowering:
-	// with demand-driven analysis (the engine analyzes a dependency function only
-	// when taint reaches it — see Engine.ScopeSeed), the analysis cost no longer
-	// scales with the lowered set, so a reachability pre-pass (RTA) only added
-	// overhead. The remaining cost is the lowering itself, which is parallelized
-	// below. The stdlib is skipped (modeled by rules).
+	// Create SSA for every loaded package. Non-stdlib roots have syntax, so
+	// prog.Build() builds their bodies and AllFunctions yields them — the engine
+	// can then flow taint through a library call instead of dropping at it.
+	// Stdlib packages (export data, no syntax) are created bodyless: their
+	// declarations still resolve callee names and method sets, but nothing is
+	// built or lowered for them.
+	//
+	// This replaces ssautil.AllPackages, which only visits the go/packages
+	// graph — and without NeedDeps that graph is truncated at the roots' direct
+	// imports. Export data can reference packages BEYOND that frontier (e.g. a
+	// type alias into a transitive stdlib package), and the SSA builder panics
+	// on any referenced-but-uncreated package, so we additionally create the
+	// full transitive types.Package closure (types-only) of every import.
+	prog := ssa.NewProgram(initial[0].Fset, ssa.InstantiateGenerics)
+	created := map[*types.Package]bool{}
+	var createTypesOnly func(tp *types.Package)
+	createTypesOnly = func(tp *types.Package) {
+		if tp == nil || created[tp] {
+			return
+		}
+		created[tp] = true
+		for _, imp := range tp.Imports() {
+			createTypesOnly(imp)
+		}
+		prog.CreatePackage(tp, nil, nil, true)
+	}
+	packages.Visit(initial, nil, func(p *packages.Package) {
+		if p.Types == nil || p.IllTyped || created[p.Types] {
+			return
+		}
+		created[p.Types] = true
+		for _, imp := range p.Types.Imports() {
+			createTypesOnly(imp)
+		}
+		prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
+	})
+	prog.Build()
+	return prog, initial[0].Fset, nil
+}
+
+// lowerModules lowers the target packages and every non-stdlib dependency
+// (third-party bodies, so taint flows through them). We do NOT tree-shake
+// before lowering: with demand-driven analysis (the engine analyzes a
+// dependency function only when taint reaches it — see Engine.ScopeSeed), the
+// analysis cost no longer scales with the lowered set, so a reachability
+// pre-pass (RTA) only added overhead. The remaining cost is the lowering
+// itself, which is parallelized here. The stdlib is skipped (modeled by rules).
+func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, stdlibPkgs map[string]bool) *ir.Program {
 	var pkgList []*ssa.Package
 	for pkg := range funcsByPkg {
 		if pkg == nil || pkg.Pkg == nil {
@@ -185,32 +298,35 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Build each module's shell (name, types, globals) sequentially on the main
 	// converter, and collect its functions in deterministic order.
 	irProg := &ir.Program{Mode: "ssa"}
+	irProg.Modules = make([]*ir.Module, 0, len(pkgList))
 	type modWork struct {
 		mod   *ir.Module
 		funcs []*ssa.Function
 	}
 	works := make([]modWork, 0, len(pkgList))
+	totalFuncs := 0
 	for _, pkg := range pkgList {
 		funcs := funcsByPkg[pkg]
-		sort.Slice(funcs, func(i, j int) bool { return funcs[i].String() < funcs[j].String() })
+		sort.Slice(funcs, func(i, j int) bool { return c.fnString(funcs[i]) < c.fnString(funcs[j]) })
 		mod := &ir.Module{Name: pkg.Pkg.Path(), Language: "go"}
 		c.addPackageMembers(mod, pkg)
 		mod.Functions = make([]*ir.Function, len(funcs))
 		works = append(works, modWork{mod, funcs})
 		irProg.Modules = append(irProg.Modules, mod)
+		totalFuncs += len(funcs)
 	}
 
 	// Convert functions concurrently — the dominant remaining cost once deps are
 	// lowered. Each worker uses its OWN Converter (own typeCache): the cache is
 	// pure memoization, so per-worker copies need no lock and cannot race, while
-	// the read-only program/fset/routeHandlers are shared. Output is
+	// the read-only fset/routeHandlers are shared. Output is
 	// deterministic: functions are pre-sorted and written to fixed slice indices.
 	type fnJob struct {
 		mod *ir.Module
 		idx int
 		fn  *ssa.Function
 	}
-	var jobs []fnJob
+	jobs := make([]fnJob, 0, totalFuncs)
 	for _, w := range works {
 		for i, fn := range w.funcs {
 			jobs = append(jobs, fnJob{w.mod, i, fn})
@@ -241,19 +357,21 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	close(jobCh)
 	wg.Wait()
 
-	return irProg, nil
+	return irProg
 }
 
 // worker returns a lightweight Converter that shares this converter's read-only
-// setup (program, fset, route handlers) but has its own typeCache, so it can
+// setup (fset, route handlers) but has its own typeCache, so it can
 // lower functions concurrently without locking or racing on the shared cache.
 // targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
 // on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
 	return &Converter{
-		program:       c.program,
 		fset:          c.fset,
 		typeCache:     make(map[types.Type]*ir.Type),
+		baseTypes:     c.typeCache,
+		fnNames:       make(map[*ssa.Function]string),
+		valueCache:    make(map[ssa.Value]*ir.Value),
 		routeHandlers: c.routeHandlers,
 	}
 }
@@ -275,8 +393,11 @@ func (c *Converter) addPackageMembers(mod *ir.Module, pkg *ssa.Package) {
 }
 
 func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
+	// The value-wrapper intern table is per function: registers are
+	// function-scoped, so wrappers must not leak across functions.
+	clear(c.valueCache)
 	irFunc := &ir.Function{
-		Name:          f.String(),
+		Name:          c.fnString(f),
 		ObjectName:    f.Name(),
 		PackageName:   f.Pkg.Pkg.Path(),
 		Pos:           c.convertPos(f.Pos()),
@@ -288,6 +409,9 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		irFunc.Signature = c.convertSignature(f.Signature)
 	}
 
+	if n := len(f.Params) + len(f.FreeVars); n > 0 {
+		irFunc.Params = make([]*ir.Value, 0, n)
+	}
 	for _, p := range f.Params {
 		irFunc.Params = append(irFunc.Params, &ir.Value{
 			Kind: &ir.Value_RegName{RegName: p.Name()},
@@ -304,6 +428,9 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		})
 	}
 
+	if n := len(f.Blocks); n > 0 {
+		irFunc.Blocks = make([]*ir.BasicBlock, 0, n)
+	}
 	for _, b := range f.Blocks {
 		irFunc.Blocks = append(irFunc.Blocks, c.convertBlock(b))
 	}
@@ -504,23 +631,48 @@ func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {
 		Comment: b.Comment,
 	}
 
-	for _, p := range b.Preds {
-		irBlock.Preds = append(irBlock.Preds, int32(p.Index))
+	if n := len(b.Preds); n > 0 {
+		irBlock.Preds = make([]int32, n)
+		for i, p := range b.Preds {
+			irBlock.Preds[i] = int32(p.Index)
+		}
 	}
-	for _, s := range b.Succs {
-		irBlock.Succs = append(irBlock.Succs, int32(s.Index))
+	if n := len(b.Succs); n > 0 {
+		irBlock.Succs = make([]int32, n)
+		for i, s := range b.Succs {
+			irBlock.Succs[i] = int32(s.Index)
+		}
 	}
 
-	for _, inst := range b.Instrs {
-		irBlock.Instrs = append(irBlock.Instrs, c.convertInstruction(inst))
+	// Slab-allocate the block's instructions AND their positions: one
+	// exact-sized backing array each instead of one heap object per
+	// instruction — the converter's dominant allocations (every SSA instruction
+	// of every lowered function carries a Position). The slabs are never
+	// appended to or copied after pointers are taken, so the pointers stay
+	// stable; output is value-identical to individual allocations.
+	slab := make([]ir.Instruction, len(b.Instrs))
+	posSlab := make([]ir.Position, len(b.Instrs))
+	irBlock.Instrs = make([]*ir.Instruction, len(b.Instrs))
+	for i, inst := range b.Instrs {
+		c.convertInstructionInto(&slab[i], &posSlab[i], inst)
+		irBlock.Instrs[i] = &slab[i]
 	}
 
 	return irBlock
 }
 
-func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
-	irInst := &ir.Instruction{
-		Pos: c.convertPos(inst.Pos()),
+// convertInstructionInto lowers one SSA instruction into irInst
+// (caller-provided storage, see the slabs in convertBlock). irInst and pos must
+// be zero-valued; pos is used (and linked as irInst.Pos) only when the
+// instruction has a valid source position, so an invalid position stays nil
+// exactly as before.
+func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Position, inst ssa.Instruction) {
+	if p := inst.Pos(); p.IsValid() {
+		fp := c.fset.Position(p)
+		pos.Filename = fp.Filename
+		pos.Line = int32(fp.Line)
+		pos.Column = int32(fp.Column)
+		irInst.Pos = pos
 	}
 
 	if val, ok := inst.(ssa.Value); ok {
@@ -679,8 +831,6 @@ func (c *Converter) convertInstruction(inst ssa.Instruction) *ir.Instruction {
 	default:
 		irInst.Comment = fmt.Sprintf("unsupported instruction: %T", inst)
 	}
-
-	return irInst
 }
 
 // blockName is the gIR label for an SSA basic block ("b<index>"); the
@@ -694,18 +844,28 @@ func (c *Converter) convertValue(v ssa.Value) *ir.Value {
 	if v == nil {
 		return nil
 	}
+	// Intern the wrapper per function (valueCache is cleared by
+	// convertFunction): the same ssa.Value is referenced by many instructions,
+	// and the emitted wrappers are never mutated downstream, so one object per
+	// value is observably identical to a fresh allocation per reference.
+	if cached, ok := c.valueCache[v]; ok {
+		return cached
+	}
+	var out *ir.Value
 	switch val := v.(type) {
 	case *ssa.Const:
-		return &ir.Value{Kind: &ir.Value_Constant{Constant: c.convertConstant(val)}}
+		out = &ir.Value{Kind: &ir.Value_Constant{Constant: c.convertConstant(val)}}
 	case *ssa.Global:
-		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: val.Name()}}
+		out = &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: val.Name()}}
 	case *ssa.Function:
-		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: c.canonicalFunc(val)}}
+		out = &ir.Value{Kind: &ir.Value_FuncName{FuncName: c.canonicalFunc(val)}}
 	case *ssa.Builtin:
-		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "builtin." + val.Name()}}
+		out = &ir.Value{Kind: &ir.Value_FuncName{FuncName: "builtin." + val.Name()}}
 	default:
-		return &ir.Value{Kind: &ir.Value_RegName{RegName: val.Name()}}
+		out = &ir.Value{Kind: &ir.Value_RegName{RegName: val.Name()}}
 	}
+	c.valueCache[v] = out
+	return out
 }
 
 func (c *Converter) convertConstant(con *ssa.Const) *ir.Constant {
@@ -735,8 +895,11 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
 		cc.Callee = "builtin." + b.Name()
 	}
-	for _, arg := range call.Args {
-		cc.Args = append(cc.Args, c.convertValue(arg))
+	if n := len(call.Args); n > 0 {
+		cc.Args = make([]*ir.Value, n)
+		for i, arg := range call.Args {
+			cc.Args[i] = c.convertValue(arg)
+		}
 	}
 	return cc
 }
@@ -744,11 +907,14 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 // canonicalFunc returns a language-prefixed, cross-language-comparable name
 // for a Go function, e.g. "go:net/http.(*Request).FormValue".
 func (c *Converter) canonicalFunc(f *ssa.Function) string {
-	return "go:" + f.String()
+	return "go:" + c.fnString(f)
 }
 
 func (c *Converter) convertType(t types.Type) *ir.Type {
 	if cached, ok := c.typeCache[t]; ok {
+		return cached
+	}
+	if cached, ok := c.baseTypes[t]; ok {
 		return cached
 	}
 

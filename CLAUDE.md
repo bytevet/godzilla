@@ -52,7 +52,7 @@ never add their dependencies to the root `go.mod`.
 ## Architecture
 
 **gIR v2 — the contract (`proto/`, generated into `pkg/ir/v1/`).** A deliberately small, language-neutral
-SSA opcode core (RET/JUMP/IF/SWITCH/PANIC, ALLOC/LOAD/STORE, FIELD(_ADDR)/INDEX(_ADDR), BIN_OP/UN_OP/PHI,
+SSA opcode core (RET/JUMP/IF/SWITCH/PANIC/UNREACHABLE, ALLOC/LOAD/STORE, FIELD(_ADDR)/INDEX(_ADDR), BIN_OP/UN_OP/PHI,
 CALL/INVOKE, CONVERT/TYPE_ASSERT/MAKE_INTERFACE/EXTRACT) plus **`OP_CODE_INTRINSIC`**, the escape hatch:
 every language-specific construct (Go `defer`/channels/`go`/`select`, map ops, closures, builtins) is an
 intrinsic with a canonical name (e.g. `go.chan.send`, `builtin.make_closure`) that the engine interprets.
@@ -65,7 +65,9 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - `converters/go/` — uses `golang.org/x/tools` SSA. `ConvertFile` accepts a file or directory and
   enumerates **all** functions via `ssautil.AllFunctions` (package funcs, methods, and closures — vulnerable
   code often lives in `http.HandleFunc` closures, so closure coverage is essential). Third-party **dependency
-  bodies ARE lowered** (`LoadAllSyntax` + `ssautil.AllPackages`) so taint flows THROUGH library/utility code
+  bodies ARE lowered** (a two-phase load: a metadata-only `go list` classifies the closure by module, then
+  syntax is loaded for every non-stdlib package as an explicit root — the stdlib arrives as compiled export
+  data and its SSA packages are created bodyless) so taint flows THROUGH library/utility code
   instead of dropping at it (a class of false negatives); the Go **stdlib** is skipped (modeled by rules).
   Two things keep this affordable: findings are **scoped to user code** (`internal/scan` `scopeFindings` +
   `Finding.Package`; a sink reached inside a library is not reported), and dependency functions are analyzed

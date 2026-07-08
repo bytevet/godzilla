@@ -1,7 +1,8 @@
 package analysis
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	ir "godzilla/pkg/ir/v1"
@@ -189,10 +190,5 @@ func addToSet(sets map[string]map[string]bool, key, value string) {
 }
 
 func sortedKeys(set map[string]bool) []string {
-	out := make([]string, 0, len(set))
-	for k := range set {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(set))
 }

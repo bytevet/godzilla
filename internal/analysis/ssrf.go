@@ -69,7 +69,7 @@ func isPassthroughCallee(callee string) bool {
 // urlHostControllable reports whether any tainted injection-point argument can
 // influence the request URL's host. Returns true (keep the SSRF finding) unless
 // EVERY tainted argument is provably confined to the path/query of a fixed host.
-func urlHostControllable(injectable []*ir.Value, tainted map[string]*ir.Position, defs map[string]*ir.Instruction) bool {
+func urlHostControllable(injectable []*ir.Value, tainted taintState, defs map[string]*ir.Instruction) bool {
 	for _, v := range injectable {
 		if _, ok := isTainted(tainted, v); !ok {
 			continue
@@ -86,8 +86,8 @@ func urlHostControllable(injectable []*ir.Value, tainted map[string]*ir.Position
 // urlConstPrefix returns the constant text that precedes the first tainted/dynamic
 // segment of the URL value v, and whether the construction was recognized well
 // enough to trust that prefix. A concatenation/format whose leading segments are
-// constant yields (thePrefix, true); an opaque construction (e.g. Rust format!,
-// Java `+`, or a direct source value) yields ("", false).
+// constant yields (thePrefix, true); an opaque construction (e.g. Java `+`, or
+// a direct source value) yields ("", false).
 func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
 	def, ok := resolveDef(v, defs, seen)
 	if !ok {

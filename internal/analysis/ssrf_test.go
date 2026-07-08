@@ -109,7 +109,7 @@ func TestURLHostControllable(t *testing.T) {
 	tests := []struct {
 		name    string
 		defs    map[string]*ir.Instruction
-		tainted map[string]*ir.Position
+		tainted taintState
 		// controllable == true  -> keep the finding (taint can reach the host)
 		// controllable == false -> suppress (taint confined to a fixed host's path/query)
 		want bool

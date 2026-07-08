@@ -3,17 +3,23 @@
 a compact JSON tree on stdout.
 
 This script is embedded into the Go binary via //go:embed and executed as
-`python3 pyast.py <file.py>` by converters/python/converter.go, which builds
-gIR from the JSON it prints. It has no dependencies beyond the Python 3
-standard library (ast, json, sys) so it works with any python3 on PATH.
+`python3 pyast.py [--batch] <file.py> [more...]` by
+converters/python/converter.go, which builds gIR from the JSON it prints. It
+has no dependencies beyond the Python 3 standard library (ast, json, sys) so
+it works with any python3 on PATH.
 
 Output shape
 ------------
-On success, prints a single JSON object to stdout:
+Each file's document is a single JSON object:
 
     {"kind": "Module", "body": [<stmt>, ...]}
 
-On a parse error, prints {"error": "<message>"} to stdout and exits 1.
+or, when that file failed to parse/read, {"error": "<message>"}.
+
+Batch mode (--batch): one JSON document per line, in argv order, always exit
+0 — a per-file failure is that file's own {"error": ...} line. Single-file
+mode (no flag): historical behavior — the bare document on stdout and exit 1
+on failure.
 
 Every statement/expression node is a JSON object with a "kind" field and a
 "pos": {"line": <1-based>, "col": <1-based>} field (Python's col_offset is
@@ -351,25 +357,38 @@ def conv_expr(node):
     return {"kind": "Unknown", "note": type(node).__name__, "pos": p}
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(json.dumps({"error": "usage: pyast.py <file.py>"}))
-        sys.exit(1)
-
-    path = sys.argv[1]
+def parse_one(path):
+    """Parse one file to its module JSON, or an {"error": ...} object."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=path)
     except SyntaxError as e:
-        print(json.dumps({"error": f"syntax error: {e}"}))
-        sys.exit(1)
+        return {"error": f"syntax error: {e}"}
     except OSError as e:
-        print(json.dumps({"error": f"read error: {e}"}))
+        return {"error": f"read error: {e}"}
+    return {"kind": "Module", "body": conv_body(tree.body)}
+
+
+def main():
+    # Batch mode (--batch <files...>): one JSON document per line, in argument
+    # order, always exit 0. A per-file failure is that file's own
+    # {"error": ...} line, so one broken file cannot hide the rest — and
+    # interpreter startup is paid once per batch instead of once per file.
+    if len(sys.argv) >= 2 and sys.argv[1] == "--batch":
+        for path in sys.argv[2:]:
+            print(json.dumps(parse_one(path)))
+        return
+
+    if len(sys.argv) != 2:
+        print(json.dumps({"error": "usage: pyast.py [--batch] <file.py> [more files...]"}))
         sys.exit(1)
 
-    out = {"kind": "Module", "body": conv_body(tree.body)}
+    # Single-file mode: historical behavior — the JSON (or {"error": ...}) on
+    # stdout, exit 1 on failure, so a direct single-file scan fails loudly.
+    out = parse_one(sys.argv[1])
     print(json.dumps(out))
+    sys.exit(1 if "error" in out else 0)
 
 
 if __name__ == "__main__":

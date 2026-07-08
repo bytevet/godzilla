@@ -46,6 +46,7 @@ import (
 	"sort"
 	"strings"
 
+	"godzilla/internal/chunks"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -64,9 +65,7 @@ func NewConverter() *Converter {
 
 // ConvertFile lowers the Python source at path into gIR. path may be either a
 // single .py file or a directory (all *.py files under it are converted
-// recursively, one gIR Module per file). Requires python3 on PATH; if it is
-// not found, an error is returned (a tree-sitter based fallback is a
-// documented future path, not implemented here).
+// recursively, one gIR Module per file). Requires python3 on PATH.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -112,7 +111,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	pythonExe, err := exec.LookPath("python3")
 	if err != nil {
-		return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source; a tree-sitter fallback is a documented future path but not implemented): %w", err)
+		return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source): %w", err)
 	}
 
 	scriptPath, cleanup, err := writeHelperScript()
@@ -134,27 +133,38 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Single-file mode (path pointed directly at a .py file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
 	if !info.IsDir() {
-		mod, err := c.convertPythonFile(pythonExe, scriptPath, files[0], moduleNameFor(root, files[0]))
-		if err != nil {
-			return nil, err
+		results := make([]pyFileResult, 1)
+		c.convertPythonChunk(pythonExe, scriptPath, root, files, results)
+		if results[0].err != nil {
+			return nil, results[0].err
 		}
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}, nil
+		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
 	}
 
 	// Directory batch mode: one unparseable .py file must not abort the whole
 	// batch (a single syntax error in an unrelated file shouldn't hide every
 	// other file's findings). Skip it, log a warning to stderr, and keep
 	// going; only fail if not a single file in the tree converted.
+	//
+	// Parsing is batched: the file list is split into contiguous chunks — one
+	// `python3 pyast.py --batch <chunk...>` invocation each, run concurrently —
+	// so interpreter startup is paid per chunk, not per file (the dominant cost
+	// of the old file-at-a-time loop). Results land at fixed indices, so module
+	// order stays the sorted file order regardless of chunk completion order.
+	results := make([]pyFileResult, len(files))
+	chunks.Run(len(files), func(start, end int) {
+		c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
+	})
+
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
-	for _, f := range files {
-		mod, err := c.convertPythonFile(pythonExe, scriptPath, f, moduleNameFor(root, f))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", f, err)
-			convertErrs = append(convertErrs, err.Error())
+	for i, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", files[i], r.err)
+			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}
-		prog.Modules = append(prog.Modules, mod)
+		prog.Modules = append(prog.Modules, r.mod)
 	}
 
 	if len(prog.Modules) == 0 {
@@ -163,6 +173,49 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 
 	return prog, nil
+}
+
+// pyFileResult is one file's outcome within a batch chunk.
+type pyFileResult struct {
+	mod *ir.Module
+	err error
+}
+
+// convertPythonChunk parses a contiguous chunk of files with a single
+// `pyast.py --batch` invocation (one JSON document per file, argv order) and
+// lowers each, writing into out (index-aligned with files). A process-level
+// failure marks every file in the chunk; a per-file parse failure marks only
+// that file, mirroring the old file-at-a-time error semantics.
+func (c *Converter) convertPythonChunk(pythonExe, scriptPath, root string, files []string, out []pyFileResult) {
+	ctx, cancel := proc.ParseContext()
+	defer cancel()
+	args := append([]string{scriptPath, "--batch"}, files...)
+	cmd := exec.CommandContext(ctx, pythonExe, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if runErr := cmd.Run(); runErr != nil {
+		for i, f := range files {
+			out[i].err = fmt.Errorf("py_converter: python3 failed parsing %s: %v (stderr: %s)", f, runErr, strings.TrimSpace(stderr.String()))
+		}
+		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	dec.UseNumber()
+	for i, f := range files {
+		var root_ astNode
+		if err := dec.Decode(&root_); err != nil {
+			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", f, err)
+			continue
+		}
+		if errMsg, ok := root_["error"]; ok {
+			out[i].err = fmt.Errorf("py_converter: failed to parse %s: %v", f, errMsg)
+			continue
+		}
+		out[i].mod = convertModule(root_, f, moduleNameFor(root, f))
+	}
 }
 
 // writeHelperScript materializes the embedded pyast.py into a temp file so it
@@ -196,32 +249,4 @@ func moduleNameFor(root, file string) string {
 		rel = filepath.Base(file)
 	}
 	return filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
-}
-
-// convertPythonFile runs the embedded pyast.py helper against file and lowers
-// the resulting JSON AST into one gIR Module.
-func (c *Converter) convertPythonFile(pythonExe, scriptPath, file, moduleName string) (*ir.Module, error) {
-	ctx, cancel := proc.ParseContext()
-	defer cancel()
-	cmd := exec.CommandContext(ctx, pythonExe, scriptPath, file)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	runErr := cmd.Run()
-	if runErr != nil {
-		return nil, fmt.Errorf("py_converter: python3 failed parsing %s: %v (stderr: %s)", file, runErr, strings.TrimSpace(stderr.String()))
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	dec.UseNumber()
-	var root astNode
-	if err := dec.Decode(&root); err != nil {
-		return nil, fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", file, err)
-	}
-	if errMsg, ok := root["error"]; ok {
-		return nil, fmt.Errorf("py_converter: failed to parse %s: %v", file, errMsg)
-	}
-
-	return convertModule(root, file, moduleName), nil
 }

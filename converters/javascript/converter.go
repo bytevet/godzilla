@@ -107,8 +107,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/parser"
@@ -196,16 +198,39 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// batch (a single syntax error in an unrelated file shouldn't hide every
 	// other file's findings). Skip it, log a warning to stderr, and keep
 	// going; only fail if not a single file in the tree converted.
+	//
+	// Files are converted concurrently — the parse (goja), esbuild transform,
+	// and lowering are all pure per-file CPU work with no shared state (the
+	// Converter is stateless). Results land at fixed indices, so module order
+	// stays the sorted file order regardless of completion order.
+	type jsFileResult struct {
+		mod *ir.Module
+		err error
+	}
+	results := make([]jsFileResult, len(files))
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+	var wg sync.WaitGroup
+	for i, f := range files {
+		wg.Add(1)
+		go func(i int, f string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			mod, err := c.convertJSFile(f, moduleNameFor(root, f))
+			results[i] = jsFileResult{mod, err}
+		}(i, f)
+	}
+	wg.Wait()
+
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
-	for _, f := range files {
-		mod, err := c.convertJSFile(f, moduleNameFor(root, f))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "js_converter: skipping %s: %v\n", f, err)
-			convertErrs = append(convertErrs, err.Error())
+	for i, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "js_converter: skipping %s: %v\n", files[i], r.err)
+			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}
-		prog.Modules = append(prog.Modules, mod)
+		prog.Modules = append(prog.Modules, r.mod)
 	}
 
 	if len(prog.Modules) == 0 {

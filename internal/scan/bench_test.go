@@ -59,7 +59,7 @@ func TestGoFindingsScopedToUserCode(t *testing.T) {
 	}
 	if n < 100 {
 		t.Errorf("expected dependency bodies to be lowered (thousands of functions); got %d — "+
-			"dep-lowering (LoadAllSyntax + ssautil.AllPackages) may have regressed", n)
+			"dep-lowering (two-phase load: non-stdlib packages as explicit syntax roots) may have regressed", n)
 	}
 	// But no finding may be scoped into a dependency.
 	if len(res.Findings) == 0 {
