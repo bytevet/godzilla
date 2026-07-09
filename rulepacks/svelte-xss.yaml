@@ -1,0 +1,39 @@
+# Svelte template XSS: untrusted input rendered through `{@html expr}`, which
+# emits raw HTML and bypasses Svelte's default text-escaping. Ordinary `{expr}`
+# interpolation is auto-escaped and is NOT modeled as a sink. The Svelte frontend
+# (converters/javascript/sfc.go) compiles each `{@html x}` to a synthetic call
+# `js:__godzilla_svelte_html(x)`, so a constant/sanitized binding never fires.
+rules:
+  - id: svelte-xss
+    languages: [javascript]
+    # Align with js-xss / vue-xss / go-xss (same CWE-79).
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input flows into a Svelte `{@html ...}` block, which renders raw
+      HTML and bypasses the framework's auto-escaping, allowing Cross-Site
+      Scripting (XSS). Render the value with ordinary `{ }` interpolation, which
+      auto-escapes, or sanitize it (e.g. DOMPurify.sanitize) before rendering it
+      as HTML.
+    sources:
+      # Component props passed via `export let` bind to CommonJS exports after the
+      # esbuild lowering; the reliable untrusted sources are the browser URL,
+      # SvelteKit's $page, and query parsing.
+      - "js:window.location*"
+      - "js:*.location.href"
+      - "js:*.location.search"
+      - "js:*.location.hash"
+      - "js:document.URL"
+      - "js:document.cookie"
+      - "js:*URLSearchParams*"
+      - "js:*$page*"
+      - "js:*useSearchParams*"
+    sinks:
+      - "js:__godzilla_svelte_html"
+    sanitizers:
+      - "js:*DOMPurify*"
+      - "js:*.sanitize"
+      - "js:*sanitizeHtml"
+      - "js:*escapeHtml"
+      - "js:*xss"
+    propagators: []

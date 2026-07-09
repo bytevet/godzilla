@@ -11,12 +11,27 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
-// isJSFamily reports whether path is a JavaScript/TypeScript source file the
-// frontend handles: plain JS, TypeScript, JSX/TSX, and the ES-module / CommonJS
-// variants.
-func isJSFamily(path string) bool {
+// IsJSFamily reports whether path is a JavaScript-family source file the frontend
+// handles: plain JS, TypeScript, JSX/TSX, the ES-module / CommonJS variants, and
+// Vue/Svelte single-file components (whose <script> block is JS/TS and whose
+// template compiles to synthetic JS calls — see sfc.go). It is the single source
+// of truth for the extension set — the converter's own directory walk and
+// internal/scan's dispatch/detection table both call it.
+func IsJSFamily(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs":
+	case ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vue", ".svelte":
+		return true
+	}
+	return false
+}
+
+// isSFC reports whether path is a component single-file format (Vue/Svelte) that
+// needs SFC block extraction — the <script> block plus a template compiled to
+// synthetic sink calls — before goja can read it. esbuild has no .vue/.svelte
+// loader, so these must NOT take the generic needsTransform path.
+func isSFC(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".vue", ".svelte":
 		return true
 	}
 	return false
@@ -57,19 +72,28 @@ func loaderFor(path string) api.Loader {
 // merge treats the file as a skipped/failed conversion, exactly like a parse
 // error.
 func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
-	res := api.Transform(string(src), api.TransformOptions{
-		Loader:      loaderFor(path),
+	return runESBuild(string(src), loaderFor(path), filepath.Base(path))
+}
+
+// runESBuild is the shared esbuild pass behind transformToJS (whole-file
+// TS/ESM transform) and the SFC extractor (its synthesized combined buffer):
+// it strips TS types and lowers ES modules to CommonJS with the same options,
+// returning the transformed JS and a sourcemap consumer mapping transformed
+// positions back to code (nil if the map is missing/unparseable — non-fatal, we
+// fall back to transformed positions). A build error is returned so the caller
+// treats the file as a skipped/failed conversion, exactly like a parse error.
+func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sourcemap.Consumer, error) {
+	res := api.Transform(code, api.TransformOptions{
+		Loader:      loader,
 		Format:      api.FormatCommonJS,
 		Target:      api.ESNext,
 		Sourcemap:   api.SourceMapExternal,
-		Sourcefile:  filepath.Base(path),
+		Sourcefile:  sourcefile,
 		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
 	})
 	if len(res.Errors) > 0 {
 		return "", nil, fmt.Errorf("esbuild: %s", res.Errors[0].Text)
 	}
-	// A missing/unparseable map is non-fatal: fall back to transformed positions
-	// (still better than not analyzing the file at all).
 	consumer, err := sourcemap.Parse("", res.Map)
 	if err != nil {
 		consumer = nil

@@ -177,7 +177,9 @@ Python/Java/Rust/Ruby merely shell out to a toolchain on `PATH`.
   dump, then lowers it (straight-line). Emits `py:` names; requires `python3`.
 - **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
   lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node) before
-  parsing, with source maps remapping positions back. Emits `js:` names.
+  parsing, with source maps remapping positions back. `.vue`/`.svelte` SFCs are also
+  handled (`sfc.go`): the `<script>` block lowers as JS/TS and each dangerous template
+  directive (`v-html`, `{@html}`) compiles to a synthetic sink call. Emits `js:` names.
 - **Java** (`converters/java/`) — analyzes JVM **bytecode**. An embedded helper
   (`JavaDump.java`, run via a JDK 24+ `java`) compiles `.java` in-process and reads
   `.class` with `java.lang.classfile`; `lower.go` simulates the operand stack to
@@ -223,7 +225,7 @@ detected across the languages that have samples.
 | gIR (small core + intrinsics, SSA, canonical FQNs) | ✅ `proto/`, `pkg/ir/v1/` |
 | Go frontend (x/tools SSA; funcs + methods + closures) | ✅ |
 | Python frontend (`python3` `ast` → gIR) | ✅ straight-line lowering; requires `python3` |
-| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild) | ✅ straight-line lowering |
+| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild; Vue/Svelte SFCs) | ✅ straight-line lowering |
 | Java frontend (JVM bytecode → gIR) | ✅ `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ |
 | Rust frontend (rustc MIR → gIR) | ✅ value-forwarding over MIR; pure Go, default binary; needs `rustc` |
 | Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + straight-line lowering; pure Go, default binary; needs `ruby` |

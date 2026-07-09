@@ -523,6 +523,43 @@ func isNamedType(t types.Type, pkgPath, name string) bool {
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
 }
 
+// templateTrustedTypes are the html/template string types whose conversion
+// marks a value as ALREADY-SAFE and BYPASSES the package's context-aware auto
+// -escaping. Converting attacker-controlled data to one is the canonical Go XSS
+// pattern (what gosec flags as G203). A conversion is not a call, so it carries
+// no callee for a sink rule to match — the frontend synthesizes one (see
+// emitTemplateTrustedConv).
+var templateTrustedTypes = map[string]bool{
+	"HTML": true, "HTMLAttr": true, "JS": true, "JSStr": true,
+	"URL": true, "CSS": true, "Srcset": true,
+}
+
+// emitTemplateTrustedConv, when t is an html/template trusted-string type,
+// lowers the conversion as a synthetic CALL `go:html/template.<Type>` (arg 0 =
+// the converted value) instead of an opaque OP_CODE_CONVERT, so the rule engine
+// can treat it as an XSS sink. It also stays a default propagator (see
+// internal/rules/propagators.go), so for every non-XSS rule the result still
+// carries taint exactly as the plain conversion did. Returns false (caller
+// emits the normal CONVERT) when t is not a trusted type.
+func (c *Converter) emitTemplateTrustedConv(irInst *ir.Instruction, t types.Type, x ssa.Value) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() != "html/template" || !templateTrustedTypes[obj.Name()] {
+		return false
+	}
+	callee := "go:html/template." + obj.Name()
+	irInst.Op = ir.OpCode_OP_CODE_CALL
+	irInst.Call = &ir.CallCommon{
+		Callee: callee,
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
+		Args:   []*ir.Value{c.convertValue(x)},
+	}
+	return true
+}
+
 // routingVerbs are the method names (lowercased) that register an HTTP handler
 // across the common Go routers — the near-universal REST verbs plus stdlib
 // Handle/HandleFunc and middleware Use/Any/All. A call to a method with one of
@@ -740,14 +777,18 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 		irInst.Op = ir.OpCode_OP_CODE_MAKE_INTERFACE
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
 	case *ssa.ChangeType:
-		irInst.Op = ir.OpCode_OP_CODE_CONVERT
-		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
+		if !c.emitTemplateTrustedConv(irInst, i.Type(), i.X) {
+			irInst.Op = ir.OpCode_OP_CODE_CONVERT
+			irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
+		}
 	case *ssa.ChangeInterface:
 		irInst.Op = ir.OpCode_OP_CODE_CONVERT
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
 	case *ssa.Convert:
-		irInst.Op = ir.OpCode_OP_CODE_CONVERT
-		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
+		if !c.emitTemplateTrustedConv(irInst, i.Type(), i.X) {
+			irInst.Op = ir.OpCode_OP_CODE_CONVERT
+			irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
+		}
 	case *ssa.TypeAssert:
 		irInst.Op = ir.OpCode_OP_CODE_TYPE_ASSERT
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))

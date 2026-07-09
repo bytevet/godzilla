@@ -1,0 +1,2 @@
+# Escaped `{bio}` interpolation (not {@html}), so no XSS fires.
+findings: []

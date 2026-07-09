@@ -398,6 +398,12 @@ func (st *lowerState) line(raw string) {
 // assign lowers a single MIR assignment `_dst = <rvalue>` (or a call
 // terminator) into gIR, updating the value-forwarding environment.
 func (st *lowerState) assign(dst, expr string, pos *ir.Position, isCall bool) {
+	// rustc 1.97+ prefixes some Use rvalues with a `no_retag` qualifier (a
+	// Tree-Borrows retag annotation, e.g. `_10 = no_retag copy (_4.0: T)`). It
+	// carries no dataflow meaning; strip it so the operand parses exactly as on
+	// older rustc — without this, the case below misses and taint silently drops
+	// (notably through format!, which lowers its args via such a copy).
+	expr = strings.TrimPrefix(expr, "no_retag ")
 	if isCall {
 		st.emitCall(dst, expr, pos)
 		return
@@ -646,6 +652,7 @@ func callShape(expr string) (callee, args string, ok bool) {
 // bare place.
 func placeOf(tok string) string {
 	tok = strings.TrimSpace(tok)
+	tok = strings.TrimPrefix(tok, "no_retag ") // rustc 1.97+ retag qualifier (see assign)
 	tok = strings.TrimPrefix(tok, "move ")
 	tok = strings.TrimPrefix(tok, "copy ")
 	return strings.TrimSpace(tok)

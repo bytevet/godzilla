@@ -1,0 +1,3 @@
+# Interpolation auto-escapes and DOMPurify.sanitize neutralizes the bound value,
+# so no XSS fires.
+findings: []

@@ -178,7 +178,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, .rs, or .rb)", path)
+			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
 		}
 		prog, targetPkgs, err := conv(path)
 		if err != nil {
@@ -238,7 +238,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	// Every launched frontend goroutine records a result on both its success and
 	// failure paths, so "no frontend ran" is exactly "coverage is empty".
 	if len(coverage) == 0 {
-		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
+		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Vue/Svelte/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
 	return merged, coverage, targetPkgs, nil
 }
@@ -265,7 +265,7 @@ var languageFrontends = []frontend{
 	{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }),
 		func(p string) bool { return strings.HasSuffix(p, ".py") }},
 	{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }),
-		isJSFamilyFile},
+		js_converter.IsJSFamily},
 	{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }),
 		func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
 	{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }),
@@ -323,23 +323,6 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bo
 		}
 	}
 	return "", nil
-}
-
-// isJSFamilyFile reports whether path is a JavaScript-family source file the JS
-// frontend handles: plain JS, TypeScript, JSX/TSX, and ES-module/CommonJS
-// variants (the .ts/.tsx/.jsx/.mjs/.cjs files are esbuild-transformed to JS in
-// the frontend before parsing).
-func isJSFamilyFile(path string) bool {
-	switch {
-	case strings.HasSuffix(path, ".js"),
-		strings.HasSuffix(path, ".ts"),
-		strings.HasSuffix(path, ".tsx"),
-		strings.HasSuffix(path, ".jsx"),
-		strings.HasSuffix(path, ".mjs"),
-		strings.HasSuffix(path, ".cjs"):
-		return true
-	}
-	return false
 }
 
 // isCppFile reports whether path is a C or C++ translation unit (not a header,

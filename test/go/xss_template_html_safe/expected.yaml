@@ -1,0 +1,4 @@
+# Safe control: request input is rendered through html/template WITHOUT a
+# trusted-type conversion (auto-escaped), and the only template.HTML wraps a
+# compile-time constant (untainted). No XSS — must stay clean.
+findings: []
