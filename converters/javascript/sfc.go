@@ -104,35 +104,36 @@ func extractSFCToJS(path string, src []byte) (string, *sourcemap.Consumer, []dir
 	if isTS {
 		loader = api.LoaderTS
 	}
-	res := api.Transform(b.String(), api.TransformOptions{
-		Loader:      loader,
-		Format:      api.FormatCommonJS,
-		Target:      api.ESNext,
-		Sourcemap:   api.SourceMapExternal,
-		Sourcefile:  filepath.Base(path),
-		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
-	})
-	if len(res.Errors) > 0 {
-		return "", nil, nil, fmt.Errorf("esbuild: %s", res.Errors[0].Text)
-	}
-	consumer, err := sourcemap.Parse("", res.Map)
+	code, consumer, err := runESBuild(b.String(), loader, filepath.Base(path))
 	if err != nil {
-		consumer = nil
+		return "", nil, nil, err
 	}
-	return string(res.Code), consumer, dirs, nil
+	return code, consumer, dirs, nil
+}
+
+// extractScriptBlock returns the SFC <script> block's source, the 1-based line
+// its content starts on, whether it is TypeScript, and its [lo,hi) byte range in
+// src (lo == -1 when there is no <script>). Shared by the Vue and Svelte
+// extractors, which differ only in how they scan the surrounding template/markup.
+// lower is the lower-cased src, computed once by the caller and threaded through.
+func extractScriptBlock(src, lower []byte) (script string, scriptLine, lo, hi int, isTS bool) {
+	scriptLine, lo, hi = 1, -1, -1
+	if content, start, openTag, ok := findBlock(src, lower, "script"); ok {
+		script = string(content)
+		ln, _ := lineColOf(src, start)
+		scriptLine = int(ln)
+		isTS = tagHasTS(openTag)
+		lo, hi = start, start+len(content)
+	}
+	return script, scriptLine, lo, hi, isTS
 }
 
 // extractVueSFC splits a Vue SFC into its <script> block (with its start line and
 // whether it is TypeScript) and the dangerous directives found in its <template>.
 func extractVueSFC(src []byte) (script string, scriptLine int, isTS bool, dirs []directivePos) {
-	scriptLine = 1
-	if content, start, openTag, ok := findBlock(src, "script"); ok {
-		script = string(content)
-		ln, _ := lineColOf(src, start)
-		scriptLine = int(ln)
-		isTS = tagHasTS(openTag)
-	}
-	if tmpl, start, _, ok := findBlock(src, "template"); ok {
+	lower := bytes.ToLower(src)
+	script, scriptLine, _, _, isTS = extractScriptBlock(src, lower)
+	if tmpl, start, _, ok := findBlock(src, lower, "template"); ok {
 		dirs = scanVueTemplate(src, tmpl, start)
 	}
 	return script, scriptLine, isTS, dirs
@@ -141,17 +142,10 @@ func extractVueSFC(src []byte) (script string, scriptLine int, isTS bool, dirs [
 // extractSvelteSFC splits a Svelte SFC into its <script> block and the `{@html}`
 // mustaches found in the surrounding markup (everything outside <script>/<style>).
 func extractSvelteSFC(src []byte) (script string, scriptLine int, isTS bool, dirs []directivePos) {
-	scriptLine = 1
-	scriptLo, scriptHi := -1, -1
-	if content, start, openTag, ok := findBlock(src, "script"); ok {
-		script = string(content)
-		ln, _ := lineColOf(src, start)
-		scriptLine = int(ln)
-		isTS = tagHasTS(openTag)
-		scriptLo, scriptHi = start, start+len(content)
-	}
+	lower := bytes.ToLower(src)
+	script, scriptLine, scriptLo, scriptHi, isTS := extractScriptBlock(src, lower)
 	styleLo, styleHi := -1, -1
-	if content, start, _, ok := findBlock(src, "style"); ok {
+	if content, start, _, ok := findBlock(src, lower, "style"); ok {
 		styleLo, styleHi = start, start+len(content)
 	}
 	dirs = scanSvelteMarkup(src, scriptLo, scriptHi, styleLo, styleHi)
@@ -241,7 +235,6 @@ func applyDirectivePositions(mod *ir.Module, dirs []directivePos) {
 		key := "js:" + d.callee
 		queues[key] = append(queues[key], d)
 	}
-	idx := map[string]int{}
 	for _, f := range mod.Functions {
 		if f == nil {
 			continue
@@ -255,20 +248,16 @@ func applyDirectivePositions(mod *ir.Module, dirs []directivePos) {
 					continue
 				}
 				key := in.Call.GetCallee()
-				q, ok := queues[key]
-				if !ok {
+				q := queues[key]
+				if len(q) == 0 {
 					continue
 				}
-				i := idx[key]
-				if i >= len(q) {
-					continue
-				}
-				idx[key] = i + 1
+				queues[key] = q[1:] // consume this callee's next directive, in order
 				if in.Pos == nil {
 					in.Pos = &ir.Position{}
 				}
-				in.Pos.Line = q[i].line
-				in.Pos.Column = q[i].col
+				in.Pos.Line = q[0].line
+				in.Pos.Column = q[0].col
 			}
 		}
 	}
@@ -277,9 +266,9 @@ func applyDirectivePositions(mod *ir.Module, dirs []directivePos) {
 // findBlock returns the content between the first top-level `<name ...>` and its
 // matching `</name>`, along with the content's byte offset in src and the opening
 // tag text. Same-name nesting (a Vue `<template>` slot inside the root template)
-// is handled by depth counting. A self-closing `<name/>` has no content.
-func findBlock(src []byte, name string) (content []byte, contentStart int, openTag string, ok bool) {
-	lower := bytes.ToLower(src)
+// is handled by depth counting. A self-closing `<name/>` has no content. lower is
+// the lower-cased src, passed in so it is computed once per SFC, not per call.
+func findBlock(src, lower []byte, name string) (content []byte, contentStart int, openTag string, ok bool) {
 	open := findTag(lower, name, 0, true)
 	if open < 0 {
 		return nil, 0, "", false

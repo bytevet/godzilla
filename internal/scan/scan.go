@@ -265,7 +265,7 @@ var languageFrontends = []frontend{
 	{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }),
 		func(p string) bool { return strings.HasSuffix(p, ".py") }},
 	{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }),
-		isJSFamilyFile},
+		js_converter.IsJSFamily},
 	{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }),
 		func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
 	{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }),
@@ -323,26 +323,6 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bo
 		}
 	}
 	return "", nil
-}
-
-// isJSFamilyFile reports whether path is a JavaScript-family source file the JS
-// frontend handles: plain JS, TypeScript, JSX/TSX, ES-module/CommonJS variants
-// (the .ts/.tsx/.jsx/.mjs/.cjs files are esbuild-transformed to JS in the
-// frontend before parsing), and Vue/Svelte single-file components (whose script
-// block is JS/TS and whose template compiles to synthetic JS calls).
-func isJSFamilyFile(path string) bool {
-	switch {
-	case strings.HasSuffix(path, ".js"),
-		strings.HasSuffix(path, ".ts"),
-		strings.HasSuffix(path, ".tsx"),
-		strings.HasSuffix(path, ".jsx"),
-		strings.HasSuffix(path, ".mjs"),
-		strings.HasSuffix(path, ".cjs"),
-		strings.HasSuffix(path, ".vue"),
-		strings.HasSuffix(path, ".svelte"):
-		return true
-	}
-	return false
 }
 
 // isCppFile reports whether path is a C or C++ translation unit (not a header,

@@ -155,7 +155,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 				}
 				return nil
 			}
-			if isJSFamily(p) && !walkignore.SkipFile(d.Name()) {
+			if IsJSFamily(p) && !walkignore.SkipFile(d.Name()) {
 				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
 					return nil
 				}
