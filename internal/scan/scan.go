@@ -178,7 +178,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js, .java, C/C++, .rs, or .rb)", path)
+			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
 		}
 		prog, targetPkgs, err := conv(path)
 		if err != nil {
@@ -238,7 +238,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	// Every launched frontend goroutine records a result on both its success and
 	// failure paths, so "no frontend ran" is exactly "coverage is empty".
 	if len(coverage) == 0 {
-		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Java/Rust/Ruby/C/C++ source found under %s", path)
+		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Vue/Svelte/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
 	return merged, coverage, targetPkgs, nil
 }
@@ -326,9 +326,10 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bo
 }
 
 // isJSFamilyFile reports whether path is a JavaScript-family source file the JS
-// frontend handles: plain JS, TypeScript, JSX/TSX, and ES-module/CommonJS
-// variants (the .ts/.tsx/.jsx/.mjs/.cjs files are esbuild-transformed to JS in
-// the frontend before parsing).
+// frontend handles: plain JS, TypeScript, JSX/TSX, ES-module/CommonJS variants
+// (the .ts/.tsx/.jsx/.mjs/.cjs files are esbuild-transformed to JS in the
+// frontend before parsing), and Vue/Svelte single-file components (whose script
+// block is JS/TS and whose template compiles to synthetic JS calls).
 func isJSFamilyFile(path string) bool {
 	switch {
 	case strings.HasSuffix(path, ".js"),
@@ -336,7 +337,9 @@ func isJSFamilyFile(path string) bool {
 		strings.HasSuffix(path, ".tsx"),
 		strings.HasSuffix(path, ".jsx"),
 		strings.HasSuffix(path, ".mjs"),
-		strings.HasSuffix(path, ".cjs"):
+		strings.HasSuffix(path, ".cjs"),
+		strings.HasSuffix(path, ".vue"),
+		strings.HasSuffix(path, ".svelte"):
 		return true
 	}
 	return false

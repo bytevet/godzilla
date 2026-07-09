@@ -1,0 +1,45 @@
+# Vue template XSS: untrusted input bound to a directive that bypasses Vue's
+# context-aware auto-escaping. `v-html` renders raw HTML; a bound `:href`/`:src`
+# can carry a `javascript:` URL. Escaped interpolation (`{{ }}`) is safe and is
+# NOT modeled as a sink. The Vue frontend (converters/javascript/sfc.go) compiles
+# each dangerous directive to a synthetic call — `v-html="x"` -> `js:__godzilla_
+# vue_vhtml(x)`, `:href="x"` -> `js:__godzilla_vue_url(x)` — so a constant/escaped
+# binding is untainted and never fires.
+rules:
+  - id: vue-xss
+    languages: [javascript]
+    # Align with js-xss / go-xss (same CWE-79) so the CI gate treats XSS
+    # identically regardless of source language / framework.
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input flows into a Vue directive that bypasses the framework's
+      auto-escaping — `v-html` renders raw HTML, and a bound `:href`/`:src` can
+      carry a `javascript:` URL — which may allow Cross-Site Scripting (XSS).
+      Render the value with text interpolation ({{ }}), which auto-escapes, or
+      sanitize it (e.g. DOMPurify.sanitize) before binding it as HTML.
+    sources:
+      # Component props (data passed from a parent — external to this component).
+      - "js:*defineProps"
+      # vue-router route params/query and the reactive $route.
+      - "js:*useRoute"
+      - "js:*$route*"
+      # Browser-controlled input (the URL and cookies).
+      - "js:window.location*"
+      - "js:*.location.href"
+      - "js:*.location.search"
+      - "js:*.location.hash"
+      - "js:document.URL"
+      - "js:document.cookie"
+      - "js:*URLSearchParams*"
+    sinks:
+      - "js:__godzilla_vue_vhtml"
+      - "js:__godzilla_vue_url"
+    sanitizers:
+      # HTML sanitizers neutralize the value before it is bound as raw HTML.
+      - "js:*DOMPurify*"
+      - "js:*.sanitize"
+      - "js:*sanitizeHtml"
+      - "js:*escapeHtml"
+      - "js:*xss"
+    propagators: []

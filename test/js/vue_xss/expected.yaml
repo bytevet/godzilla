@@ -1,0 +1,6 @@
+# Vue v-html XSS: the tainted prop `bio` reaches the v-html sink, which the Vue
+# frontend lowers to js:__godzilla_vue_vhtml (see converters/javascript/sfc.go).
+findings:
+    - rule: vue-xss
+      min: 1
+      sink: vhtml

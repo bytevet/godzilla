@@ -249,13 +249,24 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, error) {
 		return nil, fmt.Errorf("js_converter: failed to read %s: %w", path, err)
 	}
 
-	// TypeScript / JSX / ES-module files are esbuild-transformed to plain
-	// CommonJS JS first (goja parses neither TS annotations nor top-level
-	// import/export); a sourcemap consumer remaps positions back to the original
-	// file afterward. Plain .js skips this entirely.
+	// Vue/Svelte single-file components are compiled to plain JS by the SFC
+	// extractor (script block + template directives as synthetic sink calls);
+	// TypeScript / JSX / ES-module files are esbuild-transformed to plain CommonJS
+	// JS (goja parses neither TS annotations nor top-level import/export). Both
+	// return a sourcemap consumer that remaps positions back to the original file;
+	// plain .js skips this entirely. SFCs must be intercepted before the generic
+	// transform — esbuild has no .vue/.svelte loader.
 	code := string(src)
 	var consumer *sourcemap.Consumer
-	if needsTransform(path) {
+	var dirs []directivePos
+	switch {
+	case isSFC(path):
+		var terr error
+		code, consumer, dirs, terr = extractSFCToJS(path, src)
+		if terr != nil {
+			return nil, fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
+		}
+	case needsTransform(path):
 		var terr error
 		code, consumer, terr = transformToJS(path, src)
 		if terr != nil {
@@ -271,6 +282,9 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, error) {
 
 	mod := convertModule(astProg, fset, path, moduleName)
 	remapPositions(mod, consumer)
+	// Relocate template-directive sink findings from the appended synthetic calls
+	// back to their positions in the .vue/.svelte template (no-op for non-SFCs).
+	applyDirectivePositions(mod, dirs)
 	return mod, nil
 }
 

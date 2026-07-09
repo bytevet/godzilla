@@ -1,0 +1,6 @@
+# Svelte {@html} XSS: the tainted query string reaches the {@html} sink, which
+# the Svelte frontend lowers to js:__godzilla_svelte_html (converters/javascript/sfc.go).
+findings:
+    - rule: svelte-xss
+      min: 1
+      sink: svelte_html

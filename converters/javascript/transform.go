@@ -12,11 +12,24 @@ import (
 )
 
 // isJSFamily reports whether path is a JavaScript/TypeScript source file the
-// frontend handles: plain JS, TypeScript, JSX/TSX, and the ES-module / CommonJS
-// variants.
+// frontend handles: plain JS, TypeScript, JSX/TSX, the ES-module / CommonJS
+// variants, and Vue/Svelte single-file components (whose <script> block is JS/TS
+// and whose template compiles to synthetic JS calls — see sfc.go).
 func isJSFamily(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs":
+	case ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vue", ".svelte":
+		return true
+	}
+	return false
+}
+
+// isSFC reports whether path is a component single-file format (Vue/Svelte) that
+// needs SFC block extraction — the <script> block plus a template compiled to
+// synthetic sink calls — before goja can read it. esbuild has no .vue/.svelte
+// loader, so these must NOT take the generic needsTransform path.
+func isSFC(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".vue", ".svelte":
 		return true
 	}
 	return false
