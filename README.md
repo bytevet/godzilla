@@ -31,9 +31,9 @@ flowchart LR
 
 ## Features
 
-- **Multi-language, one engine.** Go, Python, JavaScript, Java, Rust, and Ruby
-  (plus C/C++ in an opt-in cgo build) all emit the same gIR; the taint engine and
-  rules are language-agnostic.
+- **Multi-language, one engine.** Go, Python, JavaScript (incl. Vue/Svelte SFCs),
+  Java, Rust, and Ruby (plus C/C++ in an opt-in cgo build) all emit the same gIR;
+  the taint engine and rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
   calls (source → sanitizer → sink). Each finding carries a **confidence** — High
   for intra-procedural, Medium for cross-function.
@@ -141,7 +141,7 @@ releases; `edge`/`edge-full` track `main`. Images are multi-arch (amd64 + arm64)
 
 | | Go | Python | JavaScript | Java | Rust | Ruby |
 |---|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | — |
@@ -155,6 +155,9 @@ releases; `edge`/`edge-full` track `main`. Images are multi-arch (amd64 + arm64)
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
 > scan over gIR string constants, independent of the taint engine.
 
+- **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
+  single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
+  flagged as template-injection XSS (CWE-79). Pure Go, no Node.
 - **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
   JDK 24+ `java` on `PATH`. Maven/Gradle projects are built first so third-party
   deps are on the classpath.

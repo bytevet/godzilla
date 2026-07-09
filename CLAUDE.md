@@ -89,6 +89,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   understands) before goja parses, and a `go-sourcemap` consumer remaps finding positions back to the
   original file (`transform.go`, `remapPositions`). esbuild's ESM-interop `(0, import_mod.fn)(x)` callee is
   recovered by a `SequenceExpression` case in `syntacticCallee`. Plain `.js` skips the transform.
+  **Vue/Svelte SFCs** (`.vue`/`.svelte`, `sfc.go`) compile to JS: the `<script>` block becomes the
+  module body and each dangerous template directive is appended as a synthetic sink CALL
+  (`v-html`→`js:__godzilla_vue_vhtml`, `{@html}`→`js:__godzilla_svelte_html`), so template-injection
+  XSS flows through the engine with **no gIR/engine change**; escaped interpolation (`{{ }}`/`{ }`)
+  emits nothing.
 - `converters/java/` — analyzes **JVM bytecode**. An embedded single-file helper (`JavaDump.java`, run
   via `java`, JDK 24+) compiles `.java` in-process (compiler API) and reads `.class` with the standard
   `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to
@@ -183,7 +188,8 @@ the **top-level `rulepacks/`** directory and are embedded into the binary by `ru
 (`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and code injection (CWE-95: `eval`/`exec`/`compile`, exact-named
-  so the safe `ast.literal_eval` is not flagged), and JS code injection (CWE-95).
+  so the safe `ast.literal_eval` is not flagged), and JS code injection (CWE-95), plus `vue-xss`/
+  `svelte-xss` for Vue `v-html`/`:href` and Svelte `{@html}` template-injection XSS (CWE-79).
 - **Java** — SQLi, command injection, path traversal (CWE-22: `java.io` file streams/readers,
   `java.nio.file.Files`; `Paths.get`/`Path.of`/`Path.resolve` propagate String→Path), XSS
   (CWE-79: servlet/`PrintWriter` response writes; `HtmlUtils`/OWASP-`Encode`/`StringEscapeUtils`
