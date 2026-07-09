@@ -111,6 +111,14 @@ jobs:
           java-version: '25'
       - uses: gradle/actions/setup-gradle@v6
       - uses: dtolnay/rust-toolchain@stable
+      # Cache the crates.io registry + build artifacts for the one real Cargo build
+      # this job runs (the rouille web sample), so its dependency tree is not
+      # re-downloaded and re-compiled every run. The cache key includes the rustc
+      # version, so a stable-toolchain bump transparently starts a fresh cache
+      # (Go/Gradle are already cached by setup-go / setup-gradle).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: test/rust/web_rouille
 
       - name: real-framework corpus samples
         env:
