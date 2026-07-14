@@ -48,11 +48,17 @@ rules:
       # "*render_template_string" catches building the *template source*
       # itself from tainted input (as opposed to passing tainted input as a
       # context variable into a fixed template, which Flask autoescapes).
-      # Broad "*Response"/"*make_response" catch constructing a raw HTTP
-      # response body directly, whether imported bare (`Response(html)`) or
-      # qualified (`flask.Response(html)`).
+      # The response sinks catch constructing a raw HTML body directly, bare
+      # (`Response(html)`) or qualified (`flask.Response(html)`). Narrowed from a
+      # bare "*Response" glob, which also matched FileResponse/StreamingResponse
+      # (file/stream serving -> path traversal, not XSS) and RedirectResponse
+      # (open redirect) -- false positives once handler params are tainted.
       - "py:*render_template_string"
-      - "py:*Response"
+      - "py:Response"
+      - "py:*.Response"
+      - "py:*HTMLResponse"
+      - "py:*HttpResponse"
+      - "py:*PlainTextResponse"
       - "py:*make_response"
     # Explicit HTML-escapers only. The old "py:*escape" glob also matched
     # html.unescape — the OPPOSITE of a sanitizer — so it is replaced with the

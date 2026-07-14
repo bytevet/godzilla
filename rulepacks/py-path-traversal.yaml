@@ -50,6 +50,10 @@ rules:
       - "py:*open"
       - "py:os.remove"
       - "py:*send_file"
+      # Starlette/FastAPI file-serving responses (Gradio CVE-2023-51449): serving
+      # an attacker-controlled path is path traversal, exactly like Flask
+      # send_file. `*FileResponse` also matches RangedFileResponse.
+      - "py:*FileResponse"
     # os.path.join does NOT contain input to a base directory ("/data" +
     # "../../etc" joins to "/data/../../etc", which still escapes "/data"),
     # so it is a propagator, not a sanitizer -- mirroring go-path-traversal's
