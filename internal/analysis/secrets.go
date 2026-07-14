@@ -107,6 +107,9 @@ func scanText(s string, pos *ir.Position, lang, fn string, seen map[string]bool,
 	if s == "" {
 		return
 	}
+	if secretPathExcluded(pos.GetFilename()) {
+		return
+	}
 	for _, p := range secretPatterns {
 		if !p.re.MatchString(s) {
 			continue
@@ -147,6 +150,9 @@ func ScanSecretsInFiles(root string) []Finding {
 	var findings []Finding
 	seen := map[string]bool{}
 	scanFile := func(path string) {
+		if secretPathExcluded(path) {
+			return
+		}
 		info, err := os.Stat(path)
 		if err != nil || info.Size() > secretFileMaxBytes {
 			return
@@ -228,6 +234,43 @@ func isScannableConfigFile(path string) bool {
 		return true
 	case lower == ".npmrc" || lower == ".netrc" || lower == ".pypirc":
 		return true
+	}
+	return false
+}
+
+// secretExcludedSegments are path segments whose files are, by construction,
+// full of example/placeholder credentials rather than real leaks: vendored
+// dependencies, test fixtures, i18n bundles. The real-world CVE benchmark showed
+// these were the dominant secret-scan false positives — an SSH cert inside a
+// vendored crypto library matched an API-key regex, example JWTs lived in an
+// OpenAPI schema, and connection-string-shaped strings sat in translation JSON.
+// Scanning them costs precision at the CI gate for no real signal, so skip them,
+// mirroring how taint findings are already scoped to first-party code.
+var secretExcludedSegments = []string{
+	"/node_modules/", "/vendor/", "/go/pkg/mod/", "/site-packages/",
+	"/.venv/", "/venv/", "/.bundle/",
+	"/fixtures/", "/fixture/", "/__tests__/", "/__mocks__/", "/testdata/",
+	"/translations/", "/locales/", "/locale/", "/lc_messages/",
+}
+
+// secretPathExcluded reports whether the secret scanner should skip a file by
+// path (a vendored dependency, test fixture, i18n bundle, or API schema).
+func secretPathExcluded(path string) bool {
+	if path == "" {
+		return false
+	}
+	lower := strings.ToLower(filepath.ToSlash(path))
+	for _, seg := range secretExcludedSegments {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	base := filepath.Base(lower)
+	switch {
+	case strings.HasPrefix(base, "swagger.") || strings.HasPrefix(base, "openapi."):
+		return true // OpenAPI schemas are full of example credentials
+	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go"):
+		return true // unit-test files carry fixture secrets, not leaks
 	}
 	return false
 }
