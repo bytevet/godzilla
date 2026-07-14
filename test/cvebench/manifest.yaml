@@ -1,0 +1,53 @@
+# Real-world CVE recall benchmark (TRUST-11). Ground truth: each entry is a real
+# CVE in a famous project pinned to its VULNERABLE commit, with the sink file
+# verified against the fix diff. This is tracked ALONGSIDE the hand-written
+# corpus F1 (which is 1.000) — real-world recall measures modeling BREADTH
+# (source/framework/sink coverage), which the curated corpus cannot.
+#
+# Opt-in: `GODZILLA_CVE_BENCH=1 go test ./test/cvebench/` — it clones external
+# repos over the network. Entries default to parse-only frontends (Python/JS/
+# Ruby), which scan without a build; Go/Java CVEs need a toolchain build and are
+# omitted here (see the report and BACKLOG COV-11/13).
+cves:
+  - cve: CVE-2022-35918
+    project: streamlit/streamlit
+    url: https://github.com/streamlit/streamlit.git
+    ref: "1.11.0"
+    subdir: lib/streamlit
+    sink_file: components/v1/components.py
+    rule: py-path-traversal
+    cwe: CWE-22
+
+  - cve: CVE-2023-51449
+    project: gradio-app/gradio
+    url: https://github.com/gradio-app/gradio.git
+    ref: 992d540c3df23bf23b897eb99da8c2c39eb59d50
+    subdir: gradio
+    sink_file: routes.py
+    rule: py-path-traversal
+    cwe: CWE-22
+
+  - cve: CVE-2021-21315
+    project: sebhildebrandt/systeminformation
+    url: https://github.com/sebhildebrandt/systeminformation.git
+    ref: v5.3.0
+    sink_file: lib/internet.js
+    rule: js-command-injection
+    cwe: CWE-78
+
+  - cve: CVE-2021-43788
+    project: NodeBB/NodeBB
+    url: https://github.com/NodeBB/NodeBB.git
+    ref: v1.18.4
+    sink_file: src/languages.js
+    rule: js-path-traversal
+    cwe: CWE-22
+
+  - cve: CVE-2023-32235
+    project: TryGhost/Ghost
+    url: https://github.com/TryGhost/Ghost.git
+    ref: v5.42.0
+    subdir: ghost/core
+    sink_file: static-theme.js
+    rule: js-path-traversal
+    cwe: CWE-22
