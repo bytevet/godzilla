@@ -10,8 +10,10 @@ IDs are stable. Fix-order convention (per `CLAUDE.md`): intrinsic + engine teach
 frontend lowering → engine change; touch `proto/*.proto` only as a last resort.
 
 **Status:** ✅ done · 🟡 partial (note says what's left) · ⏸ deferred with rationale.
-Every CRITICAL/HIGH and every tractable MEDIUM is done; what remains is toolchain-gated, net-new
-frontends, or deliberately deferred perf work.
+Every CRITICAL/HIGH from the original 7-lens audit is done. A **real-world CVE benchmark** (11
+famous projects at known-CVE commits, ~1.02M LOC) then caught **0/12** despite a 1.000 corpus F1,
+opening a new class of high-severity **breadth** gaps (COV-11, TRUST-10) — modeling coverage, not
+engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf work.
 
 ## Engine precision & soundness (ENG)
 
@@ -57,6 +59,9 @@ frontends, or deliberately deferred perf work.
 | COV-8 | med | ✅ `8e313f7` | C/C++ CFG-edge fix + exec-family/argv sources + buffer-overflow & SQLi packs (SSRF is a follow-on). |
 | COV-9 | med | ✅ `1abcdab` | Sanitizer realism: real sanitizer globs; the over-broad `py:*escape` glob tightened. |
 | COV-10 | low | 🟡 `af8d696` | Ruby frontend shipped. **Open (net-new frontends):** PHP, C#, Kotlin. |
+| COV-11 | high | 🟡 | **Framework handler-parameter sources** — real-world benchmark's dominant gap (9/12 CVE misses). Packs already model FastAPI/Tornado/gin/etc. accessors, but taint is seeded **only at `request.<x>` call sites**, so input arriving as a route-handler *parameter* (Tornado captures, FastAPI DI, `web.Params(c.Req)`) stays untainted. Go: add free-function accessors (`web.Params`, …). Python/JS: synthesize sources for handler parameters, generalizing Go's `addHTTPRequestSource`. |
+| COV-12 | med | 🟡 | **Ruby rulepack parity** — add `ruby-xss` / `ruby-path-traversal` / `ruby-ssrf` / `ruby-open-redirect`. Ruby ships only SQLi + command-injection, so Redmine's XSS CVEs (CVE-2023-47258/9) are structurally unmodelable. Pure YAML. |
+| COV-13 | med | ⏸ | **Framework-abstracted sinks + library sources** — model wrapper sinks (`express.static`, `knex.raw`, ORM raw-query, a Jinja→SQL propagator); add an opt-in "exported-API parameter = untrusted" mode so a scanned library's own public API is a source (systeminformation CVE-2021-21315). |
 
 ## Performance & scalability (PERF)
 
@@ -112,12 +117,19 @@ frontends, or deliberately deferred perf work.
 | TRUST-7 | med | ✅ `09f40e1` | Frontend fuzz targets + glob-DoS fix; the `termination_stress` sample guards the analyzer's termination invariants. |
 | TRUST-8 | med | ✅ `2326058` | Cross-frontend differential corpus (same CWE in every language). |
 | TRUST-9 | med | ⏸ | Go scans still allow module fetches. Not enforcing `GOTOOLCHAIN=local`/offline mode; document a warmed cache for CI. |
+| TRUST-10 | high | 🟡 | **Secret-scanner precision** — real-world benchmark surfaced ~40 FPs, all in non-credential files. Scope the regex secret scan to first-party code (as taint findings already are) and exclude vendored deps + data/fixture files (i18n JSON, OpenAPI schemas, test fixtures). Observed: 20 Superset i18n, 8 Ghost fixtures, 6 NocoDB swagger, 6 gogs `x/crypto` dep. |
+| TRUST-11 | med | ⏸ | **Real-world CVE benchmark harness** — codify the 12-CVE benchmark (CVE → vulnerable ref → fix-diff-verified sink) as a repeatable **recall** metric alongside the corpus F1. The corpus scores 1.000 but real-world recall was 0/12, so modeling breadth needs its own tracked number, not just the hand-written corpus. |
 
 ## Open items (all deferred or partial above)
 
 - **COV-5** — remaining injection classes (NoSQL, SSTI, LDAP/XPath, zip-slip, prototype-pollution,
   header/CRLF, log). Pure-YAML packs; ship when a target framework/sample justifies each.
 - **COV-10** — PHP / C# / Kotlin frontends. Each is a net-new project.
+- **COV-11 / COV-12 / COV-13** — real-world recall (from the CVE benchmark): framework
+  handler-parameter sources (the highest-leverage fix), Ruby rulepack parity, and
+  framework-abstracted sinks + library-parameter sources.
+- **TRUST-10 / TRUST-11** — secret-scanner precision (scope out deps/data/fixtures); a repeatable
+  real-world CVE recall harness alongside the corpus F1.
 - **PERF-1 / PERF-4 (residual) / PERF-6 / PERF-8** — incremental caching, build up-to-date skip / JVM
   reuse, tree-shaking, streaming. Reasoned deferrals in the PERF table.
 - **TRUST-4 / TRUST-9** — inline-expectation oracle; Go scan hermeticity.
