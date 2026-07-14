@@ -59,9 +59,9 @@ engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf
 | COV-8 | med | ✅ `8e313f7` | C/C++ CFG-edge fix + exec-family/argv sources + buffer-overflow & SQLi packs (SSRF is a follow-on). |
 | COV-9 | med | ✅ `1abcdab` | Sanitizer realism: real sanitizer globs; the over-broad `py:*escape` glob tightened. |
 | COV-10 | low | 🟡 `af8d696` | Ruby frontend shipped. **Open (net-new frontends):** PHP, C#, Kotlin. |
-| COV-11 | high | 🟡 | **Framework handler-parameter sources** — real-world benchmark's dominant gap (9/12 CVE misses). Packs already model FastAPI/Tornado/gin/etc. accessors, but taint is seeded **only at `request.<x>` call sites**, so input arriving as a route-handler *parameter* (Tornado captures, FastAPI DI, `web.Params(c.Req)`) stays untainted. Go: add free-function accessors (`web.Params`, …). Python/JS: synthesize sources for handler parameters, generalizing Go's `addHTTPRequestSource`. |
-| COV-12 | med | 🟡 | **Ruby rulepack parity** — add `ruby-xss` / `ruby-path-traversal` / `ruby-ssrf` / `ruby-open-redirect`. Ruby ships only SQLi + command-injection, so Redmine's XSS CVEs (CVE-2023-47258/9) are structurally unmodelable. Pure YAML. |
-| COV-13 | med | ⏸ | **Framework-abstracted sinks + library sources** — model wrapper sinks (`express.static`, `knex.raw`, ORM raw-query, a Jinja→SQL propagator); add an opt-in "exported-API parameter = untrusted" mode so a scanned library's own public API is a source (systeminformation CVE-2021-21315). |
+| COV-11 | high | 🟡 | **Framework handler-parameter sources** (branch `claude/realworld-recall`). Shipped: Go free-function accessors (`go:*web.Params`); Python FastAPI/Tornado/MethodView handler-param source synthesis (`py:@http.param`); `with open(...)` context-manager lowering; split/join propagators. Corpus TP 133→142, FP=0. **Open:** JS handler-param synthesis; method-propagator chaining (`path.split()`/`.strip()` don't forward through the param source — blocks Streamlit); per-CVE inter-proc transforms. |
+| COV-12 | med | ✅ | **Ruby rulepack parity** — `ruby-xss` / `ruby-path-traversal` / `ruby-ssrf` / `ruby-open-redirect` shipped, plus a Ruby frontend fix resolving namespaced-constant receivers (`Net::HTTP.get`). Samples + FP=0. |
+| COV-13 | med | 🟡 | **Framework-abstracted sinks + library sources** — shipped FastAPI/Starlette `FileResponse` path-traversal sink (+ narrowed py-xss `*Response` to fix the resulting FP). **Open:** `express.static`, `knex.raw`/ORM raw-query, Jinja→SQL propagator; opt-in "exported-API parameter = untrusted" library-scan mode (systeminformation CVE-2021-21315). |
 
 ## Performance & scalability (PERF)
 
@@ -117,8 +117,8 @@ engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf
 | TRUST-7 | med | ✅ `09f40e1` | Frontend fuzz targets + glob-DoS fix; the `termination_stress` sample guards the analyzer's termination invariants. |
 | TRUST-8 | med | ✅ `2326058` | Cross-frontend differential corpus (same CWE in every language). |
 | TRUST-9 | med | ⏸ | Go scans still allow module fetches. Not enforcing `GOTOOLCHAIN=local`/offline mode; document a warmed cache for CI. |
-| TRUST-10 | high | 🟡 | **Secret-scanner precision** — real-world benchmark surfaced ~40 FPs, all in non-credential files. Scope the regex secret scan to first-party code (as taint findings already are) and exclude vendored deps + data/fixture files (i18n JSON, OpenAPI schemas, test fixtures). Observed: 20 Superset i18n, 8 Ghost fixtures, 6 NocoDB swagger, 6 gogs `x/crypto` dep. |
-| TRUST-11 | med | ⏸ | **Real-world CVE benchmark harness** — codify the 12-CVE benchmark (CVE → vulnerable ref → fix-diff-verified sink) as a repeatable **recall** metric alongside the corpus F1. The corpus scores 1.000 but real-world recall was 0/12, so modeling breadth needs its own tracked number, not just the hand-written corpus. |
+| TRUST-10 | high | ✅ | **Secret-scanner precision** — both secret scanners now skip vendored deps + test-fixture/i18n/API-schema paths (`secretPathExcluded`), first-party only. The ~40 benchmark FPs (Superset i18n, Ghost fixtures, NocoDB swagger, gogs `x/crypto`) are gone; a real secret in a normal config still fires. FP-guard sample + corpus FP=0. |
+| TRUST-11 | med | ✅ | **Real-world CVE benchmark harness** — `test/cvebench` (opt-in `GODZILLA_CVE_BENCH=1`): a fix-diff-verified CVE manifest + a scan/score test reporting recall alongside the corpus F1. The regression guard for the COV-11/13 breadth gaps. |
 
 ## Open items (all deferred or partial above)
 
