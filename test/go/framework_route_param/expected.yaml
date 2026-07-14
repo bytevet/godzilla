@@ -1,0 +1,6 @@
+# Route-param path traversal (Grafana CVE-2021-43798 shape): the tainted route
+# wildcard from web.Params reaches os.Open. Guards the go:*web.Params source glob.
+findings:
+    - rule: go-path-traversal
+      min: 1
+      sink: Open

@@ -41,6 +41,9 @@ rules:
       - "go:*go-chi/chi*.URLParam"
       # Gorilla mux (github.com/gorilla/mux) — path variables.
       - "go:*gorilla/mux.Vars"
+      # Macaron / Grafana route params (e.g. grafana/pkg/web.Params) — a free-function
+      # route accessor like mux.Vars; returns untrusted path/query params.
+      - "go:*web.Params"
       # Fiber (github.com/gofiber/fiber) — *fiber.Ctx.
       - "go:*gofiber/fiber*.Ctx*.Query"
       - "go:*gofiber/fiber*.Ctx*.Params"
