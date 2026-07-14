@@ -569,6 +569,20 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 			fs.lowerBody(s.list("body"))
 			fs.lowerBody(s.list("orelse"))
 		case "With":
+			// `with EXPR as VAR:` lowers as `VAR = EXPR`: lower each context-manager
+			// expression (so a sink/source CALL such as open(...) is emitted, not
+			// dropped) and bind its `as` target, then lower the body. Without this
+			// the whole `with open(tainted) as f: ...` idiom was invisible.
+			for _, it := range s.list("items") {
+				ctx := it.node("context")
+				if ctx == nil {
+					continue
+				}
+				val := fs.lowerExpr(ctx)
+				if v := it.node("vars"); v != nil {
+					fs.assign(v, val)
+				}
+			}
 			fs.lowerBody(s.list("body"))
 		case "Try":
 			fs.lowerBody(s.list("body"))

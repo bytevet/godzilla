@@ -235,7 +235,17 @@ def conv_stmt(node):
             "pos": p,
         }
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        return {"kind": "With", "body": conv_body(node.body), "pos": p}
+        # Emit the context-manager items (`with EXPR as VAR:`) so the frontend can
+        # lower them as `VAR = EXPR`. Dropping them made the extremely common
+        # `with open(tainted) as f:` file/resource idiom invisible to analysis.
+        items = [
+            {
+                "context": conv_expr(it.context_expr),
+                "vars": conv_expr(it.optional_vars) if it.optional_vars is not None else None,
+            }
+            for it in node.items
+        ]
+        return {"kind": "With", "items": items, "body": conv_body(node.body), "pos": p}
     if isinstance(node, ast.Try):
         return {
             "kind": "Try",
