@@ -319,6 +319,11 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 			return constString("")
 		}
 		return last
+	case "const_path_ref", "top_const_ref":
+		// A namespaced constant (`Net::HTTP`, `ERB::Util`). It carries no taint;
+		// return its flattened name so lowering the receiver of `Net::HTTP.get`
+		// does not fall through to a `ruby.unsupported` intrinsic.
+		return constString(constPathName(n))
 	case "symbol_literal":
 		return constString(identName(at(at(n, 1), 1)))
 	case "dyna_symbol":
@@ -526,7 +531,27 @@ func (fs *funcState) calleeFor(recv interface{}, method string) string {
 	if tag(recv) == "vcall" && tag(at(recv, 1)) == "@const" {
 		return "ruby:" + identName(at(recv, 1)) + "." + method
 	}
+	// A namespaced constant receiver (`Net::HTTP.get`, `Open3::Foo.bar`) — scope
+	// the callee by the full constant path so a sink glob (`ruby:Net::HTTP.get`)
+	// does not collapse to the bare, collision-prone method name (`ruby:get`).
+	if tag(recv) == "const_path_ref" || tag(recv) == "top_const_ref" {
+		return "ruby:" + constPathName(recv) + "." + method
+	}
 	return "ruby:" + method
+}
+
+// constPathName flattens a namespaced-constant node (`Net::HTTP`, `A::B::C`,
+// `::Foo`) into its `::`-joined source text (`Net::HTTP`).
+func constPathName(n interface{}) string {
+	switch tag(n) {
+	case "const_path_ref":
+		return constPathName(at(n, 1)) + "::" + identName(at(n, 2))
+	case "top_const_ref":
+		return identName(at(n, 1))
+	case "var_ref", "vcall":
+		return identName(at(n, 1))
+	}
+	return identName(n)
 }
 
 // localCallee builds the canonical callee for a bare function call `name(...)`,

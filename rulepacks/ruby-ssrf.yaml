@@ -1,0 +1,47 @@
+# Server-Side Request Forgery (Ruby, CWE-918): untrusted request input flowing
+# into an outbound HTTP request's target URL, allowing requests to internal or
+# unintended hosts.
+rules:
+  - id: ruby-ssrf
+    languages: [ruby]
+    # Align with go-ssrf/py-ssrf (same CWE-918).
+    severity: high
+    cwe: CWE-918
+    message: >-
+      Untrusted input flows into an outbound HTTP request URL, which may allow
+      server-side request forgery (SSRF) to internal or unintended hosts.
+      Validate the destination against an allow-list of hosts before making the
+      request.
+    # Request sources are base-scoped: the frontend synthesizes a source CALL
+    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base.
+    sources:
+      - "ruby:params"          # params[:x] / params['x']
+      - "ruby:cookies"         # cookies[:x]
+      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
+      - "ruby:cookies.*"
+      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
+      - "ruby:req.*"           # conventional `req` request receiver
+    sinks:
+      # net/http (canonical const-path names are scoped by the frontend).
+      - "ruby:Net::HTTP.get"
+      - "ruby:Net::HTTP.post"
+      - "ruby:Net::HTTP.get_response"
+      - "ruby:Net::HTTP.start"
+      # open-uri (URI.open / Kernel#open with an http(s) URL).
+      - "ruby:URI.open"
+      - "ruby:URI.parse"
+      - "ruby:open"
+      - "ruby:Kernel.open"
+      # Popular HTTP client gems.
+      - "ruby:HTTParty.get"
+      - "ruby:HTTParty.post"
+      - "ruby:Faraday.get"
+      - "ruby:Faraday.post"
+      - "ruby:RestClient.get"
+      - "ruby:RestClient.post"
+    # No built-in sanitizer neutralizes tainted input for a request URL; the fix
+    # is allow-listing the destination host, not escaping.
+    sanitizers: []
+    propagators:
+      - "ruby:*.join"
+      - "ruby:*.to_s"

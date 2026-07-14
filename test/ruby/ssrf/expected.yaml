@@ -1,0 +1,4 @@
+findings:
+  - rule: ruby-ssrf
+    min: 1
+    sink: HTTP.get

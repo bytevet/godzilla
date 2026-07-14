@@ -1,0 +1,4 @@
+findings:
+  - rule: ruby-open-redirect
+    min: 1
+    sink: redirect_to
