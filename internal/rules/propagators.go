@@ -52,6 +52,11 @@ var defaultPropagatorGlobs = []string{
 	// --- Python: str methods / builtins ---
 	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",
 	"py:*.replace", "py:*.format", "py:*.encode", "py:*.decode", "py:*.casefold",
+	// split/join carry taint through the extremely common "split on a delimiter,
+	// keep some parts, re-join" idiom (e.g. Streamlit CVE-2022-35918:
+	// path.split('/') -> '/'.join(parts[1:]) -> os.path.join -> open). str.split
+	// yields a tainted list; sep.join re-joins a tainted list into a tainted str.
+	"py:*.split", "py:*.rsplit", "py:*.splitlines", "py:*.partition", "py:*.rpartition", "py:*.join",
 	"py:*str", "py:*repr",
 
 	// --- JavaScript: String methods / URI encoders ---
