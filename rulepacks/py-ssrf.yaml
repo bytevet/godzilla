@@ -13,6 +13,8 @@ rules:
       hosts. Validate the destination against an allow-list before making
       the request.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"

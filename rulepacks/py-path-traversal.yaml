@@ -12,6 +12,10 @@ rules:
       validated, which may allow path traversal (e.g. "../" sequences) to
       read or write files outside the intended directory.
     sources:
+      # Route-handler parameter source (FastAPI/Starlette path & query params,
+      # Tornado RequestHandler / Flask MethodView route captures). Synthesized
+      # by the Python frontend, see converters/python/lower.go routeHandlerParams.
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"

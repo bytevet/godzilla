@@ -11,6 +11,8 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"

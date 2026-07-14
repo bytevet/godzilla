@@ -40,22 +40,37 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
 
-	var collect func(stmts []astNode, qualPrefix string)
-	collect = func(stmts []astNode, qualPrefix string) {
+	// Route-handler taint sources (RW-1): FastAPI/Starlette route-decorated
+	// functions and Tornado RequestHandler / Flask MethodView verb methods deliver
+	// untrusted input as HANDLER PARAMETERS, not `request.X` accessor calls, so a
+	// param has to be seeded as a source or its flow is never tainted. classBases
+	// maps every class to its base names so tornadoClasses / methodViewClasses can
+	// resolve subclassing transitively (best-effort by simple base name).
+	classBases := map[string][]string{}
+	collectClassBases(root.list("body"), classBases)
+	tornadoClasses := handlerClasses(classBases, map[string]bool{"RequestHandler": true})
+	methodViewClasses := handlerClasses(classBases, map[string]bool{"MethodView": true})
+
+	var collect func(stmts []astNode, qualPrefix string, inTornado, inMethodView bool)
+	collect = func(stmts []astNode, qualPrefix string, inTornado, inMethodView bool) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
-				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases)
+				srcParams := routeHandlerParams(s, inTornado, inMethodView)
+				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, srcParams)
 				functions = append(functions, fn)
-				collect(s.list("body"), qualPrefix+s.str("name")+".")
+				// A nested def inside a handler is not itself a verb method of the
+				// class, so its class-handler context resets.
+				collect(s.list("body"), qualPrefix+s.str("name")+".", false, false)
 			case "ClassDef":
 				// Only methods (nested FunctionDefs) are modeled; other
 				// class-body statements are a documented limitation.
-				collect(s.list("body"), qualPrefix+s.str("name")+".")
+				cn := s.str("name")
+				collect(s.list("body"), qualPrefix+cn+".", tornadoClasses[cn], methodViewClasses[cn])
 			}
 		}
 	}
-	collect(root.list("body"), "")
+	collect(root.list("body"), "", false, false)
 
 	// Module-level constant bindings (NAME = <literal>) are Python module
 	// globals. The env-based lowering keeps such a literal only in the
@@ -117,8 +132,10 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 }
 
 // convertFunction lowers a single `def` (module-level, nested, or method)
-// into an ir.Function containing one straight-line basic block.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string) *ir.Function {
+// into an ir.Function containing one straight-line basic block. srcParams names
+// this function's route-handler parameters (see routeHandlerParams): each is an
+// untrusted taint source and is seeded with a synthetic source CALL below.
+func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, srcParams []string) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
@@ -150,9 +167,158 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 		fs.methodPrefix = qualPrefix
 	}
 
+	// RW-1: seed each route-handler parameter as a taint source. A synthetic
+	// source CALL (canonical name "py:@http.param", a source glob in the Python
+	// rulepacks) is emitted at function entry and the param name is rebound to its
+	// tainted result, so every subsequent read of the param carries taint — the
+	// same frontend trick JS/Python opaque-base reads and the Java @RequestParam
+	// source use, needing no gIR/engine change.
+	for _, p := range srcParams {
+		if _, ok := fs.env[p]; !ok {
+			continue // defensive: name not an actual parameter
+		}
+		fs.env[p] = fs.emitParamSource(p, node)
+	}
+
 	fs.lowerBody(node.list("body"))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
+}
+
+// routeParamSource is the canonical name of the synthetic source CALL seeded at
+// each untrusted route-handler parameter (RW-1). It is a source glob in every
+// Python taint rulepack, so any dangerous flow off a handler param is covered.
+const routeParamSource = "py:@http.param"
+
+// routeVerbs are the FastAPI/Starlette routing-decorator methods (@app.get,
+// @router.post, ...). tornadoVerbs are the HTTP-method handler methods of a
+// Tornado RequestHandler / Flask MethodView subclass (no `websocket`).
+var (
+	routeVerbs   = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true}
+	tornadoVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
+)
+
+// routeHandlerParams returns the untrusted parameter names of a `def` when it is
+// a web-route handler, or nil otherwise. Detection is deliberately conservative
+// to avoid false positives:
+//   - FastAPI/Starlette: the function carries a routing decorator whose last
+//     component is a routing verb and which has a receiver (e.g. @app.get,
+//     @router.post, @APIRouter().get). Its params are sources EXCEPT self/cls, a
+//     param named request/websocket, and Depends()/Security()-defaulted params.
+//   - Tornado / Flask MethodView: the function is a verb-named method
+//     (get/post/...) of a class transitively subclassing RequestHandler /
+//     MethodView. Its positional params after self/cls (URL route captures) are
+//     sources.
+func routeHandlerParams(node astNode, inTornado, inMethodView bool) []string {
+	params := node.strList("params")
+	if len(params) == 0 {
+		return nil
+	}
+	if hasRouteDecorator(node) {
+		return fastapiUntrustedParams(node, params)
+	}
+	if (inTornado || inMethodView) && tornadoVerbs[node.str("name")] {
+		return positionalAfterSelf(params)
+	}
+	return nil
+}
+
+// hasRouteDecorator reports whether any decorator is a routing decorator: a
+// dotted name whose last component is a routing verb and which has a receiver
+// prefix (so a bare @get is not mistaken for one).
+func hasRouteDecorator(node astNode) bool {
+	for _, d := range node.strList("decorators") {
+		if i := strings.LastIndex(d, "."); i >= 0 && routeVerbs[d[i+1:]] {
+			return true
+		}
+	}
+	return false
+}
+
+// fastapiUntrustedParams filters a route function's params down to the untrusted
+// ones: everything except self/cls, request/websocket, and Depends()/Security()
+// dependency-injected params.
+func fastapiUntrustedParams(node astNode, params []string) []string {
+	excluded := map[string]bool{"self": true, "cls": true, "request": true, "websocket": true}
+	for _, d := range node.strList("depends_params") {
+		excluded[d] = true
+	}
+	var out []string
+	for _, p := range params {
+		if !excluded[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// positionalAfterSelf returns the params after a leading self/cls receiver (the
+// URL route captures for a Tornado / MethodView verb method).
+func positionalAfterSelf(params []string) []string {
+	if len(params) > 0 && (params[0] == "self" || params[0] == "cls") {
+		return params[1:]
+	}
+	return params
+}
+
+// collectClassBases records every class's declared base names (dotted) into out,
+// recursing through nested classes and function bodies so a handler class
+// declared anywhere in the module is discoverable.
+func collectClassBases(stmts []astNode, out map[string][]string) {
+	for _, s := range stmts {
+		switch s.kind() {
+		case "ClassDef":
+			out[s.str("name")] = s.strList("bases")
+			collectClassBases(s.list("body"), out)
+		case "FunctionDef":
+			collectClassBases(s.list("body"), out)
+		}
+	}
+}
+
+// handlerClasses returns the set of class names that subclass one of targetBases
+// (matched by simple base name) directly or transitively. The transitive closure
+// is computed to a fixpoint so `class B(A)` where `class A(RequestHandler)` is
+// also detected.
+func handlerClasses(classBases map[string][]string, targetBases map[string]bool) map[string]bool {
+	result := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for cls, bases := range classBases {
+			if result[cls] {
+				continue
+			}
+			for _, b := range bases {
+				simple := b
+				if i := strings.LastIndex(b, "."); i >= 0 {
+					simple = b[i+1:]
+				}
+				if targetBases[simple] || result[simple] {
+					result[cls] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return result
+}
+
+// emitParamSource emits a synthetic source CALL (routeParamSource) whose result
+// register carries taint, for a route-handler parameter param. The param value
+// is passed as the call's sole argument for readability; the engine seeds taint
+// on the call RESULT (which convertFunction rebinds to the param name).
+func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Comment = "route-param-source:" + param
+	inst.Call = &ir.CallCommon{
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: routeParamSource}},
+		Callee: routeParamSource,
+		Args:   []*ir.Value{regValue(param)},
+	}
+	fs.emit(inst)
+	return regValue(inst.Name)
 }
 
 // funcState holds the per-function lowering state: a monotonically

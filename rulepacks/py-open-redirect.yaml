@@ -9,6 +9,8 @@ rules:
       redirect. Validate the target against an allowlist instead of redirecting
       to a user-controlled URL.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"

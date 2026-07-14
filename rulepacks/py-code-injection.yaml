@@ -12,6 +12,8 @@ rules:
       you must parse a literal, use ast.literal_eval, and dispatch on an
       allowlist instead of dynamic evaluation.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"
