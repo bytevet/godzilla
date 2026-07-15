@@ -54,8 +54,8 @@ jobs:
         run: |
           go install golang.org/x/perf/cmd/benchstat@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          # hyperfine gives tighter wall-clock stats; the script falls back to a
-          # builtin timer if it is absent, so this is best-effort.
+          # hyperfine tightens the (informational) wall-clock numbers; the script
+          # falls back to a builtin timer if it is absent, so this is best-effort.
           sudo apt-get update -qq && sudo apt-get install -y hyperfine || \
             echo "::notice::hyperfine unavailable — using the builtin timer"
 
@@ -86,9 +86,8 @@ jobs:
         id: run
         run: |
           set +e
-          # count>=10 so benchstat can compute a confidence interval (its floor
-          # is 6); default 20 wall-clock runs via hyperfine keep the noisier
-          # subprocess frontends (JVM/rustc startup) statistically stable.
+          # count>=10 so benchstat can compute a confidence interval (its floor is
+          # 6) — the benchmark time+memory comparison is the gated signal.
           scripts/pr-quality-gate.sh "${{ steps.pr.outputs.base_sha }}" "${{ steps.pr.outputs.head_sha }}" \
             --bench-count 10 --output gate-report.md
           echo "exit=$?" >> "$GITHUB_OUTPUT"

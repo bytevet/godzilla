@@ -25,9 +25,9 @@
 #   --format md|json          output format (default: md)
 #   --output FILE             write report to FILE instead of stdout
 #   --no-gate                 report only; always exit 0
-#   --perf-threshold PCT      Go-benchmark regression bound   (default: 10)
-#   --wall-threshold PCT      wall-clock regression bound      (default: 15)
-#   --runs N                  wall-clock runs per revision     (default: 20)
+#   --perf-threshold PCT      benchmark time (sec/op) regression bound (default: 10)
+#   --mem-threshold PCT       benchmark memory (B/op, allocs/op) bound (default: 10)
+#   --runs N                  wall-clock runs per revision (informational, default: 20)
 #   --bench-count N           `go test -bench -count`          (default: 10)
 #   --no-bench | --no-wall | --no-corpus   skip that measurement (faster runs)
 #
@@ -69,9 +69,9 @@ declare -A PERF_TOOL=([go]="" [python]=python3 [js]="" [rust]=rustc [java]=java 
 FORMAT=md
 OUTPUT=""
 DO_GATE=1
-PERF_THRESHOLD=10
-WALL_THRESHOLD=15
-RUNS=20
+PERF_THRESHOLD=10   # sec/op regression bound (gated)
+MEM_THRESHOLD=10    # B/op & allocs/op regression bound (gated)
+RUNS=20             # wall-clock runs (informational only)
 BENCH_COUNT=10
 DO_BENCH=1
 DO_WALL=1
@@ -93,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --output)         OUTPUT="${2:?}"; shift 2 ;;
     --no-gate)        DO_GATE=0; shift ;;
     --perf-threshold) PERF_THRESHOLD="${2:?}"; shift 2 ;;
-    --wall-threshold) WALL_THRESHOLD="${2:?}"; shift 2 ;;
+    --mem-threshold)  MEM_THRESHOLD="${2:?}"; shift 2 ;;
     --runs)           RUNS="${2:?}"; shift 2 ;;
     --bench-count)    BENCH_COUNT="${2:?}"; shift 2 ;;
     --no-bench)       DO_BENCH=0; shift ;;
@@ -266,25 +266,28 @@ compute_bench() {
   log "benchmarking (head, count=$BENCH_COUNT)"; run_bench "$HEAD_WT" "$WORK/bench-head.txt" || { BENCH_STATUS="error running head benchmarks"; return; }
   BENCH_TEXT="$("$BENCHSTAT" "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
   BENCH_STATUS="ok"
-  # Gate: parse CSV, look only at the sec/op table, flag a significant positive
-  # delta above the threshold on a key benchmark. benchstat prints "~" when the
-  # change is not significant at alpha=0.05, so a numeric % is already significant.
+  # Gate on TIME (sec/op) and MEMORY (B/op, allocs/op). Parse benchstat's CSV,
+  # which prints one table per metric; flag a significant positive delta above the
+  # metric's threshold on a key benchmark. benchstat prints "~" when the change is
+  # not significant at alpha=0.05, so any numeric % is already significant.
   local csv
   csv="$("$BENCHSTAT" -format csv "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
   local key_re
   key_re="$(IFS='|'; echo "${KEY_BENCHMARKS[*]}")"
   while IFS= read -r reason; do
     [[ -n "$reason" ]] && GATE_FAILURES+=("perf(bench): $reason")
-  done < <(echo "$csv" | awk -F',' -v thr="$PERF_THRESHOLD" -v keyre="$key_re" '
-    /^,sec\/op,/    { metric="sec"; next }
-    /^,B\/op,/      { metric="other"; next }
-    /^,allocs\/op,/ { metric="other"; next }
-    metric=="sec" && $1 != "" && $1 != "geomean" {
+  done < <(echo "$csv" | awk -F',' -v tthr="$PERF_THRESHOLD" -v mthr="$MEM_THRESHOLD" -v keyre="$key_re" '
+    /^,sec\/op,/    { metric="time";   unit="sec/op";    next }
+    /^,B\/op,/      { metric="bytes";  unit="B/op";      next }
+    /^,allocs\/op,/ { metric="allocs"; unit="allocs/op"; next }
+    metric != "" && $1 != "" && $1 != "geomean" {
       name=$1; vs=$6;
+      if (name !~ ("(" keyre ")")) next;
       if (vs ~ /^\+[0-9.]+%$/) {
         pct=vs; gsub(/[+%]/,"",pct);
-        if ((name ~ ("(" keyre ")")) && pct+0 > thr+0)
-          printf "%s regressed %s (> %s%% threshold)\n", name, vs, thr;
+        thr=(metric=="time") ? tthr : mthr;
+        if (pct+0 > thr+0)
+          printf "%s %s regressed %s (> %s%% threshold)\n", name, unit, vs, thr;
       }
     }')
   return 0
@@ -322,18 +325,21 @@ build_binary() { # wt outbin
   (cd "$1" && go build -o "$2" ./cmd/godzilla) || return 1
 }
 
-# Rows: "lang base_secs head_secs pct" or "lang SKIP <reason>".
+# Wall clock is INFORMATIONAL ONLY — it is too noisy on shared runners to gate on
+# (JVM/rustc startup jitter alone can swing double digits). We report the median
+# scan time per revision for context and do NOT compute a delta or trip the gate.
+# Rows: "lang base_secs head_secs" or "lang SKIP <reason>".
 WALL_ROWS=()
 WALL_STATUS="ok"
 compute_wall() {
   [[ $DO_WALL -eq 1 ]] || { WALL_STATUS="skipped (--no-wall)"; return; }
   local bin_base="$WORK/godzilla-base" bin_head="$WORK/godzilla-head"
-  log "building binaries for wall-clock"
+  log "building binaries for wall-clock (informational)"
   build_binary "$BASE_WT" "$bin_base" || { WALL_STATUS="error building base binary"; return; }
   build_binary "$HEAD_WT" "$bin_head" || { WALL_STATUS="error building head binary"; return; }
   # Neutralize subprocess-frontend variance.
   unset GODZILLA_SPRING_E2E GODZILLA_RUST_E2E GODZILLA_ALLOW_BUILD GODZILLA_CVE_BENCH 2>/dev/null || true
-  local lang tool sample b h pct
+  local lang tool sample b h
   for lang in "${PERF_LANGS[@]}"; do
     tool="${PERF_TOOL[$lang]:-}"
     if [[ -n "$tool" ]] && ! command -v "$tool" >/dev/null 2>&1; then
@@ -348,11 +354,7 @@ compute_wall() {
     if [[ "$b" == "ERR" || "$h" == "ERR" ]]; then
       WALL_ROWS+=("$lang SKIP timing-error"); continue
     fi
-    pct="$(awk -v b="$b" -v h="$h" 'BEGIN{ if(b+0>0) printf "%.1f",(h-b)/b*100; else print "0.0" }')"
-    WALL_ROWS+=("$lang $b $h $pct")
-    # Gate on a per-language regression beyond the wall-clock threshold.
-    awk -v p="$pct" -v t="$WALL_THRESHOLD" 'BEGIN{exit !(p+0>t+0)}' \
-      && GATE_FAILURES+=("perf(wall): $lang scan +${pct}% (> ${WALL_THRESHOLD}% threshold)")
+    WALL_ROWS+=("$lang $b $h")
   done
   return 0
 }
@@ -458,26 +460,7 @@ emit_md() {
   # --- Metric 4 --------------------------------------------------------------
   echo "### 4 · Performance"
   echo
-  echo "#### Full-pipeline scan wall-clock (median of ${RUNS} runs, $([[ $HAVE_HYPERFINE -eq 1 ]] && echo hyperfine || echo 'builtin timer'))"
-  echo
-  if [[ "$WALL_STATUS" != "ok" ]]; then
-    echo "_${WALL_STATUS}._"
-  else
-    echo "| Language | Base (s) | Head (s) | Δ% |"
-    echo "|---|--:|--:|--:|"
-    for row in "${WALL_ROWS[@]}"; do
-      read -r lang c2 c3 c4 <<<"$row"
-      if [[ "$c2" == "SKIP" ]]; then
-        echo "| $lang | — | — | _skip: ${c3}_ |"
-      else
-        local mark=""
-        awk -v p="$c4" -v t="$WALL_THRESHOLD" 'BEGIN{exit !(p+0>t+0)}' && mark=" ⚠️"
-        printf '| %s | %.3f | %.3f | %+.1f%%%s |\n' "$lang" "$c2" "$c3" "$c4" "$mark"
-      fi
-    done
-  fi
-  echo
-  echo "#### Go hot-path microbenchmarks (benchstat, count=${BENCH_COUNT})"
+  echo "#### Go hot-path microbenchmarks — benchstat, count=${BENCH_COUNT} · **gated**"
   echo
   if [[ "$BENCH_STATUS" != "ok" ]]; then
     echo "_${BENCH_STATUS}._"
@@ -486,7 +469,26 @@ emit_md() {
     echo "$BENCH_TEXT"
     echo '```'
     echo
-    echo "> Gate blocks on a significant \`sec/op\` regression > ${PERF_THRESHOLD}% on: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}")."
+    echo "> Gate blocks on a significant regression (benchstat marks noise as \`~\`) on: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}") — time \`sec/op\` > ${PERF_THRESHOLD}%, memory \`B/op\`/\`allocs/op\` > ${MEM_THRESHOLD}%."
+  fi
+  echo
+  echo "#### Full-pipeline scan wall-clock — median of ${RUNS} runs ($([[ $HAVE_HYPERFINE -eq 1 ]] && echo hyperfine || echo 'builtin timer')) · _informational_"
+  echo
+  if [[ "$WALL_STATUS" != "ok" ]]; then
+    echo "_${WALL_STATUS}._"
+  else
+    echo "| Language | Base (s) | Head (s) |"
+    echo "|---|--:|--:|"
+    for row in "${WALL_ROWS[@]}"; do
+      read -r lang c2 c3 <<<"$row"
+      if [[ "$c2" == "SKIP" ]]; then
+        echo "| $lang | — | _skip: ${c3}_ |"
+      else
+        printf '| %s | %.3f | %.3f |\n' "$lang" "$c2" "$c3"
+      fi
+    done
+    echo
+    echo "> Wall clock is reported for context only — too noisy on shared runners to gate on."
   fi
   echo
   echo "---"
@@ -508,11 +510,11 @@ emit_json() {
   fi
   local wall_items=() row
   for row in "${WALL_ROWS[@]}"; do
-    read -r lang c2 c3 c4 <<<"$row"
+    read -r lang c2 c3 <<<"$row"
     if [[ "$c2" == "SKIP" ]]; then
       wall_items+=("{\"lang\":\"$lang\",\"skipped\":\"$c3\"}")
     else
-      wall_items+=("{\"lang\":\"$lang\",\"base_s\":$c2,\"head_s\":$c3,\"delta_pct\":$c4}")
+      wall_items+=("{\"lang\":\"$lang\",\"base_s\":$c2,\"head_s\":$c3}")
     fi
   done
   local wall_json; local IFS=,; wall_json="[${wall_items[*]}]"; unset IFS

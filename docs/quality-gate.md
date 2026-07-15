@@ -5,7 +5,8 @@ Every change to a SAST engine has to answer four questions before it merges:
 1. **How much product code changed** (excluding tests)?
 2. **Did precision or recall move** on the sample corpus (TP / FP / FN)?
 3. **How much detection surface changed** (rules added / modified)?
-4. **Did scans get slower** — the most important gate.
+4. **Did the engine get slower or more allocation-hungry** — gated on
+   benchmark time and memory (scan wall-clock is reported for context only).
 
 `scripts/pr-quality-gate.sh` answers all four by measuring **two git revisions
 back-to-back on the same machine** and printing one report. The CI workflow
@@ -55,33 +56,37 @@ working tree is left untouched.
 | **1 · LOC changed** | `git diff --numstat` over `cmd/ converters/ internal/ pkg/ proto/ rulepacks/`, excluding `*_test.go`, `testdata/`, `test/`, generated `*.pb.go` | no |
 | **2 · Corpus TP/FP/FN** | `TestCorpusSignalToNoise` log line, parsed on each revision | **yes** |
 | **3 · Rule changes** | rule-ID set diff over `rulepacks/*.yaml` + a flag on `internal/rules/propagators.go` | no |
-| **4 · Performance** | cross-language scan wall-clock + Go hot-path benchstat | **yes** |
+| **4 · Performance** | Go hot-path benchstat (time + memory) — gated; cross-language scan wall-clock — informational | **yes** (benchstat only) |
 
-Metric 4 measures perf at two altitudes because the corpus is multi-language:
+Metric 4 measures perf at two altitudes, but only one of them gates:
 
-- **Full-pipeline scan wall-clock** (primary): times `godzilla scan` on
-  `test/<lang>/command_injection` for every available language, so a per-language
-  frontend/lowering regression shows up. c/cpp are omitted — their LLVM frontend
-  is the opt-in cgo build, not in the default binary.
-- **Go hot-path microbenchmarks** (secondary, low-noise): the taint engine is
-  language-neutral, so `BenchmarkEngine_RuleScaling`, `BenchmarkMatchGlob`, and
-  `BenchmarkScan_GoWithDeps` are the cleanest early warning for a shared-engine
-  regression that would hit every language. Gated via `benchstat`'s significance
-  (a change reported as `~` is noise and never trips the gate).
+- **Go hot-path microbenchmarks — gated.** The taint engine is language-neutral,
+  so `BenchmarkEngine_RuleScaling`, `BenchmarkMatchGlob`, and
+  `BenchmarkScan_GoWithDeps` are the cleanest, lowest-noise signal for a
+  shared-engine regression that would hit every language. `benchstat` compares
+  `-count` samples and marks a change as `~` when it is not statistically
+  significant, so noise never trips the gate. Both **time** (`sec/op`) and
+  **memory** (`B/op`, `allocs/op`) are gated — memory counts are near-deterministic
+  for these benchmarks, so an allocation regression is real signal.
+- **Full-pipeline scan wall-clock — informational only.** Times `godzilla scan` on
+  `test/<lang>/command_injection` for every available language (c/cpp omitted — their
+  LLVM frontend is the opt-in cgo build). It is **not gated**: wall clock on a shared
+  runner is too noisy (JVM/rustc startup jitter alone swings double digits). The
+  report shows the per-revision medians for context; no delta is computed.
 
 ## Hard gates (exit non-zero)
 
 The script exits non-zero — and CI fails the check — when any of these trip:
 
 - **FP increased** vs. base (precision regression), or **recall decreased**.
-- Any language's scan **wall-clock regressed beyond `--wall-threshold`**
-  (default **15%**).
-- A key Go benchmark **regressed beyond `--perf-threshold`** (default **10%**)
+- A key benchmark's **time regressed beyond `--perf-threshold`** (default **10%**)
   with benchstat significance.
+- A key benchmark's **memory (`B/op` or `allocs/op`) regressed beyond
+  `--mem-threshold`** (default **10%**) with benchstat significance.
 
-LOC and rule churn are always **descriptive, never blocking**. Pass `--no-gate`
-to report without failing. Thresholds are flags:
-`--perf-threshold`, `--wall-threshold`, `--runs`, `--bench-count`.
+LOC, rule churn, and **wall-clock** are always **descriptive, never blocking**.
+Pass `--no-gate` to report without failing. Thresholds are flags:
+`--perf-threshold`, `--mem-threshold`, `--runs`, `--bench-count`.
 
 ## How CI wires it up
 
