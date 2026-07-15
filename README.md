@@ -217,6 +217,15 @@ Godzilla is functional and covered by tests, but deliberately scoped:
 See the [implementation status](ARCHITECTURE.md#implementation-status) for the
 per-component detail.
 
+## Quality gate
+
+Every PR is measured against its base on four axes — LOC changed (excluding
+tests), corpus TP/FP/FN, rule churn, and scan performance — by
+`scripts/pr-quality-gate.sh`, wired into CI so the report is posted as a PR
+comment and precision/recall/perf regressions block the merge. Run it yourself
+with `scripts/pr-quality-gate.sh origin/main`. See
+[docs/quality-gate.md](docs/quality-gate.md).
+
 ## Contributing
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first areas:
