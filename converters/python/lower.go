@@ -40,37 +40,36 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
 
-	// Route-handler taint sources (RW-1): FastAPI/Starlette route-decorated
-	// functions and Tornado RequestHandler / Flask MethodView verb methods deliver
-	// untrusted input as HANDLER PARAMETERS, not `request.X` accessor calls, so a
-	// param has to be seeded as a source or its flow is never tainted. classBases
-	// maps every class to its base names so tornadoClasses / methodViewClasses can
-	// resolve subclassing transitively (best-effort by simple base name).
+	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
+	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
+	// must be seeded as sources or the flow is never tainted. Recognition is
+	// data-driven (see the handler-recognition tables below), so it is not tied to
+	// any one framework. classBases maps every class to its base names so
+	// handler-class subclassing resolves transitively.
 	classBases := map[string][]string{}
 	collectClassBases(root.list("body"), classBases)
-	tornadoClasses := handlerClasses(classBases, map[string]bool{"RequestHandler": true})
-	methodViewClasses := handlerClasses(classBases, map[string]bool{"MethodView": true})
+	handlerClassSet := handlerClasses(classBases, handlerBaseClasses)
 
-	var collect func(stmts []astNode, qualPrefix string, inTornado, inMethodView bool)
-	collect = func(stmts []astNode, qualPrefix string, inTornado, inMethodView bool) {
+	var collect func(stmts []astNode, qualPrefix string, inHandlerClass bool)
+	collect = func(stmts []astNode, qualPrefix string, inHandlerClass bool) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
-				srcParams := routeHandlerParams(s, inTornado, inMethodView)
+				srcParams := routeHandlerParams(s, inHandlerClass)
 				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, srcParams)
 				functions = append(functions, fn)
 				// A nested def inside a handler is not itself a verb method of the
-				// class, so its class-handler context resets.
-				collect(s.list("body"), qualPrefix+s.str("name")+".", false, false)
+				// class, so its handler-class context resets.
+				collect(s.list("body"), qualPrefix+s.str("name")+".", false)
 			case "ClassDef":
 				// Only methods (nested FunctionDefs) are modeled; other
 				// class-body statements are a documented limitation.
 				cn := s.str("name")
-				collect(s.list("body"), qualPrefix+cn+".", tornadoClasses[cn], methodViewClasses[cn])
+				collect(s.list("body"), qualPrefix+cn+".", handlerClassSet[cn])
 			}
 		}
 	}
-	collect(root.list("body"), "", false, false)
+	collect(root.list("body"), "", false)
 
 	// Module-level constant bindings (NAME = <literal>) are Python module
 	// globals. The env-based lowering keeps such a literal only in the
@@ -185,39 +184,51 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	return fn
 }
 
+// --- Web-route-handler recognition (COV-11): the single extension point -------
+//
+// Frameworks deliver untrusted input as handler PARAMETERS, not `request.X`
+// accessor calls. Rather than special-case each framework in the detection
+// LOGIC, the frontend recognizes two generic SHAPES driven by the declarative
+// tables below — so adding a framework (aiohttp, Sanic, Django CBV, Falcon, …)
+// is a data edit here, not new code:
+//
+//  1. a function decorated `<receiver>.<verb>`, verb in routeDecoratorVerbs
+//     (FastAPI @app.get, @router.post, aiohttp @routes.get, Sanic @app.get, …);
+//  2. a `<verb>`-named method, verb in handlerMethodVerbs, of a class
+//     subclassing one of handlerBaseClasses (Tornado RequestHandler, Flask
+//     MethodView, … — matched by simple base name, transitively).
+//
 // routeParamSource is the canonical name of the synthetic source CALL seeded at
-// each untrusted route-handler parameter (RW-1). It is a source glob in every
-// Python taint rulepack, so any dangerous flow off a handler param is covered.
+// each recognized parameter; it is a source glob in every Python taint rulepack,
+// so any dangerous flow off a handler param is covered.
 const routeParamSource = "py:@http.param"
 
-// routeVerbs are the FastAPI/Starlette routing-decorator methods (@app.get,
-// @router.post, ...). tornadoVerbs are the HTTP-method handler methods of a
-// Tornado RequestHandler / Flask MethodView subclass (no `websocket`).
 var (
-	routeVerbs   = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true}
-	tornadoVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
+	// routeDecoratorVerbs mark a route function via its decorator (@app.get,
+	// @router.websocket, …). handlerMethodVerbs mark a verb method of a handler
+	// class (get/post/…); no `websocket`, which is a distinct handler class
+	// rather than a method name. handlerBaseClasses are the base classes (by
+	// simple name) whose subclasses are request handlers.
+	routeDecoratorVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true}
+	handlerMethodVerbs  = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
+	handlerBaseClasses  = map[string]bool{"RequestHandler": true, "MethodView": true}
 )
 
 // routeHandlerParams returns the untrusted parameter names of a `def` when it is
-// a web-route handler, or nil otherwise. Detection is deliberately conservative
-// to avoid false positives:
-//   - FastAPI/Starlette: the function carries a routing decorator whose last
-//     component is a routing verb and which has a receiver (e.g. @app.get,
-//     @router.post, @APIRouter().get). Its params are sources EXCEPT self/cls, a
-//     param named request/websocket, and Depends()/Security()-defaulted params.
-//   - Tornado / Flask MethodView: the function is a verb-named method
-//     (get/post/...) of a class transitively subclassing RequestHandler /
-//     MethodView. Its positional params after self/cls (URL route captures) are
-//     sources.
-func routeHandlerParams(node astNode, inTornado, inMethodView bool) []string {
+// a web-route handler (one of the two shapes above), or nil otherwise. Detection
+// is deliberately conservative to avoid false positives: a decorated route's
+// params exclude self/cls, request/websocket, and Depends()/Security()-injected
+// params; a handler-class verb method contributes its params after self/cls (the
+// URL route captures).
+func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 	params := node.strList("params")
 	if len(params) == 0 {
 		return nil
 	}
 	if hasRouteDecorator(node) {
-		return fastapiUntrustedParams(node, params)
+		return decoratedRouteParams(node, params)
 	}
-	if (inTornado || inMethodView) && tornadoVerbs[node.str("name")] {
+	if inHandlerClass && handlerMethodVerbs[node.str("name")] {
 		return positionalAfterSelf(params)
 	}
 	return nil
@@ -228,17 +239,17 @@ func routeHandlerParams(node astNode, inTornado, inMethodView bool) []string {
 // prefix (so a bare @get is not mistaken for one).
 func hasRouteDecorator(node astNode) bool {
 	for _, d := range node.strList("decorators") {
-		if i := strings.LastIndex(d, "."); i >= 0 && routeVerbs[d[i+1:]] {
+		if i := strings.LastIndex(d, "."); i >= 0 && routeDecoratorVerbs[d[i+1:]] {
 			return true
 		}
 	}
 	return false
 }
 
-// fastapiUntrustedParams filters a route function's params down to the untrusted
-// ones: everything except self/cls, request/websocket, and Depends()/Security()
-// dependency-injected params.
-func fastapiUntrustedParams(node astNode, params []string) []string {
+// decoratedRouteParams filters a decorated route function's params down to the
+// untrusted ones: everything except self/cls, request/websocket, and
+// Depends()/Security() dependency-injected params.
+func decoratedRouteParams(node astNode, params []string) []string {
 	excluded := map[string]bool{"self": true, "cls": true, "request": true, "websocket": true}
 	for _, d := range node.strList("depends_params") {
 		excluded[d] = true
