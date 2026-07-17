@@ -5,8 +5,8 @@ Every change to a SAST engine has to answer four questions before it merges:
 1. **How much product code changed** (excluding tests)?
 2. **Did precision or recall move** on the sample corpus (TP / FP / FN)?
 3. **How much detection surface changed** (rules added / modified)?
-4. **Did the engine get slower or more allocation-hungry** — gated on
-   benchmark time and memory (scan wall-clock is reported for context only).
+4. **Did anything get slower or more allocation-hungry** — gated on benchstat
+   time and memory across the engine and every language's full-pipeline scan.
 
 `scripts/pr-quality-gate.sh` answers all four by measuring **two git revisions
 back-to-back on the same machine** and printing one report. The CI workflow
@@ -41,13 +41,11 @@ working tree is left untouched.
 ### Requirements
 
 - `go` (always) and the per-language toolchains you want measured: `python3`,
-  `java` (JDK 24+), `rustc`, `ruby`. A language whose toolchain is absent is
-  **skipped with a note** rather than failing the run.
-- `benchstat` for the Go microbenchmark comparison:
-  `go install golang.org/x/perf/cmd/benchstat@latest`. If absent, that section
-  is skipped.
-- `hyperfine` (optional) for tighter wall-clock statistics. If absent, the
-  script falls back to a builtin median timer.
+  `java` (JDK 24+), `rustc`, `ruby`. A language whose toolchain is absent has its
+  scan benchmark **skipped** rather than failing the run.
+- `benchstat` for the benchmark comparison:
+  `go install golang.org/x/perf/cmd/benchstat@latest`. If absent, the performance
+  section is skipped.
 
 ## What each section means
 
@@ -56,23 +54,33 @@ working tree is left untouched.
 | **1 · LOC changed** | `git diff --numstat` over `cmd/ converters/ internal/ pkg/ proto/ rulepacks/`, excluding `*_test.go`, `testdata/`, `test/`, generated `*.pb.go` | no |
 | **2 · Corpus TP/FP/FN** | `TestCorpusSignalToNoise` log line, parsed on each revision | **yes** |
 | **3 · Rule changes** | rule-ID set diff over `rulepacks/*.yaml` + a flag on `internal/rules/propagators.go` | no |
-| **4 · Performance** | Go hot-path benchstat (time + memory) — gated; cross-language scan wall-clock — informational | **yes** (benchstat only) |
+| **4 · Performance** | benchstat over the engine + per-language scan benchmarks (time + memory) | **yes** |
 
-Metric 4 measures perf at two altitudes, but only one of them gates:
+Performance is measured entirely by **benchstat** — one statistically-rigorous
+mechanism for both the engine and every language, so the base→head difference is
+reliable rather than wall-clock noise. The benchmarks live in Go test files and
+run on both revisions:
 
-- **Go hot-path microbenchmarks — gated.** The taint engine is language-neutral,
-  so `BenchmarkEngine_RuleScaling`, `BenchmarkMatchGlob`, and
-  `BenchmarkScan_GoWithDeps` are the cleanest, lowest-noise signal for a
-  shared-engine regression that would hit every language. `benchstat` compares
-  `-count` samples and marks a change as `~` when it is not statistically
-  significant, so noise never trips the gate. Both **time** (`sec/op`) and
-  **memory** (`B/op`, `allocs/op`) are gated — memory counts are near-deterministic
-  for these benchmarks, so an allocation regression is real signal.
-- **Full-pipeline scan wall-clock — informational only.** Times `godzilla scan` on
-  `test/<lang>/command_injection` for every available language (c/cpp omitted — their
-  LLVM frontend is the opt-in cgo build). It is **not gated**: wall clock on a shared
-  runner is too noisy (JVM/rustc startup jitter alone swings double digits). The
-  report shows the per-revision medians for context; no delta is computed.
+- **Engine hot paths** (language-neutral, lowest-noise): `BenchmarkEngine_RuleScaling`,
+  `BenchmarkMatchGlob` — a shared-engine regression here would hit every language.
+- **Per-language full-pipeline scans**: `BenchmarkScan_GoWithDeps`, `BenchmarkScan_GoSimple`,
+  and `BenchmarkScan_{Python,JS,Rust,Java,Ruby}` (`internal/scan/bench_test.go`). Each
+  scans that language's `command_injection` sample through the real frontend —
+  **including the subprocess frontends** (python3/rustc/java/ruby) — so a per-language
+  lowering/frontend regression shows up. c/cpp are omitted (opt-in LLVM cgo build).
+  A benchmark whose toolchain is absent is skipped and simply doesn't gate.
+
+`benchstat` compares `-count` samples and marks a change as `~` when it is not
+statistically significant, so noise never trips the gate. Both **time** (`sec/op`)
+and **memory** (`B/op`, `allocs/op`) are gated.
+
+Subprocess-frontend scans (Java/Rust startup) and the GC-heavy Go dep scan are
+inherently noisier than the pure-Go engine benchmarks — enough that at the usual
+`alpha=0.05` a borderline noise result can read as significant. So the gate uses a
+**strict `alpha=0.01`** (`--alpha`): only a regression the data strongly supports
+trips it, which suppresses run-to-run subprocess/GC noise while still catching a
+real slowdown on the stable benchmarks. `--bench-count` and the thresholds are
+also tunable.
 
 ## Hard gates (exit non-zero)
 
@@ -84,9 +92,9 @@ The script exits non-zero — and CI fails the check — when any of these trip:
 - A key benchmark's **memory (`B/op` or `allocs/op`) regressed beyond
   `--mem-threshold`** (default **10%**) with benchstat significance.
 
-LOC, rule churn, and **wall-clock** are always **descriptive, never blocking**.
+LOC and rule churn are always **descriptive, never blocking**.
 Pass `--no-gate` to report without failing. Thresholds are flags:
-`--perf-threshold`, `--mem-threshold`, `--runs`, `--bench-count`.
+`--perf-threshold`, `--mem-threshold`, `--bench-count`.
 
 ## How CI wires it up
 

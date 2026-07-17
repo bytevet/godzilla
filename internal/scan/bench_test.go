@@ -1,11 +1,50 @@
 package scan
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
 	"godzilla/internal/rules/loader"
 )
+
+// benchScanLang benchmarks a full-pipeline scan of one language's sample so
+// benchstat can compare per-language performance base-vs-head with the same
+// statistical rigor as the Go engine benchmarks — a reliable replacement for
+// noisy wall-clock timing. `tool` is the frontend's required external toolchain
+// ("" for the in-binary JS frontend); the benchmark skips when it is absent, so
+// a runner missing rustc/java/ruby degrades gracefully instead of failing.
+func benchScanLang(b *testing.B, dir, tool string) {
+	b.Helper()
+	if tool != "" {
+		if _, err := exec.LookPath(tool); err != nil {
+			b.Skipf("%s not installed", tool)
+		}
+	}
+	rs, err := loader.Builtin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Scan(dir, rs); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Per-language full-pipeline scan benchmarks. Each scans that language's
+// command_injection sample (present for every frontend). Together with the Go
+// benchmarks above, these give benchstat a per-language performance signal that
+// covers the frontend/lowering cost — including the subprocess frontends
+// (python3/rustc/java/ruby) — not just the shared engine.
+func BenchmarkScan_Python(b *testing.B) {
+	benchScanLang(b, "../../test/python/command_injection", "python3")
+}
+func BenchmarkScan_JS(b *testing.B)   { benchScanLang(b, "../../test/js/command_injection", "") }
+func BenchmarkScan_Rust(b *testing.B) { benchScanLang(b, "../../test/rust/command_injection", "rustc") }
+func BenchmarkScan_Java(b *testing.B) { benchScanLang(b, "../../test/java/command_injection", "java") }
+func BenchmarkScan_Ruby(b *testing.B) { benchScanLang(b, "../../test/ruby/command_injection", "ruby") }
 
 // BenchmarkScan_GoWithDeps scans a dependency-bearing Go sample (gin + gorm).
 // Dependency bodies are now lowered so taint flows through them; the cost is kept

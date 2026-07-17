@@ -38,9 +38,10 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      # Match the toolchains the `test` job uses, so the corpus sample count and
-      # per-language scan timings are computed under the same conditions on both
-      # revisions (an absent toolchain would silently drop samples/languages).
+      # Match the toolchains the `test` job uses, plus Ruby, so the corpus sample
+      # count and the per-language scan benchmarks are computed under the same
+      # conditions on both revisions (an absent toolchain silently drops that
+      # language's samples/benchmark).
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -49,15 +50,14 @@ jobs:
           distribution: temurin
           java-version: '25'
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
 
-      - name: Install benchstat + hyperfine
+      - name: Install benchstat
         run: |
           go install golang.org/x/perf/cmd/benchstat@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          # hyperfine tightens the (informational) wall-clock numbers; the script
-          # falls back to a builtin timer if it is absent, so this is best-effort.
-          sudo apt-get update -qq && sudo apt-get install -y hyperfine || \
-            echo "::notice::hyperfine unavailable — using the builtin timer"
 
       # Resolve the PR number and base SHA. Same-repo PRs populate
       # workflow_run.pull_requests; otherwise fall back to the commit→PR API.

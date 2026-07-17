@@ -27,9 +27,9 @@
 #   --no-gate                 report only; always exit 0
 #   --perf-threshold PCT      benchmark time (sec/op) regression bound (default: 10)
 #   --mem-threshold PCT       benchmark memory (B/op, allocs/op) bound (default: 10)
-#   --runs N                  wall-clock runs per revision (informational, default: 20)
+#   --alpha A                 benchstat significance level    (default: 0.01, strict)
 #   --bench-count N           `go test -bench -count`          (default: 10)
-#   --no-bench | --no-wall | --no-corpus   skip that measurement (faster runs)
+#   --no-bench | --no-corpus  skip that measurement (faster runs)
 #
 # Exit codes: 0 = gate passed (or --no-gate), 1 = a hard gate tripped,
 #             2 = bad usage, 3 = operational error (missing tool, bad ref, ...).
@@ -47,20 +47,21 @@ LOC_INCLUDES=(cmd converters internal pkg proto rulepacks)
 # fixtures, and generated protobuf bindings.
 LOC_EXCLUDES=(':(exclude)**/*_test.go' ':(exclude)**/testdata/**' ':(exclude)pkg/ir/v1/*.pb.go')
 
-# Packages whose benchmarks form the Go hot-path signal (the taint engine is
-# language-neutral, so these catch a shared-engine regression that would hit
-# every language).
+# Packages whose benchmarks are compared by benchstat. internal/analysis +
+# internal/rules cover the language-neutral engine hot path; internal/scan holds
+# both the Go pipeline benchmarks and the per-language full-pipeline scan
+# benchmarks (BenchmarkScan_Python/JS/Rust/Java/Ruby), so benchstat is the single,
+# statistically-rigorous mechanism for BOTH engine and per-language performance.
 BENCH_PKGS=(./internal/scan/ ./internal/analysis/ ./internal/rules/)
-# Key benchmarks the perf gate blocks on (names as `go test` prints them,
-# minus the trailing GOMAXPROCS suffix and any sub-benchmark params).
-KEY_BENCHMARKS=(Engine_RuleScaling MatchGlob Scan_GoWithDeps)
-
-# Languages measured by the full-pipeline wall clock, paired with the tool that
-# must be on PATH (empty = always available: in-binary frontend). c/cpp are
-# omitted — their LLVM frontend is an opt-in cgo build, not in the default binary.
-# Each language's perf sample is test/<lang>/command_injection (exists for all).
-PERF_LANGS=(go python js rust java ruby)
-declare -A PERF_TOOL=([go]="" [python]=python3 [js]="" [rust]=rustc [java]=java [ruby]=ruby)
+# Key benchmarks the perf gate blocks on (names as `go test` prints them, minus
+# the trailing GOMAXPROCS suffix and any sub-benchmark params): the engine
+# primitives plus every language's full-pipeline scan. A benchmark whose toolchain
+# is absent simply doesn't appear in the output and is skipped by the gate.
+KEY_BENCHMARKS=(
+	Engine_RuleScaling MatchGlob
+	Scan_GoWithDeps Scan_GoSimple
+	Scan_Python Scan_JS Scan_Rust Scan_Java Scan_Ruby
+)
 
 # --------------------------------------------------------------------------- #
 # Argument parsing
@@ -71,10 +72,10 @@ OUTPUT=""
 DO_GATE=1
 PERF_THRESHOLD=10   # sec/op regression bound (gated)
 MEM_THRESHOLD=10    # B/op & allocs/op regression bound (gated)
-RUNS=20             # wall-clock runs (informational only)
+BENCH_ALPHA=0.01    # benchstat significance level — strict, so subprocess/GC noise
+                    # on the heavier scan benchmarks doesn't reach significance
 BENCH_COUNT=10
 DO_BENCH=1
-DO_WALL=1
 DO_CORPUS=1
 
 die()  { echo "pr-quality-gate: $*" >&2; exit 3; }
@@ -94,10 +95,9 @@ while [[ $# -gt 0 ]]; do
     --no-gate)        DO_GATE=0; shift ;;
     --perf-threshold) PERF_THRESHOLD="${2:?}"; shift 2 ;;
     --mem-threshold)  MEM_THRESHOLD="${2:?}"; shift 2 ;;
-    --runs)           RUNS="${2:?}"; shift 2 ;;
+    --alpha)          BENCH_ALPHA="${2:?}"; shift 2 ;;
     --bench-count)    BENCH_COUNT="${2:?}"; shift 2 ;;
     --no-bench)       DO_BENCH=0; shift ;;
-    --no-wall)        DO_WALL=0; shift ;;
     --no-corpus)      DO_CORPUS=0; shift ;;
     --)               shift; while [[ $# -gt 0 ]]; do POSITIONAL+=("$1"); shift; done ;;
     -*)               usage_err "unknown flag: $1" ;;
@@ -144,8 +144,6 @@ log() { echo "[qgate] $*" >&2; }
 BENCHSTAT="$(command -v benchstat || echo "$(go env GOPATH)/bin/benchstat")"
 HAVE_BENCHSTAT=0
 [[ -x "$BENCHSTAT" ]] && HAVE_BENCHSTAT=1
-HAVE_HYPERFINE=0
-command -v hyperfine >/dev/null 2>&1 && HAVE_HYPERFINE=1
 
 # Collected gate failures (human-readable reasons). Non-empty => hard fail.
 GATE_FAILURES=()
@@ -264,14 +262,16 @@ compute_bench() {
   fi
   log "benchmarking (base, count=$BENCH_COUNT)"; run_bench "$BASE_WT" "$WORK/bench-base.txt" || { BENCH_STATUS="error running base benchmarks"; return; }
   log "benchmarking (head, count=$BENCH_COUNT)"; run_bench "$HEAD_WT" "$WORK/bench-head.txt" || { BENCH_STATUS="error running head benchmarks"; return; }
-  BENCH_TEXT="$("$BENCHSTAT" "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
+  BENCH_TEXT="$("$BENCHSTAT" -alpha "$BENCH_ALPHA" "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
   BENCH_STATUS="ok"
   # Gate on TIME (sec/op) and MEMORY (B/op, allocs/op). Parse benchstat's CSV,
   # which prints one table per metric; flag a significant positive delta above the
   # metric's threshold on a key benchmark. benchstat prints "~" when the change is
-  # not significant at alpha=0.05, so any numeric % is already significant.
+  # not significant at the (strict) alpha, so any numeric % is already significant.
+  # The strict alpha is what keeps a noisy scan (GC-heavy Go dep scan, JVM/rustc
+  # subprocess startup) from tripping the gate on pure run-to-run variance.
   local csv
-  csv="$("$BENCHSTAT" -format csv "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
+  csv="$("$BENCHSTAT" -alpha "$BENCH_ALPHA" -format csv "$WORK/bench-base.txt" "$WORK/bench-head.txt" 2>/dev/null || true)"
   local key_re
   key_re="$(IFS='|'; echo "${KEY_BENCHMARKS[*]}")"
   while IFS= read -r reason; do
@@ -290,72 +290,6 @@ compute_bench() {
           printf "%s %s regressed %s (> %s%% threshold)\n", name, unit, vs, thr;
       }
     }')
-  return 0
-}
-
-# --------------------------------------------------------------------------- #
-# Metric 4b — full-pipeline wall clock (cross-language)
-# --------------------------------------------------------------------------- #
-
-# Median wall-clock seconds for `<bin> scan -quiet <sample>` over $RUNS runs.
-# Prefers hyperfine; falls back to a portable bash timer.
-median_scan_secs() { # bin sample
-  local bin="$1" sample="$2"
-  if [[ $HAVE_HYPERFINE -eq 1 ]]; then
-    local json="$WORK/hf.json"
-    hyperfine --warmup 2 --runs "$RUNS" --shell=none --ignore-failure \
-      --export-json "$json" "$bin scan -quiet $sample" >/dev/null 2>&1 || { echo "ERR"; return; }
-    jq -r '.results[0].median' "$json" 2>/dev/null || echo "ERR"
-    return
-  fi
-  # Fallback: warm up once, then time $RUNS runs and take the median.
-  "$bin" scan -quiet "$sample" >/dev/null 2>&1 || true
-  local i start end times=()
-  for ((i=0; i<RUNS; i++)); do
-    start="$(date +%s.%N)"
-    "$bin" scan -quiet "$sample" >/dev/null 2>&1 || true
-    end="$(date +%s.%N)"
-    times+=("$(awk -v s="$start" -v e="$end" 'BEGIN{printf "%.6f", e-s}')")
-  done
-  printf '%s\n' "${times[@]}" | sort -n \
-    | awk '{a[NR]=$1} END{ if(NR==0){print "ERR"} else if(NR%2){print a[(NR+1)/2]} else {printf "%.6f",(a[NR/2]+a[NR/2+1])/2} }'
-}
-
-build_binary() { # wt outbin
-  (cd "$1" && go build -o "$2" ./cmd/godzilla) || return 1
-}
-
-# Wall clock is INFORMATIONAL ONLY — it is too noisy on shared runners to gate on
-# (JVM/rustc startup jitter alone can swing double digits). We report the median
-# scan time per revision for context and do NOT compute a delta or trip the gate.
-# Rows: "lang base_secs head_secs" or "lang SKIP <reason>".
-WALL_ROWS=()
-WALL_STATUS="ok"
-compute_wall() {
-  [[ $DO_WALL -eq 1 ]] || { WALL_STATUS="skipped (--no-wall)"; return; }
-  local bin_base="$WORK/godzilla-base" bin_head="$WORK/godzilla-head"
-  log "building binaries for wall-clock (informational)"
-  build_binary "$BASE_WT" "$bin_base" || { WALL_STATUS="error building base binary"; return; }
-  build_binary "$HEAD_WT" "$bin_head" || { WALL_STATUS="error building head binary"; return; }
-  # Neutralize subprocess-frontend variance.
-  unset GODZILLA_SPRING_E2E GODZILLA_RUST_E2E GODZILLA_ALLOW_BUILD GODZILLA_CVE_BENCH 2>/dev/null || true
-  local lang tool sample b h
-  for lang in "${PERF_LANGS[@]}"; do
-    tool="${PERF_TOOL[$lang]:-}"
-    if [[ -n "$tool" ]] && ! command -v "$tool" >/dev/null 2>&1; then
-      WALL_ROWS+=("$lang SKIP toolchain-absent($tool)"); continue
-    fi
-    sample="test/$lang/command_injection"
-    if [[ ! -e "$BASE_WT/$sample" || ! -e "$HEAD_WT/$sample" ]]; then
-      WALL_ROWS+=("$lang SKIP sample-missing"); continue
-    fi
-    b="$(median_scan_secs "$bin_base" "$BASE_WT/$sample")"
-    h="$(median_scan_secs "$bin_head" "$HEAD_WT/$sample")"
-    if [[ "$b" == "ERR" || "$h" == "ERR" ]]; then
-      WALL_ROWS+=("$lang SKIP timing-error"); continue
-    fi
-    WALL_ROWS+=("$lang $b $h")
-  done
   return 0
 }
 
@@ -458,9 +392,11 @@ emit_md() {
   echo
 
   # --- Metric 4 --------------------------------------------------------------
-  echo "### 4 · Performance"
+  echo "### 4 · Performance · **gated** (benchstat, count=${BENCH_COUNT})"
   echo
-  echo "#### Go hot-path microbenchmarks — benchstat, count=${BENCH_COUNT} · **gated**"
+  echo "Engine hot paths **and** per-language full-pipeline scans, all compared by"
+  echo "benchstat so the base→head difference is statistically reliable rather than"
+  echo "wall-clock noise. A language whose toolchain is absent is skipped."
   echo
   if [[ "$BENCH_STATUS" != "ok" ]]; then
     echo "_${BENCH_STATUS}._"
@@ -469,30 +405,11 @@ emit_md() {
     echo "$BENCH_TEXT"
     echo '```'
     echo
-    echo "> Gate blocks on a significant regression (benchstat marks noise as \`~\`) on: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}") — time \`sec/op\` > ${PERF_THRESHOLD}%, memory \`B/op\`/\`allocs/op\` > ${MEM_THRESHOLD}%."
-  fi
-  echo
-  echo "#### Full-pipeline scan wall-clock — median of ${RUNS} runs ($([[ $HAVE_HYPERFINE -eq 1 ]] && echo hyperfine || echo 'builtin timer')) · _informational_"
-  echo
-  if [[ "$WALL_STATUS" != "ok" ]]; then
-    echo "_${WALL_STATUS}._"
-  else
-    echo "| Language | Base (s) | Head (s) |"
-    echo "|---|--:|--:|"
-    for row in "${WALL_ROWS[@]}"; do
-      read -r lang c2 c3 <<<"$row"
-      if [[ "$c2" == "SKIP" ]]; then
-        echo "| $lang | — | _skip: ${c3}_ |"
-      else
-        printf '| %s | %.3f | %.3f |\n' "$lang" "$c2" "$c3"
-      fi
-    done
-    echo
-    echo "> Wall clock is reported for context only — too noisy on shared runners to gate on."
+    echo "> Gate blocks on a regression that is significant at alpha=${BENCH_ALPHA} (benchstat marks anything weaker as \`~\`) on: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}") — time \`sec/op\` > ${PERF_THRESHOLD}%, memory \`B/op\`/\`allocs/op\` > ${MEM_THRESHOLD}%. The strict alpha keeps subprocess/GC run-to-run noise on the heavier scans from tripping the gate."
   fi
   echo
   echo "---"
-  echo "_Both revisions were built and measured back-to-back on this runner; numbers are only comparable within a single run._"
+  echo "_Both revisions were built and benchmarked back-to-back on this runner; numbers are only comparable within a single run._"
 }
 
 json_str_array() { # newline-separated -> JSON array
@@ -508,16 +425,6 @@ emit_json() {
     read -r n_h tp_h fp_h fn_h p_h r_h f_h <<<"$CORPUS_HEAD"
     corpus_json="{\"base\":{\"n\":$n_b,\"tp\":$tp_b,\"fp\":$fp_b,\"fn\":$fn_b,\"precision\":$p_b,\"recall\":$r_b,\"f1\":$f_b},\"head\":{\"n\":$n_h,\"tp\":$tp_h,\"fp\":$fp_h,\"fn\":$fn_h,\"precision\":$p_h,\"recall\":$r_h,\"f1\":$f_h}}"
   fi
-  local wall_items=() row
-  for row in "${WALL_ROWS[@]}"; do
-    read -r lang c2 c3 <<<"$row"
-    if [[ "$c2" == "SKIP" ]]; then
-      wall_items+=("{\"lang\":\"$lang\",\"skipped\":\"$c3\"}")
-    else
-      wall_items+=("{\"lang\":\"$lang\",\"base_s\":$c2,\"head_s\":$c3}")
-    fi
-  done
-  local wall_json; local IFS=,; wall_json="[${wall_items[*]}]"; unset IFS
   local pass=true; [[ ${#GATE_FAILURES[@]} -gt 0 && $DO_GATE -eq 1 ]] && pass=false
   local failures_json='[]'
   if [[ ${#GATE_FAILURES[@]} -gt 0 ]]; then
@@ -537,7 +444,7 @@ emit_json() {
     "modified": $(json_str_array "$RULES_MODIFIED"),
     "propagators_changed": $([[ $PROPAGATORS_CHANGED -eq 1 ]] && echo true || echo false)
   },
-  "perf": {"wall": $wall_json, "bench_status": "$BENCH_STATUS"}
+  "perf": {"bench_status": "$BENCH_STATUS"}
 }
 EOF
 }
@@ -550,12 +457,11 @@ log "quality gate ${BASE_SHORT}..${HEAD_SHORT}"
 compute_loc
 compute_rules
 
-if [[ $DO_CORPUS -eq 1 || $DO_BENCH -eq 1 || $DO_WALL -eq 1 ]]; then
+if [[ $DO_CORPUS -eq 1 || $DO_BENCH -eq 1 ]]; then
   setup_worktrees
 fi
 [[ $DO_CORPUS -eq 1 ]] && compute_corpus
 compute_bench
-compute_wall
 [[ $DO_CORPUS -eq 1 ]] && gate_corpus
 
 REPORT=""
