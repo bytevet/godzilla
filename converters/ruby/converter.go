@@ -105,14 +105,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 	defer cleanup()
 
-	root := abs
-	if !info.IsDir() {
-		root = filepath.Dir(abs)
-	}
-
 	if !info.IsDir() {
 		results := make([]rbFileResult, 1)
-		c.convertRubyChunk(rubyExe, scriptPath, root, files, results)
+		c.convertRubyChunk(rubyExe, scriptPath, filepath.Dir(abs), files, results)
 		if results[0].err != nil {
 			return nil, results[0].err
 		}
@@ -124,6 +119,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// per chunk, run concurrently — so interpreter startup is paid per chunk,
 	// not per file. Results land at fixed indices, keeping module order the
 	// sorted file order.
+	root := abs
 	results := make([]rbFileResult, len(files))
 	chunks.Run(len(files), func(start, end int) {
 		c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])

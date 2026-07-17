@@ -7,6 +7,7 @@
 package cpp_converter
 
 import (
+	"cmp"
 	"fmt"
 	"io/fs"
 	"os"
@@ -81,7 +82,7 @@ func lowerOne(src string) (*ir.Module, error) {
 	defer os.Remove(tmp.Name())
 
 	// -O1 runs mem2reg (SSA registers) without heavy inlining; -g provides source
-	// positions; -w silences warnings; -fsyntax-only is NOT used (we need IR).
+	// positions; -w silences warnings.
 	args := []string{"-O1", "-g", "-w", "-S", "-emit-llvm", "-o", tmp.Name(), src}
 	ctx, cancel := proc.ParseContext()
 	defer cancel()
@@ -102,13 +103,7 @@ func lowerOne(src string) (*ir.Module, error) {
 // libLLVM).
 func compilerFor(isCpp bool) string {
 	if isCpp {
-		if v := os.Getenv("GODZILLA_CXX"); v != "" {
-			return v
-		}
-		return "clang++"
+		return cmp.Or(os.Getenv("GODZILLA_CXX"), "clang++")
 	}
-	if v := os.Getenv("GODZILLA_CC"); v != "" {
-		return v
-	}
-	return "clang"
+	return cmp.Or(os.Getenv("GODZILLA_CC"), "clang")
 }

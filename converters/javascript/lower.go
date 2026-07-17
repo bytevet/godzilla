@@ -128,14 +128,20 @@ func nilValue() *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
 }
 
+// calleeCommon builds a CallCommon naming callee both as its FuncName value and
+// its Callee (the syntactic name the engine matches against rule globs).
+func calleeCommon(callee string) *ir.CallCommon {
+	return &ir.CallCommon{
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
+		Callee: callee,
+	}
+}
+
 // emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
 // its result register. Shared by lowerCall and lowerNew, whose only difference
 // is how they build the callee name.
 func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	cc := &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
-	}
+	cc := calleeCommon(callee)
 	for _, a := range args {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
@@ -284,10 +290,7 @@ func (fs *funcState) emitRootPropertyRead(root, field string, idx file.Idx) *ir.
 	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Comment = "property-read"
-	inst.Call = &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
-	}
+	inst.Call = calleeCommon(callee)
 	fs.emit(inst)
 	return regValue(inst.Name)
 }

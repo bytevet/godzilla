@@ -274,6 +274,19 @@ func (fs *funcState) lowerBody(stmts []interface{}) {
 	}
 }
 
+// lowerSeqLast lowers a sequence of expressions and returns the last value (or
+// the empty string for an empty sequence) — the value of a `(...)` or `#{...}`.
+func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
+	var last *ir.Value
+	for _, e := range exprs {
+		last = fs.lowerExpr(e)
+	}
+	if last == nil {
+		return constString("")
+	}
+	return last
+}
+
 func (fs *funcState) lowerStmt(s interface{}) {
 	switch tag(s) {
 	case "void_stmt", "":
@@ -311,14 +324,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	case "string_embexpr":
 		// `#{ stmts }` — lower the inner statements, return the last value.
 		inner, _ := asList(at(n, 1))
-		var last *ir.Value
-		for _, e := range inner {
-			last = fs.lowerExpr(e)
-		}
-		if last == nil {
-			return constString("")
-		}
-		return last
+		return fs.lowerSeqLast(inner)
 	case "const_path_ref", "top_const_ref":
 		// A namespaced constant (`Net::HTTP`, `ERB::Util`). It carries no taint;
 		// return its flattened name so lowering the receiver of `Net::HTTP.get`
@@ -345,14 +351,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		inner := at(n, 1)
 		if l, ok := asList(inner); ok && len(l) > 0 {
 			if _, isStmtList := l[0].([]interface{}); isStmtList {
-				var last *ir.Value
-				for _, e := range l {
-					last = fs.lowerExpr(e)
-				}
-				if last != nil {
-					return last
-				}
-				return constString("")
+				return fs.lowerSeqLast(l)
 			}
 		}
 		return fs.lowerExpr(inner)
@@ -525,10 +524,7 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 // bare `ruby:<method>` (Ruby is dynamically dispatched, so method-name rules are
 // the pragmatic join).
 func (fs *funcState) calleeFor(recv interface{}, method string) string {
-	if tag(recv) == "var_ref" && tag(at(recv, 1)) == "@const" {
-		return "ruby:" + identName(at(recv, 1)) + "." + method
-	}
-	if tag(recv) == "vcall" && tag(at(recv, 1)) == "@const" {
+	if (tag(recv) == "var_ref" || tag(recv) == "vcall") && tag(at(recv, 1)) == "@const" {
 		return "ruby:" + identName(at(recv, 1)) + "." + method
 	}
 	// A namespaced constant receiver (`Net::HTTP.get`, `Open3::Foo.bar`) — scope
@@ -569,12 +565,7 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 	args := extractArgs(at(n, 2))
 	switch tag(head) {
 	case "fcall":
-		callee := fs.localCallee(identName(at(head, 1)))
-		var argVals []*ir.Value
-		for _, a := range args {
-			argVals = append(argVals, fs.lowerExpr(a))
-		}
-		return fs.lowerCallExprVals(callee, argVals, n)
+		return fs.lowerCallExpr(fs.localCallee(identName(at(head, 1))), args, n)
 	case "call":
 		return fs.lowerDotCall(head, args)
 	}
@@ -582,12 +573,7 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 }
 
 func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
-	callee := fs.localCallee(identName(at(n, 1)))
-	var argVals []*ir.Value
-	for _, a := range extractArgs(at(n, 2)) {
-		argVals = append(argVals, fs.lowerExpr(a))
-	}
-	return fs.lowerCallExprVals(callee, argVals, n)
+	return fs.lowerCallExpr(fs.localCallee(identName(at(n, 1))), extractArgs(at(n, 2)), n)
 }
 
 func (fs *funcState) lowerCommandCall(n interface{}) *ir.Value {

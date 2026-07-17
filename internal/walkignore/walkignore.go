@@ -50,13 +50,11 @@ func TooBig(size int64) bool {
 // artifact (a bundle or a sourcemap) that should not be analyzed as source.
 func SkipFile(name string) bool {
 	lower := strings.ToLower(name)
-	switch {
-	case strings.HasSuffix(lower, ".min.js"),
-		strings.HasSuffix(lower, ".min.css"),
-		strings.HasSuffix(lower, ".bundle.js"),
-		strings.HasSuffix(lower, ".map"),
-		strings.HasSuffix(lower, ".d.ts"): // TS declaration files carry no runtime code
-		return true
+	// .d.ts = TS declaration files, which carry no runtime code.
+	for _, suffix := range []string{".min.js", ".min.css", ".bundle.js", ".map", ".d.ts"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
 	}
 	return false
 }

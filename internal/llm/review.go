@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -62,10 +63,8 @@ type ReviewConfig struct {
 	MaxReviews  int           // cap on reviews per pass (0 = unlimited; default 200)
 }
 
-// DefaultReviewConfig returns the tuned defaults: 8-way concurrency, a 30s
-// per-review timeout, and a 200-finding cap so a pathological scan degrades to
-// "some findings kept unreviewed" rather than an unbounded bill or a stalled
-// pipeline.
+// DefaultReviewConfig returns the tuned defaults, so a pathological scan degrades
+// to "some findings kept unreviewed" rather than an unbounded bill or stalled pipeline.
 func DefaultReviewConfig() ReviewConfig {
 	return ReviewConfig{Concurrency: 8, Timeout: 30 * time.Second, MaxReviews: 200}
 }
@@ -97,8 +96,7 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 	if r == nil {
 		return findings, stats
 	}
-	out := make([]analysis.Finding, len(findings))
-	copy(out, findings)
+	out := slices.Clone(findings)
 
 	// Decide, in order, which findings to review and with what context.
 	type job struct {
@@ -127,10 +125,7 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 	// Review concurrently, bounded, each under its own timeout. Only reads of
 	// out[idx] happen here; the suppression writes are applied afterward in
 	// original order, so there is no data race on out.
-	conc := cfg.Concurrency
-	if conc < 1 {
-		conc = 1
-	}
+	conc := max(cfg.Concurrency, 1)
 	verdicts := make([]Verdict, len(jobs))
 	errs := make([]error, len(jobs))
 	sem := make(chan struct{}, conc)
@@ -210,9 +205,8 @@ func buildPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("You are a security triage assistant reviewing a static-analysis (SAST) taint finding.\n")
 	b.WriteString("Decide whether it is a TRUE positive (a real, exploitable vulnerability) or a FALSE positive.\n\n")
 	writeFindingFacts(&b, f)
-	// This guard exists purely for direct-call robustness (e.g. unit tests): on
-	// the Filter path an empty codeContext never reaches here, since
-	// FilterWithConfig skips any finding with a blank codeContextFor before Review.
+	// Guard for direct callers (e.g. unit tests): the Filter path never reaches
+	// here with empty context, as it skips blank-context findings before Review.
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nCode context:\n")
 		b.WriteString(codeContext)
@@ -290,9 +284,8 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
 	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
 	writeFindingFacts(&b, f)
-	// This guard exists purely for direct-call robustness (e.g. unit tests): on
-	// the Filter path an empty codeContext never reaches here, since
-	// FilterWithConfig skips any finding with a blank codeContextFor before Review.
+	// Guard for direct callers (e.g. unit tests): the Filter path never reaches
+	// here with empty context, as it skips blank-context findings before Review.
 	if strings.TrimSpace(codeContext) != "" {
 		b.WriteString("\nInitial code context:\n")
 		b.WriteString(codeContext)
@@ -404,14 +397,8 @@ func snippet(p *ir.Position, ctx int) string {
 	}
 	lines := strings.Split(string(data), "\n")
 	target := int(p.GetLine())
-	lo := target - ctx
-	if lo < 1 {
-		lo = 1
-	}
-	hi := target + ctx
-	if hi > len(lines) {
-		hi = len(lines)
-	}
+	lo := max(target-ctx, 1)
+	hi := min(target+ctx, len(lines))
 	var b strings.Builder
 	for i := lo; i <= hi; i++ {
 		marker := "  "

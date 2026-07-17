@@ -3,6 +3,7 @@ package py_converter
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	ir "godzilla/pkg/ir/v1"
@@ -615,18 +616,18 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 // deterministic false negative. A PHI over the two branch values keeps taint
 // from EITHER path (the taint engine treats PHI as a propagator).
 func (fs *funcState) lowerIfMerge(s astNode) {
-	before := cloneEnv(fs.env)
+	before := maps.Clone(fs.env)
 
 	fs.lowerBody(s.list("body"))
-	afterBody := cloneEnv(fs.env)
+	afterBody := maps.Clone(fs.env)
 
 	// Lower the else branch from the pre-branch bindings (the two branches are
 	// mutually exclusive), keeping the already-emitted body instructions.
-	fs.env = cloneEnv(before)
+	fs.env = maps.Clone(before)
 	fs.lowerBody(s.list("orelse"))
 	afterElse := fs.env
 
-	merged := cloneEnv(afterElse)
+	merged := maps.Clone(afterElse)
 	names := map[string]bool{}
 	for k := range afterBody {
 		names[k] = true
@@ -652,15 +653,6 @@ func (fs *funcState) lowerIfMerge(s astNode) {
 		merged[name] = regValue(phi.Name)
 	}
 	fs.env = merged
-}
-
-// cloneEnv shallow-copies the name->value environment (values are shared).
-func cloneEnv(env map[string]*ir.Value) map[string]*ir.Value {
-	out := make(map[string]*ir.Value, len(env))
-	for k, v := range env {
-		out[k] = v
-	}
-	return out
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;

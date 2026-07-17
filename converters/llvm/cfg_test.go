@@ -58,7 +58,7 @@ entry:
 // connect when the edges exist. Before this was wired, multi-block C/C++
 // functions dropped all cross-block taint.
 func TestLowerWiresCFGEdges(t *testing.T) {
-	const ir = `
+	const ll = `
 define i32 @main(i32 %n) {
 entry:
   %c = icmp sgt i32 %n, 0
@@ -69,7 +69,7 @@ end:
   ret i32 0
 }
 `
-	mod := lowerLL(t, ir)
+	mod := lowerLL(t, ll)
 	if len(mod.Functions) != 1 {
 		t.Fatalf("expected 1 function, got %d", len(mod.Functions))
 	}

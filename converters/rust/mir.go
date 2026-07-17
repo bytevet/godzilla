@@ -2,6 +2,7 @@ package rust_converter
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -184,9 +185,9 @@ func (st *lowerState) lowerBlocks(lines []string) {
 		}
 		switch len(known) {
 		case 0:
-			st.env = cloneMIREnv(prevExit)
+			st.env = maps.Clone(prevExit)
 		case 1:
-			st.env = cloneMIREnv(exitEnvs[known[0]])
+			st.env = maps.Clone(exitEnvs[known[0]])
 		default:
 			st.env = st.mergeBlockEnvs(known, exitEnvs)
 		}
@@ -272,14 +273,6 @@ func (st *lowerState) mergeBlockEnvs(preds []string, exitEnvs map[string]map[str
 		default:
 			out[name] = st.emit(st.reg(), ir.OpCode_OP_CODE_PHI, distinct, nil)
 		}
-	}
-	return out
-}
-
-func cloneMIREnv(env map[string]*ir.Value) map[string]*ir.Value {
-	out := make(map[string]*ir.Value, len(env))
-	for k, v := range env {
-		out[k] = v
 	}
 	return out
 }
@@ -451,7 +444,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 			return
 		}
 	}
-	if before, _, ok := cutCast(expr); ok { // `<operand> as T (Kind)`
+	if before, ok := cutCast(expr); ok { // `<operand> as T (Kind)`
 		st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_CONVERT, st.operands([]string{before}), pos)
 		return
 	}
@@ -534,19 +527,19 @@ func (st *lowerState) operands(toks []string) []*ir.Value {
 		if t = strings.TrimSpace(t); t == "" {
 			continue
 		}
-		out = append(out, st.operand(t, nil))
+		out = append(out, st.operand(t))
 	}
 	return out
 }
 
 // operand resolves a single MIR operand token (`move _x` / `copy _x` /
 // `const ..` / `_x`) to a gIR value.
-func (st *lowerState) operand(tok string, pos *ir.Position) *ir.Value {
+func (st *lowerState) operand(tok string) *ir.Value {
 	tok = strings.TrimSpace(tok)
 	if strings.HasPrefix(tok, "const ") {
 		return constFromLiteral(strings.TrimPrefix(tok, "const "))
 	}
-	return st.place(placeOf(tok), pos)
+	return st.place(placeOf(tok), nil)
 }
 
 func (st *lowerState) emit(name string, op ir.OpCode, operands []*ir.Value, pos *ir.Position) *ir.Value {
@@ -668,14 +661,14 @@ func refPlace(expr string) string {
 	return strings.TrimSpace(p)
 }
 
-// cutCast splits a MIR cast rvalue `<operand> as <type> (<kind>)` into the
-// operand and type, ignoring the parenthesized cast-kind suffix.
-func cutCast(expr string) (before, typ string, ok bool) {
+// cutCast returns the operand of a MIR cast rvalue `<operand> as <type> (<kind>)`,
+// dropping the type and parenthesized cast-kind suffix.
+func cutCast(expr string) (before string, ok bool) {
 	i := strings.LastIndex(expr, " as ")
 	if i < 0 {
-		return "", "", false
+		return "", false
 	}
-	return strings.TrimSpace(expr[:i]), strings.TrimSpace(expr[i+4:]), true
+	return strings.TrimSpace(expr[:i]), true
 }
 
 // structFields extracts the field operand tokens from a struct-literal tail

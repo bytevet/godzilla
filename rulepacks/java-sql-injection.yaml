@@ -14,22 +14,16 @@ rules:
       - "java:*HttpServletRequest.getHeader"
       - "java:*HttpServletRequest.getQueryString"
       - "java:*ServletRequest.getParameter"
-      # Spring MVC controller parameter annotations. The Java frontend
-      # synthesizes a source CALL for each annotated parameter (see
-      # converters/java/lower.go), so untrusted request data bound to a
-      # controller method parameter is seeded as tainted. Anchored on the
-      # annotation package (internal name org/springframework/web/bind/annotation/*)
-      # so an ordinary method whose name ends in the token (e.g. getRequestBody)
-      # is NOT mistaken for a source.
+      # Spring MVC controller parameter annotations (synthesized source CALLs;
+      # see converters/java/lower.go). Anchored on the annotation package so an
+      # ordinary method ending in the token (e.g. getRequestBody) is not a source.
       - "java:*bind/annotation/RequestParam"
       - "java:*bind/annotation/PathVariable"
       - "java:*bind/annotation/RequestBody"
       - "java:*bind/annotation/RequestHeader"
       - "java:*bind/annotation/CookieValue"
       # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both). Same synthesized
-      # source-CALL mechanism as the Spring set; anchored on the annotation
-      # package so an ordinary method ending in the token is not a source.
+      # jakarta.ws.rs — the `ws/rs` fragment matches both).
       - "java:*ws/rs/QueryParam"
       - "java:*ws/rs/PathParam"
       - "java:*ws/rs/FormParam"

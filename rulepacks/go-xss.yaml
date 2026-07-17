@@ -1,4 +1,4 @@
-# Cross-site scripting: untrusted HTTP/URL input flowing into an HTTP
+# Cross-site scripting (CWE-79): untrusted HTTP/URL input flowing into an HTTP
 # response body without escaping.
 rules:
   - id: go-xss
@@ -13,15 +13,13 @@ rules:
     sources:
       - "go:*net/url*.Get"
       - "go:*net/http.Header*.Get"
-      # Synthetic request-object source: the frontend taints an HTTP handler's
-      # *http.Request parameter (converters/go addHTTPRequestSource), so field
-      # reads off it (r.URL.Path, r.Form, r.Body, …) — which no method rule can
-      # match — are covered for net/http and any router built on it (chi,
-      # gorilla/mux, …).
+      # Synthetic source: the frontend taints an HTTP handler's *http.Request
+      # param (converters/go addHTTPRequestSource) so field reads off it
+      # (r.URL.Path, r.Form, …) are covered for net/http and any router on it.
       - "go:@net/http.Request"
-      # Web-framework request accessors, receiver-type-scoped so they never
-      # collide with a same-named sink (e.g. sql.DB.Query).
-      # Gin (github.com/gin-gonic/gin).
+      # Framework request accessors, receiver-type-scoped so they never collide
+      # with a same-named sink (e.g. sql.DB.Query).
+      # Gin.
       - "go:*gin-gonic/gin.Context*.Query"
       - "go:*gin-gonic/gin.Context*.DefaultQuery"
       - "go:*gin-gonic/gin.Context*.QueryArray"
@@ -31,38 +29,37 @@ rules:
       - "go:*gin-gonic/gin.Context*.PostForm"
       - "go:*gin-gonic/gin.Context*.DefaultPostForm"
       - "go:*gin-gonic/gin.Context*.GetHeader"
-      # Echo (github.com/labstack/echo).
+      # Echo.
       - "go:*labstack/echo*Context*.QueryParam"
       - "go:*labstack/echo*Context*.QueryParams"
       - "go:*labstack/echo*Context*.Param"
       - "go:*labstack/echo*Context*.FormValue"
       - "go:*labstack/echo*Context*.FormParams"
-      # Chi (github.com/go-chi/chi).
+      # Chi.
       - "go:*go-chi/chi*.URLParam"
-      # Gorilla mux (github.com/gorilla/mux) — path variables.
+      # Gorilla mux — path variables.
       - "go:*gorilla/mux.Vars"
-      # Macaron / Grafana route params (e.g. grafana/pkg/web.Params) — a free-function
-      # route accessor like mux.Vars; returns untrusted path/query params.
+      # Macaron / Grafana route params (grafana/pkg/web.Params) — a free-function
+      # route accessor like mux.Vars returning untrusted path/query params.
       - "go:*web.Params"
-      # Fiber (github.com/gofiber/fiber) — *fiber.Ctx.
+      # Fiber — *fiber.Ctx.
       - "go:*gofiber/fiber*.Ctx*.Query"
       - "go:*gofiber/fiber*.Ctx*.Params"
       - "go:*gofiber/fiber*.Ctx*.FormValue"
       - "go:*gofiber/fiber*.Ctx*.Cookies"
       - "go:*gofiber/fiber*.Ctx*.Get"
-      # fasthttp (github.com/valyala/fasthttp) — *fasthttp.RequestCtx.
+      # fasthttp — *fasthttp.RequestCtx.
       - "go:*fasthttp.RequestCtx*.FormValue"
       - "go:*fasthttp.RequestCtx*.UserValue"
     sinks:
       - "go:*net/http*.ResponseWriter*.Write"
       - "go:fmt.Fprint*"
       - "go:io.WriteString"
-      # html/template trusted-string CONVERSIONS bypass the package's context
-      # -aware auto-escaping, so converting untrusted data to one is XSS (gosec
-      # G203). A conversion carries no callee, so the Go frontend synthesizes a
-      # CALL `go:html/template.<Type>` (converters/go emitTemplateTrustedConv)
-      # for the sink to match; a constant/escaped arg is untainted and never
-      # fires, so precision is preserved.
+      # html/template trusted-string CONVERSIONS bypass the package's context-aware
+      # auto-escaping, so converting untrusted data to one is XSS (gosec G203). A
+      # conversion carries no callee, so the Go frontend synthesizes a CALL
+      # `go:html/template.<Type>` (converters/go emitTemplateTrustedConv) for the
+      # sink to match; a constant/escaped arg is untainted and never fires.
       - "go:html/template.HTML"
       - "go:html/template.HTMLAttr"
       - "go:html/template.JS"
@@ -72,9 +69,8 @@ rules:
       - "go:html/template.Srcset"
     sanitizers:
       - "go:*html.EscapeString"
-      # html/template's ESCAPER functions neutralize; scoped to *Escape* so it
-      # does NOT swallow the trusted-type conversions above (which are the one
-      # UNSAFE html/template operation, modeled as sinks).
+      # html/template's ESCAPER functions neutralize; scoped to *Escape* so it does
+      # NOT swallow the trusted-type conversions above (modeled as sinks).
       - "go:*html/template*Escape*"
     propagators:
       - "go:strings.Join"

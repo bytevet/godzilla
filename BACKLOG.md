@@ -1,8 +1,8 @@
 # Godzilla Backlog — status
 
-> **Goals measured against** (`README.md`, `ARCHITECTURE.md`): (1) ultra-fast per-commit CI gate;
-> (2) near-zero false positives at the gate; (3) multi-language via one taint engine over the frozen
-> gIR SSA IR; (4) an optional LLM reviewer that adjudicates only low/medium findings and fails open.
+> **Goals** (`README.md`, `ARCHITECTURE.md`): (1) ultra-fast per-commit CI gate; (2) near-zero false
+> positives at the gate; (3) multi-language via one taint engine over the frozen gIR SSA IR; (4) an
+> optional LLM reviewer that adjudicates only low/medium findings and fails open.
 
 Produced by a 7-lens code audit (engine, frontend, coverage, perf, CI/CD, LLM, trust); the 21
 highest-severity claims went through adversarial re-verification (18 confirmed, 3 partial, 0 refuted).
@@ -10,10 +10,10 @@ IDs are stable. Fix-order convention (per `CLAUDE.md`): intrinsic + engine teach
 frontend lowering → engine change; touch `proto/*.proto` only as a last resort.
 
 **Status:** ✅ done · 🟡 partial (note says what's left) · ⏸ deferred with rationale.
-Every CRITICAL/HIGH from the original 7-lens audit is done. A **real-world CVE benchmark** (11
-famous projects at known-CVE commits, ~1.02M LOC) then caught **0/12** despite a 1.000 corpus F1,
-opening a new class of high-severity **breadth** gaps (COV-11, TRUST-10) — modeling coverage, not
-engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf work.
+Every CRITICAL/HIGH from the original audit is done. A **real-world CVE benchmark** (11 famous projects
+at known-CVE commits, ~1.02M LOC) then caught **0/12** despite a 1.000 corpus F1, opening a new class of
+high-severity **breadth** gaps (COV-11, TRUST-10) — modeling coverage, not engine defects. The rest is
+toolchain-gated, net-new frontends, or deferred perf work.
 
 ## Engine precision & soundness (ENG)
 
@@ -54,14 +54,14 @@ engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf
 | COV-3 | high | ✅ `39c5cf3` | Java insecure-deserialization / SSRF / XSS / open-redirect packs + JAX-RS param sources. |
 | COV-4 | high | ✅ `3a1b72e` | `kind: dangerous-call` non-dataflow rule type (weak crypto / weak cipher / insecure RNG). |
 | COV-5 | high | 🟡 `315bbf6` | Python `eval`/`exec`/`compile` code injection shipped. **Open (pure-YAML):** NoSQL, SSTI, LDAP/XPath, zip-slip, prototype-pollution, header/CRLF, log injection. |
-| COV-6 | high | ✅ `55d4f15` | Header/cookie/body sources + gorilla/fiber/fastify; extended this session to a framework-agnostic request-object source + stdlib request-accessor propagators (covers unmodeled frameworks). |
+| COV-6 | high | ✅ `55d4f15` | Header/cookie/body sources + gorilla/fiber/fastify; extended to a framework-agnostic request-object source + stdlib request-accessor propagators (covers unmodeled frameworks). |
 | COV-7 | med | ✅ `dcfda8d` | Rust axum extractor sources (`Query`/`Path`/`Json`/`Form`) + XSS/open-redirect packs. |
 | COV-8 | med | ✅ `8e313f7` | C/C++ CFG-edge fix + exec-family/argv sources + buffer-overflow & SQLi packs (SSRF is a follow-on). |
 | COV-9 | med | ✅ `1abcdab` | Sanitizer realism: real sanitizer globs; the over-broad `py:*escape` glob tightened. |
 | COV-10 | low | 🟡 `af8d696` | Ruby frontend shipped. **Open (net-new frontends):** PHP, C#, Kotlin. |
-| COV-11 | high | 🟡 | **Framework handler-parameter sources** (branch `claude/realworld-recall`). Shipped: Go free-function accessors (`go:*web.Params`); Python FastAPI/Tornado/MethodView handler-param source synthesis (`py:@http.param`); `with open(...)` context-manager lowering; split/join propagators. Corpus TP 133→142, FP=0. **Open:** JS handler-param synthesis; method-propagator chaining (`path.split()`/`.strip()` don't forward through the param source — blocks Streamlit); per-CVE inter-proc transforms. |
+| COV-11 | high | 🟡 | **Framework handler-parameter sources** (branch `claude/realworld-recall`). Shipped: Go free-function accessors (`go:*web.Params`); Python FastAPI/Tornado/MethodView handler-param synthesis (`py:@http.param`); `with open(...)` context-manager lowering; split/join propagators. Corpus TP 133→142, FP=0. **Open:** JS handler-param synthesis; method-propagator chaining (`path.split()`/`.strip()` don't forward through the param source — blocks Streamlit); per-CVE inter-proc transforms. |
 | COV-12 | med | ✅ | **Ruby rulepack parity** — `ruby-xss` / `ruby-path-traversal` / `ruby-ssrf` / `ruby-open-redirect` shipped, plus a Ruby frontend fix resolving namespaced-constant receivers (`Net::HTTP.get`). Samples + FP=0. |
-| COV-13 | med | 🟡 | **Framework-abstracted sinks + library sources** — shipped FastAPI/Starlette `FileResponse` path-traversal sink (+ narrowed py-xss `*Response` to fix the resulting FP). **Open:** `express.static`, `knex.raw`/ORM raw-query, Jinja→SQL propagator; opt-in "exported-API parameter = untrusted" library-scan mode (systeminformation CVE-2021-21315). |
+| COV-13 | med | 🟡 | **Framework-abstracted sinks + library sources** — shipped FastAPI/Starlette `FileResponse` path-traversal sink (+ narrowed py-xss `*Response` to fix the resulting FP). **Open:** `express.static`, `knex.raw`/ORM raw-query, Jinja→SQL propagator; opt-in "exported-API param = untrusted" library-scan mode (systeminformation CVE-2021-21315). |
 
 ## Performance & scalability (PERF)
 
@@ -117,7 +117,7 @@ engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf
 | TRUST-7 | med | ✅ `09f40e1` | Frontend fuzz targets + glob-DoS fix; the `termination_stress` sample guards the analyzer's termination invariants. |
 | TRUST-8 | med | ✅ `2326058` | Cross-frontend differential corpus (same CWE in every language). |
 | TRUST-9 | med | ⏸ | Go scans still allow module fetches. Not enforcing `GOTOOLCHAIN=local`/offline mode; document a warmed cache for CI. |
-| TRUST-10 | high | ✅ | **Secret-scanner precision** — both secret scanners now skip vendored deps + test-fixture/i18n/API-schema paths (`secretPathExcluded`), first-party only. The ~40 benchmark FPs (Superset i18n, Ghost fixtures, NocoDB swagger, gogs `x/crypto`) are gone; a real secret in a normal config still fires. FP-guard sample + corpus FP=0. |
+| TRUST-10 | high | ✅ | **Secret-scanner precision** — both secret scanners skip vendored deps + test-fixture/i18n/API-schema paths (`secretPathExcluded`), first-party only. The ~40 benchmark FPs (Superset i18n, Ghost fixtures, NocoDB swagger, gogs `x/crypto`) are gone; a real secret in a normal config still fires. FP-guard sample + corpus FP=0. |
 | TRUST-11 | med | ✅ | **Real-world CVE benchmark harness** — `test/cvebench` (opt-in `GODZILLA_CVE_BENCH=1`): a fix-diff-verified CVE manifest + a scan/score test reporting recall alongside the corpus F1. The regression guard for the COV-11/13 breadth gaps. |
 
 ## Open items (all deferred or partial above)
@@ -126,8 +126,8 @@ engine defects. The rest is toolchain-gated, net-new frontends, or deferred perf
   header/CRLF, log). Pure-YAML packs; ship when a target framework/sample justifies each.
 - **COV-10** — PHP / C# / Kotlin frontends. Each is a net-new project.
 - **COV-11 / COV-12 / COV-13** — real-world recall (from the CVE benchmark): framework
-  handler-parameter sources (the highest-leverage fix), Ruby rulepack parity, and
-  framework-abstracted sinks + library-parameter sources.
+  handler-parameter sources (highest-leverage), Ruby rulepack parity, framework-abstracted sinks +
+  library-parameter sources.
 - **TRUST-10 / TRUST-11** — secret-scanner precision (scope out deps/data/fixtures); a repeatable
   real-world CVE recall harness alongside the corpus F1.
 - **PERF-1 / PERF-4 (residual) / PERF-6 / PERF-8** — incremental caching, build up-to-date skip / JVM

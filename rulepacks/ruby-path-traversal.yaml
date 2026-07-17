@@ -36,13 +36,12 @@ rules:
       - "ruby:send_data"
       - "ruby:open"                 # Kernel#open(path)
       - "ruby:Kernel.open"
-    # File.join does NOT contain input to a base directory ("/data" +
-    # "../../etc" joins to "/data/../../etc", which still escapes "/data"), so it
-    # is a propagator, not a sanitizer -- mirroring go/py's treatment of
+    # File.join / *.join do NOT contain input to a base directory ("/data" +
+    # "../../etc" joins to "/data/../../etc", which still escapes "/data"), so they
+    # are propagators, not sanitizers -- mirroring go/py's treatment of
     # filepath.Join / os.path.join.
     sanitizers: []
     propagators:
-      - "ruby:File.join"
       - "ruby:File.expand_path"
       - "ruby:*.join"
       - "ruby:*.to_s"

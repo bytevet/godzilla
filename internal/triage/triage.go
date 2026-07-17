@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"godzilla/internal/analysis"
@@ -57,8 +57,7 @@ func ApplyInlineIgnores(findings []analysis.Finding) []analysis.Finding {
 			continue
 		}
 		line := int(f.SinkPos.GetLine())
-		// Check the sink line and the line above (a directive is commonly placed
-		// on the preceding line).
+		// A directive on the sink line or the line directly above it applies.
 		for _, ln := range []int{line, line - 1} {
 			if ln < 1 || ln > len(lines) {
 				continue
@@ -109,20 +108,21 @@ func ApplyBaseline(findings []analysis.Finding, baseline []string) []analysis.Fi
 		remaining[fp]++
 	}
 
+	// Process in fingerprint order so multiset suppression is deterministic.
+	fps := make([]string, len(findings))
 	order := make([]int, len(findings))
-	for i := range order {
+	for i := range findings {
+		fps[i] = analysis.Fingerprint(findings[i])
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return analysis.Fingerprint(findings[order[a]]) < analysis.Fingerprint(findings[order[b]])
-	})
+	slices.SortStableFunc(order, func(a, b int) int { return strings.Compare(fps[a], fps[b]) })
 
 	for _, i := range order {
 		f := &findings[i]
 		if f.Suppressed {
 			continue
 		}
-		fp := analysis.Fingerprint(*f)
+		fp := fps[i]
 		if remaining[fp] > 0 {
 			remaining[fp]--
 			f.Suppressed = true
@@ -150,7 +150,7 @@ func WriteBaseline(w io.Writer, findings []analysis.Finding) error {
 		}
 		fps = append(fps, analysis.Fingerprint(f))
 	}
-	sort.Strings(fps)
+	slices.Sort(fps)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(Baseline{Tool: "godzilla", Fingerprints: fps})

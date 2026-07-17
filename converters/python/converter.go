@@ -43,7 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"godzilla/internal/chunks"
@@ -100,7 +100,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		if walkErr != nil {
 			return nil, walkErr
 		}
-		sort.Strings(files)
+		slices.Sort(files)
 	} else {
 		files = []string{abs}
 	}
@@ -205,16 +205,16 @@ func (c *Converter) convertPythonChunk(pythonExe, scriptPath, root string, files
 	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
 	dec.UseNumber()
 	for i, f := range files {
-		var root_ astNode
-		if err := dec.Decode(&root_); err != nil {
+		var doc astNode
+		if err := dec.Decode(&doc); err != nil {
 			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", f, err)
 			continue
 		}
-		if errMsg, ok := root_["error"]; ok {
+		if errMsg, ok := doc["error"]; ok {
 			out[i].err = fmt.Errorf("py_converter: failed to parse %s: %v", f, errMsg)
 			continue
 		}
-		out[i].mod = convertModule(root_, f, moduleNameFor(root, f))
+		out[i].mod = convertModule(doc, f, moduleNameFor(root, f))
 	}
 }
 

@@ -332,16 +332,10 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 			jobs = append(jobs, fnJob{w.mod, i, fn})
 		}
 	}
-	nWorkers := runtime.GOMAXPROCS(0)
-	if nWorkers > len(jobs) {
-		nWorkers = len(jobs)
-	}
-	if nWorkers < 1 {
-		nWorkers = 1
-	}
+	nWorkers := max(1, min(runtime.GOMAXPROCS(0), len(jobs)))
 	jobCh := make(chan fnJob)
 	var wg sync.WaitGroup
-	for i := 0; i < nWorkers; i++ {
+	for range nWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -971,7 +965,7 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		irType.ElemType = c.convertType(typ.Elem())
 	case *types.Struct:
 		irType.Kind = ir.TypeKind_TYPE_KIND_STRUCT
-		for i := 0; i < typ.NumFields(); i++ {
+		for i := range typ.NumFields() {
 			f := typ.Field(i)
 			irType.Fields = append(irType.Fields, &ir.Field{
 				Name: f.Name(),
@@ -994,7 +988,7 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		irType.ElemType = c.convertType(typ.Elem())
 	case *types.Interface:
 		irType.Kind = ir.TypeKind_TYPE_KIND_INTERFACE
-		for i := 0; i < typ.NumMethods(); i++ {
+		for i := range typ.NumMethods() {
 			m := typ.Method(i)
 			irType.Methods = append(irType.Methods, &ir.Method{
 				Name:      m.Name(),
@@ -1003,7 +997,7 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		}
 	case *types.Tuple:
 		irType.Kind = ir.TypeKind_TYPE_KIND_TUPLE
-		for i := 0; i < typ.Len(); i++ {
+		for i := range typ.Len() {
 			irType.Fields = append(irType.Fields, &ir.Field{
 				Type: c.convertType(typ.At(i).Type()),
 			})
@@ -1028,11 +1022,11 @@ func (c *Converter) convertSignature(sig *types.Signature) *ir.Signature {
 		irSig.Recv = c.convertType(sig.Recv().Type())
 	}
 	params := sig.Params()
-	for i := 0; i < params.Len(); i++ {
+	for i := range params.Len() {
 		irSig.Params = append(irSig.Params, c.convertType(params.At(i).Type()))
 	}
 	results := sig.Results()
-	for i := 0; i < results.Len(); i++ {
+	for i := range results.Len() {
 		irSig.Results = append(irSig.Results, c.convertType(results.At(i).Type()))
 	}
 	return irSig

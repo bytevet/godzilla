@@ -1,11 +1,10 @@
-# SQL injection: untrusted HTTP/URL input flowing into database/sql query
-# construction without parameterization.
+# SQL injection (CWE-89): untrusted HTTP/URL input flowing into a database/sql
+# query without parameterization.
 #
 # The "#<n>" suffix on each sink names the LOGICAL (receiver-excluded) index of
-# the query-string argument, so a parameterized call like
-# db.Query("... = ?", userInput) — where userInput is a bound placeholder value
-# at a later position, not part of the query text — is NOT flagged. The Context
-# variants take ctx as their first argument, so their query string is at index 1.
+# the query-string argument, so a parameterized call db.Query("... = ?", input) —
+# where input is a bound placeholder, not part of the query text — is NOT flagged.
+# The Context variants take ctx first, so their query string is at index 1.
 rules:
   - id: go-sql-injection
     languages: [go]
@@ -19,15 +18,13 @@ rules:
     sources:
       - "go:*net/url*.Get"
       - "go:*net/http.Header*.Get"
-      # Synthetic request-object source: the frontend taints an HTTP handler's
-      # *http.Request parameter (converters/go addHTTPRequestSource), so field
-      # reads off it (r.URL.Path, r.Form, r.Body, …) — which no method rule can
-      # match — are covered for net/http and any router built on it (chi,
-      # gorilla/mux, …).
+      # Synthetic source: the frontend taints an HTTP handler's *http.Request
+      # param (converters/go addHTTPRequestSource) so field reads off it
+      # (r.URL.Path, r.Form, …) are covered for net/http and any router on it.
       - "go:@net/http.Request"
-      # Web-framework request accessors, receiver-type-scoped so they never
-      # collide with a same-named sink (e.g. sql.DB.Query).
-      # Gin (github.com/gin-gonic/gin).
+      # Framework request accessors, receiver-type-scoped so they never collide
+      # with a same-named sink (e.g. sql.DB.Query).
+      # Gin.
       - "go:*gin-gonic/gin.Context*.Query"
       - "go:*gin-gonic/gin.Context*.DefaultQuery"
       - "go:*gin-gonic/gin.Context*.QueryArray"
@@ -37,26 +34,26 @@ rules:
       - "go:*gin-gonic/gin.Context*.PostForm"
       - "go:*gin-gonic/gin.Context*.DefaultPostForm"
       - "go:*gin-gonic/gin.Context*.GetHeader"
-      # Echo (github.com/labstack/echo).
+      # Echo.
       - "go:*labstack/echo*Context*.QueryParam"
       - "go:*labstack/echo*Context*.QueryParams"
       - "go:*labstack/echo*Context*.Param"
       - "go:*labstack/echo*Context*.FormValue"
       - "go:*labstack/echo*Context*.FormParams"
-      # Chi (github.com/go-chi/chi).
+      # Chi.
       - "go:*go-chi/chi*.URLParam"
-      # Gorilla mux (github.com/gorilla/mux) — path variables.
+      # Gorilla mux — path variables.
       - "go:*gorilla/mux.Vars"
-      # Macaron / Grafana route params (e.g. grafana/pkg/web.Params) — a free-function
-      # route accessor like mux.Vars; returns untrusted path/query params.
+      # Macaron / Grafana route params (grafana/pkg/web.Params) — a free-function
+      # route accessor like mux.Vars returning untrusted path/query params.
       - "go:*web.Params"
-      # Fiber (github.com/gofiber/fiber) — *fiber.Ctx.
+      # Fiber — *fiber.Ctx.
       - "go:*gofiber/fiber*.Ctx*.Query"
       - "go:*gofiber/fiber*.Ctx*.Params"
       - "go:*gofiber/fiber*.Ctx*.FormValue"
       - "go:*gofiber/fiber*.Ctx*.Cookies"
       - "go:*gofiber/fiber*.Ctx*.Get"
-      # fasthttp (github.com/valyala/fasthttp) — *fasthttp.RequestCtx.
+      # fasthttp — *fasthttp.RequestCtx.
       - "go:*fasthttp.RequestCtx*.FormValue"
       - "go:*fasthttp.RequestCtx*.UserValue"
     sinks:
@@ -72,8 +69,8 @@ rules:
       - "go:*gorm*.DB*.Exec#0"
       - "go:*gorm*.DB*.Where#0"
       - "go:*gorm*.DB*.Order#0"
-    # No built-in sanitizer neutralizes tainted input for raw SQL string
-    # construction; the fix is parameterized queries, not escaping.
+    # No sanitizer neutralizes tainted input for raw SQL; the fix is parameterized
+    # queries, not escaping.
     sanitizers: []
     propagators:
       - "go:strings.Join"

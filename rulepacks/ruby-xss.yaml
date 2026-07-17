@@ -41,8 +41,7 @@ rules:
       - "ruby:sanitize"             # Rails ActionView sanitize helper
       - "ruby:*.sanitize"
       - "ruby:html_escape"
-      - "ruby:*.html_escape"
-      - "ruby:ERB::Util.html_escape"
+      - "ruby:*.html_escape"          # covers ERB::Util.html_escape
       - "ruby:ERB::Util.h"
       - "ruby:CGI.escapeHTML"
       - "ruby:CGI.escape_html"

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"godzilla/internal/analysis"
@@ -63,7 +63,7 @@ func RunDir(root string, rs *rules.RuleSet) ([]Result, error) {
 		}
 		results = append(results, checkSample(e.Name(), dir, rs))
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Sample < results[j].Sample })
+	slices.SortFunc(results, func(a, b Result) int { return strings.Compare(a.Sample, b.Sample) })
 	return results, nil
 }
 
@@ -82,13 +82,10 @@ func checkSample(name, dir string, rs *rules.RuleSet) Result {
 
 	expected := map[string]bool{}
 	for _, ef := range exp.Findings {
-		min := ef.Min
-		if min < 1 {
-			min = 1
-		}
+		want := max(ef.Min, 1)
 		expected[ef.Rule] = true
-		if got[ef.Rule] < min {
-			res.fail(fmt.Sprintf("rule %q: want >= %d finding(s), got %d", ef.Rule, min, got[ef.Rule]))
+		if got[ef.Rule] < want {
+			res.fail(fmt.Sprintf("rule %q: want >= %d finding(s), got %d", ef.Rule, want, got[ef.Rule]))
 		}
 		if !matchesLocation(ef, scanRes.Findings) {
 			res.fail(fmt.Sprintf("rule %q: no finding matched the expected location (line=%d sink=%q)", ef.Rule, ef.Line, ef.Sink))

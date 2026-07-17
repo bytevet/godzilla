@@ -133,7 +133,7 @@ func TestConvertComplexFile(t *testing.T) {
 		for _, f := range mod.Functions {
 			for _, b := range f.Blocks {
 				for _, inst := range b.Instrs {
-					if inst.Comment != "" && (len(inst.Comment) > 23 && inst.Comment[:23] == "unsupported instruction") {
+					if strings.HasPrefix(inst.Comment, "unsupported instruction") {
 						t.Errorf("unsupported instruction in function %s: %s", f.Name, inst.Comment)
 					}
 				}

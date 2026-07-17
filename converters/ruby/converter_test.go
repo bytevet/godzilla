@@ -28,45 +28,33 @@ func cmdiRules() *rules.RuleSet {
 	}}}
 }
 
-// TestCommandInjection_ParamsToSystem proves the core taint path: a request
-// parameter (params[:x]) concatenated into a single-string system() call fires.
-func TestCommandInjection_ParamsToSystem(t *testing.T) {
+// TestCommandInjection exercises the core taint paths for the cmdi rule:
+//   - params[:x] concatenated into a single-string system() call fires;
+//   - a backtick literal with an interpolated tainted value (`ping #{host}`) fires;
+//   - the safe multi-arg form system("ls", x) — no shell — does not, because the
+//     sink pins arg #0.
+func TestCommandInjection(t *testing.T) {
 	requireRuby(t)
-	prog, err := NewConverter().ConvertFile("../../test/ruby/command_injection/app.rb")
-	if err != nil {
-		t.Fatalf("ConvertFile: %v", err)
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"params-to-system", "../../test/ruby/command_injection/app.rb", true},
+		{"backtick-interpolation", "../../test/ruby/backtick_injection/app.rb", true},
+		{"arg-list-form-safe", "../../test/ruby/command_injection_safe/app.rb", false},
 	}
-	findings := analysis.NewEngine(cmdiRules()).Analyze(prog)
-	if !hasRule(findings, "ruby-cmdi") {
-		t.Fatalf("expected ruby-cmdi finding, got %d: %v", len(findings), findings)
-	}
-}
-
-// TestBacktick_Interpolation proves a backtick command literal with an
-// interpolated tainted value (“ `ping #{host}` “) fires as a shell exec.
-func TestBacktick_Interpolation(t *testing.T) {
-	requireRuby(t)
-	prog, err := NewConverter().ConvertFile("../../test/ruby/backtick_injection/app.rb")
-	if err != nil {
-		t.Fatalf("ConvertFile: %v", err)
-	}
-	findings := analysis.NewEngine(cmdiRules()).Analyze(prog)
-	if !hasRule(findings, "ruby-cmdi") {
-		t.Fatalf("expected ruby-cmdi finding from backtick interpolation, got %d: %v", len(findings), findings)
-	}
-}
-
-// TestArgListForm_NotFlagged proves the safe multi-arg form system("ls", x) —
-// which invokes no shell — does not fire, because the command sink pins arg #0.
-func TestArgListForm_NotFlagged(t *testing.T) {
-	requireRuby(t)
-	prog, err := NewConverter().ConvertFile("../../test/ruby/command_injection_safe/app.rb")
-	if err != nil {
-		t.Fatalf("ConvertFile: %v", err)
-	}
-	findings := analysis.NewEngine(cmdiRules()).Analyze(prog)
-	if hasRule(findings, "ruby-cmdi") {
-		t.Errorf("multi-arg system() must not be flagged (no shell), got: %v", findings)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prog, err := NewConverter().ConvertFile(tc.path)
+			if err != nil {
+				t.Fatalf("ConvertFile: %v", err)
+			}
+			findings := analysis.NewEngine(cmdiRules()).Analyze(prog)
+			if got := hasRule(findings, "ruby-cmdi"); got != tc.want {
+				t.Errorf("ruby-cmdi finding = %v, want %v (findings: %v)", got, tc.want, findings)
+			}
+		})
 	}
 }
 

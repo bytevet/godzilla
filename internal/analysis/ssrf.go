@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"maps"
 	"regexp"
 	"strings"
 
@@ -201,10 +202,7 @@ func resolveDef(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bo
 }
 
 func markSeen(seen map[string]bool, v *ir.Value) map[string]bool {
-	next := make(map[string]bool, len(seen)+1)
-	for k := range seen {
-		next[k] = true
-	}
+	next := maps.Clone(seen)
 	if reg := v.GetRegName(); reg != "" {
 		next[reg] = true
 	}

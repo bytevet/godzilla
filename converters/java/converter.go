@@ -528,8 +528,5 @@ func fileExists(p string) bool {
 
 // tail returns the last n bytes of b, for truncating build output in an error.
 func tail(b []byte, n int) []byte {
-	if len(b) > n {
-		return b[len(b)-n:]
-	}
-	return b
+	return b[max(0, len(b)-n):]
 }

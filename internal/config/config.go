@@ -130,19 +130,15 @@ func (c *Config) FilterFindings(findings []analysis.Finding, root string) ([]ana
 // pathExcluded reports whether a relative path is filtered out: not matching any
 // Include (when Include is non-empty), or matching any Exclude.
 func (c *Config) pathExcluded(rel string) bool {
-	if len(c.Include) > 0 {
-		included := false
-		for _, g := range c.Include {
-			if pathMatches(g, rel) {
-				included = true
-				break
-			}
-		}
-		if !included {
-			return true
-		}
+	if len(c.Include) > 0 && !matchesAny(c.Include, rel) {
+		return true
 	}
-	for _, g := range c.Exclude {
+	return matchesAny(c.Exclude, rel)
+}
+
+// matchesAny reports whether rel matches any of the path globs.
+func matchesAny(globs []string, rel string) bool {
+	for _, g := range globs {
 		if pathMatches(g, rel) {
 			return true
 		}

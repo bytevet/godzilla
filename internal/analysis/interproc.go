@@ -978,7 +978,7 @@ func analyzeFunc(
 	// monotonically across passes (deduped by effectSeen / reported).
 	// Fast path: a function with a single basic block has no control-flow merges
 	// or back-edges, so its taint converges in one forward pass. Skip the whole
-	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps, cloneState,
+	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps, the clone,
 	// preds/rpo indexes, and the multi-pass loop — and just seed and visit once.
 	// This is the majority of functions (every straight-line-lowered Python / JS /
 	// Ruby / Java / Go-closure body), so it removes most of the engine's
@@ -1033,9 +1033,7 @@ func analyzeFunc(
 			}
 			in := taintState{}
 			if idx == entry {
-				for k, v := range seedState {
-					in[k] = v
-				}
+				maps.Copy(in, seedState)
 			}
 			for _, p := range preds[idx] {
 				for k, v := range blockOut[p] {
@@ -1051,8 +1049,8 @@ func analyzeFunc(
 					visit(inst)
 				}
 			}
-			if !statesEqual(blockOut[idx], tainted) {
-				blockOut[idx] = cloneState(tainted)
+			if !maps.Equal(blockOut[idx], tainted) {
+				blockOut[idx] = maps.Clone(tainted)
 				changed = true
 			}
 		}

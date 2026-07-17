@@ -126,10 +126,8 @@ func (c *collector) collectClass(cl *ast.ClassLiteral, qualPrefix, fallbackName 
 }
 
 func leafName(qualname string) string {
-	for i := len(qualname) - 1; i >= 0; i-- {
-		if qualname[i] == '.' {
-			return qualname[i+1:]
-		}
+	if i := strings.LastIndexByte(qualname, '.'); i >= 0 {
+		return qualname[i+1:]
 	}
 	return qualname
 }

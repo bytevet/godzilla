@@ -103,17 +103,10 @@ func (tb *FileToolBox) ReadFileRange(path string, start, end int) (string, error
 		return "", fmt.Errorf("read %q: %w", path, err)
 	}
 	lines := strings.Split(string(data), "\n")
-	if start < 1 {
-		start = 1
-	}
-	if end < start {
-		end = start
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
+	start = max(start, 1)
+	end = min(max(end, start), len(lines))
 	var b strings.Builder
-	for i := start; i <= end && i <= len(lines); i++ {
+	for i := start; i <= end; i++ {
 		fmt.Fprintf(&b, "%d: %s\n", i, lines[i-1])
 		if b.Len() > maxToolOutput {
 			b.WriteString("... (truncated)\n")

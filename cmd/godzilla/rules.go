@@ -1,10 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"godzilla/internal/rules"
@@ -52,8 +53,8 @@ func runRulesList(args []string) {
 		fmt.Fprintf(os.Stderr, "error: loading rules: %v\n", err)
 		os.Exit(exitError)
 	}
-	sorted := append([]rules.Rule(nil), rs.Rules...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	sorted := slices.Clone(rs.Rules)
+	slices.SortFunc(sorted, func(a, b rules.Rule) int { return cmp.Compare(a.ID, b.ID) })
 	for _, r := range sorted {
 		langs := "all"
 		if len(r.Languages) > 0 {
