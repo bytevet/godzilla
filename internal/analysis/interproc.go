@@ -503,6 +503,25 @@ func analyzeFunc(
 	guards := buildGuardIndex(fn, rule, defs)
 	var curBlock int32
 
+	// linearFn marks a single-basic-block function — the straight-line-lowered
+	// Python/JS/Ruby/Java bodies, which carry NO CFG, so the dominance-based guard
+	// index above can never fire for them. In one linear block, program order IS
+	// dominance: a validator applied to a value before that value is returned
+	// guards the return just as a dominating branch would. validated records the
+	// registers a rule validator has been applied to, consulted only in the linear
+	// case at a RET (the CFG path keeps using the precise dominator guard).
+	linearFn := false
+	{
+		n := 0
+		for _, blk := range fn.Blocks {
+			if blk != nil {
+				n++
+			}
+		}
+		linearFn = n <= 1
+	}
+	validated := map[string]bool{}
+
 	// Seed tainted parameters into the entry block's in-state. A flow that enters
 	// through a parameter is inter-procedural, which lowers the confidence of any
 	// finding it feeds. interprocOrigins records every source origin whose taint
@@ -712,6 +731,22 @@ func analyzeFunc(
 		isSan := rule.IsSanitizer(callee)
 		isSrc := rule.IsSource(callee)
 		isProp := rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee)
+
+		// Record a validator application (ENG-9, linear case): mark the checked
+		// registers so a later RET of one of them in this same straight-line block
+		// is treated as validated. Cheap and gated on the rule declaring validators.
+		if linearFn && rule.HasValidators() && rule.IsValidator(callee) {
+			if v := inst.Call.GetValue(); v != nil {
+				if r := v.GetRegName(); r != "" {
+					validated[r] = true
+				}
+			}
+			for _, a := range args {
+				if r := a.GetRegName(); r != "" {
+					validated[r] = true
+				}
+			}
+		}
 
 		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
 		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
@@ -982,7 +1017,26 @@ func analyzeFunc(
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:
 			if _, pos, ok := firstTainted(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
-				res.returnsOrigin = pos
+				// Interprocedural ENG-9: a tainted value returned on a path a
+				// validator guard dominates (`if !valid(x) { return "" }; return x`)
+				// is validated on every returning path, so the function is not
+				// taint-returning for this rule. Suppressing the return summary
+				// stops a sanitized value from tainting callers — the cross-function
+				// analogue of the intra-procedural guarded-sink suppression below.
+				// The CFG guard covers multi-block functions; validated covers the
+				// single-block (no-CFG) straight-line case where order is dominance.
+				retValidated := false
+				if linearFn {
+					for _, op := range inst.GetOperands() {
+						if r := op.GetRegName(); r != "" && validated[r] {
+							retValidated = true
+							break
+						}
+					}
+				}
+				if !retValidated && !guards.guarded(curBlock, pos, tainted) {
+					res.returnsOrigin = pos
+				}
 			}
 		default:
 			if propagatingOps[inst.Op] {

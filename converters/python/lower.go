@@ -616,6 +616,36 @@ func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
 
+// selfFieldGlobal returns the synthetic global key for a one-level `self.<field>`
+// access inside a method, or "" when node is not such an access. It is the
+// cross-method channel for instance-field taint: keyed per (module, class,
+// field), `self.f = tainted` in one method and a read of `self.f` in a sibling
+// method of the same class link through the engine's existing global-taint
+// propagation with NO engine change (the store/read carry this key as a
+// GlobalName operand, which recordGlobalStore / readGlobalTaint already handle).
+// Object-insensitive (all instances of the class share the key) and scoped to
+// the method's own class+module, so a same-named field on an unrelated class in
+// another file cannot alias.
+func (fs *funcState) selfFieldGlobal(node astNode) string {
+	if fs.selfName == "" || fs.methodPrefix == "" || node.kind() != "Attribute" {
+		return ""
+	}
+	base := node.node("value")
+	if base == nil || base.kind() != "Name" || base.str("id") != fs.selfName {
+		return ""
+	}
+	attr := node.str("attr")
+	if attr == "" {
+		return ""
+	}
+	// methodPrefix ends with '.', e.g. "Runner." -> "pyfield:mod.Runner.field".
+	return "pyfield:" + fs.moduleName + "." + fs.methodPrefix + attr
+}
+
+func globalValue(name string) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
+}
+
 func stringValue(s string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
 }
@@ -879,6 +909,16 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 		inst.Op = ir.OpCode_OP_CODE_STORE
 		inst.Operands = []*ir.Value{base, val}
 		fs.emit(inst)
+		// Instance-field heap: `self.<field> = v` also stores into a per-(class,
+		// field) synthetic global so a sibling method that reads `self.<field>`
+		// observes the taint cross-method (see selfFieldGlobal). The register
+		// STORE above still handles intra-method / whole-object flow.
+		if g := fs.selfFieldGlobal(target); g != "" {
+			s := fs.newVoidInst(target)
+			s.Op = ir.OpCode_OP_CODE_STORE
+			s.Operands = []*ir.Value{globalValue(g), val}
+			fs.emit(s)
+		}
 	case "Sequence":
 		// Unpacking `a, b = rhs` (or `[a, b] = rhs`): bind each target element to
 		// the RHS value (element taint == container taint, mirroring for-loop
@@ -922,6 +962,14 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		inst.Op = ir.OpCode_OP_CODE_FIELD
 		inst.Operands = []*ir.Value{base}
 		inst.Comment = "attr:" + n.str("attr")
+		// Instance-field heap: a one-level `self.<field>` read also carries the
+		// per-(class, field) synthetic global as an operand, so readGlobalTaint
+		// seeds the result when a sibling method tainted that field (see
+		// selfFieldGlobal). visitFieldRead keys on operand 0 (the base) only, so
+		// the extra operand is inert to intra-method field-sensitivity.
+		if g := fs.selfFieldGlobal(n); g != "" {
+			inst.Operands = append(inst.Operands, globalValue(g))
+		}
 		fs.emit(inst)
 		return regValue(inst.Name)
 
