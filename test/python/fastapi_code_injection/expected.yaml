@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# FastAPI request-body param -> ast.parse/ast.Module -> compile/exec (CWE-95).
+findings:
+    - rule: py-code-injection
+      min: 1

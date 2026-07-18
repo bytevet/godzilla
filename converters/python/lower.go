@@ -14,7 +14,7 @@ import (
 // and methods) becomes its own ir.Function; module-level statements that are
 // not defs/classes are collected into one synthetic "<module>" function, the
 // Python analogue of Go's package-init/main flattening in converters/go.
-func convertModule(root astNode, filename, moduleName string) *ir.Module {
+func convertModule(root astNode, filename, moduleName string, handlerClassSet map[string]bool) *ir.Module {
 	mod := &ir.Module{
 		Name:     moduleName,
 		Language: "python",
@@ -45,19 +45,16 @@ func convertModule(root astNode, filename, moduleName string) *ir.Module {
 	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
 	// must be seeded as sources or the flow is never tainted. Recognition is
 	// data-driven (see the handler-recognition tables below), so it is not tied to
-	// any one framework. classBases maps every class to its base names so
-	// handler-class subclassing resolves transitively.
-	classBases := map[string][]string{}
-	collectClassBases(root.list("body"), classBases)
-	handlerClassSet := handlerClasses(classBases, handlerBaseClasses)
-
+	// any one framework. handlerClassSet — the set of request-handler class names
+	// (by simple name) — is computed across ALL files (lowerAll/globalHandlerClasses)
+	// so handler subclassing that crosses file boundaries still resolves.
 	var collect func(stmts []astNode, qualPrefix string, inHandlerClass bool)
 	collect = func(stmts []astNode, qualPrefix string, inHandlerClass bool) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
 				srcParams := routeHandlerParams(s, inHandlerClass)
-				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, srcParams)
+				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, srcParams, inHandlerClass)
 				functions = append(functions, fn)
 				// A nested def inside a handler is not itself a verb method of the
 				// class, so its handler-class context resets.
@@ -135,7 +132,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 // into an ir.Function containing one straight-line basic block. srcParams names
 // this function's route-handler parameters (see routeHandlerParams): each is an
 // untrusted taint source and is seeded with a synthetic source CALL below.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, srcParams []string) *ir.Function {
+func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, srcParams []string, inHandlerClass bool) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
@@ -151,6 +148,7 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
 	fs.aliases = aliases
+	fs.inHandlerClass = inHandlerClass
 	params := node.strList("params")
 	for _, p := range params {
 		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
@@ -280,7 +278,10 @@ func collectClassBases(stmts []astNode, out map[string][]string) {
 	for _, s := range stmts {
 		switch s.kind() {
 		case "ClassDef":
-			out[s.str("name")] = s.strList("bases")
+			// Append (union) rather than overwrite so a class name defined in more
+			// than one file (collectClassBases is also called across all files to
+			// resolve cross-file handler subclassing) keeps every base it declares.
+			out[s.str("name")] = append(out[s.str("name")], s.strList("bases")...)
 			collectClassBases(s.list("body"), out)
 		case "FunctionDef":
 			collectClassBases(s.list("body"), out)
@@ -333,6 +334,71 @@ func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
 	return regValue(inst.Name)
 }
 
+// emitHandlerSource emits a synthetic source CALL (routeParamSource) for a
+// request accessor reached through `self` in a handler-class method (Tornado
+// self.get_argument / self.request.body); its result register carries taint. The
+// canonical name is the same @http.param glob every Python taint rulepack already
+// treats as a source, so no rule change is needed beyond the accessor's own sink.
+func (fs *funcState) emitHandlerSource(n astNode, label string) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Comment = "handler-request-source:" + label
+	inst.Call = &ir.CallCommon{
+		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: routeParamSource}},
+		Callee: routeParamSource,
+	}
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
+// Tornado request accessors reached via `self` inside a handler-class method.
+// tornadoArgMethods are call accessors (self.get_argument(...)); the *.body /
+// *.arguments members of self.request are attribute reads (tornadoRequestAttrs).
+var (
+	tornadoArgMethods = map[string]bool{
+		"get_argument": true, "get_arguments": true,
+		"get_body_argument": true, "get_body_arguments": true,
+		"get_query_argument": true, "get_query_arguments": true,
+	}
+	tornadoRequestAttrs = map[string]bool{
+		"body": true, "arguments": true,
+		"body_arguments": true, "query_arguments": true, "files": true,
+	}
+)
+
+// selfRequestAccessor reports whether n is `self.request.<attr>` with attr an
+// untrusted Tornado request member, for a handler-class method (fs.selfName set).
+func (fs *funcState) selfRequestAccessor(n astNode) (attr string, ok bool) {
+	if !fs.inHandlerClass || fs.selfName == "" || n.kind() != "Attribute" {
+		return "", false
+	}
+	if !tornadoRequestAttrs[n.str("attr")] {
+		return "", false
+	}
+	req := n.node("value") // the `self.request` part
+	if req == nil || req.kind() != "Attribute" || req.str("attr") != "request" {
+		return "", false
+	}
+	base := req.node("value")
+	if base == nil || base.kind() != "Name" || base.str("id") != fs.selfName {
+		return "", false
+	}
+	return n.str("attr"), true
+}
+
+// selfArgMethod reports whether funcNode is `self.<get_argument-family>` for a
+// handler-class method, i.e. a Tornado request-argument accessor call.
+func (fs *funcState) selfArgMethod(funcNode astNode) bool {
+	if !fs.inHandlerClass || fs.selfName == "" || funcNode == nil || funcNode.kind() != "Attribute" {
+		return false
+	}
+	if !tornadoArgMethods[funcNode.str("attr")] {
+		return false
+	}
+	base := funcNode.node("value")
+	return base != nil && base.kind() == "Name" && base.str("id") == fs.selfName
+}
+
 // funcState holds the per-function lowering state: a monotonically
 // increasing temp-register counter, an environment mapping the current
 // Python variable name to its most recent gIR value (constant or register),
@@ -360,6 +426,15 @@ type funcState struct {
 	// are empty for non-methods.
 	selfName     string
 	methodPrefix string
+
+	// inHandlerClass marks that this function is a method of a web request-handler
+	// class (Tornado RequestHandler / Flask MethodView subclass; see
+	// handlerClassSet). In such a method the request object reached via `self`
+	// (`self.request.body`, `self.get_argument(...)`) is untrusted input, so those
+	// reads are lowered to a synthetic source CALL — the same @http.param trick the
+	// verb-method/route parameters use, but for the accessor style Tornado uses
+	// (CVE-2025-47782 motioneye: json.loads(self.request.body) -> shell pipeline).
+	inHandlerClass bool
 
 	// aliases maps a locally-bound import name to its canonical dotted path
 	// (FE-2): "sp" -> "subprocess" for `import subprocess as sp`, "system" ->
@@ -736,6 +811,12 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lookupName(n.str("id"))
 
 	case "Attribute":
+		// self.request.body / .arguments / ... in a handler-class method is the
+		// untrusted Tornado request payload: emit a synthetic source instead of a
+		// plain field read (CVE-2025-47782 motioneye).
+		if attr, ok := fs.selfRequestAccessor(n); ok {
+			return fs.emitHandlerSource(n, "self.request."+attr)
+		}
 		base := fs.lowerExpr(n.node("value"))
 		inst := fs.newValueInst(n)
 		inst.Op = ir.OpCode_OP_CODE_FIELD
@@ -784,7 +865,26 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 					Args:   []*ir.Value{{Kind: &ir.Value_GlobalName{GlobalName: dotted}}, idx},
 				}
 				fs.emit(inst)
-				return regValue(inst.Name)
+				src := regValue(inst.Name)
+				// When the base is one of THIS function's own parameters read
+				// directly (`param[key]`, not `param.attr[key]`), the param may
+				// already be tainted by an inter-procedural caller (e.g. a request
+				// dict passed into a helper: config.add_camera(device_details) then
+				// device_details['path']). The synthetic getitem source above only
+				// seeds taint when its dotted name matches a source glob, so it does
+				// NOT forward that incoming taint; also index the parameter and merge
+				// (BIN_OP_OR) so a tainted-param subscript still propagates, while a
+				// request-object glob source keeps firing via the call. Restricted to
+				// a plain-Name param base so global/attribute opaque bases are
+				// untouched (CVE-2025-47782 motioneye).
+				if baseNode.kind() == "Name" && fs.paramRegs[baseNode.str("id")] {
+					idxInst := fs.newValueInst(n)
+					idxInst.Op = ir.OpCode_OP_CODE_INDEX
+					idxInst.Operands = []*ir.Value{fs.lookupName(root), idx}
+					fs.emit(idxInst)
+					return fs.emitBinOp(ir.BinOpKind_BIN_OP_OR, src, regValue(idxInst.Name), n)
+				}
+				return src
 			}
 		}
 
@@ -925,6 +1025,21 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		return fs.lowerFormatCall(n, funcNode)
 	}
 
+	// Tornado request-argument accessor via `self` in a handler-class method
+	// (self.get_argument(...) / self.get_body_argument(...)): untrusted input.
+	// Lower the arguments for their side effects, then return a synthetic source
+	// (CVE-2025-47782 motioneye). Checked before self-method resolution so it wins
+	// over an (accidental) sibling-method match.
+	if fs.selfArgMethod(funcNode) {
+		for _, a := range n.list("args") {
+			fs.lowerExpr(a)
+		}
+		for _, kw := range n.list("keywords") {
+			fs.lowerExpr(kw.node("value"))
+		}
+		return fs.emitHandlerSource(n, "self."+funcNode.str("attr"))
+	}
+
 	// Lower any call embedded in the callee chain first, so a chained call like
 	// requests.get(url).json() still emits the inner requests.get call (an SSRF
 	// sink) even though the outer call is `.json()`. Mirrors JS's
@@ -962,11 +1077,31 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	if isSelfMethod {
 		cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
 	}
-	for _, a := range n.list("args") {
+	// An `ast.*` node constructor (ast.Module/ast.Expression/ast.Interactive/...)
+	// builds a new AST node from its child nodes; a node assembled from tainted
+	// parts is itself tainted. Its children are commonly wrapped in a list
+	// (`ast.Module(body=[node], type_ignores=[])`, CVE-2025-3248 langflow), but a
+	// list literal is lowered to an untainted placeholder on purpose (a direct-argv
+	// subprocess list must NOT be flagged -- see the Sequence case and the
+	// subprocess_argv_safe sentinel). So for ast constructors ONLY, spread a
+	// sequence argument's elements as direct call args, letting element taint reach
+	// the constructor (a rulepack propagator) without touching the general
+	// list-taint behavior any sink relies on.
+	astCtor := strings.HasPrefix(callee, "py:ast.")
+	appendArg := func(a astNode) {
+		if astCtor && a != nil && a.kind() == "Sequence" {
+			for _, e := range a.list("elts") {
+				cc.Args = append(cc.Args, fs.lowerExpr(e))
+			}
+			return
+		}
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
+	for _, a := range n.list("args") {
+		appendArg(a)
+	}
 	for _, kw := range n.list("keywords") {
-		cc.Args = append(cc.Args, fs.lowerExpr(kw.node("value")))
+		appendArg(kw.node("value"))
 	}
 
 	inst := fs.newValueInst(n)

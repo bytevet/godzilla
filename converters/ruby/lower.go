@@ -90,27 +90,33 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 			case "def":
 				localFuncs[identName(at(s, 1))] = true
 			case "class", "module":
-				collectNames(bodyStmts(at(s, 3)))
+				collectNames(bodyStmts(classModuleBody(s)))
 			}
 		}
 	}
 	collectNames(stmts)
 
 	var functions []*ir.Function
-	var collect func(ss []interface{}, qualPrefix string)
-	collect = func(ss []interface{}, qualPrefix string) {
+	var collect func(ss []interface{}, qualPrefix, className string)
+	collect = func(ss []interface{}, qualPrefix, className string) {
 		for _, s := range ss {
 			switch tag(s) {
 			case "def":
 				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs))
+			case "defs":
+				// A singleton/class method `def self.m` — analyzed like any def but
+				// canonically named by its enclosing CLASS (not the file path) so a
+				// call on the class (or an ActiveRecord relation of it) in another
+				// file resolves to it for cross-function taint.
+				functions = append(functions, lowerDefs(s, filename, moduleName, className, localFuncs))
 			case "class", "module":
 				// class C ... end → constant name at at(s,1) = ["const_ref",["@const","C",pos]]
 				name := identName(at(at(s, 1), 1))
-				collect(bodyStmts(at(s, 3)), qualPrefix+name+".")
+				collect(bodyStmts(classModuleBody(s)), qualPrefix+name+".", name)
 			}
 		}
 	}
-	collect(stmts, "")
+	collect(stmts, "", "")
 
 	// The module entry point: top-level statements that are not a def/class.
 	if init := lowerModuleInit(stmts, filename, moduleName, localFuncs); init != nil {
@@ -130,6 +136,19 @@ func programStmts(root interface{}) []interface{} {
 	return l
 }
 
+// classModuleBody returns the bodystmt node of a `class`/`module` node. Ripper
+// lays these out differently: `["class", const, superclass_or_null, bodystmt]`
+// (body at index 3, index 2 is the optional superclass) but `["module", const,
+// bodystmt]` (body at index 2). Reading a fixed index 3 for both silently drops
+// every nested module's contents — the common `module A; module B; class C …`
+// nesting used across Rails engines and gems.
+func classModuleBody(s interface{}) interface{} {
+	if tag(s) == "module" {
+		return at(s, 2)
+	}
+	return at(s, 3)
+}
+
 // bodyStmts returns the statement list inside a `["bodystmt",[stmts],…]`.
 func bodyStmts(n interface{}) []interface{} {
 	if tag(n) != "bodystmt" {
@@ -145,7 +164,7 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 	var top []interface{}
 	for _, s := range stmts {
 		switch tag(s) {
-		case "def", "class", "module", "void_stmt":
+		case "def", "defs", "class", "module", "void_stmt":
 			// skip
 		default:
 			top = append(top, s)
@@ -193,9 +212,52 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 	return fn
 }
 
-// paramNames extracts the required positional parameter names from a `params`
-// node (`["params", [reqs], opts, rest, …]`). Optional/keyword/splat params are
-// out of scope for the taint-focused MVP.
+// lowerDefs lowers a singleton/class method `def self.m(...)` into a function.
+// Its layout is ["defs", recv, ".", methodIdent, params, bodystmt].
+//
+// The canonical name is class-qualified but FILE-PATH-INDEPENDENT
+// (`ruby:<Class>.<method>`), so a call on the class — or on an ActiveRecord
+// relation of it, `Model.scope(...).class_method(arg)`, which dispatches to the
+// class method — in ANOTHER file resolves to this function for cross-function
+// taint (the engine matches a call's callee to a function by exact canonical
+// name). A synthetic receiver parameter occupies slot 0, mirroring the receiver
+// that a `recv.m(args)` call site prepends to its arguments, so the arg->param
+// mapping lines the first real argument up with the first declared parameter.
+func lowerDefs(defNode interface{}, filename, moduleName, className string, localFuncs map[string]bool) *ir.Function {
+	name := identName(at(defNode, 3))
+	canonical := "ruby:" + className + "." + name
+	if className == "" {
+		// A top-level `def self.m` with no enclosing class: fall back to the
+		// file-scoped naming so it is at least uniquely identified.
+		canonical = "ruby:" + moduleName + "." + name
+	}
+	fn := &ir.Function{
+		Name:          name,
+		ObjectName:    name,
+		PackageName:   moduleName,
+		CanonicalName: canonical,
+		Pos:           posFrom(filename, defNode),
+	}
+	fs := newFuncState(filename, moduleName, localFuncs)
+	// Synthetic receiver at slot 0 (the class / relation); never referenced.
+	fn.Params = append(fn.Params, regValue("self"))
+	for _, p := range paramNames(at(defNode, 4)) {
+		v := regValue(p)
+		fn.Params = append(fn.Params, v)
+		fs.env[p] = v
+		fs.paramNames[p] = true
+	}
+	fs.lowerBody(bodyStmts(at(defNode, 5)))
+	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	return fn
+}
+
+// paramNames extracts the positional parameter names from a `params` node
+// (`["params", [reqs], [opts], rest, …]`) in source order: required first, then
+// optional (defaulted) params. Binding the optionals matters for taint — a
+// classic vulnerable signature is `def m(filter = nil)`, and without the
+// optional bound the tainted argument would map to no parameter and drop.
+// Keyword/splat/block params remain out of scope for the taint-focused MVP.
 func paramNames(n interface{}) []string {
 	// def may wrap params in `paren`: ["paren", ["params", …]].
 	if tag(n) == "paren" {
@@ -204,10 +266,21 @@ func paramNames(n interface{}) []string {
 	if tag(n) != "params" {
 		return nil
 	}
-	reqs, _ := asList(at(n, 1))
 	var out []string
+	reqs, _ := asList(at(n, 1))
 	for _, r := range reqs {
 		if name := identName(r); name != "" {
+			out = append(out, name)
+		}
+	}
+	// Optionals: index 2 is a list of [identNode, defaultExpr] pairs.
+	opts, _ := asList(at(n, 2))
+	for _, o := range opts {
+		pair, ok := asList(o)
+		if !ok || len(pair) == 0 {
+			continue
+		}
+		if name := identName(pair[0]); name != "" {
 			out = append(out, name)
 		}
 	}
@@ -291,9 +364,19 @@ func (fs *funcState) lowerStmt(s interface{}) {
 	switch tag(s) {
 	case "void_stmt", "":
 		return
-	case "assign", "opassign":
+	case "assign":
 		// ["assign", target, rhs]; target is ["var_field",["@ident","x",pos]].
 		val := fs.lowerExpr(at(s, 2))
+		if name := identName(at(at(s, 1), 1)); name != "" {
+			fs.env[name] = val
+		}
+		return
+	case "opassign":
+		// ["opassign", target, ["@op","||="/"+="/…], rhs] — the rhs is at index 3
+		// (index 2 is the operator token), so `@x ||= expr` must lower at(s,3);
+		// lowering index 2 would emit the operator and drop the expression (and any
+		// source/sink/cross-call inside it).
+		val := fs.lowerExpr(at(s, 3))
 		if name := identName(at(at(s, 1), 1)); name != "" {
 			fs.env[name] = val
 		}
@@ -371,6 +454,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerMethodAddBlock(n)
 	case "fcall":
 		return fs.lowerCallExpr("ruby:"+identName(at(n, 1)), nil, n)
+	case "case":
+		return fs.lowerCase(n)
 	case "array":
 		// Lower elements (so a source/sink inside fires); the container itself is
 		// left untainted, matching the other frontends' list handling.
@@ -414,6 +499,43 @@ func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 		return constString("")
 	}
 	return acc
+}
+
+// lowerCase lowers `case cond; when …; else …; end`. The condition and EVERY
+// branch body are lowered inline into the current block (straight-line, like the
+// rest of the Ruby frontend), so taint reaching any branch — e.g. a raw SQL
+// string built only in the `else` arm — is analyzed rather than dropped as an
+// unsupported node.
+func (fs *funcState) lowerCase(n interface{}) *ir.Value {
+	fs.lowerExpr(at(n, 1)) // subject expression (for any embedded source/sink)
+	var last *ir.Value
+	node := at(n, 2)
+	for node != nil {
+		switch tag(node) {
+		case "when":
+			// ["when", conditions, body, next] — next is a `when`, `else`, or nil.
+			if conds, ok := asList(at(node, 1)); ok {
+				for _, c := range conds {
+					fs.lowerExpr(c)
+				}
+			}
+			if body, ok := asList(at(node, 2)); ok {
+				last = fs.lowerSeqLast(body)
+			}
+			node = at(node, 3)
+		case "else":
+			if body, ok := asList(at(node, 1)); ok {
+				last = fs.lowerSeqLast(body)
+			}
+			node = nil
+		default:
+			node = nil
+		}
+	}
+	if last == nil {
+		return constString("")
+	}
+	return last
 }
 
 // lowerBacktick lowers a backtick command literal “ `cmd #{x}` “ (and %x{}) —
@@ -512,6 +634,15 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 	// Lower the receiver first so a chained inner call (a.b(x).c) still emits.
 	recvVal := fs.lowerExpr(recv)
 	callee := fs.calleeFor(recv, method)
+	// A method chain rooted at a constant — `Model.scope(a).class_method(x)` —
+	// dispatches (in ActiveRecord, via the relation) to the class's method. Give
+	// it a class-qualified callee so it resolves to that lowered `def self.method`
+	// across files, instead of the bare, unresolvable `ruby:method`.
+	if callee == "ruby:"+method {
+		if base := chainRootConstBase(recv); base != "" {
+			callee = "ruby:" + base + "." + method
+		}
+	}
 	argVals := []*ir.Value{recvVal} // receiver as operand 0 (rules pin the tainted arg with #1)
 	for _, a := range args {
 		argVals = append(argVals, fs.lowerExpr(a))
@@ -534,6 +665,36 @@ func (fs *funcState) calleeFor(recv interface{}, method string) string {
 		return "ruby:" + constPathName(recv) + "." + method
 	}
 	return "ruby:" + method
+}
+
+// chainRootConstBase returns the base (last-segment) name of the constant that a
+// receiver method chain is rooted at, or "" if it does not root at a constant.
+// It unwraps call / method_add_arg / method_add_block nodes down to the chain's
+// head receiver: `Foo::Bar.a(x).b` roots at `Foo::Bar`, base `Bar`. This lets a
+// call on an ActiveRecord relation (`Model.where(...).klass_method(arg)`)
+// resolve to the class method `ruby:Model.klass_method`, since a class/scope
+// method invoked on a relation dispatches back to the class.
+func chainRootConstBase(n interface{}) string {
+	for i := 0; i < 64; i++ {
+		switch tag(n) {
+		case "var_ref", "vcall":
+			if tag(at(n, 1)) == "@const" {
+				return identName(at(n, 1))
+			}
+			return ""
+		case "const_path_ref":
+			return identName(at(n, 2)) // last segment of A::B::C
+		case "top_const_ref":
+			return identName(at(n, 1))
+		case "call", "command_call":
+			n = at(n, 1) // unwrap to the receiver
+		case "method_add_arg", "method_add_block":
+			n = at(n, 1) // unwrap to the inner call
+		default:
+			return ""
+		}
+	}
+	return ""
 }
 
 // constPathName flattens a namespaced-constant node (`Net::HTTP`, `A::B::C`,

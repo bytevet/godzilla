@@ -28,6 +28,13 @@ rules:
       - "ruby:*exec_query"
       - "ruby:*find_by_sql"
       - "ruby:*.where_sql"
+      # Arel.sql(x) wraps a RAW SQL fragment that ActiveRecord will not escape
+      # (used to bypass its safe-query protection, e.g. inside `where(Arel.sql(
+      # "... #{input} ..."))`), so a tainted argument is a direct injection. The
+      # receiver `Arel` is operand 0, so the SQL fragment is logical arg #1 — the
+      # safe parameterized forms (`where("x = ?", v)`, `where(col: v)`) never call
+      # Arel.sql, so this raises no false positive on them.
+      - "ruby:Arel.sql#1"
     sanitizers:
       - "ruby:*.sanitize_sql"
       - "ruby:*.quote"

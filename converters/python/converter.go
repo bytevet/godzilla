@@ -138,6 +138,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		if results[0].err != nil {
 			return nil, results[0].err
 		}
+		lowerAll(results)
 		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
 	}
 
@@ -156,6 +157,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
 	})
 
+	// Lower after every file is parsed, so the handler-class set spans all files.
+	lowerAll(results)
+
 	prog := &ir.Program{Mode: "ast"}
 	var convertErrs []string
 	for i, r := range results {
@@ -172,13 +176,105 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			abs, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 
+	resolveCrossModuleCalls(prog)
+
 	return prog, nil
 }
 
-// pyFileResult is one file's outcome within a batch chunk.
+// resolveCrossModuleCalls rewrites CALL callees that reference a function in
+// ANOTHER file via its dotted import path (`from pkg.util import f; f(x)` lowers
+// to callee "py:pkg.util.f") to that function's real canonical name, which the
+// module frontend builds from the file's path relative to the scan root and thus
+// uses "/" separators and may lack the import's leading package prefix (scanning
+// inside a package). The engine resolves calls by EXACT canonical name, so
+// without this a cross-subdir call never links and taint stops at the call --
+// only same-directory calls (bare module name == import name) resolved before.
+//
+// Matching is by logical dotted path (module "/"→"."), taking the LONGEST
+// dot-aligned suffix that names exactly ONE function; an ambiguous or absent
+// match leaves the callee untouched. Single-component method callees ("x.execute")
+// can never match (a function's logical path always has >=1 dot: module + name),
+// so ordinary method/sink calls are unaffected -- only genuine multi-component
+// import paths resolve. Runs only in directory scans (single-file scans have one
+// module and nothing to cross-link).
+func resolveCrossModuleCalls(prog *ir.Program) {
+	// logical maps a "py:"-prefixed canonical name to its dotted logical path.
+	logical := func(canon string) string {
+		return strings.ReplaceAll(strings.TrimPrefix(canon, "py:"), "/", ".")
+	}
+
+	// Index every lowered function by its logical dotted path. A path shared by
+	// two functions is ambiguous and never used as a rewrite target.
+	rawByLogical := map[string]string{} // logical path -> raw canonical
+	ambiguous := map[string]bool{}
+	rawSet := map[string]bool{} // every function's raw canonical (exact-resolvable already)
+	for _, m := range prog.Modules {
+		for _, fn := range m.Functions {
+			if fn.CanonicalName == "" {
+				continue
+			}
+			rawSet[fn.CanonicalName] = true
+			lp := logical(fn.CanonicalName)
+			if _, seen := rawByLogical[lp]; seen {
+				ambiguous[lp] = true
+				continue
+			}
+			rawByLogical[lp] = fn.CanonicalName
+		}
+	}
+
+	// resolve returns the raw canonical for a callee's logical path via the
+	// longest unique dot-aligned suffix, or "" if none/ambiguous.
+	resolve := func(calleeLogical string) string {
+		s := calleeLogical
+		for {
+			if raw, ok := rawByLogical[s]; ok && !ambiguous[s] {
+				return raw
+			}
+			i := strings.IndexByte(s, '.')
+			if i < 0 {
+				return ""
+			}
+			s = s[i+1:] // drop the leading package component and retry a shorter suffix
+		}
+	}
+
+	for _, m := range prog.Modules {
+		for _, fn := range m.Functions {
+			for _, b := range fn.Blocks {
+				for _, inst := range b.Instrs {
+					cc := inst.GetCall()
+					if cc == nil {
+						continue
+					}
+					callee := cc.GetCallee()
+					if callee == "" || rawSet[callee] {
+						continue // unset, or already resolves by exact name
+					}
+					raw := resolve(logical(callee))
+					if raw == "" || raw == callee {
+						continue
+					}
+					cc.Callee = raw
+					if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
+						fnv.Kind = &ir.Value_FuncName{FuncName: raw}
+					}
+				}
+			}
+		}
+	}
+}
+
+// pyFileResult is one file's outcome within a batch chunk. Parsing and lowering
+// are two phases: convertPythonChunk fills doc/file/module (or err); lowerParsed
+// then turns doc into mod, after a whole-program pass has computed the global
+// request-handler class set (cross-file subclassing, see lowerAll).
 type pyFileResult struct {
-	mod *ir.Module
-	err error
+	doc    astNode
+	file   string
+	module string
+	mod    *ir.Module
+	err    error
 }
 
 // convertPythonChunk parses a contiguous chunk of files with a single
@@ -214,8 +310,40 @@ func (c *Converter) convertPythonChunk(pythonExe, scriptPath, root string, files
 			out[i].err = fmt.Errorf("py_converter: failed to parse %s: %v", f, errMsg)
 			continue
 		}
-		out[i].mod = convertModule(doc, f, moduleNameFor(root, f))
+		// Parse phase only: keep the AST; lowering happens in lowerParsed after the
+		// global handler-class set is known (lowerAll).
+		out[i].doc = doc
+		out[i].file = f
+		out[i].module = moduleNameFor(root, f)
 	}
+}
+
+// lowerAll lowers every successfully-parsed result into a gIR Module. It first
+// computes the request-handler class set across ALL files (Tornado/Flask handler
+// subclassing frequently crosses file boundaries — e.g. ConfigHandler(BaseHandler)
+// with BaseHandler(RequestHandler) in another module), so a handler's request
+// accessors are seeded as taint sources regardless of where its base class lives.
+func lowerAll(results []pyFileResult) {
+	handlerSet := globalHandlerClasses(results)
+	for i := range results {
+		if results[i].err != nil || results[i].doc == nil {
+			continue
+		}
+		results[i].mod = convertModule(results[i].doc, results[i].file, results[i].module, handlerSet)
+	}
+}
+
+// globalHandlerClasses builds the transitive set of request-handler class names
+// (by simple name) across every parsed file, so cross-file subclassing resolves.
+func globalHandlerClasses(results []pyFileResult) map[string]bool {
+	classBases := map[string][]string{}
+	for i := range results {
+		if results[i].err != nil || results[i].doc == nil {
+			continue
+		}
+		collectClassBases(results[i].doc.list("body"), classBases)
+	}
+	return handlerClasses(classBases, handlerBaseClasses)
 }
 
 // writeHelperScript materializes the embedded pyast.py into a temp file so it
@@ -248,5 +376,13 @@ func moduleNameFor(root, file string) string {
 	if err != nil {
 		rel = filepath.Base(file)
 	}
-	return filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
+	name := filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
+	// A package's `pkg/__init__.py` IS the module `pkg` in Python; drop the
+	// implicit __init__ component so an import of `pkg` (callee "py:pkg.f")
+	// resolves to its function's canonical name (see resolveCrossModuleCalls).
+	name = strings.TrimSuffix(name, "/__init__")
+	if name == "__init__" {
+		name = "" // a bare __init__.py scanned at its own dir: the package root
+	}
+	return name
 }

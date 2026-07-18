@@ -24,6 +24,12 @@ rules:
       # More Express request accessors (the URL/path are attacker-influenced).
       - "js:*req.originalUrl"
       - "js:*req.path*"
+      # req.url is the raw request target (pathname+query) on a Node
+      # http.IncomingMessage — attacker-controlled and the value most path
+      # helpers are built from (e.g. webpack-dev-middleware getFilenameFromUrl,
+      # CVE-2024-29180). Trailing (no `*`) so it matches `...req.url` exactly and
+      # not `req.urlencoded`.
+      - "js:*req.url"
       # Koa request accessors (ctx.query, ctx.params, ctx.headers, ctx.cookies,
       # ctx.request.body/query).
       - "js:*ctx.query*"
@@ -52,6 +58,16 @@ rules:
       - "js:*fs.readFile*"
       - "js:*fs.createReadStream"
       - "js:*.sendFile"
+      # File reads are not always on the literal `fs` module: a static-file
+      # server often reads through an injected filesystem abstraction (memfs,
+      # webpack-dev-middleware's `context.outputFileSystem`, a Vinyl/GracefulFS
+      # wrapper), so the receiver is an opaque object rather than `fs`. Match the
+      # read/stat entry points by method name so a tainted path handed to any
+      # `*.statSync`/`*.createReadStream` is caught. These are reads that act on
+      # a path argument, so a tainted path reaching them is the traversal; they
+      # do not fire without taint, so broadening the receiver adds no FP.
+      - "js:*.statSync"
+      - "js:*.createReadStream"
     # path.basename strips the directory component, so it genuinely prevents
     # traversal, mirroring go-path-traversal's filepath.Base. path.join /
     # path.resolve / path.normalize do NOT contain input to a base directory
@@ -63,3 +79,12 @@ rules:
       - "js:*path.join"
       - "js:*path.resolve"
       - "js:*path.normalize"
+      # URL/query decoding of an already-tainted value returns an equally
+      # tainted value (they decode `%2e%2e` -> `..`, if anything WIDENING the
+      # traversal surface), so they carry taint from arg to result. Modeled as
+      # propagators (not sanitizers): decoding never contains a path to a base
+      # directory. querystring.unescape sits between the request pathname and
+      # path.join in webpack-dev-middleware's getFilenameFromUrl.
+      - "js:*querystring.unescape"
+      - "js:*querystring.parse"
+      - "js:*url.parse"

@@ -10,15 +10,16 @@
 # without a build; Go/Java CVEs need a toolchain build and are omitted (see BACKLOG
 # COV-11/13).
 #
-# STATUS: as of this writing every entry MISSES — each is a genuine, correctly-pinned
-# flow, but blocked by a known modeling gap (noted per entry): an unmodeled framework
-# source (FastAPI/Tornado/queue bodies), an unmodeled sink (httpx, requests.request,
-# memfs), a deep inter-file inter-procedural hop, or the conservative SSRF fixed-host
-# suppression. This is the point of the metric: as COV-11/12/13 land, entries flip
-# MISS -> HIT and the gain is measured, not assumed.
+# STATUS: recall 3/7. HIT: langflow (FastAPI body source + ast-pipeline propagators),
+# motioneye (Tornado source + cross-file/cross-module subprocess flow), decidim (Ruby
+# module/class-method lowering + Arel.sql sink). The remaining 4 MISS on deeper limits
+# noted per entry: a request-attribute alias not resolved to a source (mlflow), an
+# unmodeled framework pipeline (gradio), cross-module default-export + memoized-call
+# resolution (webpack), and a thread-boundary + instance-field-persistence heap flow
+# (pyload). This is the point of the metric: entries flip MISS -> HIT as coverage lands.
 cves:
   # --- Python -------------------------------------------------------------------
-  - cve: CVE-2025-52967        # gap: requests.request sink + fixed-host SSRF suppression
+  - cve: CVE-2025-52967        # MISS: requests.request sink now modeled; blocked by `a = request.args; a.get()` alias not seeded
     project: mlflow/mlflow
     url: https://github.com/mlflow/mlflow.git
     ref: 0e0fe9e665aece995c0a9a54ca400961568fa05a
@@ -36,7 +37,7 @@ cves:
     rule: py-sql-injection
     cwe: CWE-89
 
-  - cve: CVE-2025-3248         # gap: FastAPI Pydantic-body source not seeded
+  - cve: CVE-2025-3248         # HIT: FastAPI body source + ast-pipeline propagators
     project: langflow-ai/langflow
     url: https://github.com/langflow-ai/langflow.git
     ref: "1.2.0"
@@ -45,12 +46,12 @@ cves:
     rule: py-code-injection
     cwe: CWE-94
 
-  - cve: CVE-2025-47782        # gap: Tornado get_argument / request-body source not seeded
+  - cve: CVE-2025-47782        # HIT: Tornado source -> cross-file/cross-module subprocess sink
     project: motioneye-project/motioneye
     url: https://github.com/motioneye-project/motioneye.git
     ref: c813b74aa6cb33418c4e48ba7e5da649cd93635a
     subdir: motioneye
-    sink_file: controls/v4l2ctl.py
+    sink_file: utils/__init__.py   # the subprocess.run call_subprocess reaches, from device via v4l2ctl.py
     rule: py-command-injection
     cwe: CWE-78
 
@@ -64,7 +65,7 @@ cves:
     cwe: CWE-918
 
   # --- Ruby ---------------------------------------------------------------------
-  - cve: CVE-2024-43415        # gap: params -> helper -> Arel.sql .where inter-procedural hop
+  - cve: CVE-2024-43415        # HIT: Ruby module/class-method lowering + Arel.sql#1 sink
     project: decidim-ice/decidim-module-decidim_awesome
     url: https://github.com/decidim-ice/decidim-module-decidim_awesome.git
     ref: a0464aab671fc7cdbad0506912219a58643426d9
