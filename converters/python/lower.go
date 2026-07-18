@@ -1244,6 +1244,11 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		cc.Value = recvVal // receiver -> callee param 0 (CHA seedInvokeArgs)
 		cc.MethodName = funcNode.str("attr")
 		cc.IsInvoke = true // the engine gates CHA dispatch on this field
+		// Python has no static receiver type, so this INVOKE is resolved by bare
+		// method NAME. Flag it so the engine dispatches it only when the name is
+		// unambiguous (a type-resolved invoke would fan out) — the dispatch
+		// discipline is thus chosen from IR, not a language check in the engine.
+		cc.UntypedDispatch = true
 	} else {
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}}
 	}

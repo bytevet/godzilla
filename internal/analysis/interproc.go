@@ -192,29 +192,16 @@ func injectableArgs(sinkArgs []int32, callee string, args []*ir.Value) []*ir.Val
 // why such findings stay Medium confidence. It depends only on the immutable
 // function index, so it is built once and shared by every rule.
 //
-// The pool is populated from two converter-provided signals; the DISPATCH policy
-// (fan out to all implementers vs. resolve only when unambiguous) is decided at
-// the call site from the same method_name signal, not by any language check.
+// A frontend marks every method — Go, Python, … — with Function.method_name, so
+// the engine identifies methods and their bare name from IR alone, parsing no
+// canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
+// only when the name is unambiguous) is likewise chosen from IR at the call site,
+// via CallCommon.untyped_dispatch, not from any language check here.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
-		switch {
-		case fn.GetMethodName() != "":
-			// A method the frontend explicitly tagged with Function.method_name (an
-			// untyped, name-resolved language, e.g. Python): a cross-object call
-			// `obj.method(x)` lowers to an INVOKE whose MethodName is this bare name.
-			// Tagging (vs. indexing every function by trailing name) keeps free
-			// functions out of the fan-out.
-			methodImpls[fn.GetMethodName()] = append(methodImpls[fn.GetMethodName()], name)
-		case strings.HasPrefix(name, "go:("):
-			// A Go method, identified by the Go frontend's receiver-qualified
-			// canonical name `go:(*T).Method` (the same naming the engine reads for
-			// request-object receivers). Its concrete method satisfies an interface
-			// abstractly named at the INVOKE, so index it under the bare method name.
-			if i := strings.LastIndex(name, "."); i >= 0 {
-				bare := name[i+1:]
-				methodImpls[bare] = append(methodImpls[bare], name)
-			}
+		if bare := fn.GetMethodName(); bare != "" {
+			methodImpls[bare] = append(methodImpls[bare], name)
 		}
 	}
 	return methodImpls
@@ -917,29 +904,26 @@ func analyzeFunc(
 		// receiver (it lives in Call.Value), so they map to a concrete method's
 		// params shifted by one — param 0 is the receiver.
 		if inst.Call.GetIsInvoke() {
-			// The dispatch discipline is driven by IR the converter supplies, not by
-			// any language-specific check in the engine: a frontend sets
-			// Function.method_name when it resolved a method by BARE NAME with no
-			// receiver type (the untyped languages). That resolution is applied only
-			// when UNAMBIGUOUS — otherwise a polymorphic name like `run_query`/
-			// `execute` would seed taint into every same-named method across
-			// unrelated classes, a cross-object fan-out that floods real code with
-			// false positives. Dispatch the frontend resolved with type information
-			// (a Go interface method, keyed by its receiver-qualified canonical name
-			// and left untagged) carries the standard, type-bounded CHA
-			// over-approximation, so it fans out to every implementer.
-			var nameOnly []string
-			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
-				if fn := byKey[impl]; fn != nil && fn.GetMethodName() != "" {
-					nameOnly = append(nameOnly, impl)
-					continue
+			// The dispatch discipline comes from IR the converter supplies, not from
+			// any language check in the engine. When the frontend resolved the call
+			// by bare method NAME with no static receiver type (untyped_dispatch —
+			// the untyped languages), apply it ONLY when the name is unambiguous:
+			// otherwise a polymorphic name like `run_query`/`execute` would seed
+			// taint into every same-named method across unrelated classes, a
+			// cross-object fan-out that floods real code with false positives. A
+			// type-resolved invoke (a Go interface method) carries the standard,
+			// type-bounded CHA over-approximation, so it fans out to every implementer.
+			impls := methodImpls[inst.Call.GetMethodName()]
+			if inst.Call.GetUntypedDispatch() {
+				if len(impls) == 1 {
+					seedInvokeArgs(impls[0])
+					pullReturnTaint(impls[0])
 				}
-				seedInvokeArgs(impl)
-				pullReturnTaint(impl)
-			}
-			if len(nameOnly) == 1 {
-				seedInvokeArgs(nameOnly[0])
-				pullReturnTaint(nameOnly[0])
+			} else {
+				for _, impl := range impls {
+					seedInvokeArgs(impl)
+					pullReturnTaint(impl)
+				}
 			}
 		}
 

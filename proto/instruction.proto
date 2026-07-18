@@ -156,4 +156,10 @@ message CallCommon {
   string method_name = 4;  // Only for is_invoke=true
   string callee = 5;       // Resolved canonical callee name when statically known
                            // (e.g. "go:net/http.HandleFunc", "builtin.append"); empty if fully dynamic.
+  bool untyped_dispatch = 6; // is_invoke resolution is by bare method NAME with no static
+                             // receiver type (untyped languages, e.g. Python obj.method()).
+                             // The engine resolves such a call only when the name is
+                             // unambiguous; a type-resolved invoke (false) fans out to every
+                             // implementer via CHA. Lets the engine pick its dispatch
+                             // discipline from converter-supplied info, not a language check.
 }

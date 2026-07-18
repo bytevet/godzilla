@@ -398,6 +398,13 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		Synthetic:     f.Synthetic != "",
 		CanonicalName: c.canonicalFunc(f),
 	}
+	// Tag a method with its bare name so the engine indexes it for CHA dynamic
+	// dispatch without parsing the canonical name. A method is type-resolved
+	// (the receiver has a static type), so the call site is left with
+	// untyped_dispatch=false and the engine fans out to every implementer.
+	if f.Signature != nil && f.Signature.Recv() != nil {
+		irFunc.MethodName = f.Name()
+	}
 
 	if f.Signature != nil {
 		irFunc.Signature = c.convertSignature(f.Signature)
