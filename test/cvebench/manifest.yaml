@@ -1,53 +1,82 @@
-# Real-world CVE recall benchmark (TRUST-11). Ground truth: each entry is a real
-# CVE in a famous project pinned to its VULNERABLE commit, with the sink file
-# verified against the fix diff. This is tracked ALONGSIDE the hand-written
-# corpus F1 (which is 1.000) — real-world recall measures modeling BREADTH
-# (source/framework/sink coverage), which the curated corpus cannot.
+# Real-world CVE recall benchmark (TRUST-11). Ground truth: each entry is a real,
+# recent (2024-2025) CVE in a popular project, pinned to its VULNERABLE ref, with
+# the sink file confirmed against the fix diff (ref = the fix commit's parent SHA,
+# or the last affected release tag). Tracked ALONGSIDE the hand-written corpus F1
+# (which is 1.000) — real-world recall measures modeling BREADTH (source/framework/
+# sink coverage), which the curated corpus cannot.
 #
-# Opt-in: `GODZILLA_CVE_BENCH=1 go test ./test/cvebench/` — it clones external
-# repos over the network. Entries default to parse-only frontends (Python/JS/
-# Ruby), which scan without a build; Go/Java CVEs need a toolchain build and are
-# omitted here (see the report and BACKLOG COV-11/13).
+# Opt-in: `GODZILLA_CVE_BENCH=1 go test ./test/cvebench/` — it clones external repos
+# over the network. Entries are parse-only frontends (Python/JS/TS/Ruby), which scan
+# without a build; Go/Java CVEs need a toolchain build and are omitted (see BACKLOG
+# COV-11/13).
+#
+# STATUS: as of this writing every entry MISSES — each is a genuine, correctly-pinned
+# flow, but blocked by a known modeling gap (noted per entry): an unmodeled framework
+# source (FastAPI/Tornado/queue bodies), an unmodeled sink (httpx, requests.request,
+# memfs), a deep inter-file inter-procedural hop, or the conservative SSRF fixed-host
+# suppression. This is the point of the metric: as COV-11/12/13 land, entries flip
+# MISS -> HIT and the gain is measured, not assumed.
 cves:
-  - cve: CVE-2022-35918
-    project: streamlit/streamlit
-    url: https://github.com/streamlit/streamlit.git
-    ref: "1.11.0"
-    subdir: lib/streamlit
-    sink_file: components/v1/components.py
-    rule: py-path-traversal
-    cwe: CWE-22
+  # --- Python -------------------------------------------------------------------
+  - cve: CVE-2025-52967        # gap: requests.request sink + fixed-host SSRF suppression
+    project: mlflow/mlflow
+    url: https://github.com/mlflow/mlflow.git
+    ref: 0e0fe9e665aece995c0a9a54ca400961568fa05a
+    subdir: mlflow/server
+    sink_file: server/handlers.py
+    rule: py-ssrf
+    cwe: CWE-918
 
-  - cve: CVE-2023-51449
-    project: gradio-app/gradio
-    url: https://github.com/gradio-app/gradio.git
-    ref: 992d540c3df23bf23b897eb99da8c2c39eb59d50
-    subdir: gradio
-    sink_file: routes.py
-    rule: py-path-traversal
-    cwe: CWE-22
+  - cve: CVE-2025-55156        # gap: deep inter-procedural hop request -> add_links -> update_link_info
+    project: pyload/pyload
+    url: https://github.com/pyload/pyload.git
+    ref: a123accec0618798db77f9f5bc66838b741d9f58
+    subdir: src
+    sink_file: core/database/file_database.py
+    rule: py-sql-injection
+    cwe: CWE-89
 
-  - cve: CVE-2021-21315
-    project: sebhildebrandt/systeminformation
-    url: https://github.com/sebhildebrandt/systeminformation.git
-    ref: v5.3.0
-    sink_file: lib/internet.js
-    rule: js-command-injection
+  - cve: CVE-2025-3248         # gap: FastAPI Pydantic-body source not seeded
+    project: langflow-ai/langflow
+    url: https://github.com/langflow-ai/langflow.git
+    ref: "1.2.0"
+    subdir: src/backend/base/langflow
+    sink_file: utils/validate.py
+    rule: py-code-injection
+    cwe: CWE-94
+
+  - cve: CVE-2025-47782        # gap: Tornado get_argument / request-body source not seeded
+    project: motioneye-project/motioneye
+    url: https://github.com/motioneye-project/motioneye.git
+    ref: c813b74aa6cb33418c4e48ba7e5da649cd93635a
+    subdir: motioneye
+    sink_file: controls/v4l2ctl.py
+    rule: py-command-injection
     cwe: CWE-78
 
-  - cve: CVE-2021-43788
-    project: NodeBB/NodeBB
-    url: https://github.com/NodeBB/NodeBB.git
-    ref: v1.18.4
-    sink_file: src/languages.js
-    rule: js-path-traversal
-    cwe: CWE-22
+  - cve: CVE-2024-48052        # gap: httpx stream sink + indirect queue-payload source
+    project: gradio-app/gradio
+    url: https://github.com/gradio-app/gradio.git
+    ref: 8805fc48ae7884ae8ce8dcc0f533e135d9e5d80e
+    subdir: gradio
+    sink_file: processing_utils.py
+    rule: py-ssrf
+    cwe: CWE-918
 
-  - cve: CVE-2023-32235
-    project: TryGhost/Ghost
-    url: https://github.com/TryGhost/Ghost.git
-    ref: v5.42.0
-    subdir: ghost/core
-    sink_file: static-theme.js
+  # --- Ruby ---------------------------------------------------------------------
+  - cve: CVE-2024-43415        # gap: params -> helper -> Arel.sql .where inter-procedural hop
+    project: decidim-ice/decidim-module-decidim_awesome
+    url: https://github.com/decidim-ice/decidim-module-decidim_awesome.git
+    ref: a0464aab671fc7cdbad0506912219a58643426d9
+    sink_file: paper_trail_version.rb
+    rule: ruby-sql-injection
+    cwe: CWE-89
+
+  # --- JavaScript ---------------------------------------------------------------
+  - cve: CVE-2024-29180        # gap: memfs (outputFileSystem) sink, read in a separate file
+    project: webpack/webpack-dev-middleware
+    url: https://github.com/webpack/webpack-dev-middleware.git
+    ref: v7.0.0
+    sink_file: getFilenameFromUrl.js
     rule: js-path-traversal
     cwe: CWE-22
