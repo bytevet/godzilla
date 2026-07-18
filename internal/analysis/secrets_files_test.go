@@ -83,6 +83,44 @@ func TestSecretPatterns_VendorPrefixes(t *testing.T) {
 	}
 }
 
+func TestSecretPathExcluded(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		// Vendored/build/venv/cache dirs — covered by reusing walkignore.SkipDir,
+		// so a new walkignore skip-dir is honored here without editing this file.
+		{"web/node_modules/pkg/config.json", true},
+		{"vendor/github.com/x/y/creds.yaml", true},
+		{".venv/lib/site.cfg", true},
+		{"app/site-packages/foo/bar.env", true},
+		{"dist/bundle.env", true},       // build output (walkignore, not the old list)
+		{"target/debug/app.conf", true}, // Rust/Java build output (walkignore)
+		{"__pycache__/x.txt", true},
+		// Extras walkignore doesn't prune.
+		{"/home/u/go/pkg/mod/example.com/lib@v1/k.yaml", true},
+		{"app/.bundle/config", true},
+		{"api/testdata/fixture.env", true},
+		{"i18n/locales/en.json", true},
+		{"src/translations/messages.yaml", true},
+		{"docs/swagger.json", true},
+		{"docs/openapi.yaml", true},
+		{"internal/foo.test.js", true},
+		{"internal/foo_test.go", true},
+		// First-party config that MUST still be scanned.
+		{"config/production.yaml", false},
+		{"app.env", false},
+		{"deploy/docker-compose.yml", false},
+		{"cmd/server/main.go", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := secretPathExcluded(tc.path); got != tc.want {
+			t.Errorf("secretPathExcluded(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
 	benign := []string{
 		"password = os.Getenv(\"DB_PASSWORD\")",

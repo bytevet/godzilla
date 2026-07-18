@@ -1,6 +1,6 @@
 # Contributing to Godzilla
 
-Thanks for your interest! This guide covers the essentials.
+This guide covers the essentials.
 
 ## Development setup
 
@@ -9,10 +9,10 @@ Thanks for your interest! This guide covers the essentials.
   **`python3`** (Python), a **JDK 24+ `java`** (Java), **`rustc`** (Rust),
   **`ruby`** (Ruby). The Go and JavaScript frontends are pure Go and need nothing
   extra.
-- **C/C++** is the opt-in cgo backend: it needs **libLLVM + clang** and builds only
+- **C/C++** is the opt-in cgo backend: needs **libLLVM + clang** and builds only
   under `-tags "llvm byollvm"` — use the Makefile `*-llvm` targets. The default
   build/test path does not touch it.
-- **`protoc` + `protoc-gen-go`** are only needed if you change the gIR schema
+- **`protoc` + `protoc-gen-go`** are needed only to change the gIR schema
   (`proto/*.proto`) and regenerate bindings.
 
 ```bash
@@ -30,7 +30,7 @@ also asserts every sample under `test/` against its `expected.yaml` — see
 ## Project layout
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and [CLAUDE.md](CLAUDE.md)
-for a concise map of the codebase. In short:
+for a concise code map. In short:
 
 - `proto/`, `pkg/ir/v1/` — the gIR schema (source of truth) and generated bindings.
 - `converters/{go,python,javascript,java,rust,ruby,cpp,llvm}/` — language frontends
@@ -47,18 +47,18 @@ for a concise map of the codebase. In short:
 `rulepacks/` directory — see the **[rule-authoring guide](docs/writing-rules.md)**
 for the full model (canonical-name globs, sink argument pinning, the taint and
 dangerous-call kinds). Add a vulnerable sample under `test/<lang>/` with an
-`expected.yaml` — the corpus test then asserts it (see
-[test/README.md](test/README.md)) — and, ideally, a safe variant that stays clean.
+`expected.yaml` so the corpus test asserts it (see
+[test/README.md](test/README.md)), and ideally a safe variant that stays clean.
 
-**Add a language frontend.** Mirror the structure of `converters/python` or
-`converters/javascript`: parse, then lower to gIR with stable `<lang>:` canonical
-names. Emit `OP_CODE_INTRINSIC` (with a canonical intrinsic name) for
-language-specific constructs rather than adding new opcodes.
+**Add a language frontend.** Mirror `converters/python` or `converters/javascript`:
+parse, then lower to gIR with stable `<lang>:` canonical names. Emit
+`OP_CODE_INTRINSIC` (with a canonical intrinsic name) for language-specific
+constructs rather than adding new opcodes.
 
 **Change the gIR schema — a last resort.** gIR is the frozen contract every
 frontend emits and the single engine consumes, so a schema change ripples across
 all of them. First try to model the construct as an `OP_CODE_INTRINSIC` (with a
-canonical name), a YAML rule, or frontend lowering. If a change is genuinely
+canonical name), a YAML rule, or frontend lowering. If a change is truly
 unavoidable, edit `proto/*.proto` first (it is authoritative), then
 `go generate ./...` — never hand-edit `pkg/ir/v1/*.pb.go`.
 
@@ -72,6 +72,6 @@ unavoidable, edit `proto/*.proto` first (it is authoritative), then
 
 ## Reporting security-relevant issues
 
-If you find a vulnerability in Godzilla itself (as opposed to a detection
-gap), please open an issue describing it; avoid posting working exploits against
-third-party targets.
+If you find a vulnerability in Godzilla itself (as opposed to a detection gap),
+open an issue describing it; avoid posting working exploits against third-party
+targets.

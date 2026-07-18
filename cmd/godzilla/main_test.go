@@ -99,13 +99,8 @@ func writeFile(t *testing.T, path, content string) {
 // console output yet still fails the gate (non-zero exit) on a finding.
 func TestQuiet_SuppressesOutputButKeepsGate(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, content string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("go.mod", "module q\n\ngo 1.21\n")
-	write("main.go", `package main
+	writeFile(t, filepath.Join(dir, "go.mod"), "module q\n\ngo 1.21\n")
+	writeFile(t, filepath.Join(dir, "main.go"), `package main
 
 import (
 	"net/http"

@@ -11,6 +11,8 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"
@@ -50,3 +52,8 @@ rules:
       - "py:*shlex.quote"
     propagators:
       - "py:*.join"
+      # Deserializing an untrusted request body yields tainted data (the parsed
+      # dict/list carries the attacker's input forward). Forwards EXISTING taint
+      # only. CVE-2025-47782 motioneye: json.loads(self.request.body) -> device
+      # field -> shell pipeline.
+      - "py:*json.loads"

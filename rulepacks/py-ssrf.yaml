@@ -13,6 +13,8 @@ rules:
       hosts. Validate the destination against an allow-list before making
       the request.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"
@@ -44,6 +46,23 @@ rules:
     sinks:
       - "py:requests.get"
       - "py:requests.post"
+      # requests.request(method, url, ...) — the generic verb-dispatching call
+      # (CVE-2025-52967, mlflow gateway_proxy_handler). The URL is arg #1, so pin
+      # it with #1 (the HTTP method in arg #0 is not the injection point).
+      - "py:*requests.request#1"
+      # httpx outbound requests, module-level functions and the client-instance
+      # streaming API (CVE-2024-48052, gradio save_url_to_cache:
+      # client.stream("GET", url, follow_redirects=True)). For .stream/.request
+      # the URL follows the HTTP method, so pin arg #1; httpx.get/post take the
+      # URL as arg #0. Scoped to httpx.* and *client.* (the httpx.Client /
+      # AsyncClient idiom) rather than a bare *.stream/*.request to avoid
+      # matching unrelated stream/request methods.
+      - "py:httpx.get"
+      - "py:httpx.post"
+      - "py:httpx.stream#1"
+      - "py:httpx.request#1"
+      - "py:*client.stream#1"
+      - "py:*client.request#1"
       - "py:*urlopen"
     # No built-in sanitizer neutralizes tainted input for a request URL;
     # the fix is allow-listing the destination host, not escaping.

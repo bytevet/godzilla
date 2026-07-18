@@ -187,11 +187,13 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Single-file mode (path pointed directly at a .js file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
 	if !info.IsDir() {
-		mod, err := c.convertJSFile(files[0], moduleNameFor(root, files[0]))
+		mod, defaultExport, err := c.convertJSFile(files[0], moduleNameFor(root, files[0]))
 		if err != nil {
 			return nil, err
 		}
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}, nil
+		prog := &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}
+		resolveJSCrossModuleCalls(prog, map[string]string{mod.Name: defaultExport})
+		return prog, nil
 	}
 
 	// Directory batch mode: one unparseable .js file must not abort the whole
@@ -204,8 +206,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Converter is stateless). Results land at fixed indices, so module order
 	// stays the sorted file order regardless of completion order.
 	type jsFileResult struct {
-		mod *ir.Module
-		err error
+		mod           *ir.Module
+		defaultExport string
+		err           error
 	}
 	results := make([]jsFileResult, len(files))
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
@@ -216,13 +219,17 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			mod, err := c.convertJSFile(f, moduleNameFor(root, f))
-			results[i] = jsFileResult{mod, err}
+			mod, defaultExport, err := c.convertJSFile(f, moduleNameFor(root, f))
+			results[i] = jsFileResult{mod, defaultExport, err}
 		}(i, f)
 	}
 	wg.Wait()
 
 	prog := &ir.Program{Mode: "ast"}
+	// defaultExports maps each module name to its default-export function
+	// canonical, so resolveJSCrossModuleCalls can rewrite cross-module markers
+	// once every file has been lowered.
+	defaultExports := map[string]string{}
 	var convertErrs []string
 	for i, r := range results {
 		if r.err != nil {
@@ -231,6 +238,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			continue
 		}
 		prog.Modules = append(prog.Modules, r.mod)
+		if r.defaultExport != "" {
+			defaultExports[r.mod.Name] = r.defaultExport
+		}
 	}
 
 	if len(prog.Modules) == 0 {
@@ -238,15 +248,70 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			abs, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 
+	resolveJSCrossModuleCalls(prog, defaultExports)
+
 	return prog, nil
+}
+
+// crossModuleMarker prefixes a callee emitted for a bare call to a relative-
+// require default binding (see funcState.relativeDefaults); the suffix is the
+// scan-root-relative module name whose default export is the real callee.
+const crossModuleMarker = "js:@mod:"
+
+// resolveJSCrossModuleCalls rewrites every "js:@mod:<module>" marker callee to
+// the named module's default-export function canonical name, once all files are
+// lowered (the callee may live in a file not yet seen at lowering time). It
+// mirrors converters/python's resolveCrossModuleCalls: the engine resolves calls
+// by EXACT canonical name, so without this a bare cross-file default-import call
+// (`const f = require('./util'); f(x)`) never links and taint stops at the call.
+//
+// A marker with no single unambiguous default export (module.exports is a
+// non-function, an object of named exports, or absent) is stripped back to a
+// plain "js:<leaf>" bare name -- exactly what the callee would have been without
+// the marker -- so nothing downstream trips on the marker syntax. Only ADDS an
+// inter-procedural edge to an unambiguously-named exported function (FP-safe).
+func resolveJSCrossModuleCalls(prog *ir.Program, defaultExports map[string]string) {
+	setCallee := func(cc *ir.CallCommon, name string) {
+		cc.Callee = name
+		if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
+			fnv.Kind = &ir.Value_FuncName{FuncName: name}
+		}
+	}
+	for _, m := range prog.Modules {
+		for _, fn := range m.Functions {
+			for _, b := range fn.Blocks {
+				for _, inst := range b.Instrs {
+					cc := inst.GetCall()
+					if cc == nil {
+						continue
+					}
+					callee := cc.GetCallee()
+					if !strings.HasPrefix(callee, crossModuleMarker) {
+						continue
+					}
+					modName := strings.TrimPrefix(callee, crossModuleMarker)
+					if target := defaultExports[modName]; target != "" {
+						setCallee(cc, target)
+						continue
+					}
+					// Unresolved/ambiguous: fall back to a plain bare name.
+					leaf := modName
+					if i := strings.LastIndexByte(leaf, '/'); i >= 0 {
+						leaf = leaf[i+1:]
+					}
+					setCallee(cc, "js:"+leaf)
+				}
+			}
+		}
+	}
 }
 
 // convertJSFile parses a single JavaScript file with goja's parser and lowers
 // the resulting AST into one gIR Module.
-func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, error) {
+func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("js_converter: failed to read %s: %w", path, err)
+		return nil, "", fmt.Errorf("js_converter: failed to read %s: %w", path, err)
 	}
 
 	// Vue/Svelte single-file components are compiled to plain JS by the SFC
@@ -264,28 +329,28 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, error) {
 		var terr error
 		code, consumer, dirs, terr = extractSFCToJS(path, src)
 		if terr != nil {
-			return nil, fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
+			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
 		}
 	case needsTransform(path):
 		var terr error
 		code, consumer, terr = transformToJS(path, src)
 		if terr != nil {
-			return nil, fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
+			return nil, "", fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
 		}
 	}
 
 	fset := &file.FileSet{}
 	astProg, err := parser.ParseFile(fset, path, code, 0)
 	if err != nil {
-		return nil, fmt.Errorf("js_converter: failed to parse %s: %w", path, err)
+		return nil, "", fmt.Errorf("js_converter: failed to parse %s: %w", path, err)
 	}
 
-	mod := convertModule(astProg, fset, path, moduleName)
+	mod, defaultExport := convertModule(astProg, fset, path, moduleName)
 	remapPositions(mod, consumer)
 	// Relocate template-directive sink findings from the appended synthetic calls
 	// back to their positions in the .vue/.svelte template (no-op for non-SFCs).
 	applyDirectivePositions(mod, dirs)
-	return mod, nil
+	return mod, defaultExport, nil
 }
 
 // moduleNameFor derives a module name unique to the file: its path relative to

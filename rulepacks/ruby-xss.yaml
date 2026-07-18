@@ -1,0 +1,51 @@
+# Cross-site scripting (Ruby / Rails / Sinatra, CWE-79): untrusted request input
+# flowing into an HTML response without being escaped. Rails auto-escapes `<%= %>`
+# interpolation, so XSS arises when that escaping is bypassed — `raw`, `html_safe`,
+# `render html:/inline:/text:`, ERB `concat`, or a hand-built ERB template.
+rules:
+  - id: ruby-xss
+    languages: [ruby]
+    # Align with go-xss/js-xss/py-xss (same CWE-79) so the CI gate treats
+    # reflected XSS identically regardless of source language.
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input flows into an HTML response without being HTML-escaped,
+      which may allow cross-site scripting (XSS). Escape the value (e.g. the `h`
+      / `sanitize` helper, `ERB::Util.html_escape`, or `CGI.escapeHTML`) or rely
+      on Rails' automatic output escaping instead of `raw` / `html_safe`.
+    # Request sources are base-scoped: the frontend synthesizes a source CALL
+    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base
+    # (a handler parameter or a free framework accessor), so these globs match a
+    # whole framework's request object rather than a fixed member list.
+    sources:
+      - "ruby:params"          # params[:x] / params['x']
+      - "ruby:cookies"         # cookies[:x]
+      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
+      - "ruby:cookies.*"
+      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
+      - "ruby:req.*"           # conventional `req` request receiver
+    sinks:
+      # Explicit escape-bypassing HTML output helpers.
+      - "ruby:raw"                  # raw(user_html) in a view
+      - "ruby:html_safe"           # user_html.html_safe
+      - "ruby:*.html_safe"
+      - "ruby:concat"               # ERB/helper concat(user_html)
+      - "ruby:safe_concat"
+      # render html:/inline:/text: interpolates the value straight into the body
+      # (unlike render :template, which passes a symbol constant, not taint).
+      - "ruby:render"
+    # Rails/Ruby output-escaping helpers neutralize the value for HTML.
+    sanitizers:
+      - "ruby:h"                    # ERB::Util#h shorthand
+      - "ruby:sanitize"             # Rails ActionView sanitize helper
+      - "ruby:*.sanitize"
+      - "ruby:html_escape"
+      - "ruby:*.html_escape"          # covers ERB::Util.html_escape
+      - "ruby:ERB::Util.h"
+      - "ruby:CGI.escapeHTML"
+      - "ruby:CGI.escape_html"
+    propagators:
+      - "ruby:*.to_s"
+      - "ruby:*.strip"
+      - "ruby:*.join"

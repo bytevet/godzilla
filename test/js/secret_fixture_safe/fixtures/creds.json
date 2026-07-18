@@ -1,0 +1,4 @@
+{
+  "comment": "example/placeholder connection string used by unit tests, not a real leak",
+  "database_url": "postgres://user:hunter2xyz@db.example.com:5432/app"
+}

@@ -12,6 +12,8 @@ rules:
       you must parse a literal, use ast.literal_eval, and dispatch on an
       allowlist instead of dynamic evaluation.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"
@@ -50,3 +52,11 @@ rules:
     propagators:
       - "py:*.format"
       - "py:*.join"
+      # Parsing/compiling untrusted code yields a tainted AST/code object, so
+      # taint must flow through the ast pipeline into a later compile()/exec()
+      # (CVE-2025-3248 langflow: ast.parse(code) -> ast.Module([node]) ->
+      # compile -> exec). These forward EXISTING taint only, never create it.
+      - "py:*ast.parse"
+      - "py:*ast.Module"
+      - "py:*ast.Expression"
+      - "py:*ast.fix_missing_locations"

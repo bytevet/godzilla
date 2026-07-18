@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -108,11 +109,7 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	}
 	wg.Wait()
 
-	findings := taint
-	findings = append(findings, danger...)
-	findings = append(findings, secrets...)
-	findings = append(findings, fileSecrets...)
-	return findings
+	return slices.Concat(taint, danger, secrets, fileSecrets)
 }
 
 // ScanFiles analyzes an explicit list of paths (a changed-files / pre-commit
@@ -161,14 +158,12 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 }
 
 // convert lowers source at path into a single gIR program and reports per-
-// language coverage. For a single source file it runs the matching frontend
-// (dispatched via languageFrontends); for a directory it runs every frontend
-// whose language is present and merges the modules they produce (a repo may
-// mix languages), tolerating a frontend that
-// finds nothing as long as at least one yields modules. A frontend that fails
-// on present source is warned about on stderr AND recorded as a failed-coverage
-// entry, so the caller can choose to fail the gate rather than report a false
-// "clean".
+// language coverage. For a single file it runs the matching frontend; for a
+// directory it runs every present-language frontend and merges their modules (a
+// repo may mix languages), tolerating a frontend that finds nothing as long as
+// one yields modules. A frontend that fails on present source is warned on
+// stderr AND recorded as a failed-coverage entry, so the caller can fail the
+// gate rather than report a false "clean".
 func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -328,15 +323,9 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bo
 // isCppFile reports whether path is a C or C++ translation unit (not a header,
 // which clang can't compile to a standalone module).
 func isCppFile(path string) bool {
-	switch {
-	case strings.HasSuffix(path, ".c"),
-		strings.HasSuffix(path, ".cc"),
-		strings.HasSuffix(path, ".cpp"),
-		strings.HasSuffix(path, ".cxx"),
-		strings.HasSuffix(path, ".c++"):
-		return true
-	}
-	return false
+	return strings.HasSuffix(path, ".c") || strings.HasSuffix(path, ".cc") ||
+		strings.HasSuffix(path, ".cpp") || strings.HasSuffix(path, ".cxx") ||
+		strings.HasSuffix(path, ".c++")
 }
 
 // detectLanguages walks dir and reports which supported languages have source

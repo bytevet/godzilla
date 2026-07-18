@@ -82,8 +82,7 @@ rules:
       - "rust:*nth"
       - "rust:*first"
       - "rust:*last"
-      - "rust:*iter"
-      - "rust:*into_iter"
+      - "rust:*iter"                 # also matches *into_iter
       - "rust:*next"
       - "rust:*map"
       - "rust:*chars"

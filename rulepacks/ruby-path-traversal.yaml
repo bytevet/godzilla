@@ -1,0 +1,47 @@
+# Path traversal (Ruby, CWE-22): untrusted request input flowing into a
+# filesystem path without normalization/containment, allowing "../" sequences
+# to read or write files outside the intended directory.
+rules:
+  - id: ruby-path-traversal
+    languages: [ruby]
+    # Align with go-path-traversal/py-path-traversal (same CWE-22).
+    severity: high
+    cwe: CWE-22
+    message: >-
+      Untrusted input flows into a filesystem path without being cleaned or
+      validated, which may allow path traversal (e.g. "../" sequences) to read
+      or write files outside the intended directory. Validate the resolved path
+      is contained within an intended base directory (e.g. File.expand_path +
+      a prefix check) before opening it.
+    # Request sources are base-scoped: the frontend synthesizes a source CALL
+    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base.
+    sources:
+      - "ruby:params"          # params[:x] / params['x']
+      - "ruby:cookies"         # cookies[:x]
+      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
+      - "ruby:cookies.*"
+      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
+      - "ruby:req.*"           # conventional `req` request receiver
+    sinks:
+      - "ruby:File.read"
+      - "ruby:File.open"
+      - "ruby:File.new"
+      - "ruby:File.write"
+      - "ruby:File.readlines"
+      - "ruby:File.binread"
+      - "ruby:IO.read"
+      - "ruby:IO.binread"
+      - "ruby:IO.readlines"
+      - "ruby:send_file"            # Rails ActionController#send_file
+      - "ruby:send_data"
+      - "ruby:open"                 # Kernel#open(path)
+      - "ruby:Kernel.open"
+    # File.join / *.join do NOT contain input to a base directory ("/data" +
+    # "../../etc" joins to "/data/../../etc", which still escapes "/data"), so they
+    # are propagators, not sanitizers -- mirroring go/py's treatment of
+    # filepath.Join / os.path.join.
+    sanitizers: []
+    propagators:
+      - "ruby:File.expand_path"
+      - "ruby:*.join"
+      - "ruby:*.to_s"

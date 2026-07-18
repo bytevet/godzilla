@@ -1,0 +1,5 @@
+# FastAPI/Starlette FileResponse is a file-serving sink like Flask send_file.
+findings:
+    - rule: py-path-traversal
+      min: 1
+      sink: FileResponse

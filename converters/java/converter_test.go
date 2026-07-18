@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	ir "godzilla/pkg/ir/v1"
 )
 
 // requireJava skips when no JDK `java` launcher is on PATH (the frontend runs
@@ -14,6 +16,28 @@ func requireJava(t *testing.T) {
 	if _, err := exec.LookPath("java"); err != nil {
 		t.Skip("java not found on PATH; skipping")
 	}
+}
+
+// eachInstr visits every lowered instruction in a program.
+func eachInstr(prog *ir.Program, fn func(*ir.Instruction)) {
+	for _, mod := range prog.Modules {
+		for _, f := range mod.Functions {
+			for _, b := range f.Blocks {
+				for _, in := range b.Instrs {
+					fn(in)
+				}
+			}
+		}
+	}
+}
+
+// eachCallee visits the callee of every CALL/INVOKE instruction.
+func eachCallee(prog *ir.Program, fn func(callee string)) {
+	eachInstr(prog, func(in *ir.Instruction) {
+		if in.Call != nil {
+			fn(in.Call.GetCallee())
+		}
+	})
 }
 
 // TestConvertFile_CommandInjectionSample proves the bytecode pipeline recovers a
@@ -30,27 +54,20 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 		t.Fatal("no modules produced")
 	}
 
-	var sawExec, sawSource bool
 	for _, mod := range prog.Modules {
 		if mod.Language != "java" {
 			t.Errorf("module %q language = %q, want java", mod.Name, mod.Language)
 		}
-		for _, fn := range mod.Functions {
-			for _, blk := range fn.Blocks {
-				for _, inst := range blk.Instrs {
-					if inst.Call == nil {
-						continue
-					}
-					switch inst.Call.GetCallee() {
-					case "java:java/lang/Runtime.exec":
-						sawExec = true
-					case "java:javax/servlet/http/HttpServletRequest.getParameter":
-						sawSource = true
-					}
-				}
-			}
-		}
 	}
+	var sawExec, sawSource bool
+	eachCallee(prog, func(callee string) {
+		switch callee {
+		case "java:java/lang/Runtime.exec":
+			sawExec = true
+		case "java:javax/servlet/http/HttpServletRequest.getParameter":
+			sawSource = true
+		}
+	})
 	if !sawSource {
 		t.Error("expected a java:javax/servlet/http/HttpServletRequest.getParameter source call in the lowered IR")
 	}
@@ -76,20 +93,11 @@ func TestConvertFile_SpringParamAnnotationSource(t *testing.T) {
 		"java:org/springframework/web/bind/annotation/RequestParam": false,
 		"java:org/springframework/web/bind/annotation/PathVariable": false,
 	}
-	for _, mod := range prog.Modules {
-		for _, fn := range mod.Functions {
-			for _, blk := range fn.Blocks {
-				for _, inst := range blk.Instrs {
-					if inst.Call == nil {
-						continue
-					}
-					if _, ok := want[inst.Call.GetCallee()]; ok {
-						want[inst.Call.GetCallee()] = true
-					}
-				}
-			}
+	eachCallee(prog, func(callee string) {
+		if _, ok := want[callee]; ok {
+			want[callee] = true
 		}
-	}
+	})
 	for callee, saw := range want {
 		if !saw {
 			t.Errorf("expected a synthesized parameter-source call %q in the lowered IR", callee)
@@ -156,21 +164,16 @@ func TestJavaSourceFilePositions(t *testing.T) {
 		t.Fatalf("ConvertFile: %v", err)
 	}
 	seen := map[string]bool{}
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			for _, b := range fn.Blocks {
-				for _, in := range b.Instrs {
-					if in.Pos != nil && in.Pos.GetFilename() != "" {
-						base := filepath.Base(in.Pos.GetFilename())
-						seen[base] = true
-						if base == filepath.Base(dir) {
-							t.Errorf("position anchored to the scan directory, not a source file: %s", in.Pos.GetFilename())
-						}
-					}
-				}
-			}
+	eachInstr(prog, func(in *ir.Instruction) {
+		if in.Pos == nil || in.Pos.GetFilename() == "" {
+			return
 		}
-	}
+		base := filepath.Base(in.Pos.GetFilename())
+		seen[base] = true
+		if base == filepath.Base(dir) {
+			t.Errorf("position anchored to the scan directory, not a source file: %s", in.Pos.GetFilename())
+		}
+	})
 	if !seen["Alpha.java"] || !seen["Beta.java"] {
 		t.Errorf("expected positions in both Alpha.java and Beta.java, saw %v", seen)
 	}

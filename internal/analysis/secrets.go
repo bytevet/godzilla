@@ -107,6 +107,9 @@ func scanText(s string, pos *ir.Position, lang, fn string, seen map[string]bool,
 	if s == "" {
 		return
 	}
+	if secretPathExcluded(pos.GetFilename()) {
+		return
+	}
 	for _, p := range secretPatterns {
 		if !p.re.MatchString(s) {
 			continue
@@ -147,6 +150,9 @@ func ScanSecretsInFiles(root string) []Finding {
 	var findings []Finding
 	seen := map[string]bool{}
 	scanFile := func(path string) {
+		if secretPathExcluded(path) {
+			return
+		}
 		info, err := os.Stat(path)
 		if err != nil || info.Size() > secretFileMaxBytes {
 			return
@@ -228,6 +234,63 @@ func isScannableConfigFile(path string) bool {
 		return true
 	case lower == ".npmrc" || lower == ".netrc" || lower == ".pypirc":
 		return true
+	}
+	return false
+}
+
+// secretExtraExcludedSegments are path segments the shared walk-exclusion policy
+// (internal/walkignore) does NOT prune but whose files are, by construction, full
+// of example/placeholder credentials rather than real leaks. Two kinds:
+//   - vendored dependency trees walkignore.SkipDir can't match on a single path
+//     segment: the Go module cache (go/pkg/mod) and Ruby's bundler dir; and
+//   - directories that DO hold first-party source (so the walk keeps them) yet
+//     whose credential-shaped strings are fixture/example/translation data.
+//
+// The real-world CVE benchmark showed these were the dominant secret-scan false
+// positives — example JWTs in an OpenAPI schema, connection-string-shaped values
+// in translation JSON, an SSH cert inside a vendored crypto library. Scanning them
+// costs precision at the CI gate for no real signal.
+//
+// The vendored/build/venv/cache directories walkignore already prunes are handled
+// by reusing walkignore.SkipDir below (single source of truth) rather than being
+// re-listed here.
+var secretExtraExcludedSegments = []string{
+	"/go/pkg/mod/", "/.bundle/",
+	"/fixtures/", "/fixture/", "/__tests__/", "/__mocks__/", "/testdata/",
+	"/translations/", "/locales/", "/locale/", "/lc_messages/",
+}
+
+// secretPathExcluded reports whether the secret scanner should skip a file by
+// path (a vendored dependency, build output, test fixture, i18n bundle, or API
+// schema).
+func secretPathExcluded(path string) bool {
+	if path == "" {
+		return false
+	}
+	lower := strings.ToLower(filepath.ToSlash(path))
+	// Single source of truth for vendored/build/venv/cache directories: any dir
+	// the source walk prunes is likewise not first-party source worth
+	// secret-scanning. Reusing walkignore.SkipDir means a new frontend that
+	// teaches walkignore a skip-dir gets secret-exclusion for free — no parallel
+	// list to maintain. (The file-tree walk never even descends into these, but
+	// the gIR-constant scanner can see a lowered dependency's file path, so the
+	// check still matters here.)
+	for _, seg := range strings.Split(lower, "/") {
+		if seg != "" && walkignore.SkipDir(seg) {
+			return true
+		}
+	}
+	for _, seg := range secretExtraExcludedSegments {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	base := filepath.Base(lower)
+	switch {
+	case strings.HasPrefix(base, "swagger.") || strings.HasPrefix(base, "openapi."):
+		return true // OpenAPI schemas are full of example credentials
+	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go"):
+		return true // unit-test files carry fixture secrets, not leaks
 	}
 	return false
 }

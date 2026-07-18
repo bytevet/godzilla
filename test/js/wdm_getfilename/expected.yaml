@@ -1,0 +1,9 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# CVE-2024-29180 shape: req.url in middleware.js flows through a cross-module
+# default-export call (getFilenameFromUrl) and a memoize wrapper (mem(parse))
+# into fs.statSync in getFilenameFromUrl.js. safe.js (constant path) is a
+# no-finding control.
+findings:
+    - rule: js-path-traversal
+      min: 1

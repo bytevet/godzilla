@@ -2,10 +2,9 @@
 
 A fast, multi-language **Static Application Security Testing (SAST)** analyzer for CI/CD gates.
 
-Godzilla lowers source code from several languages into one language-neutral SSA
-intermediate representation — **gIR** — and runs a single inter-procedural taint
-engine over it. Every language funnels into the same IR, so you **write a
-detection rule once and it applies across every supported language**.
+Godzilla lowers many languages into one language-neutral SSA IR — **gIR** — and
+runs a single inter-procedural taint engine over it. **Write a detection rule
+once; it applies across every supported language.**
 
 ```mermaid
 flowchart LR
@@ -32,11 +31,11 @@ flowchart LR
 ## Features
 
 - **Multi-language, one engine.** Go, Python, JavaScript (incl. Vue/Svelte SFCs),
-  Java, Rust, and Ruby (plus C/C++ in an opt-in cgo build) all emit the same gIR;
-  the taint engine and rules are language-agnostic.
+  Java, Rust, and Ruby (plus C/C++ in an opt-in cgo build) emit the same gIR; the
+  taint engine and rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
-  calls (source → sanitizer → sink). Each finding carries a **confidence** — High
-  for intra-procedural, Medium for cross-function.
+  calls (source → sanitizer → sink). Each finding carries a **confidence**: High
+  intra-procedural, Medium cross-function.
 - **YAML rules, sink-argument aware.** Sources / sinks / sanitizers / propagators
   are canonical-name globs. A sink can pin its injection-point argument
   (`"go:*database/sql*.Query#0"`), so a parameterized `db.Query("... = ?", x)` is
@@ -48,9 +47,9 @@ flowchart LR
 - **CI-friendly output.** Human-readable findings, a self-contained **HTML
   report**, **JSON** and **SARIF 2.1.0** (for GitHub code scanning), and a
   severity-gated **exit code**.
-- **Optional LLM review.** A pluggable stage sends low-confidence findings to
-  Claude to trim false positives; it fails open and is off by default.
-- **Single self-contained binary.** Go/JS/Ruby-parsing is pure Go; Python, Java,
+- **Optional LLM review.** A pluggable, off-by-default stage sends low-confidence
+  findings to Claude to trim false positives; it fails open.
+- **Single self-contained binary.** Go/JS/Ruby parsing is pure Go; Python, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
 ## Install
@@ -61,8 +60,8 @@ go build -o godzilla ./cmd/godzilla
 ```
 
 Requires **Go 1.25+**. Scanning Python, Ruby, Java, or Rust also needs that
-language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`;
-each degrades gracefully when absent. Or skip install entirely and
+language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`,
+each degrading gracefully when absent. Or skip install and
 [run with Docker](#run-with-docker).
 
 ## Quick start
@@ -119,7 +118,7 @@ without installing anything. They live on GHCR in two variants:
 | `ghcr.io/bytevet/godzilla:full` | ~1.5–2 GB | everything in slim **+ Java + Rust** |
 
 The entrypoint is `godzilla` and the default command is `scan .`, so mounting a
-repo at `/src` scans it immediately:
+repo at `/src` scans it immediately.
 
 ```bash
 # Scan the current directory (exit 3 on a finding at/above --fail-on)
@@ -135,7 +134,7 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
 
 The slim image **skips** Java and Rust with a coverage warning rather than
 failing. Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full` (full) track
-releases; `edge`/`edge-full` track `main`. Images are multi-arch (amd64 + arm64).
+releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 
 ## Supported languages & detections
 
@@ -159,11 +158,11 @@ releases; `edge`/`edge-full` track `main`. Images are multi-arch (amd64 + arm64)
   single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
   flagged as template-injection XSS (CWE-79). Pure Go, no Node.
 - **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
-  JDK 24+ `java` on `PATH`. Maven/Gradle projects are built first so third-party
-  deps are on the classpath.
-- **Rust** analyzes **rustc MIR** and ships in the default binary — only `rustc`
-  is needed. A `Cargo.toml` project is built so web-framework request accessors
-  are recognized as sources.
+  JDK 24+ `java`. Maven/Gradle projects are built first so third-party deps are on
+  the classpath.
+- **Rust** analyzes **rustc MIR** and ships in the default binary; only `rustc` is
+  needed. A `Cargo.toml` project is built so web-framework request accessors are
+  recognized as sources.
 - **C / C++** are analyzed via **LLVM IR** — an opt-in **cgo** build
   (`make build-llvm`, needs libLLVM + clang), *not* in the default binary. Adds
   command injection, path traversal, format string, SQL injection, and
@@ -205,23 +204,31 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and rationale.
 Godzilla is functional and covered by tests, but deliberately scoped:
 
 - **Python/JS lowering is straight-line** — control flow is flattened into one
-  conceptual pass. Taint still flows through the common expression forms and
+  conceptual pass. Taint still flows through common expression forms and
   class-based handlers; the main gap is taint carried across methods via instance
   attributes (`self.attr` / `this.attr`).
 - **Taint is inter-procedural but context-insensitive.** Interface/dynamic
   dispatch is threaded via class-hierarchy analysis (an over-approximation).
-- **SSRF is host-aware** — a finding is suppressed when the taint only reaches the
-  path/query of a *proven* fixed host, conservatively (never a false negative).
+- **SSRF is host-aware** — a finding is suppressed, conservatively, when the taint
+  only reaches the path/query of a *proven* fixed host (never a false negative).
 - **Pointer analysis is approximated** (value-flow + CHA), not full points-to.
 
 See the [implementation status](ARCHITECTURE.md#implementation-status) for the
 per-component detail.
 
+## Quality gate
+
+`scripts/pr-quality-gate.sh` measures every PR against its base on four axes — LOC
+changed (excluding tests), corpus TP/FP/FN, rule churn, and scan performance. CI
+posts the report as a PR comment, and precision/recall/perf regressions block the
+merge. Run it yourself with `scripts/pr-quality-gate.sh origin/main`. See
+[docs/quality-gate.md](docs/quality-gate.md).
+
 ## Contributing
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first areas:
 new built-in rules (often just YAML — [guide](docs/writing-rules.md)), a new
-language frontend, or improving frontend fidelity.
+language frontend, or better frontend fidelity.
 
 ## License
 

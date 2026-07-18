@@ -47,6 +47,14 @@ type funcState struct {
 	// "exec" -> "child_process.exec" for a destructured require. resolveRequire
 	// rewrites a callee's root through it so module-anchored sink rules match.
 	moduleAliases map[string]string
+
+	// relativeDefaults maps a name default-imported from a relative (project)
+	// require -- `const f = require('./util')` -> f -> "util" (the scan-root-
+	// relative module name) -- so a bare call `f(x)` lowers to a resolvable
+	// "js:@mod:<module>" marker instead of the unmatchable "js:f".
+	// resolveJSCrossModuleCalls rewrites that marker to the module's default
+	// export after all files are lowered.
+	relativeDefaults map[string]string
 }
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
@@ -128,13 +136,35 @@ func nilValue() *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
 }
 
-// emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
-// its result register. Shared by lowerCall and lowerNew, whose only difference
-// is how they build the callee name.
-func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	cc := &ir.CallCommon{
+// calleeCommon builds a CallCommon naming callee both as its FuncName value and
+// its Callee (the syntactic name the engine matches against rule globs).
+func calleeCommon(callee string) *ir.CallCommon {
+	return &ir.CallCommon{
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
 		Callee: callee,
+	}
+}
+
+// emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
+// its result register. Shared by lowerNew and (via emitCallRecv) lowerCall,
+// whose only difference is how they build the callee name.
+func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
+	return fs.emitCallRecv(callee, nil, args, idx)
+}
+
+// emitCallRecv emits an OP_CODE_CALL to callee. For a method call (`obj.m(x)`),
+// receiver is the already-lowered base object; it is placed in Call.Value so the
+// engine -- which reads a method call's receiver from Call.Value (see
+// propagatorOperands in internal/analysis) -- carries taint from the receiver
+// through a taint-preserving transform such as `tainted.slice(i)` or
+// `tainted.toLowerCase()`. JS methods take no explicit receiver argument, so the
+// receiver stays OUT of Args and the arg->param alignment the engine relies on
+// for cross-function calls is unchanged. When receiver is nil (a free/identifier
+// call or `new`), Call.Value falls back to the callee FuncName as before.
+func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Value {
+	cc := calleeCommon(callee)
+	if receiver != nil {
+		cc.Value = receiver
 	}
 	for _, a := range args {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
@@ -172,7 +202,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases map[string]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases, relativeDefaults map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -183,6 +213,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 	fs := newFuncState(filename, fset, nameOf, localFuncs)
 	fs.moduleName = moduleName
 	fs.moduleAliases = moduleAliases
+	fs.relativeDefaults = relativeDefaults
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -284,10 +315,7 @@ func (fs *funcState) emitRootPropertyRead(root, field string, idx file.Idx) *ir.
 	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Comment = "property-read"
-	inst.Call = &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
-	}
+	inst.Call = calleeCommon(callee)
 	fs.emit(inst)
 	return regValue(inst.Name)
 }
@@ -905,7 +933,22 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // to match a source/sink glob) would silently disappear. See the package doc
 // note on the js-ssrf sample's chained axios.get(...).then(...) handler.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
-	fs.lowerNestedCallees(v.Callee)
+	// For a method call, lower the receiver (the callee's base object) so its
+	// register can be carried in Call.Value (see emitCallRecv): this both
+	// evaluates the base -- which, off an opaque request object like `req.url`,
+	// is itself the synthetic taint source -- and lets a taint-preserving method
+	// like `.slice`/`.toLowerCase` propagate the receiver's taint to the result.
+	// lowerExpr recurses through any nested call in the base chain, so it fully
+	// subsumes lowerNestedCallees for these two callee shapes.
+	var receiver *ir.Value
+	switch c := v.Callee.(type) {
+	case *ast.DotExpression:
+		receiver = fs.lowerExpr(c.Left)
+	case *ast.BracketExpression:
+		receiver = fs.lowerExpr(c.Left)
+	default:
+		fs.lowerNestedCallees(v.Callee)
+	}
 	callee := "js:" + fs.resolveRequire(syntacticCallee(v.Callee))
 	// A bare call to a top-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName; otherwise byKey
@@ -914,6 +957,12 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	if id, ok := v.Callee.(*ast.Identifier); ok {
 		if canonical, found := fs.localFuncs[string(id.Name)]; found {
 			callee = canonical
+		} else if mod, found := fs.relativeDefaults[string(id.Name)]; found {
+			// Bare call to a name default-imported from a relative require:
+			// emit a resolvable marker naming the target module. Its default
+			// export is filled in by resolveJSCrossModuleCalls once every file
+			// is lowered (the callee function may live in a not-yet-seen file).
+			callee = crossModuleMarker + mod
 		}
 	}
 	// `this.method(x)` inside a class method: qualify to the sibling method's
@@ -925,7 +974,7 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
 		}
 	}
-	return fs.emitCall(callee, v.ArgumentList, v.Idx0())
+	return fs.emitCallRecv(callee, receiver, v.ArgumentList, v.Idx0())
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an

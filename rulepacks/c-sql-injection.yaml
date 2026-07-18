@@ -1,8 +1,7 @@
 # SQL injection (C/C++, CWE-89): untrusted input concatenated into a SQL string
-# passed to a database driver's query API. The query text is the argument that
-# matters, so each sink pins the tainted parameter with a #<idx> suffix (the
-# logical, receiver-excluded argument) to avoid firing on the connection/handle
-# argument.
+# passed to a database driver's query API. Each sink pins the query-text argument
+# with a #<idx> suffix (logical, receiver-excluded) to avoid firing on the
+# connection/handle argument.
 rules:
   - id: c-sql-injection
     languages: [c, cpp]

@@ -41,8 +41,8 @@ func (n astNode) node(key string) astNode {
 	return astNode(m)
 }
 
-// list returns the child value at key as a slice of astNode, skipping
-// non-object entries (e.g. a stray null).
+// list returns the child value at key as a slice of astNode, keeping a nil
+// placeholder for non-object entries (e.g. a stray null) so indices align.
 func (n astNode) list(key string) []astNode {
 	if n == nil {
 		return nil

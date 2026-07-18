@@ -1,0 +1,7 @@
+# `with open(os.path.join(root, path)) as f:` — the with-statement's context
+# expression must be lowered so the open() sink is seen. Guards the with-stmt
+# lowering fix (pyast.py emits with-items; lower.go lowers them as VAR = EXPR).
+findings:
+    - rule: py-path-traversal
+      min: 1
+      sink: open

@@ -21,12 +21,7 @@ func LoadFile(path string) (*rules.RuleSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loader: read %s: %w", path, err)
 	}
-
-	rs, err := parse(path, data)
-	if err != nil {
-		return nil, err
-	}
-	return rs, nil
+	return parse(path, data)
 }
 
 // LoadDir loads and merges every *.yaml/*.yml file directly under dir

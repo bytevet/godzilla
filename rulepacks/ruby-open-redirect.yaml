@@ -1,0 +1,30 @@
+# Open redirect (Ruby / Rails / Sinatra, CWE-601): untrusted request input
+# flowing into a redirect destination, letting an attacker redirect victims to
+# an arbitrary external site.
+rules:
+  - id: ruby-open-redirect
+    languages: [ruby]
+    # Align with py-open-redirect (same CWE-601).
+    severity: medium
+    cwe: CWE-601
+    message: >-
+      Untrusted input flows into a redirect destination, which allows an open
+      redirect. Validate the target against an allow-list, or restrict it to a
+      relative path (e.g. redirect_to with only_path: true), instead of
+      redirecting to a user-controlled URL.
+    # Request sources are base-scoped: the frontend synthesizes a source CALL
+    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base.
+    sources:
+      - "ruby:params"          # params[:x] / params['x']
+      - "ruby:cookies"         # cookies[:x]
+      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
+      - "ruby:cookies.*"
+      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
+      - "ruby:req.*"           # conventional `req` request receiver
+    sinks:
+      - "ruby:redirect_to"          # Rails ActionController#redirect_to
+      - "ruby:redirect"             # Sinatra redirect
+    sanitizers: []
+    propagators:
+      - "ruby:*.to_s"
+      - "ruby:*.join"

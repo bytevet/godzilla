@@ -1,0 +1,2 @@
+# The value is HTML-escaped via h(...) before rendering, so ruby-xss must NOT fire.
+findings: []

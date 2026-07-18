@@ -1,0 +1,4 @@
+# FP guard for TRUST-10: a real-looking DB connection string in a test fixture
+# (path contains /fixtures/) must be skipped by the secret scanner. Without the
+# path exclusion this fires secret-db-connection.
+findings: []

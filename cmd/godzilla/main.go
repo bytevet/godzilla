@@ -7,12 +7,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"godzilla/internal/analysis"
@@ -398,12 +400,11 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
 func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
-	sort.SliceStable(findings, func(i, j int) bool {
-		ri, rj := findings[i].Severity.Rank(), findings[j].Severity.Rank()
-		if ri != rj {
-			return ri > rj
+	slices.SortStableFunc(findings, func(a, b analysis.Finding) int {
+		if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
+			return c // worst severity first
 		}
-		return posString(findings[i].SinkPos) < posString(findings[j].SinkPos)
+		return cmp.Compare(posString(a.SinkPos), posString(b.SinkPos))
 	})
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
@@ -549,26 +550,18 @@ func printSummary(w *os.File, s summary) {
 
 // sortedKeys returns the keys of m sorted alphabetically.
 func sortedKeys(m map[string]int) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
 
 // sortedOpCodes returns the keys of m sorted by count descending, then by
 // opcode name ascending to break ties deterministically.
 func sortedOpCodes(m map[ir.OpCode]int) []ir.OpCode {
-	ops := make([]ir.OpCode, 0, len(m))
-	for op := range m {
-		ops = append(ops, op)
-	}
-	sort.Slice(ops, func(i, j int) bool {
-		if m[ops[i]] != m[ops[j]] {
-			return m[ops[i]] > m[ops[j]]
+	ops := slices.Collect(maps.Keys(m))
+	slices.SortFunc(ops, func(a, b ir.OpCode) int {
+		if c := cmp.Compare(m[b], m[a]); c != 0 {
+			return c
 		}
-		return ops[i].String() < ops[j].String()
+		return cmp.Compare(a.String(), b.String())
 	})
 	return ops
 }

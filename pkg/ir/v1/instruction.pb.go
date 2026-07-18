@@ -662,14 +662,16 @@ func (x *Case) GetBlock() string {
 }
 
 type CallCommon struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Value         *Value                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"` // Function to call (func_name for static, receiver reg for invoke)
-	Args          []*Value               `protobuf:"bytes,2,rep,name=args,proto3" json:"args,omitempty"`
-	IsInvoke      bool                   `protobuf:"varint,3,opt,name=is_invoke,json=isInvoke,proto3" json:"is_invoke,omitempty"`      // True if dynamic dispatch (interface method)
-	MethodName    string                 `protobuf:"bytes,4,opt,name=method_name,json=methodName,proto3" json:"method_name,omitempty"` // Only for is_invoke=true
-	Callee        string                 `protobuf:"bytes,5,opt,name=callee,proto3" json:"callee,omitempty"`                           // Resolved canonical callee name when statically known
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Value      *Value                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"` // Function to call (func_name for static, receiver reg for invoke)
+	Args       []*Value               `protobuf:"bytes,2,rep,name=args,proto3" json:"args,omitempty"`
+	IsInvoke   bool                   `protobuf:"varint,3,opt,name=is_invoke,json=isInvoke,proto3" json:"is_invoke,omitempty"`      // True if dynamic dispatch (interface method)
+	MethodName string                 `protobuf:"bytes,4,opt,name=method_name,json=methodName,proto3" json:"method_name,omitempty"` // Only for is_invoke=true
+	Callee     string                 `protobuf:"bytes,5,opt,name=callee,proto3" json:"callee,omitempty"`                           // Resolved canonical callee name when statically known
+	// (e.g. "go:net/http.HandleFunc", "builtin.append"); empty if fully dynamic.
+	UntypedDispatch bool `protobuf:"varint,6,opt,name=untyped_dispatch,json=untypedDispatch,proto3" json:"untyped_dispatch,omitempty"` // is_invoke resolution is by bare method NAME with no static
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CallCommon) Reset() {
@@ -737,6 +739,13 @@ func (x *CallCommon) GetCallee() string {
 	return ""
 }
 
+func (x *CallCommon) GetUntypedDispatch() bool {
+	if x != nil {
+		return x.UntypedDispatch
+	}
+	return false
+}
+
 var File_proto_instruction_proto protoreflect.FileDescriptor
 
 const file_proto_instruction_proto_rawDesc = "" +
@@ -774,7 +783,7 @@ const file_proto_instruction_proto_rawDesc = "" +
 	"\tintrinsic\x18\x12 \x01(\tR\tintrinsicJ\x04\b\x10\x10\x11\"I\n" +
 	"\x04Case\x12+\n" +
 	"\x05value\x18\x01 \x01(\v2\x15.godzilla.ir.v1.ValueR\x05value\x12\x14\n" +
-	"\x05block\x18\x02 \x01(\tR\x05block\"\xba\x01\n" +
+	"\x05block\x18\x02 \x01(\tR\x05block\"\xe5\x01\n" +
 	"\n" +
 	"CallCommon\x12+\n" +
 	"\x05value\x18\x01 \x01(\v2\x15.godzilla.ir.v1.ValueR\x05value\x12)\n" +
@@ -782,7 +791,8 @@ const file_proto_instruction_proto_rawDesc = "" +
 	"\tis_invoke\x18\x03 \x01(\bR\bisInvoke\x12\x1f\n" +
 	"\vmethod_name\x18\x04 \x01(\tR\n" +
 	"methodName\x12\x16\n" +
-	"\x06callee\x18\x05 \x01(\tR\x06callee*\xf6\x03\n" +
+	"\x06callee\x18\x05 \x01(\tR\x06callee\x12)\n" +
+	"\x10untyped_dispatch\x18\x06 \x01(\bR\x0funtypedDispatch*\xf6\x03\n" +
 	"\x06OpCode\x12\x17\n" +
 	"\x13OP_CODE_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vOP_CODE_RET\x10\x01\x12\x10\n" +

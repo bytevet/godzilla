@@ -99,44 +99,40 @@ type reportData struct {
 	Findings         []findingView
 }
 
-// countRow is one row of a summary table: a label, its CSS class (severity
-// tables only; empty for confidence rows), and the number of findings.
+// countRow is one row of a summary table: a label, its CSS badge class, and
+// the finding count.
 type countRow struct {
 	Label string
 	Class string
 	Count int
 }
 
-func severityCounts(findings []analysis.Finding) []countRow {
-	counts := make(map[rules.Severity]int, len(severityOrder))
+// summaryRows tallies findings by a normalized string key and emits one
+// countRow per value in order (fixed order, zeros included).
+func summaryRows[T ~string](findings []analysis.Finding, order []T, keyOf func(analysis.Finding) T, class func(T) string) []countRow {
+	counts := make(map[T]int, len(order))
 	for _, f := range findings {
-		counts[normalizeSeverity(f.Severity)]++
+		counts[keyOf(f)]++
 	}
-	rows := make([]countRow, 0, len(severityOrder))
-	for _, s := range severityOrder {
+	rows := make([]countRow, 0, len(order))
+	for _, v := range order {
 		rows = append(rows, countRow{
-			Label: strings.ToUpper(string(s)),
-			Class: severityClass(s),
-			Count: counts[s],
+			Label: strings.ToUpper(string(v)),
+			Class: class(v),
+			Count: counts[v],
 		})
 	}
 	return rows
 }
 
+func severityCounts(findings []analysis.Finding) []countRow {
+	return summaryRows(findings, severityOrder,
+		func(f analysis.Finding) rules.Severity { return normalizeSeverity(f.Severity) }, severityClass)
+}
+
 func confidenceCounts(findings []analysis.Finding) []countRow {
-	counts := make(map[analysis.Confidence]int, len(confidenceOrder))
-	for _, f := range findings {
-		counts[normalizeConfidence(f.Confidence)]++
-	}
-	rows := make([]countRow, 0, len(confidenceOrder))
-	for _, c := range confidenceOrder {
-		rows = append(rows, countRow{
-			Label: strings.ToUpper(string(c)),
-			Class: confidenceClass(c),
-			Count: counts[c],
-		})
-	}
-	return rows
+	return summaryRows(findings, confidenceOrder,
+		func(f analysis.Finding) analysis.Confidence { return normalizeConfidence(f.Confidence) }, confidenceClass)
 }
 
 // findingView is the per-finding data made available to the template; it
@@ -159,13 +155,12 @@ type findingView struct {
 }
 
 func newFindingView(f analysis.Finding) findingView {
-	sev := normalizeSeverity(f.Severity)
-	conf := normalizeConfidence(f.Confidence)
+	// severityClass/confidenceClass normalize their input, so pass the raw values.
 	return findingView{
 		SeverityLabel:     strings.ToUpper(string(f.Severity)),
-		SeverityClass:     severityClass(sev),
+		SeverityClass:     severityClass(f.Severity),
 		ConfidenceLabel:   strings.ToUpper(string(f.Confidence)),
-		ConfidenceClass:   confidenceClass(conf),
+		ConfidenceClass:   confidenceClass(f.Confidence),
 		RuleID:            f.RuleID,
 		CWE:               f.CWE,
 		Message:           f.Message,
@@ -275,14 +270,8 @@ func buildSnippet(pos *ir.Position) *codeSnippet {
 		return nil
 	}
 
-	startIdx := int(target) - 1 - snippetContext
-	if startIdx < 0 {
-		startIdx = 0
-	}
-	endIdx := int(target) - 1 + snippetContext
-	if endIdx > len(allLines)-1 {
-		endIdx = len(allLines) - 1
-	}
+	startIdx := max(int(target)-1-snippetContext, 0)
+	endIdx := min(int(target)-1+snippetContext, len(allLines)-1)
 
 	lines := make([]snippetLine, 0, endIdx-startIdx+1)
 	for i := startIdx; i <= endIdx; i++ {

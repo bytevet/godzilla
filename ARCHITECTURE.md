@@ -7,38 +7,37 @@
 > package-level code map and [docs/writing-rules.md](docs/writing-rules.md) for
 > rule authoring.
 
-Godzilla is a **rapid, multi-language SAST tool** for CI/CD quality gates. Source
-code in any supported language is lowered to a single language-neutral IR
-(**gIR**), and one analysis core runs over that IR regardless of source language.
-The three design goals:
+Godzilla is a **rapid, multi-language SAST tool** for CI/CD quality gates. Any
+supported language is lowered to a single language-neutral IR (**gIR**), and one
+analysis core runs over it. Three design goals:
 
 1. **Ultra fast** — usable as a per-commit CI checkpoint.
 2. **High signal/noise** — few false positives at the gate.
 3. **Multi-language** — one analysis core, many frontends.
 
 These pull against each other (precision is expensive; speed favors
-approximation). The design resolves that tension with a small IR, demand-driven
+approximation). The design resolves the tension with a small IR, demand-driven
 analysis scoping, recall-oriented taint, and an optional LLM reviewer as a
 false-positive backstop.
 
 ## Design principles
 
 - **gIR is the contract.** A single language-neutral SSA IR sits between frontends
-  and analysis; no analysis pass ever branches on source language, only on gIR
-  structure and canonical symbol names. Getting the IR right first avoids reworking
-  every frontend and pass later.
+  and analysis; no pass ever branches on source language, only on gIR structure and
+  canonical symbol names. Getting the IR right first avoids reworking every frontend
+  and pass later.
 - **Small core + tagged intrinsics.** The opcode set stays tiny and universal;
   every language-specific construct is an `INTRINSIC` carrying a canonical name that
-  rules and analysis interpret. No opcode is ever added for a single language.
-- **SSA is mandatory.** Frontends emit SSA with explicit `PHI` nodes, because
-  def-use chains make taint and dataflow dramatically simpler and faster.
+  rules and analysis interpret. No opcode is added for a single language.
+- **SSA is mandatory.** Frontends emit SSA with explicit `PHI` nodes; def-use
+  chains make taint and dataflow dramatically simpler and faster.
 - **Canonical FQN + globs.** Every symbol has a stable `lang:module/path.Type.member`
   name, so one rule shape matches equivalent APIs across languages.
 - **Inter-procedural taint.** The target vuln classes are source→sink flows that
   cross function boundaries; the engine follows them via per-function summaries.
 - **In-process, single binary.** Frontends run in-process for fast startup and
-  trivial CI deployment; each merely shells out to a language toolchain where one is
-  unavoidable (Python/Java/Rust/Ruby).
+  trivial CI deployment, shelling out to a language toolchain only where unavoidable
+  (Python/Java/Rust/Ruby).
 - **Recall first, precision backstop.** Lowering favors catching the common
   web-handler vulnerability shape; a confidence score plus the optional LLM reviewer
   trim the residual false positives.
@@ -74,7 +73,7 @@ gIR is a **small universal SSA core plus an intrinsic escape hatch**, defined in
 
 ### Core opcodes
 
-The opcode set stays small and language-neutral:
+Small and language-neutral:
 
 - **Terminators:** `RET`, `JUMP`, `IF`, `SWITCH`, `PANIC`, `UNREACHABLE`
 - **Memory:** `ALLOC`, `LOAD`, `STORE`
@@ -91,8 +90,8 @@ name** plus operands, which the engine and rules interpret by name. Examples: Go
 `go.chan.send`, `go.defer`, `go.range`; map ops; closures (`builtin.make_closure`);
 aggregate construction (`builtin.aggregate`). Intrinsics may declare default taint
 semantics in rules, so common propagators (concatenation, formatting) are handled
-uniformly. This keeps the core neutral while every language construct still has a
-home — no opcode per language feature.
+uniformly. The core stays neutral while every language construct has a home — no
+opcode per language feature.
 
 ### SSA is mandatory
 
@@ -114,13 +113,13 @@ ruby:params
 ```
 
 Scheme: `lang:module/path.Type.member`. Frontends own the mapping from native
-naming to this scheme; analysis and rules only ever see canonical names, matched
-with globs (`*` spans `/` and `.`).
+naming to this scheme; analysis and rules only see canonical names, matched with
+globs (`*` spans `/` and `.`).
 
 ### Source mapping
 
-Every instruction, function, and global carries a `Position` (file/line/column).
-This is non-negotiable — it drives both reporting and the HTML path visualization.
+Every instruction, function, and global carries a `Position` (file/line/column) —
+non-negotiable, since it drives both reporting and the HTML path visualization.
 
 ## Analysis engine
 
@@ -143,9 +142,9 @@ Inter-procedural taint tracking (`internal/analysis/`):
    Medium. Low-confidence findings are the ones the LLM reviewer adjudicates.
 
 Analysis cost is scoped **demand-driven**: `Engine.ScopeSeed` seeds only user
-functions, so a lowered dependency function is analyzed only when taint actually
-reaches it (see the Go frontend's dependency lowering). A regex-based **secrets
-scanner** (`ScanSecrets`, CWE-798) runs alongside taint over gIR string constants.
+functions, so a lowered dependency function is analyzed only when taint reaches it
+(see the Go frontend's dependency lowering). A regex-based **secrets scanner**
+(`ScanSecrets`, CWE-798) runs alongside taint over gIR string constants.
 
 ## Rule engine
 
@@ -162,13 +161,13 @@ YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
 Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
 not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
 `rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
-For the full authoring reference see [docs/writing-rules.md](docs/writing-rules.md).
+Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends
 
 All frontends run **in-process** and emit gIR with canonical FQNs and SSA; the tool
-ships as a single Go binary. Only C/C++ needs cgo — the rest are pure Go, and
-Python/Java/Rust/Ruby merely shell out to a toolchain on `PATH`.
+ships as a single Go binary. Only C/C++ needs cgo — the rest are pure Go, with
+Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
 
 - **Go** (`converters/go/`) — `golang.org/x/tools` SSA (already SSA). Enumerates all
   functions incl. closures via `ssautil.AllFunctions`, since vulnerable code often
@@ -245,19 +244,19 @@ detected across the languages that have samples.
   template literals, `or`/`and`, ternary, walrus, destructuring/unpacking, optional
   chaining, `await`, tainted-iterable loop variables, comprehensions) and class-based
   handlers with cross-method calls (`self.method(x)` / `this.method(x)`). The main
-  remaining gap is taint carried across methods via **instance attributes**
-  (`self.attr` / `this.attr`). This maximizes recall for the common web-handler shape
-  at the cost of path precision — consistent with the recall-first design.
+  gap is taint carried across methods via **instance attributes** (`self.attr` /
+  `this.attr`). This maximizes recall for the common web-handler shape at the cost of
+  path precision — consistent with the recall-first design.
 - **Context-insensitive dispatch (CHA).** An `INVOKE` names the abstract method, so
-  the taint transfer resolves it to every concrete method of that name and flows taint
-  into each (with the receiver offset handled). This catches taint through interfaces
-  but over-approximates, so such findings stay Medium confidence.
+  taint transfer resolves it to every concrete method of that name and flows into
+  each (receiver offset handled). This catches taint through interfaces but
+  over-approximates, so such findings stay Medium confidence.
 - **SSRF host-awareness.** An SSRF finding is suppressed when the untrusted value
   only reaches the **path or query of a fixed host** — reconstructed from
   concatenation and format strings (including Rust's packed `fmt::Arguments`
-  template). It is conservative: it drops a finding only when a constant
-  `scheme://host/…` prefix is *proven* to precede the taint, so no real SSRF is lost.
-  The one construction whose literal template is absent from gIR — Java string `+`
+  template). Conservative: it drops a finding only when a constant `scheme://host/…`
+  prefix is *proven* to precede the taint, so no real SSRF is lost. The one
+  construction whose literal template is absent from gIR — Java string `+`
   (`makeConcatWithConstants`) — keeps firing (a possible false positive over a fixed
   host, never a false negative).
 - **Go field-access sources.** A source read as a struct field (`r.URL.Path`) lowers
@@ -266,6 +265,6 @@ detected across the languages that have samples.
   request-object source: a function taking both `http.ResponseWriter` and
   `*http.Request` gets its request parameter tainted at entry (`addHTTPRequestSource`),
   so whole-object taint flows to every field read off it — the same boundary-source
-  idea the JS/Java/Rust frontends use. Field reads off request objects that reach the
-  handler by other means (a custom framework context we don't recognize) still rely on
+  idea the JS/Java/Rust frontends use. Field reads off request objects reaching the
+  handler by other means (an unrecognized custom framework context) still rely on
   method-accessor rules.

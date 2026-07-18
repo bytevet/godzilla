@@ -2,7 +2,7 @@
 
 Godzilla's detections are **YAML rules** matched against **canonical
 fully-qualified names** — stable `<lang>:module/path.Type.member` symbols that
-every frontend emits (so one rule shape can cover multiple languages). The
+every frontend emits, so one rule shape can cover multiple languages. The
 built-in packs live in the top-level [`rulepacks/`](../rulepacks) directory and
 are embedded into the binary; `--rules <file-or-dir>` merges your own rules on
 top of them.
@@ -28,8 +28,8 @@ canonical names a frontend produces for your target code.
 
 ## Rule kinds
 
-There are two rule kinds. (Hardcoded-**secrets** detection is a separate
-regex scanner over string constants — it is *not* a YAML rule.)
+Two rule kinds. (Hardcoded-**secrets** detection is a separate regex scanner over
+string constants — *not* a YAML rule.)
 
 ### Taint rules (default)
 
@@ -56,18 +56,18 @@ rules:
 ```
 
 - **Sink argument pinning** — a sink may append `#<index>` to fire only when
-  taint reaches that **logical** (receiver-excluded) argument. This is what keeps
+  taint reaches that **logical** (receiver-excluded) argument. This keeps
   parameterized queries clean: for `...Query#0`, `db.Query("... = ?", userInput)`
   binds `userInput` at a later position, so it does not fire. A bare pattern (no
   `#`) treats every argument as an injection point.
 - **Sanitizers** transform a value and return a cleaned result (e.g. an escaper);
   taint stops at their output.
-- **Validators** are boolean guards (e.g. `go:path/filepath.IsLocal`) that, when
-  they dominate the branch reaching a sink, clear taint on that path — the value
-  is unchanged but the finding is neutralized by control flow.
+- **Validators** are boolean guards (e.g. `go:path/filepath.IsLocal`) that clear
+  taint on a path when they dominate the branch reaching a sink — the value is
+  unchanged but the finding is neutralized by control flow.
 - **Propagators** are calls that pass taint from an argument to their result.
-  Common concatenation/formatting (`BIN_OP` `+`, `fmt.Sprintf`) already
-  propagates by default; list a propagator when a domain helper should too.
+  Common concatenation/formatting (`BIN_OP` `+`, `fmt.Sprintf`) propagates by
+  default; list a propagator when a domain helper should too.
 
 ### Dangerous-call rules
 
@@ -93,7 +93,7 @@ rules:
 
 Without `const_arg`, every call to a `callees` glob fires (e.g. Go
 `crypto/md5.New`). With it, only calls whose constant string argument at `index`
-matches the regexp fire — e.g. `MessageDigest.getInstance("MD5")` but not
+matches the regexp fire — e.g. `MessageDigest.getInstance("MD5")`, not
 `getInstance("SHA-256")`.
 
 ## Field reference
@@ -112,6 +112,5 @@ matches the regexp fire — e.g. `MessageDigest.getInstance("MD5")` but not
 
 Add a vulnerable sample under `test/<lang>/<case>/` with an `expected.yaml`
 declaring what must fire, and — where precision matters — a `*_safe` control that
-must stay clean. `go test ./test/corpus/` then asserts both. See
-[test/README.md](../test/README.md) for the sample layout and the manifest
-format.
+must stay clean. `go test ./test/corpus/` asserts both. See
+[test/README.md](../test/README.md) for the sample layout and manifest format.

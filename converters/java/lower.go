@@ -2,7 +2,8 @@ package java_converter
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	ir "godzilla/pkg/ir/v1"
@@ -129,77 +130,74 @@ func entryLine(m dumpMethod) int {
 func (s *methodState) run(instrs []dumpInstr) {
 	blocks, labelIdx := splitBlocks(instrs)
 	if len(blocks) <= 1 {
-		for i := range instrs {
-			s.step(instrs[i])
+		for _, in := range instrs {
+			s.step(in)
 		}
 		return
 	}
-	s.runBlocks(blocks, labelIdx, instrs)
+	s.runBlocks(blocks, labelIdx)
 }
 
 // step lowers one instruction against the current operand-stack state.
 func (s *methodState) step(in dumpInstr) {
 	pos := s.pos(in.Line)
-	{
-		switch in.Op {
-		case "LABEL":
-			// Block marker only (FE-4); no stack effect.
-		case "SWITCH":
-			s.pop() // the switch key
-		case "LOAD":
-			s.push(s.load(in.Slot))
-		case "STORE":
-			s.locals[in.Slot] = s.pop()
-		case "CONST":
-			// All constants are modeled as string constants: harmless for taint
-			// (constants are untrusted-free) and lets the secrets scanner see
-			// string literals.
-			s.push(constString(in.Cst))
-		case "INVOKE":
-			s.invoke(in, pos)
-		case "INVOKEDYNAMIC":
-			s.invokeDynamic(in, pos)
-		case "FIELD":
-			s.field(in, pos)
-		case "NEW":
-			s.push(s.emit("", ir.OpCode_OP_CODE_ALLOC, nil, pos))
-		case "NEWARRAY":
-			s.pop() // count/dims
-			s.push(s.emit("", ir.OpCode_OP_CODE_ALLOC, nil, pos))
-		case "ARRAYLOAD":
-			s.pop()        // index
-			arr := s.pop() // array ref
-			s.push(s.emit(s.reg(), ir.OpCode_OP_CODE_INDEX, []*ir.Value{arr}, pos))
-		case "ARRAYSTORE":
-			val := s.pop()
-			s.pop()                                                         // index
-			arr := s.pop()                                                  // array ref
-			s.emit("", ir.OpCode_OP_CODE_STORE, []*ir.Value{arr, val}, pos) // element taint → array
-		case "OPERATOR":
-			s.operator(in, pos)
-		case "CONVERT":
-			v := s.pop()
-			s.push(s.emit(s.reg(), ir.OpCode_OP_CODE_CONVERT, []*ir.Value{v}, pos))
-		case "STACK":
-			s.stackOp(in.Kind)
-		case "TYPECHECK":
-			// CHECKCAST leaves the value (narrower static type); INSTANCEOF pops a
-			// ref and pushes an int.
-			if in.Kind == "INSTANCEOF" {
-				s.pop()
-				s.push(constString("0"))
-			}
-		case "RETURN":
-			s.ret(in, pos)
-		case "THROW":
+	switch in.Op {
+	case "LABEL":
+		// Block marker only (FE-4); no stack effect.
+	case "SWITCH":
+		s.pop() // the switch key
+	case "LOAD":
+		s.push(s.load(in.Slot))
+	case "STORE":
+		s.locals[in.Slot] = s.pop()
+	case "CONST":
+		// Model every constant as a string: harmless for taint and lets the
+		// secrets scanner see string literals.
+		s.push(constString(in.Cst))
+	case "INVOKE":
+		s.invoke(in, pos)
+	case "INVOKEDYNAMIC":
+		s.invokeDynamic(in, pos)
+	case "FIELD":
+		s.field(in, pos)
+	case "NEW":
+		s.push(s.emit("", ir.OpCode_OP_CODE_ALLOC, nil, pos))
+	case "NEWARRAY":
+		s.pop() // count/dims
+		s.push(s.emit("", ir.OpCode_OP_CODE_ALLOC, nil, pos))
+	case "ARRAYLOAD":
+		s.pop()        // index
+		arr := s.pop() // array ref
+		s.push(s.emit(s.reg(), ir.OpCode_OP_CODE_INDEX, []*ir.Value{arr}, pos))
+	case "ARRAYSTORE":
+		val := s.pop()
+		s.pop()                                                         // index
+		arr := s.pop()                                                  // array ref
+		s.emit("", ir.OpCode_OP_CODE_STORE, []*ir.Value{arr, val}, pos) // element taint → array
+	case "OPERATOR":
+		s.operator(in, pos)
+	case "CONVERT":
+		v := s.pop()
+		s.push(s.emit(s.reg(), ir.OpCode_OP_CODE_CONVERT, []*ir.Value{v}, pos))
+	case "STACK":
+		s.stackOp(in.Kind)
+	case "TYPECHECK":
+		// CHECKCAST leaves the value (narrower static type); INSTANCEOF pops a
+		// ref and pushes an int.
+		if in.Kind == "INSTANCEOF" {
 			s.pop()
-		case "BRANCH":
-			s.branch(in.Kind)
-		case "NOP":
-			// no stack effect
-		default: // "OTHER" — best-effort stack delta for unmodeled opcodes
-			s.other(in.Kind, pos)
+			s.push(constString("0"))
 		}
+	case "RETURN":
+		s.ret(in, pos)
+	case "THROW":
+		s.pop()
+	case "BRANCH":
+		s.branch(in.Kind)
+	case "NOP":
+		// no stack effect
+	default: // "OTHER" — best-effort stack delta for unmodeled opcodes
+		s.other(in.Kind, pos)
 	}
 }
 
@@ -256,11 +254,7 @@ func splitBlocks(instrs []dumpInstr) ([]block, map[int]int) {
 			}
 		}
 	}
-	starts := make([]int, 0, len(leaders))
-	for ld := range leaders {
-		starts = append(starts, ld)
-	}
-	sort.Ints(starts)
+	starts := slices.Sorted(maps.Keys(leaders))
 	blocks := make([]block, len(starts))
 	for i, st := range starts {
 		end := len(instrs)
@@ -279,7 +273,7 @@ func splitBlocks(instrs []dumpInstr) ([]block, map[int]int) {
 // predecessors are already lowered; a block reachable only via an unprocessed
 // (back-)edge falls back to the previous block's exit, never doing worse than
 // the old linear walk.
-func (s *methodState) runBlocks(blocks []block, labelIdx map[int]int, instrs []dumpInstr) {
+func (s *methodState) runBlocks(blocks []block, labelIdx map[int]int) {
 	blockAt := map[int]int{} // leader instruction index -> block index
 	for bi, b := range blocks {
 		blockAt[b.start] = bi

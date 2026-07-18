@@ -14,132 +14,47 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
-// xssRuleSet mirrors internal/rules/loader/builtin/js-xss.yaml.
+// reqSources is the untrusted-HTTP-request source glob set shared by every
+// builtin JS rulepack these tests mirror.
+var reqSources = []string{"js:*req.query*", "js:*req.params*", "js:*req.body*"}
+
+// jsRuleSet builds a one-rule RuleSet over reqSources, mirroring one of the
+// builtin internal/rules/loader/builtin/js-*.yaml packs.
+func jsRuleSet(id, cwe, msg string, sev rules.Severity, sinks ...string) *rules.RuleSet {
+	return &rules.RuleSet{Rules: []rules.Rule{{
+		ID:        id,
+		Languages: []string{"javascript"},
+		Severity:  sev,
+		CWE:       cwe,
+		Message:   msg,
+		Sources:   reqSources,
+		Sinks:     sinks,
+	}}}
+}
+
 func xssRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:        "js-xss",
-				Languages: []string{"javascript"},
-				Severity:  rules.SeverityHigh,
-				CWE:       "CWE-79",
-				Message:   "reflected XSS",
-				Sources: []string{
-					"js:*req.query*",
-					"js:*req.params*",
-					"js:*req.body*",
-				},
-				Sinks: []string{
-					"js:*res.send",
-					"js:*res.write",
-					"js:*res.end",
-				},
-			},
-		},
-	}
+	return jsRuleSet("js-xss", "CWE-79", "reflected XSS", rules.SeverityHigh,
+		"js:*res.send", "js:*res.write", "js:*res.end")
 }
 
-// commandInjectionRuleSet mirrors
-// internal/rules/loader/builtin/js-command-injection.yaml.
 func commandInjectionRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:        "js-command-injection",
-				Languages: []string{"javascript"},
-				Severity:  rules.SeverityCritical,
-				CWE:       "CWE-78",
-				Message:   "OS command injection",
-				Sources: []string{
-					"js:*req.query*",
-					"js:*req.params*",
-					"js:*req.body*",
-				},
-				Sinks: []string{
-					"js:*child_process.exec*",
-					"js:*.exec",
-					"js:*.execSync",
-					"js:*.spawn",
-				},
-			},
-		},
-	}
+	return jsRuleSet("js-command-injection", "CWE-78", "OS command injection", rules.SeverityCritical,
+		"js:*child_process.exec*", "js:*.exec", "js:*.execSync", "js:*.spawn")
 }
 
-// sqliRuleSet mirrors internal/rules/loader/builtin/js-sqli.yaml.
 func sqliRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:        "js-sqli",
-				Languages: []string{"javascript"},
-				Severity:  rules.SeverityHigh,
-				CWE:       "CWE-89",
-				Message:   "SQL injection",
-				Sources: []string{
-					"js:*req.query*",
-					"js:*req.params*",
-					"js:*req.body*",
-				},
-				Sinks: []string{
-					"js:*.query",
-					"js:*.execute",
-				},
-			},
-		},
-	}
+	return jsRuleSet("js-sqli", "CWE-89", "SQL injection", rules.SeverityHigh,
+		"js:*.query", "js:*.execute")
 }
 
-// ssrfRuleSet mirrors internal/rules/loader/builtin/js-ssrf.yaml.
 func ssrfRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:        "js-ssrf",
-				Languages: []string{"javascript"},
-				Severity:  rules.SeverityHigh,
-				CWE:       "CWE-918",
-				Message:   "server-side request forgery",
-				Sources: []string{
-					"js:*req.query*",
-					"js:*req.params*",
-					"js:*req.body*",
-				},
-				Sinks: []string{
-					"js:*http.get",
-					"js:*https.get",
-					"js:*axios*",
-					"js:*fetch",
-				},
-			},
-		},
-	}
+	return jsRuleSet("js-ssrf", "CWE-918", "server-side request forgery", rules.SeverityHigh,
+		"js:*http.get", "js:*https.get", "js:*axios*", "js:*fetch")
 }
 
-// pathTraversalRuleSet mirrors
-// internal/rules/loader/builtin/js-path-traversal.yaml.
 func pathTraversalRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:        "js-path-traversal",
-				Languages: []string{"javascript"},
-				Severity:  rules.SeverityHigh,
-				CWE:       "CWE-22",
-				Message:   "path traversal",
-				Sources: []string{
-					"js:*req.query*",
-					"js:*req.params*",
-					"js:*req.body*",
-				},
-				Sinks: []string{
-					"js:*fs.readFile*",
-					"js:*fs.createReadStream",
-					"js:*.sendFile",
-				},
-			},
-		},
-	}
+	return jsRuleSet("js-path-traversal", "CWE-22", "path traversal", rules.SeverityHigh,
+		"js:*fs.readFile*", "js:*fs.createReadStream", "js:*.sendFile")
 }
 
 func mustConvert(t *testing.T, path string) *ir.Program {

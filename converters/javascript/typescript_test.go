@@ -3,6 +3,8 @@ package js_converter
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	ir "godzilla/pkg/ir/v1"
@@ -32,15 +34,6 @@ func calleeNames(t *testing.T, path string) []string {
 	return out
 }
 
-func hasCallee(cs []string, want string) bool {
-	for _, c := range cs {
-		if c == want {
-			return true
-		}
-	}
-	return false
-}
-
 // TestTypeScript_StrippedAndLowered checks that a .ts file (type annotations +
 // an interface) is esbuild-transformed so goja can parse it, and that the
 // resulting callees still name the source (req.query) and sink (cp.execSync).
@@ -59,7 +52,7 @@ export function run(req: Req, res: unknown): void {
 	cs := calleeNames(t, src)
 	// FE-2: `const cp = require("child_process")` makes cp an alias, so the callee
 	// resolves to the canonical js:child_process.execSync (not the local js:cp.*).
-	if !hasCallee(cs, "js:child_process.execSync") {
+	if !slices.Contains(cs, "js:child_process.execSync") {
 		t.Errorf("expected sink callee js:child_process.execSync in TS output, got %v", cs)
 	}
 }
@@ -79,14 +72,11 @@ export function run(req) {
 		t.Fatal(err)
 	}
 	cs := calleeNames(t, src)
-	found := false
-	for _, c := range cs {
-		// esbuild renames the module base to import_child_process; the suffix
-		// (.execSync) is what a js:*.execSync sink glob matches.
-		if len(c) > len(".execSync") && c[len(c)-len(".execSync"):] == ".execSync" {
-			found = true
-		}
-	}
+	// esbuild renames the module base to import_child_process; the suffix
+	// (.execSync) is what a js:*.execSync sink glob matches.
+	found := slices.ContainsFunc(cs, func(c string) bool {
+		return strings.HasSuffix(c, ".execSync")
+	})
 	if !found {
 		t.Errorf("ESM interop callee not recovered (collapsed to <dynamic>?): got %v", cs)
 	}

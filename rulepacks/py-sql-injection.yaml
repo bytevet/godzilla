@@ -18,6 +18,8 @@ rules:
       parameterized queries (e.g. cursor.execute(sql, params)) instead of
       concatenating or formatting user input into the query string.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"

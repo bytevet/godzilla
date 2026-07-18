@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Godzilla is a multi-language SAST (Static Application Security Testing) analyzer for CI/CD gates. Source
 code is lowered to a language-neutral SSA IR called **gIR** (a Protobuf schema), and one taint-analysis
-engine runs over that IR regardless of source language. The full pipeline is implemented and working:
+engine runs over that IR regardless of source language. The full pipeline is implemented and tested:
 
 ```
 source (Go / Python / JS / Java / Rust / Ruby / C·C++) → frontend → gIR v2 → rule engine + taint analysis → findings → report / gate
@@ -15,7 +15,7 @@ source (Go / Python / JS / Java / Rust / Ruby / C·C++) → frontend → gIR v2 
 
 Seven frontends — Go, Python, JavaScript, Java (JVM bytecode), Rust (rustc MIR), Ruby (stdlib Ripper),
 and C/C++ (LLVM IR, an opt-in cgo build) — plus an inter-procedural taint engine, a YAML rule engine, a
-secrets scanner, an HTML/JSON/SARIF report, and a pluggable LLM reviewer all exist and are tested.
+secrets scanner, an HTML/JSON/SARIF report, and a pluggable LLM reviewer.
 
 ## Commands
 
@@ -51,8 +51,8 @@ never add their dependencies to the root `go.mod`.
 
 ## Architecture
 
-**gIR v2 — the contract (`proto/`, generated into `pkg/ir/v1/`).** A deliberately small, language-neutral
-SSA opcode core (RET/JUMP/IF/SWITCH/PANIC/UNREACHABLE, ALLOC/LOAD/STORE, FIELD(_ADDR)/INDEX(_ADDR), BIN_OP/UN_OP/PHI,
+**gIR v2 — the contract (`proto/`, generated into `pkg/ir/v1/`).** A small, language-neutral SSA opcode
+core (RET/JUMP/IF/SWITCH/PANIC/UNREACHABLE, ALLOC/LOAD/STORE, FIELD(_ADDR)/INDEX(_ADDR), BIN_OP/UN_OP/PHI,
 CALL/INVOKE, CONVERT/TYPE_ASSERT/MAKE_INTERFACE/EXTRACT) plus **`OP_CODE_INTRINSIC`**, the escape hatch:
 every language-specific construct (Go `defer`/channels/`go`/`select`, map ops, closures, builtins) is an
 intrinsic with a canonical name (e.g. `go.chan.send`, `builtin.make_closure`) that the engine interprets.
@@ -66,9 +66,9 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   enumerates **all** functions via `ssautil.AllFunctions` (package funcs, methods, and closures — vulnerable
   code often lives in `http.HandleFunc` closures, so closure coverage is essential). Third-party **dependency
   bodies ARE lowered** (a two-phase load: a metadata-only `go list` classifies the closure by module, then
-  syntax is loaded for every non-stdlib package as an explicit root — the stdlib arrives as compiled export
-  data and its SSA packages are created bodyless) so taint flows THROUGH library/utility code
-  instead of dropping at it (a class of false negatives); the Go **stdlib** is skipped (modeled by rules).
+  syntax is loaded for every non-stdlib package as an explicit root; the stdlib arrives as compiled export
+  data with bodyless SSA packages) so taint flows THROUGH library/utility code instead of dropping at it
+  (a false-negative class); the Go **stdlib** is skipped (modeled by rules).
   Two things keep this affordable: findings are **scoped to user code** (`internal/scan` `scopeFindings` +
   `Finding.Package`; a sink reached inside a library is not reported), and dependency functions are analyzed
   **demand-driven** (`Engine.ScopeSeed` seeds only user functions; a dependency function is analyzed only when
@@ -84,11 +84,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
   off an opaque base (`req.query`) become a synthetic source CALL so taint seeds correctly; chained calls
   (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`. **TypeScript/JSX/ESM**
-  (`.ts/.tsx/.jsx/.mjs/.cjs`) are handled by esbuild's in-process `Transform` (pure Go, no Node): it strips
-  TS types and lowers ES modules to CommonJS (`require`/`exports`, which the existing lowering already
-  understands) before goja parses, and a `go-sourcemap` consumer remaps finding positions back to the
-  original file (`transform.go`, `remapPositions`). esbuild's ESM-interop `(0, import_mod.fn)(x)` callee is
-  recovered by a `SequenceExpression` case in `syntacticCallee`. Plain `.js` skips the transform.
+  (`.ts/.tsx/.jsx/.mjs/.cjs`) go through esbuild's in-process `Transform` (pure Go, no Node): it strips
+  TS types and lowers ES modules to CommonJS (`require`/`exports`, which the lowering already understands)
+  before goja parses, and a `go-sourcemap` consumer remaps finding positions back to the original file
+  (`transform.go`, `remapPositions`). esbuild's ESM-interop `(0, import_mod.fn)(x)` callee is recovered by a
+  `SequenceExpression` case in `syntacticCallee`. Plain `.js` skips the transform.
   **Vue/Svelte SFCs** (`.vue`/`.svelte`, `sfc.go`) compile to JS: the `<script>` block becomes the
   module body and each dangerous template directive is appended as a synthetic sink CALL
   (`v-html`→`js:__godzilla_vue_vhtml`, `{@html}`→`js:__godzilla_svelte_html`), so template-injection
@@ -99,15 +99,14 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   `java.lang.classfile` API, emitting JSON; `lower.go` runs an **abstract operand-stack simulation** to
   recover SSA values. Instance calls → `OP_CODE_INVOKE` (receiver in `Call.Value`, so a sink `#0` and the
   engine's arg→param mapping both line up); string concat (`makeConcatWithConstants`) → BIN_OP. Canonical
-  names `java:<owner>.<method>`. A scan target that is a **Maven/Gradle project** (`pom.xml` /
-  `build.gradle`) is compiled by its own build tool first (`resolveInputs` in `converter.go`, preferring a
-  `mvnw`/`gradlew` wrapper, else `mvn`/`gradle` on PATH) so third-party deps (Spring, etc.) are on the
-  classpath, and the resulting `.class` output is analyzed — with graceful fallback to the in-process
-  compile when no build tool / the build fails. **Spring controller param annotations**
-  (`@RequestParam`/`@PathVariable`/`@RequestBody`/…) become taint sources by *synthesizing a source CALL*
-  per annotated parameter (JavaDump emits `paramAnnotations`; `lower.go` binds the param slot to a
-  `java:<annotation>` CALL) — the same trick JS/Python use for opaque-base member reads, so it's a frontend
-  + YAML change with **no gIR/engine change**.
+  names `java:<owner>.<method>`. A **Maven/Gradle project** target (`pom.xml` / `build.gradle`) is compiled
+  by its own build tool first (`resolveInputs` in `converter.go`, preferring a `mvnw`/`gradlew` wrapper,
+  else `mvn`/`gradle` on PATH) so third-party deps (Spring, etc.) are on the classpath, and the resulting
+  `.class` output is analyzed — falling back to the in-process compile when there's no build tool or the
+  build fails. **Spring controller param annotations** (`@RequestParam`/`@PathVariable`/`@RequestBody`/…)
+  become taint sources by *synthesizing a source CALL* per annotated parameter (JavaDump emits
+  `paramAnnotations`; `lower.go` binds the param slot to a `java:<annotation>` CALL) — the same trick
+  JS/Python use for opaque-base member reads, so it's a frontend + YAML change with **no gIR/engine change**.
 - `converters/rust/` — analyzes **rustc MIR** (Mid-level IR). Shells out to `rustc --emit=mir
   -Zmir-include-spans=on` (`RUSTC_BOOTSTRAP=1` unlocks the span flag; the MIR text format is itself
   unstable, so this adds no new assumption), then `mir.go` runs a **straight-line value-forwarding**
@@ -120,10 +119,9 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   `fmt::Arguments::new(<packed byte-template>, args)`; `decodeFmtTemplate` turns that `const b"..."`
   template into a readable `{}`-placeholder string so the SSRF host check can read its constant pieces
   (rustc's `fmt::rt` encoding: `0xC0` = an argument, a byte `< 0x80` = the length of a literal run).
-  Canonical names
-  `rust:<normalized-path>` (generics stripped). Pure Go, in the default binary; only `rustc` is needed
-  at scan time. A scan target with a **`Cargo.toml`** is built with `cargo rustc -- --emit=mir`
-  (`convertCargo`) so its dependency crates — a web framework, etc. — resolve and the project's calls
+  Canonical names `rust:<normalized-path>` (generics stripped). Pure Go, in the default binary; only
+  `rustc` is needed at scan time. A **`Cargo.toml`** target is built with `cargo rustc -- --emit=mir`
+  (`convertCargo`) so its dependency crates (a web framework, etc.) resolve and the project's calls
   are named by their real crate paths; cargo passes the trailing args to only the final crate's rustc,
   so dependency MIR is not emitted. A build failure (e.g. an unfetchable dep offline) is a skipped
   frontend. Sources model the real attack surface — HTTP request accessors (`*Request::query|header|
@@ -151,16 +149,16 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from the synthetic
   request source (`go:@net/http.Request`, see the Go frontend) carries **request-object provenance**
   (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
-  as untrusted (result tainted, pointer out-args filled), even for a web framework with **no rules**. Gated on
+  as untrusted (result tainted, pointer out-args filled), even for a framework with **no rules**. Gated on
   provenance so ordinary taint is untouched, and only for unresolved/external callees. Provenance is
   **inter-procedural** — a request object passed to a helper makes that helper's parameter a request object too
   (a `reqEffects`/`paramReqTaint` summary channel mirroring the taint one), so the `*http.Request` direct-method
   source globs (`FormValue`/`Cookie`/`PathValue`/`PostFormValue`) are redundant and removed; the kept Go request
   sources are the synthetic `go:@net/http.Request`, `net/http.Header.Get` (a field sub-object), `net/url.Values.Get`,
   and the free-function accessors (`chi.URLParam`, `mux.Vars`). Method sugar only fires for external callees, so a
-  **lowered** framework (gin/echo/… whose bodies dep-lowering analyzes) instead carries taint through its own code —
+  **lowered** framework (gin/echo/… whose bodies dep-lowering analyzes) carries taint through its own code instead —
   but that code bottoms out in stdlib request parsers that are NOT lowered (gin's `c.Query` → `c.Request.URL.Query()`
-  then a `queryCache[key]` map read), dropping taint there. The fix is framework-agnostic and lives in the rules:
+  then a `queryCache[key]` map read), dropping taint there. The framework-agnostic fix lives in the rules:
   the net/http+net/url request accessors (`net/url.URL.Query`, `net/url.Values.Get`, `net/http.Request.FormValue`/
   `Cookie`/…, `net/http.Header.Get`) are **default propagators** (`internal/rules/propagators.go`) — they only
   forward already-present request taint, so any unmodeled framework built on net/http is covered at no FP cost.
@@ -173,7 +171,8 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   cannot redirect the request. Deliberately conservative: it suppresses only when the fixed host is *proven*;
   an opaque or unrecoverable construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is
   dropped from gIR) keeps firing, so no real SSRF is lost.
-- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
+- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
+  (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
   (CWE-798).
 - `finding.go` — the `Finding` type shared across the pipeline.
@@ -181,11 +180,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 **Rules (`internal/rules/`).** `rule.go` — the `Rule` model (sources/sinks/sanitizers/propagators as
 canonical-FQN globs, `*` matches across `/` and `.`) + `AppliesTo`/glob matcher. A **sink** entry may pin
 its injection point with a `#<idx>` suffix (`"go:*database/sql*.Query#0"`): only taint reaching that
-LOGICAL (receiver-excluded) argument fires — this is what prevents parameterized-query false positives
+LOGICAL (receiver-excluded) argument fires — this prevents parameterized-query false positives
 (`db.Query("... = ?", taintedParam)` binds a safe placeholder). A bare pattern means all args.
 `loader/` — YAML loader (`LoadFile`/`LoadDir`/`Builtin`/`LoadDefault`). The built-in rule packs live in
-the **top-level `rulepacks/`** directory and are embedded into the binary by `rulepacks/embed.go`
-(`//go:embed *.yaml`), which the loader's `Builtin()` consumes:
+the **top-level `rulepacks/`** directory, embedded into the binary by `rulepacks/embed.go`
+(`//go:embed *.yaml`) and consumed by the loader's `Builtin()`:
 - **Go / Python / JS** — SQLi, command injection, path traversal, SSRF, XSS, open redirect, plus Python
   insecure deserialization (CWE-502) and code injection (CWE-95: `eval`/`exec`/`compile`, exact-named
   so the safe `ast.literal_eval` is not flagged), and JS code injection (CWE-95), plus `vue-xss`/
@@ -216,9 +215,9 @@ dependency-free (interface, confidence-gated `Filter` with fail-open semantics, 
 parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-haiku-4-5`, override via
 `GODZILLA_LLM_MODEL`).
 
-**CLI (`cmd/godzilla/main.go`).** `scan` dispatches to frontends by extension (or runs all on a directory
-and merges modules), runs the engine + secrets scan, optionally LLM-reviews, prints findings, writes HTML,
-and sets a severity-gated exit code.
+**CLI (`cmd/godzilla/main.go`).** `scan` dispatches to frontends by extension (or runs all on a directory and
+merges modules), runs the engine + secrets scan, optionally LLM-reviews, prints findings, writes HTML, and
+sets a severity-gated exit code.
 
 ## Conventions
 

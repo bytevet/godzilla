@@ -27,8 +27,12 @@ Every statement/expression node is a JSON object with a "kind" field and a
 
 Statement kinds
 ---------------
-  FunctionDef   {name, params: [str, ...], body: [stmt, ...]}
-  ClassDef      {name, body: [stmt, ...]}
+  FunctionDef   {name, params: [str, ...], decorators: [str, ...],
+                  depends_params: [str, ...], body: [stmt, ...]}
+                  (decorators are dotted names, e.g. ["app.get"]; depends_params
+                   are params defaulted to a FastAPI Depends()/Security() call)
+  ClassDef      {name, bases: [str, ...], body: [stmt, ...]}
+                  (bases are dotted names, e.g. ["tornado.web.RequestHandler"])
   Assign        {targets: [expr, ...], value: expr}
   AugAssign     {target: expr, op: BinOpStr, value: expr}
   ExprStmt      {value: expr}
@@ -106,6 +110,52 @@ def arg_names(args: ast.arguments):
     return names
 
 
+def dotted_of(node):
+    """Best-effort dotted name for a decorator / class-base expression.
+
+    Name("app") -> "app"; Attribute(Name("app"),"get") -> "app.get";
+    Call(func=...) -> dotted name of the callee (so @APIRouter().get(...) ->
+    "APIRouter.get"). Anything else -> "".
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = dotted_of(node.value)
+        return (base + "." + node.attr) if base else node.attr
+    if isinstance(node, ast.Call):
+        return dotted_of(node.func)
+    return ""
+
+
+def decorator_names(node):
+    """The dotted names of a def's decorators, e.g. ["app.get"] for @app.get(...)."""
+    return [d for d in (dotted_of(d) for d in node.decorator_list) if d]
+
+
+def depends_params(args: ast.arguments):
+    """Names of parameters whose default is a FastAPI Depends(...)/Security(...)
+    call — these are dependency-injected, not raw request input, so callers
+    must NOT treat them as taint sources."""
+
+    def is_depends(default):
+        if isinstance(default, ast.Call):
+            last = dotted_of(default.func).rsplit(".", 1)[-1]
+            return last in ("Depends", "Security")
+        return False
+
+    out = []
+    positional = list(getattr(args, "posonlyargs", [])) + list(args.args)
+    defaults = list(args.defaults)
+    if defaults:
+        for a, d in zip(positional[len(positional) - len(defaults):], defaults):
+            if is_depends(d):
+                out.append(a.arg)
+    for a, d in zip(args.kwonlyargs, args.kw_defaults):
+        if d is not None and is_depends(d):
+            out.append(a.arg)
+    return out
+
+
 def conv_body(stmts):
     return [conv_stmt(s) for s in stmts]
 
@@ -127,11 +177,19 @@ def conv_stmt(node):
             "kind": "FunctionDef",
             "name": node.name,
             "params": arg_names(node.args),
+            "decorators": decorator_names(node),
+            "depends_params": depends_params(node.args),
             "body": conv_body(node.body),
             "pos": p,
         }
     if isinstance(node, ast.ClassDef):
-        return {"kind": "ClassDef", "name": node.name, "body": conv_body(node.body), "pos": p}
+        return {
+            "kind": "ClassDef",
+            "name": node.name,
+            "bases": [b for b in (dotted_of(b) for b in node.bases) if b],
+            "body": conv_body(node.body),
+            "pos": p,
+        }
     if isinstance(node, ast.Assign):
         return {
             "kind": "Assign",
@@ -177,7 +235,17 @@ def conv_stmt(node):
             "pos": p,
         }
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        return {"kind": "With", "body": conv_body(node.body), "pos": p}
+        # Emit the context-manager items (`with EXPR as VAR:`) so the frontend can
+        # lower them as `VAR = EXPR`. Dropping them made the extremely common
+        # `with open(tainted) as f:` file/resource idiom invisible to analysis.
+        items = [
+            {
+                "context": conv_expr(it.context_expr),
+                "vars": conv_expr(it.optional_vars) if it.optional_vars is not None else None,
+            }
+            for it in node.items
+        ]
+        return {"kind": "With", "items": items, "body": conv_body(node.body), "pos": p}
     if isinstance(node, ast.Try):
         return {
             "kind": "Try",

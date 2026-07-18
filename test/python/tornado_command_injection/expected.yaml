@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Tornado request body (self.request.body) -> cross-file shell pipeline (CWE-78).
+findings:
+    - rule: py-command-injection
+      min: 1

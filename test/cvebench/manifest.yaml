@@ -1,0 +1,86 @@
+# Real-world CVE recall benchmark (TRUST-11). Ground truth: each entry is a real,
+# recent (2024-2025) CVE in a popular project, pinned to its VULNERABLE ref, with
+# the sink file confirmed against the fix diff (ref = the fix commit's parent SHA,
+# or the last affected release tag). Tracked ALONGSIDE the hand-written corpus F1
+# (which is 1.000) — real-world recall measures modeling BREADTH (source/framework/
+# sink coverage), which the curated corpus cannot.
+#
+# Opt-in: `GODZILLA_CVE_BENCH=1 go test ./test/cvebench/` — it clones external repos
+# over the network. Entries are parse-only frontends (Python/JS/TS/Ruby), which scan
+# without a build; Go/Java CVEs need a toolchain build and are omitted (see BACKLOG
+# COV-11/13).
+#
+# STATUS: recall 5/7. HIT: mlflow (request-attribute alias -> source + requests.request
+# sink), langflow (FastAPI body source + ast-pipeline propagators), motioneye (Tornado
+# source + cross-module subprocess flow), decidim (Ruby module/class-method lowering +
+# Arel.sql sink), webpack (JS cross-module default-export resolution + memoize-wrapper
+# alias). The 2 remaining need CORE engine capabilities that a context-insensitive,
+# straight-line taint engine lacks and that can't be added as narrow FP-safe changes:
+# gradio (higher-order callback taint: tainted data handed to a generic traversal helper
+# that invokes a passed-by-reference callback), pyload (non-self method-call CHA
+# resolution + cross-method instance-field heap persistence + thread/async dispatch --
+# the chain breaks in ~8 places). Tracked as engine work in BACKLOG.
+cves:
+  # --- Python -------------------------------------------------------------------
+  - cve: CVE-2025-52967        # HIT: request-attribute alias (a = request.args; a.get()) -> source + requests.request sink
+    project: mlflow/mlflow
+    url: https://github.com/mlflow/mlflow.git
+    ref: 0e0fe9e665aece995c0a9a54ca400961568fa05a
+    subdir: mlflow/server
+    sink_file: server/handlers.py
+    rule: py-ssrf
+    cwe: CWE-918
+
+  - cve: CVE-2025-55156        # MISS: sink modeled; needs Python method-CHA + cross-method field-heap + thread dispatch
+    project: pyload/pyload
+    url: https://github.com/pyload/pyload.git
+    ref: a123accec0618798db77f9f5bc66838b741d9f58
+    subdir: src
+    sink_file: core/database/file_database.py
+    rule: py-sql-injection
+    cwe: CWE-89
+
+  - cve: CVE-2025-3248         # HIT: FastAPI body source + ast-pipeline propagators
+    project: langflow-ai/langflow
+    url: https://github.com/langflow-ai/langflow.git
+    ref: "1.2.0"
+    subdir: src/backend/base/langflow
+    sink_file: utils/validate.py
+    rule: py-code-injection
+    cwe: CWE-94
+
+  - cve: CVE-2025-47782        # HIT: Tornado source -> cross-file/cross-module subprocess sink
+    project: motioneye-project/motioneye
+    url: https://github.com/motioneye-project/motioneye.git
+    ref: c813b74aa6cb33418c4e48ba7e5da649cd93635a
+    subdir: motioneye
+    sink_file: utils/__init__.py   # the subprocess.run call_subprocess reaches, from device via v4l2ctl.py
+    rule: py-command-injection
+    cwe: CWE-78
+
+  - cve: CVE-2024-48052        # MISS: sink modeled; needs higher-order callback taint (async_traverse dispatch)
+    project: gradio-app/gradio
+    url: https://github.com/gradio-app/gradio.git
+    ref: 8805fc48ae7884ae8ce8dcc0f533e135d9e5d80e
+    subdir: gradio
+    sink_file: processing_utils.py
+    rule: py-ssrf
+    cwe: CWE-918
+
+  # --- Ruby ---------------------------------------------------------------------
+  - cve: CVE-2024-43415        # HIT: Ruby module/class-method lowering + Arel.sql#1 sink
+    project: decidim-ice/decidim-module-decidim_awesome
+    url: https://github.com/decidim-ice/decidim-module-decidim_awesome.git
+    ref: a0464aab671fc7cdbad0506912219a58643426d9
+    sink_file: paper_trail_version.rb
+    rule: ruby-sql-injection
+    cwe: CWE-89
+
+  # --- JavaScript ---------------------------------------------------------------
+  - cve: CVE-2024-29180        # HIT: JS cross-module default-export resolution + memoize-wrapper alias
+    project: webpack/webpack-dev-middleware
+    url: https://github.com/webpack/webpack-dev-middleware.git
+    ref: v7.0.0
+    sink_file: getFilenameFromUrl.js
+    rule: js-path-traversal
+    cwe: CWE-22

@@ -9,6 +9,8 @@ rules:
       redirect. Validate the target against an allowlist instead of redirecting
       to a user-controlled URL.
     sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
       - "py:*request.args.get"
       - "py:*request.headers.get"
       - "py:*request.headers.__getitem__"
@@ -39,3 +41,12 @@ rules:
       - "py:*redirect"
     sanitizers: []
     propagators: []
+    # Django's standard open-redirect guard: a value checked by
+    # url_has_allowed_host_and_scheme against an allowed-hosts set is validated,
+    # so a redirect to it is not an open redirect (ENG-9). Recognized both
+    # intra-procedurally and at a validated return (the common
+    # `get_valid_next_url` helper: `if not url_has_allowed_host_and_scheme(x):
+    # return ""; return x`).
+    validators:
+      - "py:*url_has_allowed_host_and_scheme"
+      - "py:*is_safe_url"

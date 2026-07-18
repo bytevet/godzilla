@@ -9,6 +9,7 @@
 package rules
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,12 +140,9 @@ func (r *Rule) AppliesTo(language string) bool {
 	if len(r.Languages) == 0 {
 		return true
 	}
-	for _, l := range r.Languages {
-		if strings.EqualFold(l, language) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(r.Languages, func(l string) bool {
+		return strings.EqualFold(l, language)
+	})
 }
 
 // ruleMatchers holds a rule's pattern lists precompiled into shape-matchers, so
