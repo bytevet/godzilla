@@ -441,23 +441,55 @@ type funcState struct {
 	// "os.system" for `from os import system`. resolveDotted rewrites a callee's
 	// root through it so module-anchored sink rules match regardless of aliasing.
 	aliases map[string]string
+
+	// localAlias maps a local variable to the request-rooted attribute path it was
+	// assigned (`a` -> "request.args" for `a = request.args`), per function. It lets
+	// resolveDotted rewrite `a.get(...)` to `request.args.get` so the existing
+	// request source globs match the aliased form (mlflow CVE-2025-52967), not just
+	// the inline `request.args.get(...)`. Narrow to request-rooted chains to stay FP-safe.
+	localAlias map[string]string
 }
 
 func newFuncState(filename string) *funcState {
-	return &funcState{filename: filename, env: map[string]*ir.Value{}, paramRegs: map[string]bool{}}
+	return &funcState{filename: filename, env: map[string]*ir.Value{}, paramRegs: map[string]bool{}, localAlias: map[string]string{}}
+}
+
+// requestAliasPath returns the request-rooted attribute path a variable is being
+// aliased to when an assignment's RHS is a `request.<...>` chain (or a ternary
+// between such chains), else "". Used to resolve `a = request.args; a.get("k")`
+// to the `request.args.get` source the inline form already matches.
+func requestAliasPath(n astNode) string {
+	if n == nil {
+		return ""
+	}
+	switch n.kind() {
+	case "Attribute", "Name":
+		if d := dottedName(n); d == "request" || strings.HasPrefix(d, "request.") {
+			return d
+		}
+	case "IfExp":
+		if p := requestAliasPath(n.node("body")); p != "" {
+			return p
+		}
+		return requestAliasPath(n.node("orelse"))
+	}
+	return ""
 }
 
 // resolveDotted rewrites the root component of a dotted callee name through the
-// import alias table, so `sp.call` becomes `subprocess.call` and a from-imported
-// `system` becomes `os.system` (FE-2). Names with no alias pass through.
+// per-function request-alias table (`a` -> "request.args") and the import alias
+// table (`sp` -> "subprocess"), so `a.get` becomes `request.args.get` and
+// `sp.call` becomes `subprocess.call` (FE-2). Names with no alias pass through.
 func (fs *funcState) resolveDotted(dotted string) string {
-	if len(fs.aliases) == 0 {
+	if len(fs.aliases) == 0 && len(fs.localAlias) == 0 {
 		return dotted
 	}
 	root, rest, hasRest := strings.Cut(dotted, ".")
-	canon, ok := fs.aliases[root]
+	canon, ok := fs.localAlias[root]
 	if !ok {
-		return dotted
+		if canon, ok = fs.aliases[root]; !ok {
+			return dotted
+		}
 	}
 	if hasRest {
 		return canon + "." + rest
@@ -735,9 +767,21 @@ func (fs *funcState) lowerIfMerge(s astNode) {
 func (fs *funcState) lowerStmt(s astNode) {
 	switch s.kind() {
 	case "Assign":
-		val := fs.lowerExpr(s.node("value"))
+		valNode := s.node("value")
+		val := fs.lowerExpr(valNode)
+		aliasPath := requestAliasPath(valNode)
 		for _, target := range s.list("targets") {
 			fs.assign(target, val)
+			// Track/untrack a request-attribute alias so `a = request.args;
+			// a.get(k)` resolves its callee to request.args.get. A rebind to a
+			// non-request value clears any stale alias.
+			if target.kind() == "Name" {
+				if aliasPath != "" {
+					fs.localAlias[target.str("id")] = aliasPath
+				} else {
+					delete(fs.localAlias, target.str("id"))
+				}
+			}
 		}
 	case "AugAssign":
 		target := s.node("target")
