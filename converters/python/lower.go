@@ -40,6 +40,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
+	imported := collectImportedNames(root.list("body"))
 
 	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
 	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
@@ -48,26 +49,30 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// any one framework. handlerClassSet — the set of request-handler class names
 	// (by simple name) — is computed across ALL files (lowerAll/globalHandlerClasses)
 	// so handler subclassing that crosses file boundaries still resolves.
-	var collect func(stmts []astNode, qualPrefix string, inHandlerClass bool)
-	collect = func(stmts []astNode, qualPrefix string, inHandlerClass bool) {
+	// inClass marks a FunctionDef whose immediate enclosing scope is a class body,
+	// i.e. a real method (not a module function or a closure nested in a def). The
+	// engine's cross-object CHA dispatch indexes such functions by method name, so
+	// a call `obj.method(x)` resolves to it (see interproc buildMethodImpls).
+	var collect func(stmts []astNode, qualPrefix string, inHandlerClass, inClass bool)
+	collect = func(stmts []astNode, qualPrefix string, inHandlerClass, inClass bool) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
 				srcParams := routeHandlerParams(s, inHandlerClass)
-				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, srcParams, inHandlerClass)
+				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, imported, srcParams, inHandlerClass, inClass)
 				functions = append(functions, fn)
-				// A nested def inside a handler is not itself a verb method of the
-				// class, so its handler-class context resets.
-				collect(s.list("body"), qualPrefix+s.str("name")+".", false)
+				// A nested def inside a handler/method is not itself a verb method of
+				// the class, so its handler-class and method context reset.
+				collect(s.list("body"), qualPrefix+s.str("name")+".", false, false)
 			case "ClassDef":
 				// Only methods (nested FunctionDefs) are modeled; other
 				// class-body statements are a documented limitation.
 				cn := s.str("name")
-				collect(s.list("body"), qualPrefix+cn+".", handlerClassSet[cn])
+				collect(s.list("body"), qualPrefix+cn+".", handlerClassSet[cn], true)
 			}
 		}
 	}
-	collect(root.list("body"), "", false)
+	collect(root.list("body"), "", false, false)
 
 	// Module-level constant bindings (NAME = <literal>) are Python module
 	// globals. The env-based lowering keeps such a literal only in the
@@ -101,7 +106,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 		}
 	}
 
-	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs, aliases)
+	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs, aliases, imported)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 
 	return mod
@@ -111,7 +116,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 // (skipping nested def/class bodies, which become their own functions) into a
 // synthetic entry-point function, analogous to converters/go treating
 // package-level init code as part of the SSA program.
-func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool, aliases map[string]string) *ir.Function {
+func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool, aliases map[string]string, imported map[string]bool) *ir.Function {
 	fn := &ir.Function{
 		Name:          moduleName + ".<module>",
 		ObjectName:    "<module>",
@@ -123,6 +128,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
 	fs.aliases = aliases
+	fs.importedNames = imported
 	fs.lowerBody(root.list("body"))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
@@ -132,7 +138,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 // into an ir.Function containing one straight-line basic block. srcParams names
 // this function's route-handler parameters (see routeHandlerParams): each is an
 // untrusted taint source and is seeded with a synthetic source CALL below.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, srcParams []string, inHandlerClass bool) *ir.Function {
+func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, imported map[string]bool, srcParams []string, inHandlerClass, isMethod bool) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
@@ -143,11 +149,17 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 		CanonicalName: "py:" + moduleName + "." + qualname,
 		Pos:           posFromNode(filename, node),
 	}
+	// Tag a real method (def directly in a class body) with its bare name so the
+	// engine can resolve a cross-object call `obj.method(x)` to it via CHA.
+	if isMethod {
+		fn.MethodName = name
+	}
 
 	fs := newFuncState(filename)
 	fs.moduleName = moduleName
 	fs.localFuncs = localFuncs
 	fs.aliases = aliases
+	fs.importedNames = imported
 	fs.inHandlerClass = inHandlerClass
 	params := node.strList("params")
 	for _, p := range params {
@@ -448,6 +460,11 @@ type funcState struct {
 	// request source globs match the aliased form (mlflow CVE-2025-52967), not just
 	// the inline `request.args.get(...)`. Narrow to request-rooted chains to stay FP-safe.
 	localAlias map[string]string
+
+	// importedNames is the module's set of import-bound names (see
+	// collectImportedNames). A method call on one of these is a library call, not an
+	// object method, so lowerCall does not turn it into a CHA INVOKE.
+	importedNames map[string]bool
 }
 
 func newFuncState(filename string) *funcState {
@@ -495,6 +512,45 @@ func (fs *funcState) resolveDotted(dotted string) string {
 		return canon + "." + rest
 	}
 	return canon
+}
+
+// collectImportedNames returns the set of local names bound by Import/ImportFrom
+// statements — INCLUDING plain `import subprocess` (bound name "subprocess"),
+// which collectImportAliases does not record. A method call whose receiver root
+// is an imported name is a library/module call (subprocess.run, os.system, a
+// module's function), matched by sink globs on its callee; it must NOT be lowered
+// to a CHA INVOKE, which would fan the (often tainted) argument into every
+// same-named user method. Used by lowerCall to gate INVOKE emission.
+func collectImportedNames(body []astNode) map[string]bool {
+	names := map[string]bool{}
+	for _, s := range body {
+		switch s.kind() {
+		case "Import":
+			for _, a := range s.list("names") {
+				name, as := a.str("name"), a.str("asname")
+				switch {
+				case as != "":
+					names[as] = true
+				case name != "":
+					// `import a.b.c` binds the top-level package name `a`.
+					names[strings.SplitN(name, ".", 2)[0]] = true
+				}
+			}
+		case "ImportFrom":
+			for _, a := range s.list("names") {
+				name, as := a.str("name"), a.str("asname")
+				if name == "*" {
+					continue
+				}
+				if as != "" {
+					names[as] = true
+				} else if name != "" {
+					names[name] = true
+				}
+			}
+		}
+	}
+	return names
 }
 
 // collectImportAliases scans a module body for Import/ImportFrom statements and
@@ -1084,12 +1140,6 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		return fs.emitHandlerSource(n, "self."+funcNode.str("attr"))
 	}
 
-	// Lower any call embedded in the callee chain first, so a chained call like
-	// requests.get(url).json() still emits the inner requests.get call (an SSRF
-	// sink) even though the outer call is `.json()`. Mirrors JS's
-	// lowerNestedCallees.
-	fs.lowerNestedCallees(funcNode)
-
 	callee := "py:" + fs.resolveDotted(dottedName(funcNode))
 	// A bare call to a module-level function (helper(x)) must carry the module
 	// name so its callee matches the function's CanonicalName
@@ -1110,9 +1160,44 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 			isSelfMethod = true
 		}
 	}
-	cc := &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}},
-		Callee: callee,
+
+	// Object-method call `obj.method(a, b)` on a genuine object — the receiver is
+	// rooted in a local/param/self value, NOT an imported module and NOT resolved
+	// through an import/request alias. Lower it as a CHA INVOKE (receiver in
+	// Call.Value, bare method in Call.MethodName) so the engine dispatches it to
+	// every same-named user method (methodImpls), like a Go/Java instance call.
+	// Without this, taint drops at every object-method boundary because the
+	// syntactic callee `py:obj.method` names no lowered function. Library calls
+	// (subprocess.run, os.system, a module function) are excluded via importedNames
+	// and still match sink globs as plain CALLs; sink globs also match an INVOKE's
+	// Callee, so a method-named sink like `cursor.execute` still fires.
+	invoke := false
+	var recvVal *ir.Value
+	if !isSelfMethod && funcNode != nil && funcNode.kind() == "Attribute" {
+		if root := rootName(funcNode); root != "" && !fs.importedNames[root] {
+			_, isAlias := fs.aliases[root]
+			_, isLocal := fs.localAlias[root]
+			if !isAlias && !isLocal {
+				recvVal = fs.lowerExpr(funcNode.node("value"))
+				invoke = true
+			}
+		}
+	}
+	if !invoke {
+		// Lower any call embedded in the callee chain, so a chained call like
+		// requests.get(url).json() still emits the inner requests.get call (an SSRF
+		// sink) even though the outer call is `.json()`. For an INVOKE the receiver
+		// is lowered above, which already recurses through embedded calls.
+		fs.lowerNestedCallees(funcNode)
+	}
+
+	cc := &ir.CallCommon{Callee: callee}
+	if invoke {
+		cc.Value = recvVal // receiver -> callee param 0 (CHA seedInvokeArgs)
+		cc.MethodName = funcNode.str("attr")
+		cc.IsInvoke = true // the engine gates CHA dispatch on this field
+	} else {
+		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}}
 	}
 	// For a resolved `self.method(x)` call, pass the receiver as the first
 	// argument so the call's arguments line up with the method's parameters
@@ -1150,6 +1235,9 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
+	if invoke {
+		inst.Op = ir.OpCode_OP_CODE_INVOKE
+	}
 	inst.Call = cc
 	fs.emit(inst)
 	return regValue(inst.Name)

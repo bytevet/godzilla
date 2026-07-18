@@ -194,12 +194,20 @@ func injectableArgs(sinkArgs []int32, callee string, args []*ir.Value) []*ir.Val
 // on the immutable function index, so it is built once and shared by every rule.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
-	for name := range byKey {
-		if strings.HasPrefix(name, "go:(") { // a Go method (receiver-type syntax)
+	for name, fn := range byKey {
+		switch {
+		case strings.HasPrefix(name, "go:("): // a Go method (receiver-type syntax)
 			if i := strings.LastIndex(name, "."); i >= 0 {
 				bare := name[i+1:]
 				methodImpls[bare] = append(methodImpls[bare], name)
 			}
+		case fn.GetMethodName() != "":
+			// A method the frontend explicitly tagged (Python/…): a cross-object
+			// call `obj.method(x)` lowers to an INVOKE whose MethodName is this
+			// bare name, so index the concrete method under it for CHA dispatch.
+			// Tagging (vs. indexing every function by trailing name) keeps free
+			// functions out of the fan-out.
+			methodImpls[fn.GetMethodName()] = append(methodImpls[fn.GetMethodName()], name)
 		}
 	}
 	return methodImpls
@@ -867,9 +875,26 @@ func analyzeFunc(
 		// receiver (it lives in Call.Value), so they map to a concrete method's
 		// params shifted by one — param 0 is the receiver.
 		if inst.Call.GetIsInvoke() {
+			var tagged []string
 			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
-				seedInvokeArgs(impl)
-				pullReturnTaint(impl)
+				// Go interface CHA is type-constrained (the index holds only real
+				// implementers of the abstract method), so fan out freely. A
+				// frontend-tagged method (Python/…) is matched by bare NAME with no
+				// receiver type, so its dispatch is deferred and applied only when
+				// unambiguous — otherwise a polymorphic name like `run_query`/
+				// `execute` would seed taint into every same-named method across
+				// unrelated classes, a cross-object fan-out that floods real code
+				// with false positives.
+				if strings.HasPrefix(impl, "go:(") {
+					seedInvokeArgs(impl)
+					pullReturnTaint(impl)
+				} else {
+					tagged = append(tagged, impl)
+				}
+			}
+			if len(tagged) == 1 {
+				seedInvokeArgs(tagged[0])
+				pullReturnTaint(tagged[0])
 			}
 		}
 

@@ -51,7 +51,10 @@ func TestConvertFile_SQLInjectionSample(t *testing.T) {
 				if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "py.unsupported" {
 					t.Errorf("unsupported python construct in function %s: %s", f.Name, inst.Comment)
 				}
-				if inst.Op == ir.OpCode_OP_CODE_CALL && inst.Call != nil {
+				// An object-method sink like `cursor.execute(...)` now lowers to an
+				// INVOKE (CHA method dispatch), while a resolved module accessor like
+				// request.args.get stays a CALL; accept either op and match on Callee.
+				if (inst.Op == ir.OpCode_OP_CODE_CALL || inst.Op == ir.OpCode_OP_CODE_INVOKE) && inst.Call != nil {
 					// `request` comes from `from flask import request`, so FE-2 alias
 					// resolution qualifies the callee to py:flask.request.args.get;
 					// match by suffix so the test is robust to that (correct) rewrite.
