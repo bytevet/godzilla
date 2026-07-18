@@ -4,9 +4,31 @@ import ir "godzilla/pkg/ir/v1"
 
 // taintState maps a tainted register (or access-path key) to the source origin
 // its taint came from. It is the per-block dataflow fact for the flow-sensitive
-// intra-procedural pass (ENG-2). Callers clone/compare it with maps.Clone /
-// maps.Equal (origin pointers are shared and compared by identity).
+// intra-procedural pass (ENG-2).
 type taintState = map[string]*ir.Position
+
+// cloneState returns a shallow copy of s (origin pointers are shared).
+func cloneState(s taintState) taintState {
+	c := make(taintState, len(s))
+	for k, v := range s {
+		c[k] = v
+	}
+	return c
+}
+
+// statesEqual reports whether two taint states are identical (same keys mapped
+// to the same origin pointers) — the block-dataflow fixpoint's stop condition.
+func statesEqual(a, b taintState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
 
 // reversePostOrder returns fn's block indices in reverse post-order from the
 // entry block (fn.Blocks[0]) over the successor edges, followed by any blocks
