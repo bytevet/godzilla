@@ -47,6 +47,14 @@ type funcState struct {
 	// "exec" -> "child_process.exec" for a destructured require. resolveRequire
 	// rewrites a callee's root through it so module-anchored sink rules match.
 	moduleAliases map[string]string
+
+	// relativeDefaults maps a name default-imported from a relative (project)
+	// require -- `const f = require('./util')` -> f -> "util" (the scan-root-
+	// relative module name) -- so a bare call `f(x)` lowers to a resolvable
+	// "js:@mod:<module>" marker instead of the unmatchable "js:f".
+	// resolveJSCrossModuleCalls rewrites that marker to the module's default
+	// export after all files are lowered.
+	relativeDefaults map[string]string
 }
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
@@ -194,7 +202,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases map[string]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases, relativeDefaults map[string]string) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -205,6 +213,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 	fs := newFuncState(filename, fset, nameOf, localFuncs)
 	fs.moduleName = moduleName
 	fs.moduleAliases = moduleAliases
+	fs.relativeDefaults = relativeDefaults
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -948,6 +957,12 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	if id, ok := v.Callee.(*ast.Identifier); ok {
 		if canonical, found := fs.localFuncs[string(id.Name)]; found {
 			callee = canonical
+		} else if mod, found := fs.relativeDefaults[string(id.Name)]; found {
+			// Bare call to a name default-imported from a relative require:
+			// emit a resolvable marker naming the target module. Its default
+			// export is filled in by resolveJSCrossModuleCalls once every file
+			// is lowered (the callee function may live in a not-yet-seen file).
+			callee = crossModuleMarker + mod
 		}
 	}
 	// `this.method(x)` inside a class method: qualify to the sibling method's

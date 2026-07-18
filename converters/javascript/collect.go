@@ -353,7 +353,7 @@ func propertyValue(p ast.Property) ast.Expression {
 // the collector becomes its own ir.Function; the file's top-level statements
 // (excluding function bodies, which are lowered separately) become one
 // synthetic "<module>" ir.Function, mirroring converters/python.
-func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName string) *ir.Module {
+func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName string) (*ir.Module, string) {
 	mod := &ir.Module{
 		Name:     moduleName,
 		Language: "javascript",
@@ -374,12 +374,22 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		}
 	}
 
-	// Module-level require-alias table for FE-2 (cp.exec -> child_process.exec).
+	// Module-level require-alias table for FE-2 (cp.exec -> child_process.exec),
+	// augmented with identity/memoize-wrapper aliases (memoizedParse -> url.parse).
 	moduleAliases := collectRequireAliases(prog.Body)
+	collectIdentityWrapperAliases(prog.Body, moduleAliases)
+
+	// Relative-require default bindings (const f = require('./util')) so a bare
+	// call f(x) becomes a cross-module marker resolved after all files lower.
+	relativeDefaults := collectRelativeDefaults(prog.Body, moduleName)
+
+	// This module's default export (module.exports = <fn>), the rewrite target
+	// for a "js:@mod:<thisModule>" marker in some other file.
+	defaultExport := collectDefaultExport(prog.Body, localFuncs, c.nameOf)
 
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases))
+		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases, relativeDefaults))
 	}
 
 	moduleFn := &ir.Function{
@@ -392,9 +402,10 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
 	fs.moduleName = moduleName
 	fs.moduleAliases = moduleAliases
+	fs.relativeDefaults = relativeDefaults
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
-	return mod
+	return mod, defaultExport
 }
