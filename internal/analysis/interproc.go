@@ -185,29 +185,36 @@ func injectableArgs(sinkArgs []int32, callee string, args []*ir.Value) []*ir.Val
 	return sel
 }
 
-// buildMethodImpls builds the class-hierarchy index for interface dynamic
-// dispatch: a Go bare method name -> every lowered concrete method that
-// implements it. An INVOKE call names an abstract interface method (not a
-// concrete function), so this lets taint flow through the interface into the
-// concrete implementations. It over-approximates (any same-named method
-// matches), which is why such findings stay Medium confidence. It depends only
-// on the immutable function index, so it is built once and shared by every rule.
+// buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
+// method name -> every lowered concrete method exposing it. An INVOKE call names
+// a method abstractly (not a concrete function), so this lets taint flow into the
+// implementations. It over-approximates (any same-named method matches), which is
+// why such findings stay Medium confidence. It depends only on the immutable
+// function index, so it is built once and shared by every rule.
+//
+// The pool is populated from two converter-provided signals; the DISPATCH policy
+// (fan out to all implementers vs. resolve only when unambiguous) is decided at
+// the call site from the same method_name signal, not by any language check.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
 		switch {
-		case strings.HasPrefix(name, "go:("): // a Go method (receiver-type syntax)
+		case fn.GetMethodName() != "":
+			// A method the frontend explicitly tagged with Function.method_name (an
+			// untyped, name-resolved language, e.g. Python): a cross-object call
+			// `obj.method(x)` lowers to an INVOKE whose MethodName is this bare name.
+			// Tagging (vs. indexing every function by trailing name) keeps free
+			// functions out of the fan-out.
+			methodImpls[fn.GetMethodName()] = append(methodImpls[fn.GetMethodName()], name)
+		case strings.HasPrefix(name, "go:("):
+			// A Go method, identified by the Go frontend's receiver-qualified
+			// canonical name `go:(*T).Method` (the same naming the engine reads for
+			// request-object receivers). Its concrete method satisfies an interface
+			// abstractly named at the INVOKE, so index it under the bare method name.
 			if i := strings.LastIndex(name, "."); i >= 0 {
 				bare := name[i+1:]
 				methodImpls[bare] = append(methodImpls[bare], name)
 			}
-		case fn.GetMethodName() != "":
-			// A method the frontend explicitly tagged (Python/…): a cross-object
-			// call `obj.method(x)` lowers to an INVOKE whose MethodName is this
-			// bare name, so index the concrete method under it for CHA dispatch.
-			// Tagging (vs. indexing every function by trailing name) keeps free
-			// functions out of the fan-out.
-			methodImpls[fn.GetMethodName()] = append(methodImpls[fn.GetMethodName()], name)
 		}
 	}
 	return methodImpls
@@ -910,26 +917,29 @@ func analyzeFunc(
 		// receiver (it lives in Call.Value), so they map to a concrete method's
 		// params shifted by one — param 0 is the receiver.
 		if inst.Call.GetIsInvoke() {
-			var tagged []string
+			// The dispatch discipline is driven by IR the converter supplies, not by
+			// any language-specific check in the engine: a frontend sets
+			// Function.method_name when it resolved a method by BARE NAME with no
+			// receiver type (the untyped languages). That resolution is applied only
+			// when UNAMBIGUOUS — otherwise a polymorphic name like `run_query`/
+			// `execute` would seed taint into every same-named method across
+			// unrelated classes, a cross-object fan-out that floods real code with
+			// false positives. Dispatch the frontend resolved with type information
+			// (a Go interface method, keyed by its receiver-qualified canonical name
+			// and left untagged) carries the standard, type-bounded CHA
+			// over-approximation, so it fans out to every implementer.
+			var nameOnly []string
 			for _, impl := range methodImpls[inst.Call.GetMethodName()] {
-				// Go interface CHA is type-constrained (the index holds only real
-				// implementers of the abstract method), so fan out freely. A
-				// frontend-tagged method (Python/…) is matched by bare NAME with no
-				// receiver type, so its dispatch is deferred and applied only when
-				// unambiguous — otherwise a polymorphic name like `run_query`/
-				// `execute` would seed taint into every same-named method across
-				// unrelated classes, a cross-object fan-out that floods real code
-				// with false positives.
-				if strings.HasPrefix(impl, "go:(") {
-					seedInvokeArgs(impl)
-					pullReturnTaint(impl)
-				} else {
-					tagged = append(tagged, impl)
+				if fn := byKey[impl]; fn != nil && fn.GetMethodName() != "" {
+					nameOnly = append(nameOnly, impl)
+					continue
 				}
+				seedInvokeArgs(impl)
+				pullReturnTaint(impl)
 			}
-			if len(tagged) == 1 {
-				seedInvokeArgs(tagged[0])
-				pullReturnTaint(tagged[0])
+			if len(nameOnly) == 1 {
+				seedInvokeArgs(nameOnly[0])
+				pullReturnTaint(nameOnly[0])
 			}
 		}
 
