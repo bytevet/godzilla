@@ -370,7 +370,7 @@ emit_md() {
     echo "| F1 | $f_b | $f_h | $(awk -v a="$f_b" -v b="$f_h" 'BEGIN{printf "%+.3f",b-a}') |"
     echo
     if [[ "$n_b" != "$n_h" ]]; then
-      echo "> ⚠️ Sample count differs (base N=$n_b, head N=$n_h) — a toolchain/env drift; interpret deltas with care."
+      echo "> ⚠️ Sample count differs (base N=$n_b, head N=$n_h) — the PR added/removed corpus samples, or a toolchain differs between checkouts. The raw TP/FN deltas partly reflect that, so read precision/recall (rates) rather than the counts."
     else
       echo "> Scored over N=$n_b samples on both revisions."
     fi
