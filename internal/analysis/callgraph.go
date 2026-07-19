@@ -135,9 +135,12 @@ func resolveCall(
 	methodIndex map[string][]string,
 	edgeSets map[string]map[string]bool,
 ) {
-	dynamic := call.GetIsInvoke() || call.GetMethodName() != ""
-
-	if dynamic {
+	// Dynamic dispatch is signalled by the converter (IsInvoke). A statically
+	// resolved method call also names its method (MethodName set) but resolves to
+	// a precise callee, so it is NOT dynamic — routing it through CHA would add
+	// spurious edges. (Method-bearing Functions still enter methodIndex via
+	// bareMethodName below, which is how a real INVOKE finds its implementers.)
+	if call.GetIsInvoke() {
 		method := call.GetMethodName()
 		if method == "" {
 			method = trailingName(call.GetCallee())

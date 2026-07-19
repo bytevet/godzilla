@@ -19,6 +19,12 @@ import (
 // (suppress the finding) only when it can PROVE the host is a constant prefix;
 // otherwise true (keep the finding), so no real SSRF is dropped.
 
+// formatIntrinsic is the language-neutral marker a frontend sets on a
+// printf-style formatter call (Go fmt.Sprint*, Java String.format/valueOf, Rust
+// fmt::Arguments::new). The literal template is the call's Args[0]. The engine
+// reads this marker instead of matching any language's format-callee name.
+const formatIntrinsic = "builtin.format"
+
 // hostFixedRe matches a constant prefix that already pins a complete
 // scheme://authority followed by a path/query/fragment separator — i.e. the
 // authority is fully specified by the constant, so any following taint lands in
@@ -27,44 +33,12 @@ import (
 // could extend the host), "//host/" (no scheme).
 var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\\]`)
 
-// formatCallees identifies printf-style format functions whose first argument is
-// the literal template (the interpolated values follow, packed into a slice/array).
-// Rust `format!` lowers to `fmt::Arguments::new(<template>, args)`, and the Rust
-// frontend decodes the packed template into a `{}`-placeholder string in that
-// same argument-0 slot, so it fits the same shape.
-func isFormatCallee(callee string) bool {
-	return strings.Contains(callee, "Sprintf") ||
-		strings.Contains(callee, "Sprintln") ||
-		strings.HasSuffix(callee, "Sprint") ||
-		strings.Contains(callee, "String.format") ||
-		strings.Contains(callee, "String.valueOf") ||
-		strings.Contains(callee, "Arguments::new")
-}
-
-// isConcatAddCallee identifies an operator-overload string concatenation lowered
-// as a call — chiefly Rust's `String + &str` (`<String as Add>::add`, normalized
-// to a callee ending in "add").
-func isConcatAddCallee(callee string) bool {
-	return callee == "rust:add" || strings.HasSuffix(callee, "::add")
-}
-
-// isPassthroughCallee identifies string-valued conversions that forward their
-// operand's text unchanged (so the URL construction is found one hop deeper).
-func isPassthroughCallee(callee string) bool {
-	for _, suffix := range []string{
-		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
-		"String.toString", "String::from", "borrow",
-		// Rust `format!` result chain: format(Arguments) -> String, wrapped in
-		// must_use; each forwards its argument-0 so the URL construction is found
-		// at the underlying fmt::Arguments::new.
-		"must_use", "format",
-	} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
-		}
-	}
-	return false
-}
+// identityIntrinsic is the language-neutral marker a frontend sets on a
+// string-valued conversion that forwards its operand's text unchanged
+// (to_string/as_str/clone/into/deref and the format! result wrappers). The
+// engine follows Args[0] one hop deeper to find the URL construction, without
+// matching any language's conversion-callee name.
+const identityIntrinsic = "builtin.identity"
 
 // urlHostControllable reports whether any tainted injection-point argument can
 // influence the request URL's host. Returns true (keep the SSRF finding) unless
@@ -112,20 +86,19 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 		return "", false
 
 	case def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE:
-		callee := def.Call.GetCallee()
 		args := def.Call.GetArgs()
 		switch {
-		case isFormatCallee(callee):
+		case def.GetIntrinsic() == formatIntrinsic:
+			// A printf-style formatter the frontend tagged: Args[0] is the literal
+			// template, the interpolated values follow. The fixed prefix is the
+			// template text before its first placeholder.
 			if len(args) >= 1 {
 				if tmpl, isConst := constStr(args[0]); isConst {
 					return prefixBeforePlaceholder(tmpl), true
 				}
 			}
 			return "", false
-		case isConcatAddCallee(callee) && len(args) >= 2:
-			text, _ := leadingConst(v, defs, seen) // handled by leadingConst's add case
-			return text, true
-		case isPassthroughCallee(callee) && len(args) >= 1:
+		case def.GetIntrinsic() == identityIntrinsic && len(args) >= 1:
 			return urlConstPrefix(args[0], defs, seen)
 		}
 		return "", false
@@ -141,8 +114,9 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 
 // leadingConst returns the longest run of constant text at the START of the value
 // v's string construction, and whether the ENTIRE construction is constant
-// (complete). It flattens concatenation trees (BIN_OP_ADD and Rust `add` calls)
-// and follows passthrough conversions, stopping at the first non-constant leaf.
+// (complete). It flattens BIN_OP_ADD concatenation trees (every language lowers
+// `+` string concatenation to BIN_OP_ADD, Rust included) and follows passthrough
+// conversions, stopping at the first non-constant leaf.
 func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (text string, complete bool) {
 	if s, isConst := constStr(v); isConst {
 		return s, true
@@ -157,11 +131,7 @@ func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]
 	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
 		return leadingConstSeq(def.GetOperands(), defs, next)
 	case (def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE):
-		callee := def.Call.GetCallee()
-		if isConcatAddCallee(callee) {
-			return leadingConstSeq(def.Call.GetArgs(), defs, next)
-		}
-		if isPassthroughCallee(callee) {
+		if def.GetIntrinsic() == identityIntrinsic {
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				return leadingConst(args[0], defs, next)
 			}

@@ -738,6 +738,13 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 			irInst.Op = ir.OpCode_OP_CODE_CALL
 		}
 		irInst.Call = c.convertCall(i.Call)
+		// Tag a printf-style formatter (fmt.Sprint*, template in Args[0]) with the
+		// language-neutral builtin.format marker so the engine's SSRF host
+		// reconstruction reads the marker, not a Go callee-name shape.
+		if callee := irInst.Call.GetCallee(); strings.Contains(callee, "Sprintf") ||
+			strings.Contains(callee, "Sprintln") || strings.HasSuffix(callee, "Sprint") {
+			irInst.Intrinsic = "builtin.format"
+		}
 	case *ssa.Return:
 		irInst.Op = ir.OpCode_OP_CODE_RET
 		for _, r := range i.Results {
@@ -934,6 +941,13 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		cc.Callee = "go:" + call.Method.FullName()
 	} else if fn, ok := call.Value.(*ssa.Function); ok {
 		cc.Callee = c.canonicalFunc(fn)
+		// A statically resolved method call passes its receiver as Args[0]. Record
+		// the method name so the engine strips the receiver from the logical
+		// argument list without parsing the callee-name shape (the neutral signal:
+		// a non-invoke call that names a method has its receiver first).
+		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+			cc.MethodName = fn.Name()
+		}
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
 		cc.Callee = "builtin." + b.Name()
 	}

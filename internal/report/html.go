@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -67,8 +68,7 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 // by sink location. All three report writers (HTML, JSON, SARIF) share this
 // ordering so their output is deterministic and mutually consistent.
 func sortedFindings(findings []analysis.Finding) []analysis.Finding {
-	sorted := make([]analysis.Finding, len(findings))
-	copy(sorted, findings)
+	sorted := slices.Clone(findings)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
 		if ri != rj {

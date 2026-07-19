@@ -467,14 +467,57 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{}, Pos: pos})
 		return
 	}
-	canonical := "rust:" + normalizeName(callee)
+	norm := normalizeName(callee)
+	// `String + &str` overloads Add::add, which rustc lowers to a CALL rather than
+	// the native numeric-add rvalue. It is a string concatenation, so model it as
+	// the universal BIN_OP_ADD the engine already interprets for `+` in every
+	// language (taint propagation and SSRF fixed-host prefix reconstruction), so
+	// the engine needs no Rust-callee special case.
+	if norm == "add" {
+		operands := st.operands(splitTop(argStr, ','))
+		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: operands, Pos: pos})
+		st.env[dst] = regValue(name)
+		return
+	}
+	canonical := "rust:" + norm
 	cc := &ir.CallCommon{
 		Callee: canonical,
 		Args:   st.operands(splitTop(argStr, ',')),
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}},
 	}
-	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos})
+	inst := &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos}
+	// Tag two shapes with a language-neutral marker so the engine's SSRF host
+	// reconstruction reads the marker, not a Rust callee-name shape (both markers
+	// are inert to taint propagation — only OP_CODE_INTRINSIC consults the
+	// intrinsic-propagator table — so taint still flows via the existing rules):
+	//   - format!  -> fmt::Arguments::new(<decoded template>, args): builtin.format
+	//   - identity string conversions that forward their operand's text unchanged
+	//     (to_string/as_str/into/clone/deref/format-result wrappers): builtin.identity
+	switch {
+	case strings.Contains(canonical, "Arguments::new"):
+		inst.Intrinsic = "builtin.format"
+	case rustIdentityConv(canonical):
+		inst.Intrinsic = "builtin.identity"
+	}
+	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
+}
+
+// rustIdentityConv reports whether a Rust callee is a string-valued conversion
+// that forwards its operand's text unchanged, so the SSRF prefix reconstruction
+// can look one hop deeper. Covers the `format!` result wrappers (format ->
+// must_use -> deref) and the common owned/borrowed conversions. The suffix set
+// mirrors the engine's former isPassthroughCallee so behavior is unchanged.
+func rustIdentityConv(callee string) bool {
+	for _, suffix := range []string{
+		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
+		"String::from", "borrow", "must_use", "format",
+	} {
+		if strings.HasSuffix(callee, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // setAgg records an aggregate construction: it both emits a builtin.aggregate

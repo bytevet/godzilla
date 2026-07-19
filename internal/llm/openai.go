@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,8 +35,8 @@ type OpenAIReviewer struct {
 
 // NewOpenAIReviewer builds an OpenAI-compatible reviewer from the environment.
 func NewOpenAIReviewer() *OpenAIReviewer {
-	base := firstNonEmpty(os.Getenv("GODZILLA_LLM_BASE_URL"), os.Getenv("OPENAI_BASE_URL"), "https://api.openai.com/v1")
-	model := firstNonEmpty(os.Getenv("GODZILLA_LLM_MODEL"), "gpt-4o-mini")
+	base := cmp.Or(os.Getenv("GODZILLA_LLM_BASE_URL"), os.Getenv("OPENAI_BASE_URL"), "https://api.openai.com/v1")
+	model := cmp.Or(os.Getenv("GODZILLA_LLM_MODEL"), "gpt-4o-mini")
 	return &OpenAIReviewer{
 		client:  &http.Client{Timeout: 60 * time.Second},
 		baseURL: strings.TrimRight(base, "/"),
@@ -93,15 +94,6 @@ func (o *OpenAIReviewer) Review(ctx context.Context, f analysis.Finding, codeCon
 		return Verdict{}, fmt.Errorf("chat-completions response had no choices")
 	}
 	return parseVerdict(out.Choices[0].Message.Content)
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // NewReviewer selects the reviewer backend from GODZILLA_LLM_PROVIDER (LLM-9):

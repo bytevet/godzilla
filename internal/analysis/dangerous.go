@@ -71,7 +71,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 						if !d.rule.AppliesTo(lang) || !d.rule.MatchesDangerousCallee(callee) {
 							continue
 						}
-						if !constArgMatches(d.rule, d.re, callee, inst.Call.GetArgs()) {
+						if !constArgMatches(d.rule, d.re, inst.Call) {
 							continue
 						}
 						key := d.rule.ID + "@" + posKey(inst.GetPos())
@@ -104,14 +104,14 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 // matches. With one, the constant string at the logical index must match the
 // regexp; a non-constant or out-of-range argument does not match (the rule
 // author asked for a specific literal).
-func constArgMatches(rule *rules.Rule, re *regexp.Regexp, callee string, args []*ir.Value) bool {
+func constArgMatches(rule *rules.Rule, re *regexp.Regexp, cc *ir.CallCommon) bool {
 	if rule.ConstArg == nil {
 		return true
 	}
 	if re == nil {
 		return false // a const_arg was declared but its regexp was invalid
 	}
-	la := logicalArgs(callee, args)
+	la := logicalArgs(cc)
 	idx := rule.ConstArg.Index
 	if idx < 0 || idx >= len(la) {
 		return false

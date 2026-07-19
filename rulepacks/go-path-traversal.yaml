@@ -53,6 +53,11 @@ rules:
     # The path is logical arg 0 for the os/ioutil sinks (os.WriteFile's data/perm
     # args are not injection points). http.ServeFile(w, r, name) serves the file
     # at `name` — the textbook path-traversal sink — with its path at logical arg 2.
+    # The synthetic request object also grants request-object provenance, so
+    # accessor calls on it are covered even for an unmodeled framework (engine
+    # reads this tag instead of a hardcoded source name).
+    request_object_sources:
+      - "go:@net/http.Request"
     sinks:
       - "go:os.Open*#0"
       - "go:os.ReadFile#0"

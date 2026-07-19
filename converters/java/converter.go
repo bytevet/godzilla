@@ -72,9 +72,6 @@ type dumpInstr struct {
 	Owner string `json:"owner"`
 	Mname string `json:"mname"`
 	Mdesc string `json:"mdesc"`
-	Fname string `json:"fname"`
-	Fdesc string `json:"fdesc"`
-	Type  string `json:"type"`
 	Cst   string `json:"cst"`
 	Slot  int    `json:"slot"`
 	Line  int    `json:"line"`

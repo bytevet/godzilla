@@ -24,6 +24,23 @@ func callInst(name, callee string, args ...*ir.Value) *ir.Instruction {
 	return &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{Callee: callee, Args: args}}
 }
 
+// fmtInst builds a printf-style formatter call tagged with the language-neutral
+// builtin.format marker (template in Args[0]), as the frontends now emit. The
+// callee is retained for readability but the engine reads only the marker.
+func fmtInst(name, callee string, args ...*ir.Value) *ir.Instruction {
+	in := callInst(name, callee, args...)
+	in.Intrinsic = "builtin.format"
+	return in
+}
+
+// idInst builds an identity string-conversion call tagged with the
+// builtin.identity marker (forwards Args[0]), as the frontends now emit.
+func idInst(name, callee string, args ...*ir.Value) *ir.Instruction {
+	in := callInst(name, callee, args...)
+	in.Intrinsic = "builtin.identity"
+	return in
+}
+
 func defsOf(insts ...*ir.Instruction) map[string]*ir.Instruction {
 	m := map[string]*ir.Instruction{}
 	for _, in := range insts {
@@ -134,13 +151,13 @@ func TestURLHostControllable(t *testing.T) {
 		},
 		{
 			name:    "Sprintf path-confined",
-			defs:    defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://api.example.com/items/%s"), regV("t"))),
+			defs:    defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://api.example.com/items/%s"), regV("t"))),
 			tainted: taintedSet("u", "t"),
 			want:    false,
 		},
 		{
 			name:    "Sprintf host taint",
-			defs:    defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://%s.example.com/"), regV("t"))),
+			defs:    defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://%s.example.com/"), regV("t"))),
 			tainted: taintedSet("u", "t"),
 			want:    true,
 		},
@@ -151,21 +168,23 @@ func TestURLHostControllable(t *testing.T) {
 			want:    false,
 		},
 		{
-			name: "Rust add path-confined (to_owned(const) + deref(taint))",
+			// Rust `String + &str` concat lowers to BIN_OP_ADD (the frontend no
+			// longer emits a rust:add call), so reconstruction is the shared path.
+			name: "Rust concat path-confined (to_owned(const) + deref(taint))",
 			defs: defsOf(
-				callInst("c", "rust:to_owned", cstV("https://api.example.com/v1/")),
-				callInst("d", "rust:deref", regV("t")),
-				callInst("u", "rust:add", regV("c"), regV("d")),
+				idInst("c", "rust:to_owned", cstV("https://api.example.com/v1/")),
+				idInst("d", "rust:deref", regV("t")),
+				binOp("u", ir.BinOpKind_BIN_OP_ADD, regV("c"), regV("d")),
 			),
 			tainted: taintedSet("u", "d", "t"),
 			want:    false,
 		},
 		{
-			name: "Rust add host-controlled",
+			name: "Rust concat host-controlled",
 			defs: defsOf(
-				callInst("c", "rust:to_owned", cstV("https://")),
-				callInst("d", "rust:deref", regV("t")),
-				callInst("u", "rust:add", regV("c"), regV("d")),
+				idInst("c", "rust:to_owned", cstV("https://")),
+				idInst("d", "rust:deref", regV("t")),
+				binOp("u", ir.BinOpKind_BIN_OP_ADD, regV("c"), regV("d")),
 			),
 			tainted: taintedSet("u", "d", "t"),
 			want:    true,
@@ -173,10 +192,10 @@ func TestURLHostControllable(t *testing.T) {
 		{
 			name: "Rust format! path-confined (deref->must_use->format->Arguments::new)",
 			defs: defsOf(
-				callInst("t", "rust:Arguments::new", cstV("https://api.example.com/v1/{}"), regV("args")),
-				callInst("f", "rust:format", regV("t")),
-				callInst("m", "rust:must_use", regV("f")),
-				callInst("u", "rust:deref", regV("m")),
+				fmtInst("t", "rust:Arguments::new", cstV("https://api.example.com/v1/{}"), regV("args")),
+				idInst("f", "rust:format", regV("t")),
+				idInst("m", "rust:must_use", regV("f")),
+				idInst("u", "rust:deref", regV("m")),
 			),
 			tainted: taintedSet("u", "m", "f", "t"),
 			want:    false,
@@ -184,10 +203,10 @@ func TestURLHostControllable(t *testing.T) {
 		{
 			name: "Rust format! host-controlled",
 			defs: defsOf(
-				callInst("t", "rust:Arguments::new", cstV("https://{}.example.com/v1/"), regV("args")),
-				callInst("f", "rust:format", regV("t")),
-				callInst("m", "rust:must_use", regV("f")),
-				callInst("u", "rust:deref", regV("m")),
+				fmtInst("t", "rust:Arguments::new", cstV("https://{}.example.com/v1/"), regV("args")),
+				idInst("f", "rust:format", regV("t")),
+				idInst("m", "rust:must_use", regV("f")),
+				idInst("u", "rust:deref", regV("m")),
 			),
 			tainted: taintedSet("u", "m", "f", "t"),
 			want:    true,
@@ -196,7 +215,7 @@ func TestURLHostControllable(t *testing.T) {
 			name: "passthrough (deref) over a path-confined concat",
 			defs: defsOf(
 				binOp("a", ir.BinOpKind_BIN_OP_ADD, cstV("https://h/v1/"), regV("t")),
-				callInst("u", "rust:deref", regV("a")),
+				idInst("u", "rust:deref", regV("a")),
 			),
 			tainted: taintedSet("u", "a", "t"),
 			want:    false,
@@ -235,7 +254,7 @@ func TestURLConstPrefix(t *testing.T) {
 		},
 		{
 			name:          "sprintf",
-			defs:          defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://h/%s"), regV("t"))),
+			defs:          defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://h/%s"), regV("t"))),
 			wantPrefix:    "https://h/",
 			wantRecovered: true,
 		},
