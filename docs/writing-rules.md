@@ -105,6 +105,7 @@ matches the regexp fire — e.g. `MessageDigest.getInstance("MD5")`, not
 | `severity` | both | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
 | `cwe`, `message` | both | Reported metadata. |
 | `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
+| `request_object_sources` | taint | Source globs whose value is an untrusted HTTP request *object* (e.g. `go:@net/http.Request`). Also list them in `sources`; this tags the flavor so the engine grants request-object provenance (framework-agnostic accessor sugar) without a hardcoded source name. |
 | `callees` | dangerous-call | Globs whose call site is itself the finding. |
 | `const_arg` | dangerous-call | Optional `{index, matches}` constant-argument condition. |
 

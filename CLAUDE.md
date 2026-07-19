@@ -141,13 +141,14 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 **Analysis (`internal/analysis/`).**
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
   aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
-  taint for Go/JS/Python; Rust models `+` as an `Add::add` **call**, so `interproc.go` treats a concat-add
-  call (`isConcatAddCallee`) as a built-in propagator too — otherwise taint would drop at every Rust concat.
+  taint across **every** language — including Rust, whose frontend lowers `String + &str` (rustc's `Add::add`
+  call) to `BIN_OP_ADD` just like Go/JS/Python `+`, so the engine needs no Rust-callee special case.
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
-  **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from the synthetic
-  request source (`go:@net/http.Request`, see the Go frontend) carries **request-object provenance**
+  **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from a source the rules
+  tag `request_object_sources` (the Go frontend's synthetic `go:@net/http.Request` — the engine reads the rule
+  tag, not a hardcoded source name) carries **request-object provenance**
   (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
   as untrusted (result tainted, pointer out-args filled), even for a framework with **no rules**. Gated on
   provenance so ordinary taint is untouched, and only for unresolved/external callees. Provenance is
@@ -162,15 +163,20 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   the net/http+net/url request accessors (`net/url.URL.Query`, `net/url.Values.Get`, `net/http.Request.FormValue`/
   `Cookie`/…, `net/http.Header.Get`) are **default propagators** (`internal/rules/propagators.go`) — they only
   forward already-present request taint, so any unmodeled framework built on net/http is covered at no FP cost.
-- `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic. When an SSRF
-  sink fires, it reconstructs how the tainted URL string was built (concatenation `BIN_OP_ADD` / Rust
-  `Add::add`, Python `%`, a printf-style/format-string call, or **Rust `format!`** — whose packed
-  `fmt::Arguments` byte-template the Rust frontend decodes into a `{}`-placeholder string, see `mir.go`
-  `decodeFmtTemplate`) and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`)
-  precedes the first tainted segment** — i.e. the taint is confined to the path/query of a fixed host and
-  cannot redirect the request. Deliberately conservative: it suppresses only when the fixed host is *proven*;
-  an opaque or unrecoverable construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is
-  dropped from gIR) keeps firing, so no real SSRF is lost.
+- `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic and free of any
+  language callee-name matching. When an SSRF sink fires, it reconstructs how the tainted URL string was built
+  and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`) precedes the first
+  tainted segment** — i.e. the taint is confined to the path/query of a fixed host and cannot redirect the
+  request. The construction shapes it understands come from **neutral IR the frontends emit**, not engine-side
+  name lists: `BIN_OP_ADD` concatenation (every language's `+`, Rust included), Python `%` (`BIN_OP_REM`), and
+  two frontend-set intrinsic markers — **`builtin.format`** (a printf-style formatter: Go `fmt.Sprint*`, Java
+  `String.format`/`valueOf`, Rust `fmt::Arguments::new` — template in `Args[0]`; for Rust `format!` the packed
+  `fmt::Arguments` byte-template is decoded to a `{}`-placeholder string, see `mir.go` `decodeFmtTemplate`) and
+  **`builtin.identity`** (a string conversion that forwards its operand: `to_string`/`as_str`/`clone`/… and the
+  `format!` result wrappers). Both markers are inert to taint propagation, so taint still flows via the rules.
+  Deliberately conservative: it suppresses only when the fixed host is *proven*; an opaque or unrecoverable
+  construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is dropped from gIR) keeps firing, so
+  no real SSRF is lost.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
   (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
