@@ -66,10 +66,11 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// is the deterministic worklist seed order.
 	callers := buildCallers(cg)
 	globalReaders := buildGlobalReaders(byKey)
+	indirectCallees := buildIndirectCallees(byKey)
 	keys := slices.Sorted(maps.Keys(byKey))
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
-		callers: callers, globalReaders: globalReaders, keys: keys,
+		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable: e.reportable,
 	}
 
@@ -239,6 +240,39 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 // canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
 // only when the name is unambiguous) is likewise chosen from IR at the call site,
 // via CallCommon.untyped_dispatch, not from any language check here.
+// buildIndirectCallees indexes every function that CONTAINS an indirect call — a
+// CALL whose callee names no function (Callee == "") and is not an INVOKE, i.e. a
+// call through a function VALUE. A function-value points-to fact about a
+// parameter is only ever consulted at such a call site, so recording (and
+// re-enqueuing on) those facts for a function that has no indirect call is pure
+// waste. Gating the higher-order channel on this set keeps its cost off the vast
+// majority of functions — critically the large dependency closure a Go scan
+// lowers, where nearly every function receives some non-function argument but
+// almost none dispatch through a parameter.
+func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
+	has := map[string]bool{}
+	for name, fn := range byKey {
+		for _, blk := range fn.Blocks {
+			if blk == nil {
+				continue
+			}
+			for _, inst := range blk.Instrs {
+				if inst == nil || inst.Call == nil {
+					continue
+				}
+				if inst.Op == ir.OpCode_OP_CODE_CALL && inst.Call.GetCallee() == "" && !inst.Call.GetIsInvoke() {
+					has[name] = true
+					break
+				}
+			}
+			if has[name] {
+				break
+			}
+		}
+	}
+	return has
+}
+
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
@@ -258,12 +292,13 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 // rebuilding per rule — removes an O(program × rules) instruction walk and the
 // allocation that capped parallel scaling.
 type sharedIndex struct {
-	byKey         map[string]*ir.Function
-	modByKey      map[string]*ir.Module
-	methodImpls   map[string][]string
-	callers       map[string][]string // callee -> its callers (reverse call graph)
-	globalReaders map[string][]string // global name -> functions that read it (ENG-6)
-	keys          []string            // byKey names, sorted (deterministic worklist seed)
+	byKey           map[string]*ir.Function
+	modByKey        map[string]*ir.Module
+	methodImpls     map[string][]string
+	callers         map[string][]string // callee -> its callers (reverse call graph)
+	globalReaders   map[string][]string // global name -> functions that read it (ENG-6)
+	indirectCallees map[string]bool     // functions containing an indirect (function-value) call
+	keys            []string            // byKey names, sorted (deterministic worklist seed)
 	// reportable, when non-empty, restricts the initial worklist seed to functions
 	// whose module is user-authored; dependency functions are then reached
 	// demand-driven via callEffects. Empty seeds every function.
@@ -312,6 +347,7 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
+	indirectCallees := idx.indirectCallees
 	paramTaint := map[string]map[int]*ir.Position{}
 	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
 	// paramFuncVal is the function-value points-to summary: callee -> param index ->
@@ -375,7 +411,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, indirectCallees, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -565,6 +601,7 @@ func analyzeFunc(
 	paramMemTaint map[string]map[int]*ir.Position,
 	byKey map[string]*ir.Function,
 	methodImpls map[string][]string,
+	indirectCallees map[string]bool,
 	reported map[*ir.Instruction]bool,
 ) funcResult {
 	// tainted is the CURRENT block's taint state; the flow-sensitive driver
@@ -771,8 +808,14 @@ func analyzeFunc(
 	// recordFuncArg emits the points-to effect for a callback argument: each
 	// resolved target, or an opaque marker when the value is a non-constant the
 	// resolver could not pin to a concrete function. A constant can never be a
-	// callable, so it contributes neither.
+	// callable, so it contributes neither. Gated on the callee actually containing
+	// an indirect call — a function that never dispatches through a parameter can
+	// never consult these facts, so recording them (and re-enqueuing on them) would
+	// be pure overhead on the large dependency closure a Go scan lowers.
 	recordFuncArg := func(callee string, param int, a *ir.Value) {
+		if !indirectCallees[callee] {
+			return
+		}
 		if ts := targetsOf(a); len(ts) > 0 {
 			for _, t := range ts {
 				addFuncEffect(callee, param, t)
