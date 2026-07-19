@@ -319,7 +319,7 @@ func runScan(args []string) {
 		if r.path == "" {
 			continue
 		}
-		if err := writeReport(r.path, findings, r.write); err != nil {
+		if err := writeReportRaw(r.path, func(w io.Writer) error { return r.write(w, findings) }); err != nil {
 			fmt.Fprintf(os.Stderr, "error: writing %s report: %v\n", r.kind, err)
 			os.Exit(exitError)
 		}
@@ -364,24 +364,9 @@ func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
 	fmt.Fprintf(w, "coverage: %s\n\n", strings.Join(parts, ", "))
 }
 
-// writeReport creates path, streams the report to it via write, and returns any
-// error. The file's Close error is surfaced when write itself succeeded: a
+// writeReportRaw creates path, streams the report to it via write, and returns
+// any error. The file's Close error is surfaced when write itself succeeded: a
 // failed flush/close would otherwise silently truncate the report.
-func writeReport(path string, findings []analysis.Finding, write func(io.Writer, []analysis.Finding) error) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-	return write(f, findings)
-}
-
-// writeReportRaw is writeReport for a writer function that does not take a
-// findings slice (e.g. the baseline writer), with the same Close-error handling.
 func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 	f, err := os.Create(path)
 	if err != nil {

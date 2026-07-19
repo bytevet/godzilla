@@ -424,12 +424,9 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		}
 		return constString(scalarText(inner)) // @const / @kw / @gvar
 	case "vcall":
-		// A bare name: a local variable read if bound, else a 0-arg call/const.
-		name := identName(at(n, 1))
-		if v, ok := fs.env[name]; ok {
-			return v
-		}
-		return constString(name)
+		// A bare name: a local variable read if bound, else a 0-arg call/const —
+		// exactly lookup's env-or-constant resolution.
+		return fs.lookup(identName(at(n, 1)))
 	case "paren":
 		inner := at(n, 1)
 		if l, ok := asList(inner); ok && len(l) > 0 {

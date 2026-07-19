@@ -28,5 +28,5 @@ func CppDemangle(sym string) string {
 	if strings.HasPrefix(name, "_Z") || strings.HasPrefix(name, "_R") {
 		return strings.TrimSpace(demangle.Filter(name, demangle.NoParams, demangle.NoTemplateParams))
 	}
-	return strings.TrimPrefix(name, "_")
+	return CDemangle(sym) // non-mangled: identical plain-C treatment
 }

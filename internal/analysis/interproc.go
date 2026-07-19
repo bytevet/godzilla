@@ -497,16 +497,18 @@ func analyzeFunc(
 	// guards the return just as a dominating branch would. validated records the
 	// registers a rule validator has been applied to, consulted only in the linear
 	// case at a RET (the CFG path keeps using the precise dominator guard).
-	linearFn := false
-	{
-		n := 0
-		for _, blk := range fn.Blocks {
-			if blk != nil {
-				n++
-			}
+	// Count non-nil blocks once (reused by the single-block fast path below). A
+	// single-block function is linear: it has no CFG for the dominator guard, so
+	// program order stands in for dominance at a RET (see validated).
+	nBlocks := 0
+	var onlyBlock *ir.BasicBlock
+	for _, blk := range fn.Blocks {
+		if blk != nil {
+			nBlocks++
+			onlyBlock = blk
 		}
-		linearFn = n <= 1
 	}
+	linearFn := nBlocks <= 1
 	validated := map[string]bool{}
 
 	// Seed tainted parameters into the entry block's in-state. A flow that enters
@@ -1049,15 +1051,8 @@ func analyzeFunc(
 	// This is the majority of functions (every straight-line-lowered Python / JS /
 	// Ruby / Java / Go-closure body), so it removes most of the engine's
 	// per-(rule × function) allocation. seedState is a fresh map owned by this
-	// analysis, so visiting mutates it in place harmlessly.
-	nBlocks := 0
-	var onlyBlock *ir.BasicBlock
-	for _, blk := range fn.Blocks {
-		if blk != nil {
-			nBlocks++
-			onlyBlock = blk
-		}
-	}
+	// analysis, so visiting mutates it in place harmlessly. nBlocks/onlyBlock were
+	// computed once above (also feeding linearFn).
 	if nBlocks <= 1 {
 		tainted = seedState
 		if onlyBlock != nil {
