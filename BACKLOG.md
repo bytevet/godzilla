@@ -55,7 +55,7 @@ toolchain-gated, net-new frontends, or deferred perf work.
 | COV-2 | crit | ✅ `803dcfd` | Same as FE-6 (TS/ESM visible). |
 | COV-3 | high | ✅ `39c5cf3` | Java insecure-deserialization / SSRF / XSS / open-redirect packs + JAX-RS param sources. |
 | COV-4 | high | ✅ `3a1b72e` | `kind: dangerous-call` non-dataflow rule type (weak crypto / weak cipher / insecure RNG). |
-| COV-5 | high | 🟡 `315bbf6` | Python `eval`/`exec`/`compile` code injection shipped; **SSTI** shipped (`py-ssti`, CWE-1336: `render_template_string`/`jinja2.Template`/`Environment.from_string`, template-source `#0` only so a tainted context var is not flagged — also pinned `py-xss`'s `render_template_string` to `#0`); **LDAP injection** shipped (`py-ldap-injection`, CWE-90); **XPath injection** shipped (`py-xpath-injection`, CWE-643: lxml `.xpath` expression `#0`, parameterized-variable form not flagged). **Open (pure-YAML):** NoSQL, zip-slip, prototype-pollution, header/CRLF, log injection. |
+| COV-5 | high | 🟡 `315bbf6` | Python `eval`/`exec`/`compile` code injection shipped; **SSTI** shipped (`py-ssti`, CWE-1336: `render_template_string`/`jinja2.Template`/`Environment.from_string`, template-source `#0` only so a tainted context var is not flagged — also pinned `py-xss`'s `render_template_string` to `#0`); **LDAP injection** shipped (`py-ldap-injection`, CWE-90); **XPath injection** shipped (`py-xpath-injection`, CWE-643: lxml `.xpath` expression `#0`, parameterized-variable form not flagged). **Zip-slip** shipped (`py-zip-slip`, CWE-22: archive entry enumerators `namelist`/`infolist`/`getnames`/`getmembers` as taint sources into the path-traversal file-write sinks; `secure_filename` sanitizes). **Deferred as FP-prone (documented):** NoSQL (idiomatic `.find(req.body)` is intended → FP), header/CRLF (frameworks auto-strip CRLF, and open-redirect already covers `Location`), log injection (logging user input is ubiquitous → massive FP), prototype-pollution (needs bracket-write-with-tainted-key modeling, not a source/sink pack). |
 | COV-6 | high | ✅ `55d4f15` | Header/cookie/body sources + gorilla/fiber/fastify; extended to a framework-agnostic request-object source + stdlib request-accessor propagators (covers unmodeled frameworks). |
 | COV-7 | med | ✅ `dcfda8d` | Rust axum extractor sources (`Query`/`Path`/`Json`/`Form`) + XSS/open-redirect packs. |
 | COV-8 | med | ✅ `8e313f7` | C/C++ CFG-edge fix + exec-family/argv sources + buffer-overflow & SQLi packs (SSRF is a follow-on). |
@@ -124,9 +124,12 @@ toolchain-gated, net-new frontends, or deferred perf work.
 
 ## Open items (all deferred or partial above)
 
-- **COV-5** — remaining injection classes (NoSQL, zip-slip, prototype-pollution,
-  header/CRLF, log; code-injection, SSTI, LDAP, and XPath shipped). Pure-YAML packs; ship when a target
-  framework/sample justifies each.
+- **COV-5** — code-injection, SSTI, LDAP, XPath, and zip-slip shipped as pure-YAML packs. The
+  residual classes (NoSQL, prototype-pollution, header/CRLF, log injection) are **deferred as
+  FP-prone**: each flags an idiom that is overwhelmingly benign in practice (raw request object as a
+  Mongo filter; logging user input; setting header values frameworks already CRLF-strip) or needs a
+  new taint shape rather than a source/sink pack (bracket-write-with-tainted-key for
+  prototype-pollution). Revisit only if a target sample makes one FP-safe.
 - **COV-10** — PHP / C# / Kotlin frontends. Each is a net-new project.
 - **COV-11 / COV-12 / COV-13** — real-world recall (from the CVE benchmark): framework
   handler-parameter sources (highest-leverage), Ruby rulepack parity, framework-abstracted sinks +
