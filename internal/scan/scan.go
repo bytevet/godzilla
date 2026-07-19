@@ -124,7 +124,10 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	wg.Add(3)
 	// ScopeSeed makes dependency functions analyzed demand-driven (only when taint
 	// reaches them) when deps were lowered; a nil/empty set seeds every function.
-	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).Analyze(prog) }()
+	go func() {
+		defer wg.Done()
+		taint = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).Analyze(prog)
+	}()
 	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
 	// etc.) evaluated alongside the taint engine (COV-4).
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
