@@ -66,10 +66,11 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// is the deterministic worklist seed order.
 	callers := buildCallers(cg)
 	globalReaders := buildGlobalReaders(byKey)
+	indirectCallees := buildIndirectCallees(byKey)
 	keys := slices.Sorted(maps.Keys(byKey))
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
-		callers: callers, globalReaders: globalReaders, keys: keys,
+		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable: e.reportable,
 	}
 
@@ -131,6 +132,34 @@ type globalEffect struct {
 	origin *ir.Position
 }
 
+// funcValEffect records that a FUNCTION VALUE (the concrete lowered function
+// `target`) was passed as the argument at position `param` of `callee`. It is the
+// points-to analogue of callEffect: where callEffect flows taint into a param,
+// funcValEffect flows a *callable identity* into a param, so an indirect call on
+// that param inside the callee (`fn(x)` where `fn` is a parameter) can be resolved
+// back to `target`. This is what makes higher-order-callback taint work — a
+// callback passed into a generic helper is tracked across the call boundary — and,
+// combined with a frontend that rewrites a deferral API to a synthesized indirect
+// call, also covers thread/async dispatch. Mirrors callEffect but carries a target
+// function name rather than a source origin.
+type funcValEffect struct {
+	callee string
+	param  int
+	target string
+}
+
+// funcParamRef identifies a callee parameter slot. It is the key for the
+// opaque-callback channel (funcResult.funcOpaque): it records that SOME call site
+// passed a value the engine could not resolve to a concrete function into this
+// slot. That matters for soundness — the function-value points-to set is then
+// INCOMPLETE, so a lone resolved target in it is not provably the only callee and
+// an indirect call on the parameter must not bind (otherwise one site's callback
+// identity could be paired with another site's taint, a cross-context FP).
+type funcParamRef struct {
+	callee string
+	param  int
+}
+
 // funcResult is the outcome of analyzing one function under a set of
 // tainted-parameter seeds.
 type funcResult struct {
@@ -143,7 +172,20 @@ type funcResult struct {
 	// request-object method-sugar coverage across function boundaries (e.g. a
 	// handler passing *http.Request / *gin.Context to a helper that calls an
 	// accessor on it). Mirrors callEffects, but for provenance rather than taint.
-	reqEffects    []callEffect
+	reqEffects []callEffect
+	// funcEffects records that a function value was passed as an argument to a
+	// callee (see funcValEffect): the callee's matching parameter then holds that
+	// callable, so an indirect call on the parameter resolves to it. This is the
+	// cross-function channel for higher-order-callback taint. Mirrors reqEffects
+	// (a points-to fact rather than taint), but its target store is a SET — a
+	// context-insensitive helper called from several sites accumulates the union of
+	// callbacks passed to it, and the engine only binds when that set is a singleton.
+	funcEffects []funcValEffect
+	// funcOpaque records (callee, param) slots that received an UNRESOLVABLE value at
+	// some call site (a call-result callback, a lambda, an unmodeled import). Its
+	// presence marks the param's points-to set incomplete, disabling the singleton
+	// gate for an indirect call on that param — the FP-safety complement of funcEffects.
+	funcOpaque    []funcParamRef
 	globalEffects []globalEffect
 	// taintsParamMemory[i] is set when the function writes tainted data into
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
@@ -198,6 +240,39 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 // canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
 // only when the name is unambiguous) is likewise chosen from IR at the call site,
 // via CallCommon.untyped_dispatch, not from any language check here.
+// buildIndirectCallees indexes every function that CONTAINS an indirect call — a
+// CALL whose callee names no function (Callee == "") and is not an INVOKE, i.e. a
+// call through a function VALUE. A function-value points-to fact about a
+// parameter is only ever consulted at such a call site, so recording (and
+// re-enqueuing on) those facts for a function that has no indirect call is pure
+// waste. Gating the higher-order channel on this set keeps its cost off the vast
+// majority of functions — critically the large dependency closure a Go scan
+// lowers, where nearly every function receives some non-function argument but
+// almost none dispatch through a parameter.
+func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
+	has := map[string]bool{}
+	for name, fn := range byKey {
+		for _, blk := range fn.Blocks {
+			if blk == nil {
+				continue
+			}
+			for _, inst := range blk.Instrs {
+				if inst == nil || inst.Call == nil {
+					continue
+				}
+				if inst.Op == ir.OpCode_OP_CODE_CALL && inst.Call.GetCallee() == "" && !inst.Call.GetIsInvoke() {
+					has[name] = true
+					break
+				}
+			}
+			if has[name] {
+				break
+			}
+		}
+	}
+	return has
+}
+
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
@@ -217,12 +292,13 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 // rebuilding per rule — removes an O(program × rules) instruction walk and the
 // allocation that capped parallel scaling.
 type sharedIndex struct {
-	byKey         map[string]*ir.Function
-	modByKey      map[string]*ir.Module
-	methodImpls   map[string][]string
-	callers       map[string][]string // callee -> its callers (reverse call graph)
-	globalReaders map[string][]string // global name -> functions that read it (ENG-6)
-	keys          []string            // byKey names, sorted (deterministic worklist seed)
+	byKey           map[string]*ir.Function
+	modByKey        map[string]*ir.Module
+	methodImpls     map[string][]string
+	callers         map[string][]string // callee -> its callers (reverse call graph)
+	globalReaders   map[string][]string // global name -> functions that read it (ENG-6)
+	indirectCallees map[string]bool     // functions containing an indirect (function-value) call
+	keys            []string            // byKey names, sorted (deterministic worklist seed)
 	// reportable, when non-empty, restricts the initial worklist seed to functions
 	// whose module is user-authored; dependency functions are then reached
 	// demand-driven via callEffects. Empty seeds every function.
@@ -271,8 +347,19 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
+	indirectCallees := idx.indirectCallees
 	paramTaint := map[string]map[int]*ir.Position{}
 	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
+	// paramFuncVal is the function-value points-to summary: callee -> param index ->
+	// the SET of concrete functions that param can hold, accumulated across every
+	// call site (context-insensitive). An indirect call on that param binds only
+	// when the set is a singleton (see the resolution branch in handleCall), the
+	// same unambiguous-only discipline untyped_dispatch uses. Higher-order channel.
+	paramFuncVal := map[string]map[int]map[string]bool{}
+	// paramFuncOpaque[callee][param] is set when some call site passed an
+	// unresolvable value into that function-value slot, so its points-to set is
+	// incomplete and the singleton gate must not fire for it (see funcParamRef).
+	paramFuncOpaque := map[string]map[int]bool{}
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
 	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
@@ -324,7 +411,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, indirectCallees, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -358,6 +445,45 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
 				enqueue(ce.callee)
+			}
+		}
+
+		// A function value flowing into a callee parameter (higher-order channel):
+		// merge the target into paramFuncVal[callee][param] and re-enqueue the callee
+		// so an indirect call on that parameter can now resolve. Merge is first-seen
+		// per (callee, param, target) so the worklist stays monotonic and converges;
+		// a new distinct target for an already-seen param still re-enqueues, because a
+		// param that was a resolvable singleton can become ambiguous and must be
+		// re-analyzed under the singleton gate.
+		for _, fe := range res.funcEffects {
+			m := paramFuncVal[fe.callee]
+			if m == nil {
+				m = map[int]map[string]bool{}
+				paramFuncVal[fe.callee] = m
+			}
+			set := m[fe.param]
+			if set == nil {
+				set = map[string]bool{}
+				m[fe.param] = set
+			}
+			if !set[fe.target] {
+				set[fe.target] = true
+				enqueue(fe.callee)
+			}
+		}
+
+		// An unresolvable value reached a function-value slot: mark it opaque so the
+		// singleton gate no longer trusts a lone resolved target there. First-seen
+		// gated and re-enqueues the callee, mirroring the funcEffects merge.
+		for _, fo := range res.funcOpaque {
+			m := paramFuncOpaque[fo.callee]
+			if m == nil {
+				m = map[int]bool{}
+				paramFuncOpaque[fo.callee] = m
+			}
+			if !m[fo.param] {
+				m[fo.param] = true
+				enqueue(fo.callee)
 			}
 		}
 
@@ -468,11 +594,14 @@ func analyzeFunc(
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
 	reqSeeds map[int]*ir.Position,
+	funcSeeds map[int]map[string]bool,
+	opaqueSeeds map[int]bool,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
 	paramMemTaint map[string]map[int]*ir.Position,
 	byKey map[string]*ir.Function,
 	methodImpls map[string][]string,
+	indirectCallees map[string]bool,
 	reported map[*ir.Instruction]bool,
 ) funcResult {
 	// tainted is the CURRENT block's taint state; the flow-sensitive driver
@@ -550,6 +679,73 @@ func analyzeFunc(
 		}
 	}
 
+	// funcVal maps a register to the SET of concrete functions it can hold (a
+	// points-to fact). It is function-scoped and monotonic — a callable identity is
+	// a property of the value, not a per-block fact — so, like reqTainted, it is NOT
+	// reset by the flow-sensitive block driver. Seeded from the caller-supplied
+	// funcSeeds (which param holds which callback), so an indirect call on a
+	// parameter can be resolved to the function value the caller passed in.
+	funcVal := map[string]map[string]bool{}
+	for idx, targets := range funcSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				set := map[string]bool{}
+				for t := range targets {
+					set[t] = true
+				}
+				funcVal[reg] = set
+			}
+		}
+	}
+	// funcValOpaque marks a register whose function-value set is incomplete (some
+	// caller passed an unresolvable value into the parameter it was seeded from), so
+	// the indirect-call singleton gate must not fire for it. Function-scoped and
+	// monotonic, like funcVal.
+	funcValOpaque := map[string]bool{}
+	for idx := range opaqueSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				funcValOpaque[reg] = true
+			}
+		}
+	}
+
+	// targetsOf resolves a value to the concrete lowered function(s) it may hold:
+	// a FuncName is looked up directly in byKey (the make_closure resolution
+	// pattern) — this covers a function passed by reference and a frontend-
+	// synthesized deferral call whose target is known at the site; a RegName is
+	// resolved through the function-scoped funcVal points-to set (a callback
+	// received as a parameter). Anything else — an opaque/foreign callable we did
+	// not lower — yields nil, so an unresolvable value binds nothing (a false
+	// negative, never a false positive). Keys are sorted for determinism.
+	targetsOf := func(v *ir.Value) []string {
+		if v == nil {
+			return nil
+		}
+		if name := v.GetFuncName(); name != "" {
+			if byKey[name] != nil {
+				return []string{name}
+			}
+			return nil
+		}
+		if reg := v.GetRegName(); reg != "" {
+			if set := funcVal[reg]; len(set) > 0 {
+				return slices.Sorted(maps.Keys(set))
+			}
+		}
+		return nil
+	}
+	// indirectOpaque reports whether a callback value's points-to set is known to be
+	// incomplete (a caller passed an unresolvable value into the param it came from),
+	// so the singleton gate must not fire. Only a register-held callback can be
+	// opaque; a FuncName is an exact, complete target.
+	indirectOpaque := func(v *ir.Value) bool {
+		if reg := v.GetRegName(); reg != "" {
+			return funcValOpaque[reg]
+		}
+		return false
+	}
+
 	var res funcResult
 	effectSeen := map[string]bool{}
 
@@ -573,6 +769,60 @@ func analyzeFunc(
 		}
 		reqEffectSeen[key] = true
 		res.reqEffects = append(res.reqEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+
+	// addFuncEffect records that a function value flowed into a callee parameter
+	// (the higher-order channel). Dedup is keyed on callee#param#target — unlike the
+	// taint/req channels, which store a single origin per (callee,param), this stores
+	// a SET, so two distinct callbacks passed to the same param must BOTH be recorded
+	// (that is exactly what makes the param ambiguous and disables the singleton gate).
+	funcEffectSeen := map[string]bool{}
+	addFuncEffect := func(callee string, param int, target string) {
+		if callee == "" || target == "" {
+			return
+		}
+		key := callee + "#" + strconv.Itoa(param) + "#" + target
+		if funcEffectSeen[key] {
+			return
+		}
+		funcEffectSeen[key] = true
+		res.funcEffects = append(res.funcEffects, funcValEffect{callee: callee, param: param, target: target})
+	}
+
+	// addFuncOpaque records that an unresolvable value reached a callee's
+	// function-value slot (struct-keyed dedup, no per-arg string alloc). Called only
+	// for a non-constant argument that targetsOf could not resolve.
+	funcOpaqueSeen := map[funcParamRef]bool{}
+	addFuncOpaque := func(callee string, param int) {
+		if callee == "" {
+			return
+		}
+		k := funcParamRef{callee: callee, param: param}
+		if funcOpaqueSeen[k] {
+			return
+		}
+		funcOpaqueSeen[k] = true
+		res.funcOpaque = append(res.funcOpaque, k)
+	}
+
+	// recordFuncArg emits the points-to effect for a callback argument: each
+	// resolved target, or an opaque marker when the value is a non-constant the
+	// resolver could not pin to a concrete function. A constant can never be a
+	// callable, so it contributes neither. Gated on the callee actually containing
+	// an indirect call — a function that never dispatches through a parameter can
+	// never consult these facts, so recording them (and re-enqueuing on them) would
+	// be pure overhead on the large dependency closure a Go scan lowers.
+	recordFuncArg := func(callee string, param int, a *ir.Value) {
+		if !indirectCallees[callee] {
+			return
+		}
+		if ts := targetsOf(a); len(ts) > 0 {
+			for _, t := range ts {
+				addFuncEffect(callee, param, t)
+			}
+		} else if a.GetConstant() == nil {
+			addFuncOpaque(callee, param)
+		}
 	}
 	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
 		if v == nil {
@@ -713,13 +963,23 @@ func analyzeFunc(
 		}
 		callee := inst.Call.GetCallee()
 		args := inst.Call.GetArgs()
-		// Classify the callee once. These globs are the engine's hottest per-(call
-		// × rule) work; the switch below and the request-object method-sugar gate
-		// both consult the same predicates, so compute them a single time.
-		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
-		isSan := rule.IsSanitizer(callee)
-		isSrc := rule.IsSource(callee)
-		isProp := rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+		// An indirect call names no callee (Callee == ""); its callee is a function
+		// VALUE in Call.Value, resolved below. Skip source/sink/sanitizer/propagator
+		// classification entirely for it — a glob has no callee string to match, and
+		// this also neutralizes a latent coupling where an empty pattern would match
+		// the empty name. Purely structural; no language check.
+		indirect := callee == ""
+		var sinkArgs []int32
+		var isSink, isSan, isSrc, isProp bool
+		if !indirect {
+			// Classify the callee once. These globs are the engine's hottest per-(call
+			// × rule) work; the switch below and the request-object method-sugar gate
+			// both consult the same predicates, so compute them a single time.
+			sinkArgs, isSink = rule.SinkInjectionArgs(callee)
+			isSan = rule.IsSanitizer(callee)
+			isSrc = rule.IsSource(callee)
+			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+		}
 
 		// Record a validator application (ENG-9, linear case): mark the checked
 		// registers so a later RET of one of them in this same straight-line block
@@ -755,6 +1015,7 @@ func analyzeFunc(
 				if p, ok := reqTaintedArg(a); ok {
 					addReqEffect(target, j+1, p)
 				}
+				recordFuncArg(target, j+1, a)
 			}
 		}
 		// pullReturnTaint taints this call's result register from target's return
@@ -864,6 +1125,11 @@ func analyzeFunc(
 					if p, ok := reqTaintedArg(a); ok {
 						addReqEffect(callee, j, p)
 					}
+					// A function value passed as an argument records a points-to fact
+					// on the callee's param, so an indirect call on that param inside
+					// the callee resolves back to it (higher-order channel); an
+					// unresolvable value marks the slot opaque (FP-safety).
+					recordFuncArg(callee, j, a)
 				}
 			}
 			pullReturnTaint(callee)
@@ -888,6 +1154,41 @@ func analyzeFunc(
 						}
 					}
 				}
+			}
+		}
+
+		// Inter-procedural, INDIRECT call through a function value: the callee is not
+		// a named function (byKey[callee]==nil) and this is not an INVOKE — the target
+		// is a function VALUE in Call.Value. This is the unifying primitive for
+		// higher-order callbacks (`fn(x)` where fn is a callback parameter, resolved
+		// via funcVal) and frontend-synthesized deferral/thread dispatch (target a
+		// FuncName known at the site). Resolve the value and flow the args into the
+		// target's FRONT params (no receiver shift — a plain call), then pull the
+		// target's return taint back into this call's result.
+		//
+		// Binds ONLY when the resolved target set is a singleton — the same
+		// unambiguous-only discipline untyped_dispatch uses. A generic helper called
+		// with several distinct callbacks accumulates a union in funcVal; binding one
+		// caller's taint into a different caller's callback would be an unsound,
+		// FP-generating cross-context pairing, so an ambiguous set binds nothing.
+		if indirect && !inst.Call.GetIsInvoke() {
+			v := inst.Call.GetValue()
+			// Bind only a singleton, COMPLETE points-to set: an opaque contribution
+			// (some caller passed an unresolvable value into this callback slot) means
+			// the lone resolved target is not provably the only callee, so binding it
+			// would risk pairing one site's callback with another site's taint.
+			if targets := targetsOf(v); len(targets) == 1 && !indirectOpaque(v) {
+				target := targets[0]
+				for j, a := range args {
+					if p, ok := isTaintedArg(tainted, a); ok {
+						addEffect(target, j, p)
+					}
+					if p, ok := reqTaintedArg(a); ok {
+						addReqEffect(target, j, p)
+					}
+					recordFuncArg(target, j, a)
+				}
+				pullReturnTaint(target)
 			}
 		}
 

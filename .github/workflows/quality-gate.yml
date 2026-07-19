@@ -92,8 +92,12 @@ jobs:
             --bench-count 10 --output gate-report.md
           echo "exit=$?" >> "$GITHUB_OUTPUT"
 
+      # (success || failure), NOT always(): a run cancelled by cancel-in-progress
+      # (a newer push superseded it) must not overwrite a good report with the
+      # "did not produce a report" fallback — the superseding run posts the real
+      # one. always() would fire on cancellation too and cause that false alarm.
       - name: Post sticky comment
-        if: always() && steps.pr.outputs.number != ''
+        if: (success() || failure()) && steps.pr.outputs.number != ''
         uses: actions/github-script@v7
         with:
           script: |
@@ -113,7 +117,8 @@ jobs:
             }
 
       - name: Enforce gate
-        if: always()
+        # Same as above: a cancelled (superseded) run is not a gate failure.
+        if: success() || failure()
         run: |
           if [ "${{ steps.run.outputs.exit }}" != "0" ]; then
             echo "::error::Quality gate failed — see the PR comment for the tripped hard gate(s)."

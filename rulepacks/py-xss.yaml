@@ -53,7 +53,10 @@ rules:
       # bare "*Response" glob, which also matched FileResponse/StreamingResponse
       # (file/stream serving -> path traversal, not XSS) and RedirectResponse
       # (open redirect) -- false positives once handler params are tainted.
-      - "py:*render_template_string"
+      # #0 pins the template-source argument, so a tainted CONTEXT variable
+      # (`render_template_string(fixed, name=user)`, autoescaped and safe) does not
+      # fire — matching the comment above.
+      - "py:*render_template_string#0"
       - "py:Response"
       - "py:*.Response"
       - "py:*HTMLResponse"

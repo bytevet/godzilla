@@ -36,6 +36,7 @@ type collector struct {
 	anonSeq    map[string]int
 	nameOf     map[ast.Node]string // node -> canonical name ("js:<module>.<qualname>")
 	order      []pendingFunc
+	handlers   map[ast.Node]bool // function nodes registered as HTTP route handlers
 }
 
 func newCollector(moduleName string) *collector {
@@ -43,7 +44,19 @@ func newCollector(moduleName string) *collector {
 		moduleName: moduleName,
 		anonSeq:    map[string]int{},
 		nameOf:     map[ast.Node]string{},
+		handlers:   map[ast.Node]bool{},
 	}
+}
+
+// routingVerbs are the HTTP-router methods whose function argument is a request
+// handler (Express/Koa/Fastify/Hapi: app.get/post/put/…/use, router.METHOD).
+// A handler's FIRST parameter is the framework request object regardless of its
+// name, so lowering can bind property reads off it as request-taint sources even
+// when it is not named the conventional `req`/`request`/`ctx` — the JS analogue
+// of the Python route-handler-parameter source (COV-11).
+var routingVerbs = map[string]bool{
+	"get": true, "post": true, "put": true, "delete": true, "patch": true,
+	"head": true, "options": true, "all": true, "use": true,
 }
 
 // parentLabel derives the "<parent>" component of an anonymous function's
@@ -316,6 +329,31 @@ func (c *collector) collectExpr(e ast.Expression, qualPrefix, preferredName stri
 // cases, which are structurally identical here).
 func (c *collector) collectCall(callee ast.Expression, args []ast.Expression, qualPrefix string) {
 	c.collectExpr(callee, qualPrefix, "")
+	// Route-handler registration: `X.<verb>("/path", …, handler)` where <verb> is
+	// an HTTP router method, a STRING-LITERAL route path is present, and a function
+	// argument is the handler. Record each such function so its request parameter
+	// is treated as a taint source (COV-11). Requiring the route-path string keeps
+	// same-named non-router calls that take a callback — lodash `_.get(obj, fn)`,
+	// Vue `app.use(plugin)` — from being mistaken for a route.
+	if dot, ok := callee.(*ast.DotExpression); ok && routingVerbs[string(dot.Identifier.Name)] {
+		hasPath, hasFn := false, false
+		for _, a := range args {
+			switch a.(type) {
+			case *ast.StringLiteral:
+				hasPath = true
+			case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+				hasFn = true
+			}
+		}
+		if hasPath && hasFn {
+			for _, a := range args {
+				switch a.(type) {
+				case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+					c.handlers[a] = true
+				}
+			}
+		}
+	}
 	for _, a := range args {
 		c.collectExpr(a, qualPrefix, "")
 	}
@@ -389,7 +427,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases, relativeDefaults))
+		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases, relativeDefaults, c.handlers))
 	}
 
 	moduleFn := &ir.Function{

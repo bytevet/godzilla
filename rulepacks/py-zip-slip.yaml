@@ -1,0 +1,39 @@
+# Zip-slip: an archive entry name (attacker-controlled, since the archive is
+# untrusted input) flowing into a filesystem path during extraction, letting a
+# crafted entry like "../../etc/cron.d/x" write outside the extraction directory.
+# CWE-22 (a path-traversal variant whose taint source is the archive, not HTTP).
+rules:
+  - id: py-zip-slip
+    languages: [python]
+    severity: high
+    cwe: CWE-22
+    message: >-
+      An archive entry name flows into a filesystem path during extraction
+      without containment, which may allow a crafted entry (e.g. "../../")
+      to write files outside the intended directory (zip-slip). Validate each
+      entry against the destination root (os.path.realpath + startswith), or
+      sanitize the name (e.g. werkzeug.utils.secure_filename), before writing.
+    sources:
+      # Archive entry enumerators: zipfile.ZipFile.namelist/infolist and
+      # tarfile.TarFile.getnames/getmembers. The returned names (or the .name/
+      # .filename fields of the returned info objects) are attacker-controlled.
+      - "py:*.namelist"
+      - "py:*.infolist"
+      - "py:*.getnames"
+      - "py:*.getmembers"
+    sinks:
+      # Same filesystem-write/serve primitives as py-path-traversal: the entry
+      # name reaching any of these is the moment the traversal takes effect.
+      - "py:*open"
+      - "py:os.remove"
+      - "py:*send_file"
+      - "py:*FileResponse"
+    sanitizers:
+      # secure_filename strips directory separators and "../", collapsing the
+      # entry to a safe basename -- the documented Flask/Werkzeug mitigation.
+      - "py:*secure_filename"
+    # os.path.join does NOT contain the name to a base directory (a leading
+    # "../" still escapes), so it forwards taint rather than clearing it --
+    # mirroring py-path-traversal's identical treatment.
+    propagators:
+      - "py:*.join"

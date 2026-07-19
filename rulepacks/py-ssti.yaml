@@ -1,0 +1,59 @@
+# Server-Side Template Injection (Python, CWE-1336): untrusted input used as the
+# TEMPLATE STRING of a Jinja2/Mako engine is compiled and executed server-side —
+# a path to RCE (`{{ ''.__class__.__mro__[1].__subclasses__() }}`). The danger is
+# building the template FROM user input; passing user data as template CONTEXT
+# (the normal, safe path) is not a finding, so only the template-source argument
+# (#0) is the injection point.
+rules:
+  - id: py-ssti
+    languages: [python]
+    severity: critical
+    cwe: CWE-1336
+    message: >-
+      Untrusted input is used as a template string (render_template_string /
+      jinja2.Template / Environment.from_string), which the engine compiles and
+      executes server-side — server-side template injection, a path to RCE. Never
+      build a template from user input; render a fixed template and pass the user
+      data as context instead.
+    sources:
+      # Route-handler parameter source (see converters/python/lower.go).
+      - "py:@http.param"
+      - "py:*request.args.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
+      # Django request accessors.
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      # FastAPI / Starlette request accessors.
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.path_params.get"
+      # Django REST Framework: request.data (the parsed request body).
+      - "py:*request.data"
+      - "py:*request.data.get"
+      - "py:*request.data.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
+      - "py:*request.form.get"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.get"
+      - "py:*request.values.__getitem__"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
+    sinks:
+      # The template SOURCE argument (#0) only — a user-controlled context kwarg
+      # is the safe, intended path and must not fire.
+      - "py:*render_template_string#0"
+      - "py:*jinja2.Template#0"
+      - "py:*Environment.from_string#0"
+      - "py:*mako*.Template#0"
+    sanitizers: []
+    propagators:
+      - "py:*.format"
+      - "py:*.join"

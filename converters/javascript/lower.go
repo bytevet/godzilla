@@ -55,7 +55,20 @@ type funcState struct {
 	// resolveJSCrossModuleCalls rewrites that marker to the module's default
 	// export after all files are lowered.
 	relativeDefaults map[string]string
+
+	// isHandler marks this function as an HTTP route handler (collected in
+	// collect.go); reqParam is the register name of its first parameter — the
+	// framework request object. Property reads off reqParam are canonicalized to
+	// the conventional `req` base so an arbitrarily-named handler request
+	// parameter (`(rq, res) => ...`) still matches the request-source globs (COV-11).
+	isHandler bool
+	reqParam  string
 }
+
+// reqConventionNames are the request-object parameter names the source globs
+// already match by name (req.*/request.*/ctx.*); a handler param already named
+// one of these needs no canonicalization.
+var reqConventionNames = map[string]bool{"req": true, "request": true, "ctx": true}
 
 func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
 	return &funcState{
@@ -202,7 +215,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function with a single
 // straight-line basic block.
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases, relativeDefaults map[string]string) *ir.Function {
+func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases, relativeDefaults map[string]string, handlers map[ast.Node]bool) *ir.Function {
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
@@ -214,6 +227,7 @@ func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileS
 	fs.moduleName = moduleName
 	fs.moduleAliases = moduleAliases
 	fs.relativeDefaults = relativeDefaults
+	fs.isHandler = handlers[pf.node]
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -261,11 +275,56 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 			name = fmt.Sprintf("_arg%d", i)
 		}
 		bind(name)
+		// A route handler's first parameter is the framework request object;
+		// remember it so property reads off it are canonicalized to `req` and match
+		// the request-source globs regardless of the parameter's actual name.
+		if i == 0 && fs.isHandler {
+			fs.reqParam = name
+			// A handler that destructures its request object in the signature —
+			// `(req, res) => ...` written as `({ query, body }, res) => ...` — has
+			// no `req.query` member read to seed taint from. Bind each destructured
+			// property to a synthetic `js:req.<key>` source read so it matches the
+			// request-source globs exactly as an in-body `req.query` access would (COV-11).
+			if pat, ok := b.Target.(*ast.ObjectPattern); ok {
+				fs.bindHandlerDestructure(pat)
+			}
+		}
 	}
 	if params.Rest != nil {
 		if id, ok := params.Rest.(*ast.Identifier); ok {
 			bind(string(id.Name))
 		}
+	}
+}
+
+// bindHandlerDestructure binds each property of a route handler's destructured
+// request parameter — `({ query, body: b }, res) => ...` — to a synthetic
+// `js:req.<key>` source read, so the local (`query`, `b`) carries request taint
+// exactly as an in-body `req.query` member read would. Only plain, non-computed
+// shorthand/keyed properties are modeled (`{ query }`, `{ query: q }`); a nested
+// or computed pattern is skipped (a documented limitation), mirroring how the
+// positional-parameter path leaves unhandled patterns as opaque _argN slots.
+func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
+	for _, p := range pat.Properties {
+		var key, local string
+		switch prop := p.(type) {
+		case *ast.PropertyShort:
+			key = string(prop.Name.Name)
+			local = key
+		case *ast.PropertyKeyed:
+			// `{ query: q }` -> field `query`, local `q`; only a plain identifier
+			// binding target is modeled (a nested/computed pattern is skipped).
+			if v, ok := prop.Value.(*ast.Identifier); ok {
+				key = propertyKeyName(prop.Key)
+				local = string(v.Name)
+			}
+		default:
+			continue
+		}
+		if key == "" || local == "" {
+			continue
+		}
+		fs.env[local] = fs.emitRootPropertyRead("req", key, pat.Idx0())
 	}
 }
 
@@ -301,6 +360,12 @@ func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 		return g, true
 	}
 	if r := v.GetRegName(); r != "" && fs.paramRegs[r] {
+		// A route handler's request parameter (any name) canonicalizes to `req` so
+		// property reads off it (`rq.query` -> "js:req.query") match the
+		// request-source globs, which are keyed on the conventional names (COV-11).
+		if r == fs.reqParam && !reqConventionNames[r] {
+			return "req", true
+		}
 		return r, true
 	}
 	return "", false

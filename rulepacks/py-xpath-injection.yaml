@@ -1,0 +1,52 @@
+# XPath injection (Python, CWE-643): untrusted input concatenated into an XPath
+# expression lets an attacker alter the query — authentication bypass or reading
+# nodes they should not (`' or '1'='1`). Use a parameterized XPath instead
+# (lxml: `tree.xpath("//u[@n=$v]", v=user)`), which keeps the value out of the
+# expression string. Only the expression argument (#0) is the injection point, so
+# a parameterized call with the user value in a keyword is not flagged.
+rules:
+  - id: py-xpath-injection
+    languages: [python]
+    severity: high
+    cwe: CWE-643
+    message: >-
+      Untrusted input flows into an XPath expression (lxml .xpath), allowing XPath
+      injection (authentication bypass or unauthorized node disclosure). Use a
+      parameterized XPath — tree.xpath("//u[@n=$v]", v=value) — so the value never
+      becomes part of the expression string.
+    sources:
+      - "py:@http.param"
+      - "py:*request.args.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.path_params.get"
+      - "py:*request.data"
+      - "py:*request.data.get"
+      - "py:*request.data.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
+      - "py:*request.form.get"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.get"
+      - "py:*request.values.__getitem__"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
+    sinks:
+      # The XPath expression argument only (#0); lxml's parameterized form passes
+      # the user value as a keyword, which must not fire. `.xpath` is lxml-specific
+      # (ElementTree's `.find`/`.findall` collide with str.find, so are excluded).
+      - "py:*.xpath#0"
+    sanitizers: []
+    propagators:
+      - "py:*.format"
+      - "py:*.join"
