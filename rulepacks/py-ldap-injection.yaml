@@ -1,0 +1,56 @@
+# LDAP injection (Python, CWE-90): untrusted input concatenated into an LDAP
+# search filter or base DN lets an attacker alter the query — auth bypass
+# (`*)(uid=*))(|(uid=*`) or unauthorized data disclosure. Escape user input with
+# ldap.filter.escape_filter_chars / ldap.dn.escape_dn_chars (or the ldap3
+# equivalents) before building the filter.
+rules:
+  - id: py-ldap-injection
+    languages: [python]
+    severity: high
+    cwe: CWE-90
+    message: >-
+      Untrusted input flows into an LDAP search filter/DN (search_s /
+      search_ext_s), allowing LDAP injection (authentication bypass or data
+      disclosure). Escape the value with ldap.filter.escape_filter_chars (or
+      ldap.dn.escape_dn_chars for a DN) before building the query.
+    sources:
+      - "py:@http.param"
+      - "py:*request.args.get"
+      - "py:*request.args.__getitem__"
+      - "py:*request.headers.get"
+      - "py:*request.headers.__getitem__"
+      - "py:*request.cookies.get"
+      - "py:*request.cookies.__getitem__"
+      - "py:*request.GET.get"
+      - "py:*request.GET.__getitem__"
+      - "py:*request.POST.get"
+      - "py:*request.POST.__getitem__"
+      - "py:*request.query_params.__getitem__"
+      - "py:*request.query_params.get"
+      - "py:*request.path_params.__getitem__"
+      - "py:*request.path_params.get"
+      - "py:*request.data"
+      - "py:*request.data.get"
+      - "py:*request.data.__getitem__"
+      - "py:*request.json"
+      - "py:*request.form"
+      - "py:*request.form.get"
+      - "py:*request.form.__getitem__"
+      - "py:*request.values.get"
+      - "py:*request.values.__getitem__"
+      - "py:*request.get_json"
+      - "py:*request.get_data"
+    sinks:
+      # python-ldap search family (the _s/_ext_s suffixes are LDAP-specific, so
+      # they don't collide with the generic re.search / str-search). Both the
+      # filter and the base DN are injectable, so no arg is pinned.
+      - "py:*.search_s"
+      - "py:*.search_st"
+      - "py:*.search_ext_s"
+      - "py:*.search_ext"
+    sanitizers:
+      - "py:*escape_filter_chars"
+      - "py:*escape_dn_chars"
+    propagators:
+      - "py:*.format"
+      - "py:*.join"
