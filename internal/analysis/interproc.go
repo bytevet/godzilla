@@ -147,6 +147,18 @@ type funcValEffect struct {
 	target string
 }
 
+// funcParamRef identifies a callee parameter slot. It is the key for the
+// opaque-callback channel (funcResult.funcOpaque): it records that SOME call site
+// passed a value the engine could not resolve to a concrete function into this
+// slot. That matters for soundness — the function-value points-to set is then
+// INCOMPLETE, so a lone resolved target in it is not provably the only callee and
+// an indirect call on the parameter must not bind (otherwise one site's callback
+// identity could be paired with another site's taint, a cross-context FP).
+type funcParamRef struct {
+	callee string
+	param  int
+}
+
 // funcResult is the outcome of analyzing one function under a set of
 // tainted-parameter seeds.
 type funcResult struct {
@@ -167,7 +179,12 @@ type funcResult struct {
 	// (a points-to fact rather than taint), but its target store is a SET — a
 	// context-insensitive helper called from several sites accumulates the union of
 	// callbacks passed to it, and the engine only binds when that set is a singleton.
-	funcEffects   []funcValEffect
+	funcEffects []funcValEffect
+	// funcOpaque records (callee, param) slots that received an UNRESOLVABLE value at
+	// some call site (a call-result callback, a lambda, an unmodeled import). Its
+	// presence marks the param's points-to set incomplete, disabling the singleton
+	// gate for an indirect call on that param — the FP-safety complement of funcEffects.
+	funcOpaque    []funcParamRef
 	globalEffects []globalEffect
 	// taintsParamMemory[i] is set when the function writes tainted data into
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
@@ -303,6 +320,10 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	// when the set is a singleton (see the resolution branch in handleCall), the
 	// same unambiguous-only discipline untyped_dispatch uses. Higher-order channel.
 	paramFuncVal := map[string]map[int]map[string]bool{}
+	// paramFuncOpaque[callee][param] is set when some call site passed an
+	// unresolvable value into that function-value slot, so its points-to set is
+	// incomplete and the singleton gate must not fire for it (see funcParamRef).
+	paramFuncOpaque := map[string]map[int]bool{}
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
 	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
@@ -354,7 +375,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -412,6 +433,21 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if !set[fe.target] {
 				set[fe.target] = true
 				enqueue(fe.callee)
+			}
+		}
+
+		// An unresolvable value reached a function-value slot: mark it opaque so the
+		// singleton gate no longer trusts a lone resolved target there. First-seen
+		// gated and re-enqueues the callee, mirroring the funcEffects merge.
+		for _, fo := range res.funcOpaque {
+			m := paramFuncOpaque[fo.callee]
+			if m == nil {
+				m = map[int]bool{}
+				paramFuncOpaque[fo.callee] = m
+			}
+			if !m[fo.param] {
+				m[fo.param] = true
+				enqueue(fo.callee)
 			}
 		}
 
@@ -523,6 +559,7 @@ func analyzeFunc(
 	seeds map[int]*ir.Position,
 	reqSeeds map[int]*ir.Position,
 	funcSeeds map[int]map[string]bool,
+	opaqueSeeds map[int]bool,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
 	paramMemTaint map[string]map[int]*ir.Position,
@@ -623,6 +660,54 @@ func analyzeFunc(
 			}
 		}
 	}
+	// funcValOpaque marks a register whose function-value set is incomplete (some
+	// caller passed an unresolvable value into the parameter it was seeded from), so
+	// the indirect-call singleton gate must not fire for it. Function-scoped and
+	// monotonic, like funcVal.
+	funcValOpaque := map[string]bool{}
+	for idx := range opaqueSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				funcValOpaque[reg] = true
+			}
+		}
+	}
+
+	// targetsOf resolves a value to the concrete lowered function(s) it may hold:
+	// a FuncName is looked up directly in byKey (the make_closure resolution
+	// pattern) — this covers a function passed by reference and a frontend-
+	// synthesized deferral call whose target is known at the site; a RegName is
+	// resolved through the function-scoped funcVal points-to set (a callback
+	// received as a parameter). Anything else — an opaque/foreign callable we did
+	// not lower — yields nil, so an unresolvable value binds nothing (a false
+	// negative, never a false positive). Keys are sorted for determinism.
+	targetsOf := func(v *ir.Value) []string {
+		if v == nil {
+			return nil
+		}
+		if name := v.GetFuncName(); name != "" {
+			if byKey[name] != nil {
+				return []string{name}
+			}
+			return nil
+		}
+		if reg := v.GetRegName(); reg != "" {
+			if set := funcVal[reg]; len(set) > 0 {
+				return slices.Sorted(maps.Keys(set))
+			}
+		}
+		return nil
+	}
+	// indirectOpaque reports whether a callback value's points-to set is known to be
+	// incomplete (a caller passed an unresolvable value into the param it came from),
+	// so the singleton gate must not fire. Only a register-held callback can be
+	// opaque; a FuncName is an exact, complete target.
+	indirectOpaque := func(v *ir.Value) bool {
+		if reg := v.GetRegName(); reg != "" {
+			return funcValOpaque[reg]
+		}
+		return false
+	}
 
 	var res funcResult
 	effectSeen := map[string]bool{}
@@ -665,6 +750,36 @@ func analyzeFunc(
 		}
 		funcEffectSeen[key] = true
 		res.funcEffects = append(res.funcEffects, funcValEffect{callee: callee, param: param, target: target})
+	}
+
+	// addFuncOpaque records that an unresolvable value reached a callee's
+	// function-value slot (struct-keyed dedup, no per-arg string alloc). Called only
+	// for a non-constant argument that targetsOf could not resolve.
+	funcOpaqueSeen := map[funcParamRef]bool{}
+	addFuncOpaque := func(callee string, param int) {
+		if callee == "" {
+			return
+		}
+		k := funcParamRef{callee: callee, param: param}
+		if funcOpaqueSeen[k] {
+			return
+		}
+		funcOpaqueSeen[k] = true
+		res.funcOpaque = append(res.funcOpaque, k)
+	}
+
+	// recordFuncArg emits the points-to effect for a callback argument: each
+	// resolved target, or an opaque marker when the value is a non-constant the
+	// resolver could not pin to a concrete function. A constant can never be a
+	// callable, so it contributes neither.
+	recordFuncArg := func(callee string, param int, a *ir.Value) {
+		if ts := targetsOf(a); len(ts) > 0 {
+			for _, t := range ts {
+				addFuncEffect(callee, param, t)
+			}
+		} else if a.GetConstant() == nil {
+			addFuncOpaque(callee, param)
+		}
 	}
 	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
 		if v == nil {
@@ -839,32 +954,6 @@ func analyzeFunc(
 			}
 		}
 
-		// targetsOf resolves a value to the concrete lowered function(s) it may hold:
-		// a FuncName is looked up directly in byKey (the make_closure resolution
-		// pattern) — this covers a function passed by reference and a frontend-
-		// synthesized deferral call whose target is known at the site; a RegName is
-		// resolved through the function-scoped funcVal points-to set (a callback
-		// received as a parameter). Anything else — an opaque/foreign callable we did
-		// not lower — yields nil, so an unresolvable value binds nothing (a false
-		// negative, never a false positive). Keys are sorted for determinism.
-		targetsOf := func(v *ir.Value) []string {
-			if v == nil {
-				return nil
-			}
-			if name := v.GetFuncName(); name != "" {
-				if byKey[name] != nil {
-					return []string{name}
-				}
-				return nil
-			}
-			if reg := v.GetRegName(); reg != "" {
-				if set := funcVal[reg]; len(set) > 0 {
-					return slices.Sorted(maps.Keys(set))
-				}
-			}
-			return nil
-		}
-
 		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
 		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
 		// Shared by the lowered-method branch and the CHA dynamic-dispatch loop
@@ -883,9 +972,7 @@ func analyzeFunc(
 				if p, ok := reqTaintedArg(a); ok {
 					addReqEffect(target, j+1, p)
 				}
-				for _, t := range targetsOf(a) {
-					addFuncEffect(target, j+1, t)
-				}
+				recordFuncArg(target, j+1, a)
 			}
 		}
 		// pullReturnTaint taints this call's result register from target's return
@@ -997,10 +1084,9 @@ func analyzeFunc(
 					}
 					// A function value passed as an argument records a points-to fact
 					// on the callee's param, so an indirect call on that param inside
-					// the callee resolves back to it (higher-order channel).
-					for _, t := range targetsOf(a) {
-						addFuncEffect(callee, j, t)
-					}
+					// the callee resolves back to it (higher-order channel); an
+					// unresolvable value marks the slot opaque (FP-safety).
+					recordFuncArg(callee, j, a)
 				}
 			}
 			pullReturnTaint(callee)
@@ -1043,7 +1129,12 @@ func analyzeFunc(
 		// caller's taint into a different caller's callback would be an unsound,
 		// FP-generating cross-context pairing, so an ambiguous set binds nothing.
 		if indirect && !inst.Call.GetIsInvoke() {
-			if targets := targetsOf(inst.Call.GetValue()); len(targets) == 1 {
+			v := inst.Call.GetValue()
+			// Bind only a singleton, COMPLETE points-to set: an opaque contribution
+			// (some caller passed an unresolvable value into this callback slot) means
+			// the lone resolved target is not provably the only callee, so binding it
+			// would risk pairing one site's callback with another site's taint.
+			if targets := targetsOf(v); len(targets) == 1 && !indirectOpaque(v) {
 				target := targets[0]
 				for j, a := range args {
 					if p, ok := isTaintedArg(tainted, a); ok {
@@ -1052,9 +1143,7 @@ func analyzeFunc(
 					if p, ok := reqTaintedArg(a); ok {
 						addReqEffect(target, j, p)
 					}
-					for _, t := range targetsOf(a) {
-						addFuncEffect(target, j, t)
-					}
+					recordFuncArg(target, j, a)
 				}
 				pullReturnTaint(target)
 			}

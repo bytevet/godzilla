@@ -1201,17 +1201,26 @@ func (fs *funcState) funcValueOf(node astNode) *ir.Value {
 	return nil
 }
 
-// emitDeferredDispatch recognizes a thread/async dispatch construct and emits a
-// synthesized INDIRECT call target(forwarded-args...) so taint flows into the
-// worker the runtime will invoke later. The recognized APIs and their argument
-// layouts are library knowledge that belongs in the frontend; the engine only
-// ever sees a generic indirect call (empty Callee, function value in Call.Value).
-// The forwarded args are spread here (dispatch-locally), never by changing the
-// global sequence lowering that a direct-argv subprocess call relies on. Emitted
-// as a void instruction (fire-and-forget): the worker's return is not consumed.
-func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) {
+// emitDeferredDispatch recognizes a thread/process dispatch construct and, when it
+// matches, emits a synthesized INDIRECT call target(forwarded-args...) so taint
+// flows into the worker the runtime will invoke later, then returns true to signal
+// that it has fully consumed the call (the caller returns an opaque handle without
+// re-lowering it — which is what keeps the forwarded args from being lowered
+// twice). The recognized APIs and their argument layouts are library knowledge
+// that belongs in the frontend; the engine only ever sees a generic indirect call
+// (empty Callee, function value in Call.Value).
+//
+// Scoped to threading.Thread / multiprocessing.Process, whose `target=`/`args=`
+// keyword shape is highly distinctive, and gated on the target resolving to a
+// concrete named function or self-method (a FuncName). A same-named method on an
+// unrelated object, or a target that is merely a parameter holding some value, is
+// not treated as a dispatch — the unambiguous-only discipline, so a miss is a
+// false negative, never a false positive. (Executor.submit / run_in_executor use
+// the far more common `submit`/`run_in_executor` method names and need executor-
+// receiver type tracking to be FP-safe; they are a deliberate follow-up.)
+func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	if funcNode == nil {
-		return
+		return false
 	}
 	var leaf string
 	switch funcNode.kind() {
@@ -1220,55 +1229,70 @@ func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) {
 	case "Name":
 		leaf = funcNode.str("id")
 	default:
-		return
+		return false
+	}
+	if leaf != "Thread" && leaf != "Process" {
+		return false
 	}
 
 	var targetNode astNode
 	var argNodes []astNode
-	switch leaf {
-	case "Thread", "Process":
-		// threading.Thread(target=run, args=(x, y)) — target/args are keywords.
-		for _, kw := range n.list("keywords") {
-			switch kw.str("arg") {
-			case "target":
-				targetNode = kw.node("value")
-			case "args":
-				if t := kw.node("value"); t != nil && t.kind() == "Sequence" {
-					argNodes = t.list("elts")
-				}
+	for _, kw := range n.list("keywords") {
+		switch kw.str("arg") {
+		case "target":
+			targetNode = kw.node("value")
+		case "args":
+			if t := kw.node("value"); t != nil && t.kind() == "Sequence" {
+				argNodes = t.list("elts")
 			}
 		}
-	case "submit":
-		// Executor.submit(run, x, y) — target is the first positional arg.
-		if pos := n.list("args"); len(pos) >= 1 {
-			targetNode = pos[0]
-			argNodes = pos[1:]
-		}
-	case "run_in_executor":
-		// loop.run_in_executor(executor, run, x) — target is the second positional.
-		if pos := n.list("args"); len(pos) >= 2 {
-			targetNode = pos[1]
-			argNodes = pos[2:]
-		}
-	default:
-		return
 	}
 	if targetNode == nil {
-		return
+		return false
 	}
 	targetVal := fs.funcValueOf(targetNode)
-	if targetVal == nil {
-		return
+	if targetVal == nil || targetVal.GetFuncName() == "" {
+		return false
 	}
 
 	cc := &ir.CallCommon{Value: targetVal} // empty Callee marks the indirect call
+	// A self.method target takes the receiver as param 0; prepend it so the forwarded
+	// args line up with params 1..n (the engine binds an indirect call's args to the
+	// target's FRONT params with no receiver shift), mirroring the direct self-method
+	// call path — without this args[0] would bind to the `self` slot, tainting the
+	// receiver and dropping the real first argument.
+	if targetNode.kind() == "Attribute" && fs.selfName != "" {
+		if base := targetNode.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+			cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
+		}
+	}
 	for _, a := range argNodes {
-		cc.Args = append(cc.Args, fs.lowerExpr(a))
+		cc.Args = append(cc.Args, fs.lowerExpr(a)) // forwarded args: lowered exactly once
 	}
 	inst := fs.newVoidInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = cc
 	fs.emit(inst)
+
+	// Lower the remaining arguments (any positionals, other keywords, and a
+	// non-tuple args= value) for their side effects, since the caller returns
+	// without the normal call lowering. The forwarded tuple elements were already
+	// lowered above and must not be lowered again.
+	for _, a := range n.list("args") {
+		fs.lowerExpr(a)
+	}
+	for _, kw := range n.list("keywords") {
+		switch kw.str("arg") {
+		case "target":
+		case "args":
+			if v := kw.node("value"); v != nil && v.kind() != "Sequence" {
+				fs.lowerExpr(v)
+			}
+		default:
+			fs.lowerExpr(kw.node("value"))
+		}
+	}
+	return true
 }
 
 func (fs *funcState) lowerCall(n astNode) *ir.Value {
@@ -1292,15 +1316,17 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		return fs.emitHandlerSource(n, "self."+funcNode.str("attr"))
 	}
 
-	// Thread/async DISPATCH: a construct that hands a callback + its arguments to a
-	// worker the runtime invokes later — threading.Thread(target=run, args=(x,)),
-	// executor.submit(run, x), loop.run_in_executor(None, run, x). Model it as a
+	// Thread/process DISPATCH: threading.Thread(target=run, args=(x,)) hands a
+	// callback + its arguments to a worker the runtime invokes later. Model it as a
 	// deferred call run(x) so taint flows into the worker's parameters (the
 	// pyload-class miss). Library knowledge (which APIs defer, argument layout) lives
-	// here in the frontend; the engine sees only a generic indirect call. Emitted as
-	// a side-effect linkage; the actual construction call still lowers below so its
-	// result object (`t = Thread(...); t.start()`) is unaffected.
-	fs.emitDeferredDispatch(n, funcNode)
+	// here in the frontend; the engine sees only a generic indirect call. When it
+	// matches, the whole construct is consumed — return an opaque handle for the
+	// worker object so `t = Thread(...); t.start()` stays inert and the forwarded
+	// args are not lowered a second time by the normal call path below.
+	if fs.emitDeferredDispatch(n, funcNode) {
+		return regValue(fs.newReg())
+	}
 
 	callee := "py:" + fs.resolveDotted(dottedName(funcNode))
 	// A bare call to a module-level function (helper(x)) must carry the module
