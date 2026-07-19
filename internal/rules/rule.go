@@ -55,6 +55,15 @@ type Rule struct {
 	Sources    []string `yaml:"sources"`
 	Sanitizers []string `yaml:"sanitizers"`
 
+	// RequestObjectSources are source globs whose value is an untrusted HTTP
+	// request OBJECT (not a scalar), e.g. Go's synthetic "go:@net/http.Request".
+	// Taint from one carries request-object provenance, so the engine's
+	// framework-agnostic accessor sugar treats a method call on it (c.Query(),
+	// c.Bind(&x)) as untrusted even for an unmodeled framework. These are also
+	// ordinary sources (list them in Sources too); this only tags the flavor, so
+	// the engine needs no hardcoded request-object name.
+	RequestObjectSources []string `yaml:"request_object_sources"`
+
 	// Sinks are dangerous callee globs. Each entry may append an injection-point
 	// spec directly to its pattern with a "#" suffix: "pattern#i[,j...]" limits
 	// the sink to LOGICAL (source-level, receiver-excluded) argument indices
@@ -152,12 +161,13 @@ func (r *Rule) AppliesTo(language string) bool {
 // package-level cached path (correct, just slower — used by tests and the
 // non-hot dangerous-call scan).
 type ruleMatchers struct {
-	sources     []*compiledGlob
-	sinks       []compiledSink
-	sanitizers  []*compiledGlob
-	propagators []*compiledGlob
-	validators  []*compiledGlob
-	callees     []*compiledGlob
+	sources        []*compiledGlob
+	requestObjects []*compiledGlob
+	sinks          []compiledSink
+	sanitizers     []*compiledGlob
+	propagators    []*compiledGlob
+	validators     []*compiledGlob
+	callees        []*compiledGlob
 }
 
 // compiledSink pairs a sink's shape-matcher with its parsed injection-point
@@ -175,11 +185,12 @@ func (r *Rule) Compile() {
 		return
 	}
 	m := &ruleMatchers{
-		sources:     classifyAll(r.Sources),
-		sanitizers:  classifyAll(r.Sanitizers),
-		propagators: classifyAll(r.Propagators),
-		validators:  classifyAll(r.Validators),
-		callees:     classifyAll(r.Callees),
+		sources:        classifyAll(r.Sources),
+		requestObjects: classifyAll(r.RequestObjectSources),
+		sanitizers:     classifyAll(r.Sanitizers),
+		propagators:    classifyAll(r.Propagators),
+		validators:     classifyAll(r.Validators),
+		callees:        classifyAll(r.Callees),
 	}
 	for _, entry := range r.Sinks {
 		pattern, idx := parseSink(entry)
@@ -211,6 +222,17 @@ func (r *Rule) IsSource(callee string) bool {
 		return matchAnyCompiled(r.matchers.sources, callee)
 	}
 	return MatchAny(r.Sources, callee)
+}
+
+// IsRequestObjectSource reports whether callee matches one of the rule's
+// request-object source patterns (a source whose value is an untrusted HTTP
+// request object, tagged in YAML). The engine uses it to grant request-object
+// provenance without a hardcoded, language-specific source name.
+func (r *Rule) IsRequestObjectSource(callee string) bool {
+	if r.matchers != nil {
+		return matchAnyCompiled(r.matchers.requestObjects, callee)
+	}
+	return MatchAny(r.RequestObjectSources, callee)
 }
 
 // IsSink reports whether callee matches any of the rule's sink patterns.

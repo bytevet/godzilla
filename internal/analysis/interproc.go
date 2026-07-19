@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 
 	"godzilla/internal/rules"
@@ -153,14 +152,16 @@ type funcResult struct {
 	taintsParamMemory map[int]*ir.Position
 }
 
-// logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping the
-// method receiver that Go SSA carries as args[0]. Python/JS frontends already
-// omit the receiver from args (the object lives in the callee name), so logical
-// argument indices are consistent across languages: index 0 is the first real
-// argument. A Go method callee is recognizable by its receiver-type syntax, e.g.
-// "go:(*database/sql.DB).Query".
-func logicalArgs(callee string, args []*ir.Value) []*ir.Value {
-	if strings.HasPrefix(callee, "go:(") && len(args) > 0 {
+// logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping a method
+// receiver carried as args[0]. Whether args[0] is a receiver is read from the IR
+// the converter supplies, not from the callee-name shape: a statically-resolved
+// method call is a non-invoke call that names its method (MethodName set), and
+// puts the receiver first; an INVOKE keeps the receiver in Call.Value (args are
+// already logical); a free function has no receiver. So logical argument indices
+// line up across every language: index 0 is the first real argument.
+func logicalArgs(cc *ir.CallCommon) []*ir.Value {
+	args := cc.GetArgs()
+	if !cc.GetIsInvoke() && cc.GetMethodName() != "" && len(args) > 0 {
 		return args[1:]
 	}
 	return args
@@ -171,11 +172,11 @@ func logicalArgs(callee string, args []*ir.Value) []*ir.Value {
 // Empty indices means every argument is an injection point (the default). This
 // lets a sink ignore SAFE argument positions — e.g. the bound parameters of a
 // parameterized SQL query — so taint reaching them does not raise a finding.
-func injectableArgs(sinkArgs []int32, callee string, args []*ir.Value) []*ir.Value {
+func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	if len(sinkArgs) == 0 {
-		return args
+		return cc.GetArgs()
 	}
-	la := logicalArgs(callee, args)
+	la := logicalArgs(cc)
 	sel := make([]*ir.Value, 0, len(sinkArgs))
 	for _, idx := range sinkArgs {
 		if idx >= 0 && int(idx) < len(la) {
@@ -300,11 +301,12 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	// through a call (addEffect -> enqueue below) — so we pay for library code only
 	// on the taint paths that actually traverse it, not the whole closure.
 	for _, name := range idx.keys {
-		// Skip only a Go DEPENDENCY function (a Go module not in the user's
-		// reportable set) — it is reached demand-driven. Non-Go modules and Go
-		// user code are always seeded, so other languages are unaffected.
+		// When a reportable scope is set, seed only its modules (user code); a
+		// module outside it is a lowered dependency, reached demand-driven. The
+		// scope is a neutral module-name set the caller supplies (ScopeSeed) — the
+		// engine makes no language distinction. An empty scope seeds everything.
 		if len(idx.reportable) > 0 {
-			if mod := idx.modByKey[name]; mod != nil && mod.Language == "go" && !idx.reportable[mod.Name] {
+			if mod := idx.modByKey[name]; mod != nil && !idx.reportable[mod.Name] {
 				continue
 			}
 		}
@@ -410,27 +412,18 @@ func propagatorOperands(inst *ir.Instruction) []*ir.Value {
 	return args
 }
 
-// requestObjectSource is the canonical name of the synthetic source the Go
-// frontend injects for an HTTP handler's request object (converters/go
-// addHTTPRequestSource). Taint seeded from it additionally carries
-// request-object provenance (reqTainted), which unlocks the framework-agnostic
-// accessor rule below: a method call on a request object yields untrusted data
-// even for a web framework we have no rules for.
-const requestObjectSource = "go:@net/http.Request"
-
-func isRequestObjectSource(callee string) bool { return callee == requestObjectSource }
-
 // methodReceiverReg returns the register of a method call's receiver, or "" if
 // the call is not a method call whose receiver we can identify. For an INVOKE
-// (interface/virtual dispatch) the receiver is Call.Value; for a Go static
-// method call the callee is printed as "go:(recv).Method" and the receiver is
-// Args[0]. Free-function calls (no parenthesized receiver, not an invoke) return
-// "" so their first argument is never mistaken for a receiver.
+// (interface/virtual dispatch) the receiver is Call.Value; for a statically
+// resolved method call (non-invoke that names its method) the receiver is Args[0]
+// — both facts the converter records in the IR, so no callee-name parsing is
+// needed. Free-function calls return "" so their first argument is never mistaken
+// for a receiver.
 func methodReceiverReg(inst *ir.Instruction) string {
 	if inst.Call.GetIsInvoke() {
 		return inst.Call.GetValue().GetRegName()
 	}
-	if strings.HasPrefix(inst.Call.GetCallee(), "go:(") {
+	if inst.Call.GetMethodName() != "" {
 		if args := inst.Call.GetArgs(); len(args) > 0 {
 			return args[0].GetRegName()
 		}
@@ -439,14 +432,14 @@ func methodReceiverReg(inst *ir.Instruction) string {
 }
 
 // methodOutParamArgs returns a method call's real arguments (receiver excluded),
-// for out-parameter tainting like c.Bind(&dst). A Go static method call keeps
-// the receiver in Args[0], so its real args are Args[1:]; an INVOKE keeps the
-// receiver in Call.Value, so all Args are real.
+// for out-parameter tainting like c.Bind(&dst). A statically resolved method call
+// keeps the receiver in Args[0], so its real args are Args[1:]; an INVOKE keeps
+// the receiver in Call.Value, so all Args are real.
 func methodOutParamArgs(inst *ir.Instruction) []*ir.Value {
 	if inst.Call.GetIsInvoke() {
 		return inst.Call.GetArgs()
 	}
-	return logicalArgs(inst.Call.GetCallee(), inst.Call.GetArgs())
+	return logicalArgs(inst.Call)
 }
 
 // isAddressArg reports whether reg is defined by an address-producing
@@ -786,12 +779,12 @@ func analyzeFunc(
 				// Request-object sources additionally carry provenance so the
 				// method-sugar rule below can treat accessor calls on the request
 				// object as sources — even for a framework we have no rules for.
-				if isRequestObjectSource(callee) {
+				if rule.IsRequestObjectSource(callee) {
 					reqTainted[inst.Name] = inst.Pos
 				}
 			}
 		case isSink:
-			inj := injectableArgs(sinkArgs, callee, args)
+			inj := injectableArgs(sinkArgs, inst.Call)
 			if srcReg, pos, ok := firstTainted(tainted, inj); ok && !reported[inst] {
 				// ENG-9: suppress when a validator guard on this flow's source
 				// value dominates the sink on the path taken to reach it. The check

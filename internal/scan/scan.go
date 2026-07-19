@@ -79,6 +79,34 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
 }
 
+// depLoweringLangs names the frontends that lower dependency bodies, so their
+// dependency modules must be analyzed demand-driven. Only these contribute a
+// non-empty targetPkgs; a module of any other language is entirely user code.
+var depLoweringLangs = map[string]bool{"go": true}
+
+// seedScope returns the set of module names the engine should seed eagerly (user
+// code). With no dependency lowering (targetPkgs empty) it returns nil, so every
+// function is seeded. Otherwise it is the dep-lowering frontends' user packages
+// (targetPkgs) plus every module from a non-dep-lowering frontend — all user code
+// — so only the lowered dependency modules are left out and reached demand-driven.
+// This keeps the language distinction in the (language-aware) scan layer; the
+// engine consumes a neutral module-name set.
+func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
+	if len(targetPkgs) == 0 {
+		return nil
+	}
+	scope := make(map[string]bool, len(targetPkgs)+len(prog.Modules))
+	for k := range targetPkgs {
+		scope[k] = true
+	}
+	for _, m := range prog.Modules {
+		if m != nil && !depLoweringLangs[m.Language] {
+			scope[m.Name] = true
+		}
+	}
+	return scope
+}
+
 // runAnalyses runs the four independent analysis passes over an already-lowered
 // program and returns their findings in a deterministic order. The passes read
 // the program (and the rule set) but never mutate shared state, so they run
@@ -96,7 +124,7 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	wg.Add(3)
 	// ScopeSeed makes dependency functions analyzed demand-driven (only when taint
 	// reaches them) when deps were lowered; a nil/empty set seeds every function.
-	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).ScopeSeed(targetPkgs).Analyze(prog) }()
+	go func() { defer wg.Done(); taint = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).Analyze(prog) }()
 	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
 	// etc.) evaluated alongside the taint engine (COV-4).
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()

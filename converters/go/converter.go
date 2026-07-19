@@ -934,6 +934,13 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		cc.Callee = "go:" + call.Method.FullName()
 	} else if fn, ok := call.Value.(*ssa.Function); ok {
 		cc.Callee = c.canonicalFunc(fn)
+		// A statically resolved method call passes its receiver as Args[0]. Record
+		// the method name so the engine strips the receiver from the logical
+		// argument list without parsing the callee-name shape (the neutral signal:
+		// a non-invoke call that names a method has its receiver first).
+		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+			cc.MethodName = fn.Name()
+		}
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
 		cc.Callee = "builtin." + b.Name()
 	}
