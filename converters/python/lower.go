@@ -1222,13 +1222,23 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	invoke := false
 	var recvVal *ir.Value
 	if !isSelfMethod && funcNode != nil && funcNode.kind() == "Attribute" {
+		recvNode := funcNode.node("value")
 		if root := rootName(funcNode); root != "" && !fs.importedNames[root] {
 			_, isAlias := fs.aliases[root]
 			_, isLocal := fs.localAlias[root]
 			if !isAlias && !isLocal {
-				recvVal = fs.lowerExpr(funcNode.node("value"))
+				recvVal = fs.lowerExpr(recvNode)
 				invoke = true
 			}
+		} else if recvNode != nil && (recvNode.kind() == "Call" || recvNode.kind() == "Subscript") {
+			// Chained method call whose receiver is a computed VALUE, e.g.
+			// `p.strip().split(",")` or `items[0].strip()`. rootName is "" for a
+			// call/subscript-rooted chain, so the name-based branch above misses it;
+			// capture the receiver as Call.Value so a method propagator (the callee
+			// is "py:<dynamic>.<method>", which still matches "py:*.<method>") can
+			// forward taint through the chain instead of dropping it.
+			recvVal = fs.lowerExpr(recvNode)
+			invoke = true
 		}
 	}
 	if !invoke {
