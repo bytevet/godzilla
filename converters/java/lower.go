@@ -485,7 +485,14 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	if !returnsVoid(in.Mdesc) {
 		name = s.reg()
 	}
-	s.instrs = append(s.instrs, &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos})
+	inst := &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos}
+	// Tag String.format / String.valueOf (template/value in Args[0]) with the
+	// language-neutral builtin.format marker so the engine's SSRF host
+	// reconstruction reads the marker, not a Java callee-name shape.
+	if strings.Contains(callee, "String.format") || strings.Contains(callee, "String.valueOf") {
+		inst.Intrinsic = "builtin.format"
+	}
+	s.instrs = append(s.instrs, inst)
 	if name != "" {
 		s.push(regValue(name))
 	}

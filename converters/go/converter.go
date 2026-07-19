@@ -738,6 +738,13 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 			irInst.Op = ir.OpCode_OP_CODE_CALL
 		}
 		irInst.Call = c.convertCall(i.Call)
+		// Tag a printf-style formatter (fmt.Sprint*, template in Args[0]) with the
+		// language-neutral builtin.format marker so the engine's SSRF host
+		// reconstruction reads the marker, not a Go callee-name shape.
+		if callee := irInst.Call.GetCallee(); strings.Contains(callee, "Sprintf") ||
+			strings.Contains(callee, "Sprintln") || strings.HasSuffix(callee, "Sprint") {
+			irInst.Intrinsic = "builtin.format"
+		}
 	case *ssa.Return:
 		irInst.Op = ir.OpCode_OP_CODE_RET
 		for _, r := range i.Results {

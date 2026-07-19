@@ -24,6 +24,15 @@ func callInst(name, callee string, args ...*ir.Value) *ir.Instruction {
 	return &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{Callee: callee, Args: args}}
 }
 
+// fmtInst builds a printf-style formatter call tagged with the language-neutral
+// builtin.format marker (template in Args[0]), as the frontends now emit. The
+// callee is retained for readability but the engine reads only the marker.
+func fmtInst(name, callee string, args ...*ir.Value) *ir.Instruction {
+	in := callInst(name, callee, args...)
+	in.Intrinsic = "builtin.format"
+	return in
+}
+
 func defsOf(insts ...*ir.Instruction) map[string]*ir.Instruction {
 	m := map[string]*ir.Instruction{}
 	for _, in := range insts {
@@ -134,13 +143,13 @@ func TestURLHostControllable(t *testing.T) {
 		},
 		{
 			name:    "Sprintf path-confined",
-			defs:    defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://api.example.com/items/%s"), regV("t"))),
+			defs:    defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://api.example.com/items/%s"), regV("t"))),
 			tainted: taintedSet("u", "t"),
 			want:    false,
 		},
 		{
 			name:    "Sprintf host taint",
-			defs:    defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://%s.example.com/"), regV("t"))),
+			defs:    defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://%s.example.com/"), regV("t"))),
 			tainted: taintedSet("u", "t"),
 			want:    true,
 		},
@@ -175,7 +184,7 @@ func TestURLHostControllable(t *testing.T) {
 		{
 			name: "Rust format! path-confined (deref->must_use->format->Arguments::new)",
 			defs: defsOf(
-				callInst("t", "rust:Arguments::new", cstV("https://api.example.com/v1/{}"), regV("args")),
+				fmtInst("t", "rust:Arguments::new", cstV("https://api.example.com/v1/{}"), regV("args")),
 				callInst("f", "rust:format", regV("t")),
 				callInst("m", "rust:must_use", regV("f")),
 				callInst("u", "rust:deref", regV("m")),
@@ -186,7 +195,7 @@ func TestURLHostControllable(t *testing.T) {
 		{
 			name: "Rust format! host-controlled",
 			defs: defsOf(
-				callInst("t", "rust:Arguments::new", cstV("https://{}.example.com/v1/"), regV("args")),
+				fmtInst("t", "rust:Arguments::new", cstV("https://{}.example.com/v1/"), regV("args")),
 				callInst("f", "rust:format", regV("t")),
 				callInst("m", "rust:must_use", regV("f")),
 				callInst("u", "rust:deref", regV("m")),
@@ -237,7 +246,7 @@ func TestURLConstPrefix(t *testing.T) {
 		},
 		{
 			name:          "sprintf",
-			defs:          defsOf(callInst("u", "go:fmt.Sprintf", cstV("https://h/%s"), regV("t"))),
+			defs:          defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://h/%s"), regV("t"))),
 			wantPrefix:    "https://h/",
 			wantRecovered: true,
 		},

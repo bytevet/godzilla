@@ -485,7 +485,14 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		Args:   st.operands(splitTop(argStr, ',')),
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}},
 	}
-	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos})
+	inst := &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos}
+	// `format!` lowers to fmt::Arguments::new(<decoded template>, args); tag it with
+	// the language-neutral builtin.format marker (template in Args[0]) so the engine
+	// reconstructs a fixed SSRF host without matching a Rust callee-name shape.
+	if strings.Contains(canonical, "Arguments::new") {
+		inst.Intrinsic = "builtin.format"
+	}
+	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
 }
 

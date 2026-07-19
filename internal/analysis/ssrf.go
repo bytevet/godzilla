@@ -19,6 +19,12 @@ import (
 // (suppress the finding) only when it can PROVE the host is a constant prefix;
 // otherwise true (keep the finding), so no real SSRF is dropped.
 
+// formatIntrinsic is the language-neutral marker a frontend sets on a
+// printf-style formatter call (Go fmt.Sprint*, Java String.format/valueOf, Rust
+// fmt::Arguments::new). The literal template is the call's Args[0]. The engine
+// reads this marker instead of matching any language's format-callee name.
+const formatIntrinsic = "builtin.format"
+
 // hostFixedRe matches a constant prefix that already pins a complete
 // scheme://authority followed by a path/query/fragment separator — i.e. the
 // authority is fully specified by the constant, so any following taint lands in
@@ -26,20 +32,6 @@ import (
 // Examples that do NOT: "https://" (no host yet), "https://example.com" (taint
 // could extend the host), "//host/" (no scheme).
 var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\\]`)
-
-// formatCallees identifies printf-style format functions whose first argument is
-// the literal template (the interpolated values follow, packed into a slice/array).
-// Rust `format!` lowers to `fmt::Arguments::new(<template>, args)`, and the Rust
-// frontend decodes the packed template into a `{}`-placeholder string in that
-// same argument-0 slot, so it fits the same shape.
-func isFormatCallee(callee string) bool {
-	return strings.Contains(callee, "Sprintf") ||
-		strings.Contains(callee, "Sprintln") ||
-		strings.HasSuffix(callee, "Sprint") ||
-		strings.Contains(callee, "String.format") ||
-		strings.Contains(callee, "String.valueOf") ||
-		strings.Contains(callee, "Arguments::new")
-}
 
 // isPassthroughCallee identifies string-valued conversions that forward their
 // operand's text unchanged (so the URL construction is found one hop deeper).
@@ -105,17 +97,19 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 		return "", false
 
 	case def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE:
-		callee := def.Call.GetCallee()
 		args := def.Call.GetArgs()
 		switch {
-		case isFormatCallee(callee):
+		case def.GetIntrinsic() == formatIntrinsic:
+			// A printf-style formatter the frontend tagged: Args[0] is the literal
+			// template, the interpolated values follow. The fixed prefix is the
+			// template text before its first placeholder.
 			if len(args) >= 1 {
 				if tmpl, isConst := constStr(args[0]); isConst {
 					return prefixBeforePlaceholder(tmpl), true
 				}
 			}
 			return "", false
-		case isPassthroughCallee(callee) && len(args) >= 1:
+		case isPassthroughCallee(def.Call.GetCallee()) && len(args) >= 1:
 			return urlConstPrefix(args[0], defs, seen)
 		}
 		return "", false
