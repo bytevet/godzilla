@@ -699,6 +699,16 @@ func (fs *funcState) lookupName(id string) *ir.Value {
 	if v, ok := fs.env[id]; ok {
 		return v
 	}
+	// A bare reference to a module-level function used as a VALUE (passed as a
+	// callback, `Thread(target=fn)`, `walk(data, fn)`) resolves to its canonical
+	// FuncName so the engine can identify which concrete function was handed off —
+	// the ingredient for higher-order-callback taint. This mirrors the callee
+	// qualification lowerCall already does for a direct `fn(x)` call. Gated on
+	// localFuncs membership, so a non-function global/builtin/import is untouched
+	// (still a GlobalName).
+	if fs.localFuncs[id] {
+		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + id}}
+	}
 	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: id}}
 }
 
@@ -1167,6 +1177,100 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 // .format(...) call does not appear as a call in the IR (a documented
 // tradeoff: call-graph fidelity for .format sites is traded for guaranteed
 // taint propagation without needing a propagator rule).
+// funcValueOf resolves an AST expression used as a callback TARGET to the gIR
+// value the engine can resolve to a concrete function: a bare Name that is a
+// module-level function or a function-holding parameter/local (via lookupName),
+// or a `self.method` reference (to the sibling method's canonical name). Anything
+// else — a lambda, an unresolvable import — yields nil, so the dispatch is skipped.
+func (fs *funcState) funcValueOf(node astNode) *ir.Value {
+	if node == nil {
+		return nil
+	}
+	switch node.kind() {
+	case "Name":
+		if v := fs.lookupName(node.str("id")); v.GetFuncName() != "" || v.GetRegName() != "" {
+			return v
+		}
+	case "Attribute":
+		if fs.selfName != "" {
+			if base := node.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+				return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + fs.methodPrefix + node.str("attr")}}
+			}
+		}
+	}
+	return nil
+}
+
+// emitDeferredDispatch recognizes a thread/async dispatch construct and emits a
+// synthesized INDIRECT call target(forwarded-args...) so taint flows into the
+// worker the runtime will invoke later. The recognized APIs and their argument
+// layouts are library knowledge that belongs in the frontend; the engine only
+// ever sees a generic indirect call (empty Callee, function value in Call.Value).
+// The forwarded args are spread here (dispatch-locally), never by changing the
+// global sequence lowering that a direct-argv subprocess call relies on. Emitted
+// as a void instruction (fire-and-forget): the worker's return is not consumed.
+func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) {
+	if funcNode == nil {
+		return
+	}
+	var leaf string
+	switch funcNode.kind() {
+	case "Attribute":
+		leaf = funcNode.str("attr")
+	case "Name":
+		leaf = funcNode.str("id")
+	default:
+		return
+	}
+
+	var targetNode astNode
+	var argNodes []astNode
+	switch leaf {
+	case "Thread", "Process":
+		// threading.Thread(target=run, args=(x, y)) — target/args are keywords.
+		for _, kw := range n.list("keywords") {
+			switch kw.str("arg") {
+			case "target":
+				targetNode = kw.node("value")
+			case "args":
+				if t := kw.node("value"); t != nil && t.kind() == "Sequence" {
+					argNodes = t.list("elts")
+				}
+			}
+		}
+	case "submit":
+		// Executor.submit(run, x, y) — target is the first positional arg.
+		if pos := n.list("args"); len(pos) >= 1 {
+			targetNode = pos[0]
+			argNodes = pos[1:]
+		}
+	case "run_in_executor":
+		// loop.run_in_executor(executor, run, x) — target is the second positional.
+		if pos := n.list("args"); len(pos) >= 2 {
+			targetNode = pos[1]
+			argNodes = pos[2:]
+		}
+	default:
+		return
+	}
+	if targetNode == nil {
+		return
+	}
+	targetVal := fs.funcValueOf(targetNode)
+	if targetVal == nil {
+		return
+	}
+
+	cc := &ir.CallCommon{Value: targetVal} // empty Callee marks the indirect call
+	for _, a := range argNodes {
+		cc.Args = append(cc.Args, fs.lowerExpr(a))
+	}
+	inst := fs.newVoidInst(n)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
+}
+
 func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	funcNode := n.node("func")
 	if funcNode != nil && funcNode.kind() == "Attribute" && funcNode.str("attr") == "format" {
@@ -1187,6 +1291,16 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		}
 		return fs.emitHandlerSource(n, "self."+funcNode.str("attr"))
 	}
+
+	// Thread/async DISPATCH: a construct that hands a callback + its arguments to a
+	// worker the runtime invokes later — threading.Thread(target=run, args=(x,)),
+	// executor.submit(run, x), loop.run_in_executor(None, run, x). Model it as a
+	// deferred call run(x) so taint flows into the worker's parameters (the
+	// pyload-class miss). Library knowledge (which APIs defer, argument layout) lives
+	// here in the frontend; the engine sees only a generic indirect call. Emitted as
+	// a side-effect linkage; the actual construction call still lowers below so its
+	// result object (`t = Thread(...); t.start()`) is unaffected.
+	fs.emitDeferredDispatch(n, funcNode)
 
 	callee := "py:" + fs.resolveDotted(dottedName(funcNode))
 	// A bare call to a module-level function (helper(x)) must carry the module
@@ -1241,7 +1355,27 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 			invoke = true
 		}
 	}
-	if !invoke {
+	// Indirect call through a function VALUE the current function holds — `fn(x)`
+	// where `fn` is a parameter (the higher-order-callback case) or a local bound to
+	// a function reference. The syntactic callee `py:fn` names no lowered function,
+	// so a plain CALL would drop taint at the boundary; instead emit an INDIRECT call
+	// (empty Callee, the function value in Call.Value) that the engine resolves
+	// through its function-value points-to set. Excludes local functions (already
+	// resolved to their canonical name above) and imported/builtin names (they must
+	// keep their resolved callee so sink/source globs match).
+	indirect := false
+	var indirectVal *ir.Value
+	if !invoke && !isSelfMethod && funcNode != nil && funcNode.kind() == "Name" {
+		id := funcNode.str("id")
+		if !fs.localFuncs[id] && !fs.importedNames[id] {
+			if v, ok := fs.env[id]; ok && (fs.paramRegs[id] || v.GetFuncName() != "") {
+				indirect = true
+				indirectVal = v
+			}
+		}
+	}
+
+	if !invoke && !indirect {
 		// Lower any call embedded in the callee chain, so a chained call like
 		// requests.get(url).json() still emits the inner requests.get call (an SSRF
 		// sink) even though the outer call is `.json()`. For an INVOKE the receiver
@@ -1250,7 +1384,8 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	}
 
 	cc := &ir.CallCommon{Callee: callee}
-	if invoke {
+	switch {
+	case invoke:
 		cc.Value = recvVal // receiver -> callee param 0 (CHA seedInvokeArgs)
 		cc.MethodName = funcNode.str("attr")
 		cc.IsInvoke = true // the engine gates CHA dispatch on this field
@@ -1259,7 +1394,12 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		// unambiguous (a type-resolved invoke would fan out) — the dispatch
 		// discipline is thus chosen from IR, not a language check in the engine.
 		cc.UntypedDispatch = true
-	} else {
+	case indirect:
+		// Empty Callee marks an indirect call; the function value is the resolution
+		// target the engine reads from Call.Value.
+		cc.Callee = ""
+		cc.Value = indirectVal
+	default:
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}}
 	}
 	// For a resolved `self.method(x)` call, pass the receiver as the first

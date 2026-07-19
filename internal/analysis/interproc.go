@@ -131,6 +131,22 @@ type globalEffect struct {
 	origin *ir.Position
 }
 
+// funcValEffect records that a FUNCTION VALUE (the concrete lowered function
+// `target`) was passed as the argument at position `param` of `callee`. It is the
+// points-to analogue of callEffect: where callEffect flows taint into a param,
+// funcValEffect flows a *callable identity* into a param, so an indirect call on
+// that param inside the callee (`fn(x)` where `fn` is a parameter) can be resolved
+// back to `target`. This is what makes higher-order-callback taint work — a
+// callback passed into a generic helper is tracked across the call boundary — and,
+// combined with a frontend that rewrites a deferral API to a synthesized indirect
+// call, also covers thread/async dispatch. Mirrors callEffect but carries a target
+// function name rather than a source origin.
+type funcValEffect struct {
+	callee string
+	param  int
+	target string
+}
+
 // funcResult is the outcome of analyzing one function under a set of
 // tainted-parameter seeds.
 type funcResult struct {
@@ -143,7 +159,15 @@ type funcResult struct {
 	// request-object method-sugar coverage across function boundaries (e.g. a
 	// handler passing *http.Request / *gin.Context to a helper that calls an
 	// accessor on it). Mirrors callEffects, but for provenance rather than taint.
-	reqEffects    []callEffect
+	reqEffects []callEffect
+	// funcEffects records that a function value was passed as an argument to a
+	// callee (see funcValEffect): the callee's matching parameter then holds that
+	// callable, so an indirect call on the parameter resolves to it. This is the
+	// cross-function channel for higher-order-callback taint. Mirrors reqEffects
+	// (a points-to fact rather than taint), but its target store is a SET — a
+	// context-insensitive helper called from several sites accumulates the union of
+	// callbacks passed to it, and the engine only binds when that set is a singleton.
+	funcEffects   []funcValEffect
 	globalEffects []globalEffect
 	// taintsParamMemory[i] is set when the function writes tainted data into
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
@@ -273,6 +297,12 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	callers, globalReaders := idx.callers, idx.globalReaders
 	paramTaint := map[string]map[int]*ir.Position{}
 	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
+	// paramFuncVal is the function-value points-to summary: callee -> param index ->
+	// the SET of concrete functions that param can hold, accumulated across every
+	// call site (context-insensitive). An indirect call on that param binds only
+	// when the set is a singleton (see the resolution branch in handleCall), the
+	// same unambiguous-only discipline untyped_dispatch uses. Higher-order channel.
+	paramFuncVal := map[string]map[int]map[string]bool{}
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
 	paramMemTaint := map[string]map[int]*ir.Position{} // callee -> out-param index -> origin (ENG-6b)
@@ -324,7 +354,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -358,6 +388,30 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
 				enqueue(ce.callee)
+			}
+		}
+
+		// A function value flowing into a callee parameter (higher-order channel):
+		// merge the target into paramFuncVal[callee][param] and re-enqueue the callee
+		// so an indirect call on that parameter can now resolve. Merge is first-seen
+		// per (callee, param, target) so the worklist stays monotonic and converges;
+		// a new distinct target for an already-seen param still re-enqueues, because a
+		// param that was a resolvable singleton can become ambiguous and must be
+		// re-analyzed under the singleton gate.
+		for _, fe := range res.funcEffects {
+			m := paramFuncVal[fe.callee]
+			if m == nil {
+				m = map[int]map[string]bool{}
+				paramFuncVal[fe.callee] = m
+			}
+			set := m[fe.param]
+			if set == nil {
+				set = map[string]bool{}
+				m[fe.param] = set
+			}
+			if !set[fe.target] {
+				set[fe.target] = true
+				enqueue(fe.callee)
 			}
 		}
 
@@ -468,6 +522,7 @@ func analyzeFunc(
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
 	reqSeeds map[int]*ir.Position,
+	funcSeeds map[int]map[string]bool,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
 	paramMemTaint map[string]map[int]*ir.Position,
@@ -550,6 +605,25 @@ func analyzeFunc(
 		}
 	}
 
+	// funcVal maps a register to the SET of concrete functions it can hold (a
+	// points-to fact). It is function-scoped and monotonic — a callable identity is
+	// a property of the value, not a per-block fact — so, like reqTainted, it is NOT
+	// reset by the flow-sensitive block driver. Seeded from the caller-supplied
+	// funcSeeds (which param holds which callback), so an indirect call on a
+	// parameter can be resolved to the function value the caller passed in.
+	funcVal := map[string]map[string]bool{}
+	for idx, targets := range funcSeeds {
+		if idx >= 0 && idx < len(fn.Params) {
+			if reg := fn.Params[idx].GetRegName(); reg != "" {
+				set := map[string]bool{}
+				for t := range targets {
+					set[t] = true
+				}
+				funcVal[reg] = set
+			}
+		}
+	}
+
 	var res funcResult
 	effectSeen := map[string]bool{}
 
@@ -573,6 +647,24 @@ func analyzeFunc(
 		}
 		reqEffectSeen[key] = true
 		res.reqEffects = append(res.reqEffects, callEffect{callee: callee, param: param, origin: origin})
+	}
+
+	// addFuncEffect records that a function value flowed into a callee parameter
+	// (the higher-order channel). Dedup is keyed on callee#param#target — unlike the
+	// taint/req channels, which store a single origin per (callee,param), this stores
+	// a SET, so two distinct callbacks passed to the same param must BOTH be recorded
+	// (that is exactly what makes the param ambiguous and disables the singleton gate).
+	funcEffectSeen := map[string]bool{}
+	addFuncEffect := func(callee string, param int, target string) {
+		if callee == "" || target == "" {
+			return
+		}
+		key := callee + "#" + strconv.Itoa(param) + "#" + target
+		if funcEffectSeen[key] {
+			return
+		}
+		funcEffectSeen[key] = true
+		res.funcEffects = append(res.funcEffects, funcValEffect{callee: callee, param: param, target: target})
 	}
 	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
 		if v == nil {
@@ -713,13 +805,23 @@ func analyzeFunc(
 		}
 		callee := inst.Call.GetCallee()
 		args := inst.Call.GetArgs()
-		// Classify the callee once. These globs are the engine's hottest per-(call
-		// × rule) work; the switch below and the request-object method-sugar gate
-		// both consult the same predicates, so compute them a single time.
-		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
-		isSan := rule.IsSanitizer(callee)
-		isSrc := rule.IsSource(callee)
-		isProp := rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+		// An indirect call names no callee (Callee == ""); its callee is a function
+		// VALUE in Call.Value, resolved below. Skip source/sink/sanitizer/propagator
+		// classification entirely for it — a glob has no callee string to match, and
+		// this also neutralizes a latent coupling where an empty pattern would match
+		// the empty name. Purely structural; no language check.
+		indirect := callee == ""
+		var sinkArgs []int32
+		var isSink, isSan, isSrc, isProp bool
+		if !indirect {
+			// Classify the callee once. These globs are the engine's hottest per-(call
+			// × rule) work; the switch below and the request-object method-sugar gate
+			// both consult the same predicates, so compute them a single time.
+			sinkArgs, isSink = rule.SinkInjectionArgs(callee)
+			isSan = rule.IsSanitizer(callee)
+			isSrc = rule.IsSource(callee)
+			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+		}
 
 		// Record a validator application (ENG-9, linear case): mark the checked
 		// registers so a later RET of one of them in this same straight-line block
@@ -735,6 +837,32 @@ func analyzeFunc(
 					validated[r] = true
 				}
 			}
+		}
+
+		// targetsOf resolves a value to the concrete lowered function(s) it may hold:
+		// a FuncName is looked up directly in byKey (the make_closure resolution
+		// pattern) — this covers a function passed by reference and a frontend-
+		// synthesized deferral call whose target is known at the site; a RegName is
+		// resolved through the function-scoped funcVal points-to set (a callback
+		// received as a parameter). Anything else — an opaque/foreign callable we did
+		// not lower — yields nil, so an unresolvable value binds nothing (a false
+		// negative, never a false positive). Keys are sorted for determinism.
+		targetsOf := func(v *ir.Value) []string {
+			if v == nil {
+				return nil
+			}
+			if name := v.GetFuncName(); name != "" {
+				if byKey[name] != nil {
+					return []string{name}
+				}
+				return nil
+			}
+			if reg := v.GetRegName(); reg != "" {
+				if set := funcVal[reg]; len(set) > 0 {
+					return slices.Sorted(maps.Keys(set))
+				}
+			}
+			return nil
 		}
 
 		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
@@ -754,6 +882,9 @@ func analyzeFunc(
 				}
 				if p, ok := reqTaintedArg(a); ok {
 					addReqEffect(target, j+1, p)
+				}
+				for _, t := range targetsOf(a) {
+					addFuncEffect(target, j+1, t)
 				}
 			}
 		}
@@ -864,6 +995,12 @@ func analyzeFunc(
 					if p, ok := reqTaintedArg(a); ok {
 						addReqEffect(callee, j, p)
 					}
+					// A function value passed as an argument records a points-to fact
+					// on the callee's param, so an indirect call on that param inside
+					// the callee resolves back to it (higher-order channel).
+					for _, t := range targetsOf(a) {
+						addFuncEffect(callee, j, t)
+					}
 				}
 			}
 			pullReturnTaint(callee)
@@ -888,6 +1025,38 @@ func analyzeFunc(
 						}
 					}
 				}
+			}
+		}
+
+		// Inter-procedural, INDIRECT call through a function value: the callee is not
+		// a named function (byKey[callee]==nil) and this is not an INVOKE — the target
+		// is a function VALUE in Call.Value. This is the unifying primitive for
+		// higher-order callbacks (`fn(x)` where fn is a callback parameter, resolved
+		// via funcVal) and frontend-synthesized deferral/thread dispatch (target a
+		// FuncName known at the site). Resolve the value and flow the args into the
+		// target's FRONT params (no receiver shift — a plain call), then pull the
+		// target's return taint back into this call's result.
+		//
+		// Binds ONLY when the resolved target set is a singleton — the same
+		// unambiguous-only discipline untyped_dispatch uses. A generic helper called
+		// with several distinct callbacks accumulates a union in funcVal; binding one
+		// caller's taint into a different caller's callback would be an unsound,
+		// FP-generating cross-context pairing, so an ambiguous set binds nothing.
+		if indirect && !inst.Call.GetIsInvoke() {
+			if targets := targetsOf(inst.Call.GetValue()); len(targets) == 1 {
+				target := targets[0]
+				for j, a := range args {
+					if p, ok := isTaintedArg(tainted, a); ok {
+						addEffect(target, j, p)
+					}
+					if p, ok := reqTaintedArg(a); ok {
+						addReqEffect(target, j, p)
+					}
+					for _, t := range targetsOf(a) {
+						addFuncEffect(target, j, t)
+					}
+				}
+				pullReturnTaint(target)
 			}
 		}
 
