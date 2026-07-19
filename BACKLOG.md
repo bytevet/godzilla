@@ -55,7 +55,7 @@ toolchain-gated, net-new frontends, or deferred perf work.
 | COV-2 | crit | ✅ `803dcfd` | Same as FE-6 (TS/ESM visible). |
 | COV-3 | high | ✅ `39c5cf3` | Java insecure-deserialization / SSRF / XSS / open-redirect packs + JAX-RS param sources. |
 | COV-4 | high | ✅ `3a1b72e` | `kind: dangerous-call` non-dataflow rule type (weak crypto / weak cipher / insecure RNG). |
-| COV-5 | high | 🟡 `315bbf6` | Python `eval`/`exec`/`compile` code injection shipped. **Open (pure-YAML):** NoSQL, SSTI, LDAP/XPath, zip-slip, prototype-pollution, header/CRLF, log injection. |
+| COV-5 | high | 🟡 `315bbf6` | Python `eval`/`exec`/`compile` code injection shipped; **SSTI** shipped (`py-ssti`, CWE-1336: `render_template_string`/`jinja2.Template`/`Environment.from_string`, template-source `#0` only so a tainted context var is not flagged — also pinned `py-xss`'s `render_template_string` to `#0`). **Open (pure-YAML):** NoSQL, LDAP/XPath, zip-slip, prototype-pollution, header/CRLF, log injection. |
 | COV-6 | high | ✅ `55d4f15` | Header/cookie/body sources + gorilla/fiber/fastify; extended to a framework-agnostic request-object source + stdlib request-accessor propagators (covers unmodeled frameworks). |
 | COV-7 | med | ✅ `dcfda8d` | Rust axum extractor sources (`Query`/`Path`/`Json`/`Form`) + XSS/open-redirect packs. |
 | COV-8 | med | ✅ `8e313f7` | C/C++ CFG-edge fix + exec-family/argv sources + buffer-overflow & SQLi packs (SSRF is a follow-on). |
