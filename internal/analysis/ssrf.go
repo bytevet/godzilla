@@ -33,23 +33,12 @@ const formatIntrinsic = "builtin.format"
 // could extend the host), "//host/" (no scheme).
 var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\\]`)
 
-// isPassthroughCallee identifies string-valued conversions that forward their
-// operand's text unchanged (so the URL construction is found one hop deeper).
-func isPassthroughCallee(callee string) bool {
-	for _, suffix := range []string{
-		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
-		"String.toString", "String::from", "borrow",
-		// Rust `format!` result chain: format(Arguments) -> String, wrapped in
-		// must_use; each forwards its argument-0 so the URL construction is found
-		// at the underlying fmt::Arguments::new.
-		"must_use", "format",
-	} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
-		}
-	}
-	return false
-}
+// identityIntrinsic is the language-neutral marker a frontend sets on a
+// string-valued conversion that forwards its operand's text unchanged
+// (to_string/as_str/clone/into/deref and the format! result wrappers). The
+// engine follows Args[0] one hop deeper to find the URL construction, without
+// matching any language's conversion-callee name.
+const identityIntrinsic = "builtin.identity"
 
 // urlHostControllable reports whether any tainted injection-point argument can
 // influence the request URL's host. Returns true (keep the SSRF finding) unless
@@ -109,7 +98,7 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 				}
 			}
 			return "", false
-		case isPassthroughCallee(def.Call.GetCallee()) && len(args) >= 1:
+		case def.GetIntrinsic() == identityIntrinsic && len(args) >= 1:
 			return urlConstPrefix(args[0], defs, seen)
 		}
 		return "", false
@@ -142,7 +131,7 @@ func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]
 	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
 		return leadingConstSeq(def.GetOperands(), defs, next)
 	case (def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE):
-		if isPassthroughCallee(def.Call.GetCallee()) {
+		if def.GetIntrinsic() == identityIntrinsic {
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				return leadingConst(args[0], defs, next)
 			}

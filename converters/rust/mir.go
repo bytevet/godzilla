@@ -486,14 +486,38 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}},
 	}
 	inst := &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos}
-	// `format!` lowers to fmt::Arguments::new(<decoded template>, args); tag it with
-	// the language-neutral builtin.format marker (template in Args[0]) so the engine
-	// reconstructs a fixed SSRF host without matching a Rust callee-name shape.
-	if strings.Contains(canonical, "Arguments::new") {
+	// Tag two shapes with a language-neutral marker so the engine's SSRF host
+	// reconstruction reads the marker, not a Rust callee-name shape (both markers
+	// are inert to taint propagation — only OP_CODE_INTRINSIC consults the
+	// intrinsic-propagator table — so taint still flows via the existing rules):
+	//   - format!  -> fmt::Arguments::new(<decoded template>, args): builtin.format
+	//   - identity string conversions that forward their operand's text unchanged
+	//     (to_string/as_str/into/clone/deref/format-result wrappers): builtin.identity
+	switch {
+	case strings.Contains(canonical, "Arguments::new"):
 		inst.Intrinsic = "builtin.format"
+	case rustIdentityConv(canonical):
+		inst.Intrinsic = "builtin.identity"
 	}
 	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
+}
+
+// rustIdentityConv reports whether a Rust callee is a string-valued conversion
+// that forwards its operand's text unchanged, so the SSRF prefix reconstruction
+// can look one hop deeper. Covers the `format!` result wrappers (format ->
+// must_use -> deref) and the common owned/borrowed conversions. The suffix set
+// mirrors the engine's former isPassthroughCallee so behavior is unchanged.
+func rustIdentityConv(callee string) bool {
+	for _, suffix := range []string{
+		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
+		"String::from", "borrow", "must_use", "format",
+	} {
+		if strings.HasSuffix(callee, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // setAgg records an aggregate construction: it both emits a builtin.aggregate
