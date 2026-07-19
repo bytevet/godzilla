@@ -124,8 +124,9 @@ toolchain-gated, net-new frontends, or deferred perf work.
 
 ## Open items (all deferred or partial above)
 
-- **COV-5** — remaining injection classes (NoSQL, SSTI, LDAP/XPath, zip-slip, prototype-pollution,
-  header/CRLF, log). Pure-YAML packs; ship when a target framework/sample justifies each.
+- **COV-5** — remaining injection classes (NoSQL, XPath, zip-slip, prototype-pollution,
+  header/CRLF, log; code-injection, SSTI, and LDAP shipped). Pure-YAML packs; ship when a target
+  framework/sample justifies each.
 - **COV-10** — PHP / C# / Kotlin frontends. Each is a net-new project.
 - **COV-11 / COV-12 / COV-13** — real-world recall (from the CVE benchmark): framework
   handler-parameter sources (highest-leverage), Ruby rulepack parity, framework-abstracted sinks +
