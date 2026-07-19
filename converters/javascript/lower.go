@@ -280,12 +280,51 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 		// the request-source globs regardless of the parameter's actual name.
 		if i == 0 && fs.isHandler {
 			fs.reqParam = name
+			// A handler that destructures its request object in the signature —
+			// `(req, res) => ...` written as `({ query, body }, res) => ...` — has
+			// no `req.query` member read to seed taint from. Bind each destructured
+			// property to a synthetic `js:req.<key>` source read so it matches the
+			// request-source globs exactly as an in-body `req.query` access would (COV-11).
+			if pat, ok := b.Target.(*ast.ObjectPattern); ok {
+				fs.bindHandlerDestructure(pat)
+			}
 		}
 	}
 	if params.Rest != nil {
 		if id, ok := params.Rest.(*ast.Identifier); ok {
 			bind(string(id.Name))
 		}
+	}
+}
+
+// bindHandlerDestructure binds each property of a route handler's destructured
+// request parameter — `({ query, body: b }, res) => ...` — to a synthetic
+// `js:req.<key>` source read, so the local (`query`, `b`) carries request taint
+// exactly as an in-body `req.query` member read would. Only plain, non-computed
+// shorthand/keyed properties are modeled (`{ query }`, `{ query: q }`); a nested
+// or computed pattern is skipped (a documented limitation), mirroring how the
+// positional-parameter path leaves unhandled patterns as opaque _argN slots.
+func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
+	for _, p := range pat.Properties {
+		var key, local string
+		switch prop := p.(type) {
+		case *ast.PropertyShort:
+			key = string(prop.Name.Name)
+			local = key
+		case *ast.PropertyKeyed:
+			// `{ query: q }` -> field `query`, local `q`; only a plain identifier
+			// binding target is modeled (a nested/computed pattern is skipped).
+			if v, ok := prop.Value.(*ast.Identifier); ok {
+				key = propertyKeyName(prop.Key)
+				local = string(v.Name)
+			}
+		default:
+			continue
+		}
+		if key == "" || local == "" {
+			continue
+		}
+		fs.env[local] = fs.emitRootPropertyRead("req", key, pat.Idx0())
 	}
 }
 
