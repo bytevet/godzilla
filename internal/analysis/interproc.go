@@ -719,7 +719,7 @@ func analyzeFunc(
 		sinkArgs, isSink := rule.SinkInjectionArgs(callee)
 		isSan := rule.IsSanitizer(callee)
 		isSrc := rule.IsSource(callee)
-		isProp := rule.IsPropagator(callee) || isConcatAddCallee(callee) || rules.IsDefaultPropagator(callee)
+		isProp := rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
 
 		// Record a validator application (ENG-9, linear case): mark the checked
 		// registers so a later RET of one of them in this same straight-line block
@@ -827,9 +827,7 @@ func analyzeFunc(
 			}
 		case isProp:
 			// A propagating call carries taint from any of its operands to its
-			// result. This covers the rule's own propagators, a Rust concat-add
-			// call (`String + &str` lowered to `Add::add` — the call-shaped
-			// analogue of the universal BIN_OP_ADD propagator), and the built-in
+			// result. This covers the rule's own propagators and the built-in
 			// default propagators (stdlib string/encoding transforms that real
 			// code interposes between a source and a sink; without them one
 			// `strings.TrimSpace`/`.toLowerCase()` silently drops taint). Operands

@@ -151,21 +151,23 @@ func TestURLHostControllable(t *testing.T) {
 			want:    false,
 		},
 		{
-			name: "Rust add path-confined (to_owned(const) + deref(taint))",
+			// Rust `String + &str` concat lowers to BIN_OP_ADD (the frontend no
+			// longer emits a rust:add call), so reconstruction is the shared path.
+			name: "Rust concat path-confined (to_owned(const) + deref(taint))",
 			defs: defsOf(
 				callInst("c", "rust:to_owned", cstV("https://api.example.com/v1/")),
 				callInst("d", "rust:deref", regV("t")),
-				callInst("u", "rust:add", regV("c"), regV("d")),
+				binOp("u", ir.BinOpKind_BIN_OP_ADD, regV("c"), regV("d")),
 			),
 			tainted: taintedSet("u", "d", "t"),
 			want:    false,
 		},
 		{
-			name: "Rust add host-controlled",
+			name: "Rust concat host-controlled",
 			defs: defsOf(
 				callInst("c", "rust:to_owned", cstV("https://")),
 				callInst("d", "rust:deref", regV("t")),
-				callInst("u", "rust:add", regV("c"), regV("d")),
+				binOp("u", ir.BinOpKind_BIN_OP_ADD, regV("c"), regV("d")),
 			),
 			tainted: taintedSet("u", "d", "t"),
 			want:    true,

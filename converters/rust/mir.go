@@ -467,7 +467,19 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{}, Pos: pos})
 		return
 	}
-	canonical := "rust:" + normalizeName(callee)
+	norm := normalizeName(callee)
+	// `String + &str` overloads Add::add, which rustc lowers to a CALL rather than
+	// the native numeric-add rvalue. It is a string concatenation, so model it as
+	// the universal BIN_OP_ADD the engine already interprets for `+` in every
+	// language (taint propagation and SSRF fixed-host prefix reconstruction), so
+	// the engine needs no Rust-callee special case.
+	if norm == "add" {
+		operands := st.operands(splitTop(argStr, ','))
+		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: operands, Pos: pos})
+		st.env[dst] = regValue(name)
+		return
+	}
+	canonical := "rust:" + norm
 	cc := &ir.CallCommon{
 		Callee: canonical,
 		Args:   st.operands(splitTop(argStr, ',')),

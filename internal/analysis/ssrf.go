@@ -41,13 +41,6 @@ func isFormatCallee(callee string) bool {
 		strings.Contains(callee, "Arguments::new")
 }
 
-// isConcatAddCallee identifies an operator-overload string concatenation lowered
-// as a call — chiefly Rust's `String + &str` (`<String as Add>::add`, normalized
-// to a callee ending in "add").
-func isConcatAddCallee(callee string) bool {
-	return callee == "rust:add" || strings.HasSuffix(callee, "::add")
-}
-
 // isPassthroughCallee identifies string-valued conversions that forward their
 // operand's text unchanged (so the URL construction is found one hop deeper).
 func isPassthroughCallee(callee string) bool {
@@ -122,9 +115,6 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 				}
 			}
 			return "", false
-		case isConcatAddCallee(callee) && len(args) >= 2:
-			text, _ := leadingConst(v, defs, seen) // handled by leadingConst's add case
-			return text, true
 		case isPassthroughCallee(callee) && len(args) >= 1:
 			return urlConstPrefix(args[0], defs, seen)
 		}
@@ -141,8 +131,9 @@ func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[strin
 
 // leadingConst returns the longest run of constant text at the START of the value
 // v's string construction, and whether the ENTIRE construction is constant
-// (complete). It flattens concatenation trees (BIN_OP_ADD and Rust `add` calls)
-// and follows passthrough conversions, stopping at the first non-constant leaf.
+// (complete). It flattens BIN_OP_ADD concatenation trees (every language lowers
+// `+` string concatenation to BIN_OP_ADD, Rust included) and follows passthrough
+// conversions, stopping at the first non-constant leaf.
 func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (text string, complete bool) {
 	if s, isConst := constStr(v); isConst {
 		return s, true
@@ -157,11 +148,7 @@ func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]
 	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
 		return leadingConstSeq(def.GetOperands(), defs, next)
 	case (def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE):
-		callee := def.Call.GetCallee()
-		if isConcatAddCallee(callee) {
-			return leadingConstSeq(def.Call.GetArgs(), defs, next)
-		}
-		if isPassthroughCallee(callee) {
+		if isPassthroughCallee(def.Call.GetCallee()) {
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				return leadingConst(args[0], defs, next)
 			}
