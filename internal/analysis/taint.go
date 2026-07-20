@@ -458,3 +458,34 @@ func markTaintFromOperands(tainted taintState, name string, operands []*ir.Value
 		markTainted(tainted, name, pos)
 	}
 }
+
+// copyFieldPaths mirrors the field-path taint keys (base#fN and base#*) of `from`
+// onto `to`. A whole-aggregate load/copy (t2 = *t0) produces a struct VALUE that
+// carries every field of its source, so it must carry the source's per-field and
+// any-field taint too — otherwise a field-tainted struct loaded by value loses
+// its markers and is not recognized as field-tainted when passed across a call
+// (see fieldAnyKey / isTaintedArg), silently dropping the extremely common
+// "fill an options struct, pass it to a helper, read a field there" flow. Only
+// path keys (which contain '#') are copied; the plain whole-register taint is
+// left to the ordinary operand propagation, so this never widens scalar taint.
+func copyFieldPaths(tainted taintState, from, to string) {
+	if from == "" || to == "" || from == to {
+		return
+	}
+	prefix := from + "#"
+	var add []struct {
+		k   string
+		pos *ir.Position
+	}
+	for k, pos := range tainted {
+		if strings.HasPrefix(k, prefix) {
+			add = append(add, struct {
+				k   string
+				pos *ir.Position
+			}{to + "#" + k[len(prefix):], pos})
+		}
+	}
+	for _, a := range add {
+		markTainted(tainted, a.k, a.pos)
+	}
+}

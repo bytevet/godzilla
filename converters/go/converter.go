@@ -47,6 +47,15 @@ type Converter struct {
 	// for. Populated by collectRouteHandlers.
 	routeHandlers map[*ssa.Function]string
 
+	// routeFormParams maps a route-registered handler to the register names of its
+	// BOUND-FORM parameters: value-struct params that a binding middleware
+	// (macaron/martini `binding.Bind`/`bindIgnErr`, etc.) reflectively fills from
+	// the request — e.g. gogs' EditFilePost(c *context.Context, f form.EditRepoFile).
+	// Such a param is request-derived, so addHTTPRequestSource seeds it as a
+	// request source; its field reads (f.TreePath) then carry taint. Populated by
+	// collectRouteHandlers alongside routeHandlers.
+	routeFormParams map[*ssa.Function][]string
+
 	// targetPkgs is the set of user-authored (scanned) package import paths.
 	// Dependency bodies are lowered so taint flows through them, but findings are
 	// scoped back to these packages so a sink reached inside a library is not
@@ -114,7 +123,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// dependency closure); compute it once and share it between route-handler
 	// detection and the per-package function grouping below.
 	allFns := ssautil.AllFunctions(prog)
-	c.routeHandlers = collectRouteHandlers(allFns)
+	c.routeHandlers, c.routeFormParams = collectRouteHandlers(allFns)
 
 	// pkg.Members only exposes package-level funcs, not methods or anonymous
 	// function literals (closures) — and vulnerable code frequently lives inside
@@ -361,12 +370,13 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 // on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
 	return &Converter{
-		fset:          c.fset,
-		typeCache:     make(map[types.Type]*ir.Type),
-		baseTypes:     c.typeCache,
-		fnNames:       make(map[*ssa.Function]string),
-		valueCache:    make(map[ssa.Value]*ir.Value),
-		routeHandlers: c.routeHandlers,
+		fset:            c.fset,
+		typeCache:       make(map[types.Type]*ir.Type),
+		baseTypes:       c.typeCache,
+		fnNames:         make(map[*ssa.Function]string),
+		valueCache:      make(map[ssa.Value]*ir.Value),
+		routeHandlers:   c.routeHandlers,
+		routeFormParams: c.routeFormParams,
 	}
 }
 
@@ -510,6 +520,14 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		paramSeeds = append(paramSeeds, reg)
 		seen[reg] = true
 	}
+	// Bound-form params of a route handler: a binding middleware filled them from
+	// the request, so field reads off them (f.TreePath) are attacker-controlled.
+	for _, reg := range c.routeFormParams[f] {
+		if reg != "" && !seen[reg] {
+			paramSeeds = append(paramSeeds, reg)
+			seen[reg] = true
+		}
+	}
 	if len(paramSeeds) > 0 {
 		srcs := make([]*ir.Instruction, 0, len(paramSeeds))
 		for _, reg := range paramSeeds {
@@ -636,8 +654,12 @@ var routingVerbs = map[string]bool{
 // maps each to the register name of its request/context parameter. A handler is
 // a function value passed to a call whose method name is a routing verb
 // (r.GET("/x", h), app.Post(..., h), mux.HandleFunc(..., h), e.Use(mw), …).
-func collectRouteHandlers(allFns map[*ssa.Function]bool) map[*ssa.Function]string {
+//
+// It also returns, per handler, the register names of its BOUND-FORM parameters
+// (formParams): value-struct params a binding middleware fills from the request.
+func collectRouteHandlers(allFns map[*ssa.Function]bool) (map[*ssa.Function]string, map[*ssa.Function][]string) {
 	handlers := map[*ssa.Function]string{}
+	forms := map[*ssa.Function][]string{}
 	for fn := range allFns {
 		for _, b := range fn.Blocks {
 			for _, instr := range b.Instrs {
@@ -657,11 +679,38 @@ func collectRouteHandlers(allFns map[*ssa.Function]bool) map[*ssa.Function]strin
 					if reg, ok := contextParam(h); ok {
 						handlers[h] = reg
 					}
+					if fps := formParams(h); len(fps) > 0 {
+						forms[h] = fps
+					}
 				}
 			}
 		}
 	}
-	return handlers
+	return handlers, forms
+}
+
+// formParams returns the register names of a route handler's bound-form
+// parameters: parameters whose static type is a named struct passed BY VALUE
+// (e.g. gogs' `f form.EditRepoFile`). A binding middleware
+// (macaron/martini `binding.Bind`/`bindIgnErr`, …) reflectively decodes the
+// request into such a param, so it is request-derived and its field reads carry
+// taint. The value-struct shape is the low-false-positive signal: a framework
+// context or an injected service is a pointer or interface, not a by-value
+// struct, so those are excluded.
+func formParams(h *ssa.Function) []string {
+	var out []string
+	for _, p := range h.Params {
+		if p.Name() == "" {
+			continue
+		}
+		if _, ok := p.Type().(*types.Named); !ok {
+			continue // a value struct is a *types.Named whose underlying is a struct
+		}
+		if _, ok := p.Type().Underlying().(*types.Struct); ok {
+			out = append(out, p.Name())
+		}
+	}
+	return out
 }
 
 // routingMethodName returns the method name of a call, for both interface

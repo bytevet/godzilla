@@ -1390,6 +1390,16 @@ func analyzeFunc(
 		default:
 			if propagatingOps[inst.Op] {
 				markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
+				// A whole-aggregate load/deref (t2 = *t0) copies the struct value, so
+				// it must also copy the source's field-path taint — else a field
+				// -tainted struct loaded by value loses its per-field/any-field markers
+				// and is not seen as tainted when passed across a call (fieldAnyKey).
+				if inst.Op == ir.OpCode_OP_CODE_LOAD ||
+					(inst.Op == ir.OpCode_OP_CODE_UN_OP && inst.GetUnOp() == ir.UnOpKind_UN_OP_DEREF) {
+					if ops := inst.GetOperands(); len(ops) == 1 {
+						copyFieldPaths(tainted, ops[0].GetRegName(), inst.Name)
+					}
+				}
 			}
 		}
 	}
