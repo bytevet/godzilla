@@ -42,7 +42,7 @@ jobs:
       # count and the per-language scan benchmarks are computed under the same
       # conditions on both revisions (an absent toolchain silently drops that
       # language's samples/benchmark).
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: actions/setup-java@v5
