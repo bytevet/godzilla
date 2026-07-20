@@ -71,7 +71,8 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
-		reportable: e.reportable,
+		reportable:     e.reportable,
+		reqSourceHosts: buildReqSourceHosts(byKey, e.rs, e.reportable),
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -303,6 +304,59 @@ type sharedIndex struct {
 	// whose module is user-authored; dependency functions are then reached
 	// demand-driven via callEffects. Empty seeds every function.
 	reportable map[string]bool
+	// reqSourceHosts is the set of function keys that CONTAIN a request-object
+	// source call (e.g. the Go frontend's synthetic `go:@net/http.Request`,
+	// planted at every inbound *http.Request value — including field reads deep
+	// inside a lowered framework body like beego/macaron). Such a function is a
+	// taint ORIGIN, so it must seed the worklist even when it lives in a
+	// dependency module the reportable scope would otherwise reach only
+	// demand-driven — a source that never runs produces no taint. Built once,
+	// rule-independent (the union of all rules' request_object_sources).
+	reqSourceHosts map[string]bool
+}
+
+// buildReqSourceHosts returns the set of function keys whose body contains a call
+// to a request-object source (the union of every rule's request_object_sources
+// globs). These functions are taint origins wherever they live, so the worklist
+// must seed them even under a demand-driven dependency scope. It is consulted
+// ONLY when a reportable scope is set (dependencies were lowered) — with no scope
+// every function is already seeded — so skip the whole-program walk otherwise.
+func buildReqSourceHosts(byKey map[string]*ir.Function, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
+	if len(reportable) == 0 {
+		return nil
+	}
+	var globs []string
+	seen := map[string]bool{}
+	for i := range rs.Rules {
+		for _, s := range rs.Rules[i].RequestObjectSources {
+			if !seen[s] {
+				seen[s] = true
+				globs = append(globs, s)
+			}
+		}
+	}
+	if len(globs) == 0 {
+		return nil
+	}
+	hosts := map[string]bool{}
+	for key, fn := range byKey {
+		if fn == nil {
+			continue
+		}
+	scan:
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Instrs {
+				if inst.GetCall() == nil {
+					continue
+				}
+				if callee := inst.Call.GetCallee(); callee != "" && rules.MatchAny(globs, callee) {
+					hosts[key] = true
+					break scan
+				}
+			}
+		}
+	}
+	return hosts
 }
 
 // buildCallers inverts the call graph: callee -> callers, so a callee becoming
@@ -394,7 +448,14 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// engine makes no language distinction. An empty scope seeds everything.
 		if len(idx.reportable) > 0 {
 			if mod := idx.modByKey[name]; mod != nil && !idx.reportable[mod.Name] {
-				continue
+				// A dependency function is normally reached demand-driven. But if it
+				// HOSTS a request-object source (an inbound *http.Request read inside a
+				// lowered framework body), it is a taint origin and must be seeded — the
+				// source produces no taint if its function never runs. Its findings are
+				// still scoped out to user code downstream; only the taint escapes.
+				if !idx.reqSourceHosts[name] {
+					continue
+				}
 			}
 		}
 		enqueue(name)

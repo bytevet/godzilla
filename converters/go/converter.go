@@ -449,60 +449,119 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 // documented "Go field-access sources aren't matchable" gap).
 const httpRequestSourceCallee = "go:@net/http.Request"
 
-// addHTTPRequestSource injects a synthetic request-object source at the entry of
-// an HTTP handler so its *http.Request parameter is tainted. It mirrors the
-// parameter-source synthesis the Rust (axum typed params) and Java (@RequestParam)
-// frontends already do: the register defined by the synthetic source CALL is the
-// parameter's own name, so the engine (which seeds taint by register name) marks
-// the request tainted at function entry and whole-object taint flows to every
-// field read off it.
-//
-// A handler is either (a) a function taking BOTH an http.ResponseWriter and an
-// *http.Request (net/http, chi, gorilla/mux, and any router built on them), or
-// (b) a function registered at a router's GET/POST/Handle/Use/... call
-// (collectRouteHandlers) — which covers a framework context value like
-// *gin.Context / echo.Context / *fiber.Ctx, and any framework we have no rules
-// for. Case (a)'s ResponseWriter requirement keeps this from tainting helpers
-// that merely pass an *http.Request around or build an OUTBOUND request
-// (http.NewRequest), which are not attacker-controlled.
-func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
-	reqName, ok := handlerRequestParam(f)
-	if !ok {
-		reqName, ok = c.routeHandlers[f]
-	}
-	if !ok || reqName == "" || len(irFunc.Blocks) == 0 {
-		return
-	}
-	src := &ir.Instruction{
-		Name:    reqName,
+// newHTTPRequestSource builds the synthetic request-object source CALL that, when
+// its Name is set to a register holding an inbound *http.Request, marks that
+// register tainted (and request-object-tagged) at the engine.
+func newHTTPRequestSource(name string, pos *ir.Position) *ir.Instruction {
+	return &ir.Instruction{
+		Name:    name,
 		Op:      ir.OpCode_OP_CODE_CALL,
-		Pos:     irFunc.Pos,
+		Pos:     pos,
 		Comment: "http-request-source",
 		Call: &ir.CallCommon{
 			Callee: httpRequestSourceCallee,
 			Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: httpRequestSourceCallee}},
 		},
 	}
-	entry := irFunc.Blocks[0]
-	entry.Instrs = append([]*ir.Instruction{src}, entry.Instrs...)
 }
 
-// handlerRequestParam returns the register name of an HTTP handler's
-// *net/http.Request parameter, if the function looks like a handler — i.e. it
-// also takes an http.ResponseWriter.
-func handlerRequestParam(f *ssa.Function) (string, bool) {
-	var reqName string
-	var hasWriter, hasRequest bool
+// addHTTPRequestSource injects synthetic request-object sources so that every
+// value holding an INBOUND *http.Request is tainted. It mirrors the parameter
+// -source synthesis the Rust (axum typed params) and Java (@RequestParam)
+// frontends already do: the register defined by the synthetic source CALL is the
+// value's own name, so the engine (which seeds taint by register name) marks the
+// request tainted and whole-object taint flows to every field read off it.
+//
+// Three kinds of value are seeded:
+//
+//   - Any *http.Request PARAMETER of any function. An inbound request handed to a
+//     function is attacker-controlled regardless of what else the function takes,
+//     so the old ResponseWriter co-parameter requirement is dropped — it missed
+//     helpers and framework internals that receive the request alone.
+//   - Any framework CONTEXT parameter of a route-registered handler
+//     (collectRouteHandlers) — a *gin.Context / echo.Context / *fiber.Ctx we have
+//     no other knowledge of.
+//   - Any FIELD-READ / LOAD value whose static type is *http.Request — e.g.
+//     macaron's `ctx.Req`, beego's `c.Ctx.Request`, read INSIDE the lowered
+//     framework body. This is what carries taint OUT of a framework whose request
+//     accessors (c.Input().Get, ctx.Params) bottom out in a field read off the
+//     embedded *http.Request rather than a modeled stdlib call.
+//
+// Only inbound requests are seeded: an OUTBOUND request is an http.NewRequest*
+// call RESULT (a *ssa.Call / *ssa.Extract), never a parameter or a field read, so
+// it is excluded structurally and no proven-safe outbound flow is tainted.
+func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
+	if len(irFunc.Blocks) == 0 {
+		return
+	}
+
+	// (1) Parameters: inbound *http.Request params, plus a route handler's
+	// framework context param. Prepend one source per distinct register to the
+	// entry block.
+	var paramSeeds []string
+	seen := map[string]bool{}
 	for _, p := range f.Params {
-		switch {
-		case isNamedTypePtr(p.Type(), "net/http", "Request"):
-			hasRequest = true
-			reqName = p.Name()
-		case isNamedType(p.Type(), "net/http", "ResponseWriter"):
-			hasWriter = true
+		if isNamedTypePtr(p.Type(), "net/http", "Request") && !seen[p.Name()] {
+			paramSeeds = append(paramSeeds, p.Name())
+			seen[p.Name()] = true
 		}
 	}
-	return reqName, hasWriter && hasRequest
+	if reg, ok := c.routeHandlers[f]; ok && reg != "" && !seen[reg] {
+		paramSeeds = append(paramSeeds, reg)
+		seen[reg] = true
+	}
+	if len(paramSeeds) > 0 {
+		srcs := make([]*ir.Instruction, 0, len(paramSeeds))
+		for _, reg := range paramSeeds {
+			srcs = append(srcs, newHTTPRequestSource(reg, irFunc.Pos))
+		}
+		entry := irFunc.Blocks[0]
+		entry.Instrs = append(srcs, entry.Instrs...)
+	}
+
+	// (2) Field-read / load values of type *http.Request, read inside this
+	// function's body. The SSA blocks and the IR blocks are 1:1 by index (see
+	// convertBlock), so instruction i of SSA block b lowered to IR instruction i
+	// of IR block b; we insert a synthetic source right after each such IR
+	// instruction, re-using its register name.
+	for bi, sb := range f.Blocks {
+		if bi >= len(irFunc.Blocks) {
+			break
+		}
+		irBlock := irFunc.Blocks[bi]
+		if len(sb.Instrs) != len(irBlock.Instrs) {
+			continue // defensive: never seen, but don't misalign if it ever happens
+		}
+		var out []*ir.Instruction
+		for ii, sinst := range sb.Instrs {
+			irInst := irBlock.Instrs[ii]
+			out = append(out, irInst)
+			if !inboundRequestValue(sinst) {
+				continue
+			}
+			if reg := irInst.GetName(); reg != "" {
+				out = append(out, newHTTPRequestSource(reg, irInst.GetPos()))
+			}
+		}
+		irBlock.Instrs = out
+	}
+}
+
+// inboundRequestValue reports whether an SSA instruction reads an inbound
+// *http.Request out of a field or a load — the request being unwrapped from a
+// framework context (macaron `ctx.Req`, beego `c.Ctx.Request`). A *ssa.Call is
+// deliberately excluded so an OUTBOUND request (http.NewRequest*) is never seeded.
+func inboundRequestValue(inst ssa.Instruction) bool {
+	switch v := inst.(type) {
+	case *ssa.Field:
+		return isNamedTypePtr(v.Type(), "net/http", "Request")
+	case *ssa.UnOp:
+		// A load (*p) of a stored/embedded *http.Request — the shape FieldAddr+load
+		// lowers `ctx.Req` to.
+		return v.Op == token.MUL && isNamedTypePtr(v.Type(), "net/http", "Request")
+	default:
+		return false
+	}
 }
 
 // isNamedTypePtr reports whether t is a pointer to the named type pkgPath.name.

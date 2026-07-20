@@ -48,6 +48,14 @@ var defaultPropagatorGlobs = []string{
 	"go:html/template.HTML", "go:html/template.HTMLAttr", "go:html/template.JS",
 	"go:html/template.JSStr", "go:html/template.URL", "go:html/template.CSS",
 	"go:html/template.Srcset",
+	// The Go `append` builtin (lowered as a CALL to `builtin.append`): appending a
+	// tainted element — or a tainted slice — yields a tainted slice. This is what
+	// carries taint through character-level string reconstruction, the common
+	// `data := make([]byte,0); for … { data = append(data, s[i]) }; string(data)`
+	// idiom (e.g. a snake_case/normalize helper that is NOT a sanitizer). Without
+	// it, INDEX taint on `s[i]` and the `string([]byte)` CONVERT both propagate but
+	// the append in between drops it, silently breaking the flow.
+	"builtin.append",
 
 	// --- Python: str methods / builtins ---
 	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",

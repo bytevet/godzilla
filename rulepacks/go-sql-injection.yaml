@@ -74,6 +74,18 @@ rules:
       - "go:*gorm*.DB*.Exec#0"
       - "go:*gorm*.DB*.Where#0"
       - "go:*gorm*.DB*.Order#0"
+      # xorm ORM query builders (xorm.io/xorm and the go-xorm fork). Same rule:
+      # the raw SQL fragment is logical arg 0, so a parameterized call like
+      # session.And("owner=?", v) is not flagged; only a formatted/concatenated
+      # fragment — session.And(fmt.Sprintf("%s like ?", field), v) — fires.
+      - "go:*xorm*.Sql#0"
+      - "go:*xorm*.SQL#0"
+      - "go:*xorm*.Where#0"
+      - "go:*xorm*.And#0"
+      - "go:*xorm*.Or#0"
+      - "go:*xorm*.Having#0"
+      - "go:*xorm*.Query#0"
+      - "go:*xorm*.Exec#0"
     # No sanitizer neutralizes tainted input for raw SQL; the fix is parameterized
     # queries, not escaping.
     sanitizers: []
