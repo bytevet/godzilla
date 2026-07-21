@@ -219,8 +219,10 @@ var (
 	// @router.websocket, …). handlerMethodVerbs mark a verb method of a handler
 	// class (get/post/…); no `websocket`, which is a distinct handler class
 	// rather than a method name. handlerBaseClasses are the base classes (by
-	// simple name) whose subclasses are request handlers.
-	routeDecoratorVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true}
+	// simple name) whose subclasses are request handlers. `route` covers the
+	// method-agnostic registration decorator (Flask/Bottle/Sanic @app.route,
+	// @blueprint.route) whose URL captures (`<path:fname>`) arrive as params.
+	routeDecoratorVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true, "route": true}
 	handlerMethodVerbs  = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
 	handlerBaseClasses  = map[string]bool{"RequestHandler": true, "MethodView": true}
 )
