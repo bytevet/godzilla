@@ -82,19 +82,28 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 
 	// Local (top-level) def names: a bare call to one is qualified with the module
 	// so it resolves to the function's canonical name for cross-function taint.
+	// qualifiedFuncs additionally records every def's CLASS-qualified name (the
+	// `<Class>.method` part after `ruby:<module>.`) so a bare `foo(x)` inside a
+	// class method — implicit-self dispatch — resolves to that same class's
+	// `ruby:<module>.<Class>.foo` instead of the class-less `ruby:<module>.foo`
+	// (which never matches an instance method's canonical name).
 	localFuncs := map[string]bool{}
-	var collectNames func(ss []interface{})
-	collectNames = func(ss []interface{}) {
+	qualifiedFuncs := map[string]bool{}
+	var collectNames func(ss []interface{}, prefix string)
+	collectNames = func(ss []interface{}, prefix string) {
 		for _, s := range ss {
 			switch tag(s) {
 			case "def":
-				localFuncs[identName(at(s, 1))] = true
+				name := identName(at(s, 1))
+				localFuncs[name] = true
+				qualifiedFuncs[prefix+name] = true
 			case "class", "module":
-				collectNames(bodyStmts(classModuleBody(s)))
+				cname := identName(at(at(s, 1), 1))
+				collectNames(bodyStmts(classModuleBody(s)), prefix+cname+".")
 			}
 		}
 	}
-	collectNames(stmts)
+	collectNames(stmts, "")
 
 	var functions []*ir.Function
 	var collect func(ss []interface{}, qualPrefix, className string)
@@ -102,13 +111,13 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 		for _, s := range ss {
 			switch tag(s) {
 			case "def":
-				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs))
+				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs))
 			case "defs":
 				// A singleton/class method `def self.m` — analyzed like any def but
 				// canonically named by its enclosing CLASS (not the file path) so a
 				// call on the class (or an ActiveRecord relation of it) in another
 				// file resolves to it for cross-function taint.
-				functions = append(functions, lowerDefs(s, filename, moduleName, className, localFuncs))
+				functions = append(functions, lowerDefs(s, filename, moduleName, className, qualPrefix, localFuncs, qualifiedFuncs))
 			case "class", "module":
 				// class C ... end → constant name at at(s,1) = ["const_ref",["@const","C",pos]]
 				name := identName(at(at(s, 1), 1))
@@ -119,7 +128,7 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	collect(stmts, "", "")
 
 	// The module entry point: top-level statements that are not a def/class.
-	if init := lowerModuleInit(stmts, filename, moduleName, localFuncs); init != nil {
+	if init := lowerModuleInit(stmts, filename, moduleName, localFuncs, qualifiedFuncs); init != nil {
 		functions = append([]*ir.Function{init}, functions...)
 	}
 
@@ -160,7 +169,7 @@ func bodyStmts(n interface{}) []interface{} {
 
 // lowerModuleInit lowers the top-level non-def/class statements into a
 // synthetic "<module>" function, or returns nil if there are none.
-func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFuncs map[string]bool) *ir.Function {
+func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	var top []interface{}
 	for _, s := range stmts {
 		switch tag(s) {
@@ -173,7 +182,7 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 	if len(top) == 0 {
 		return nil
 	}
-	fs := newFuncState(filename, moduleName, localFuncs)
+	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, "")
 	fs.lowerBody(top)
 	if len(fs.instrs) == 0 {
 		return nil
@@ -189,7 +198,7 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 }
 
 // lowerDef lowers one `def` into a function.
-func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, localFuncs map[string]bool) *ir.Function {
+func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	name := identName(at(defNode, 1))
 	qualname := qualPrefix + name
 	fn := &ir.Function{
@@ -199,7 +208,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 		CanonicalName: "ruby:" + moduleName + "." + qualname,
 		Pos:           posFrom(filename, defNode),
 	}
-	fs := newFuncState(filename, moduleName, localFuncs)
+	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	for _, p := range paramNames(at(defNode, 2)) {
 		v := regValue(p)
 		fn.Params = append(fn.Params, v)
@@ -207,7 +216,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 		fs.paramNames[p] = true
 	}
 	// def name params bodystmt → the body is the bodystmt at index 3.
-	fs.lowerBody(bodyStmts(at(defNode, 3)))
+	fs.lowerDefBody(bodyStmts(at(defNode, 3)))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
 }
@@ -223,7 +232,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 // name). A synthetic receiver parameter occupies slot 0, mirroring the receiver
 // that a `recv.m(args)` call site prepends to its arguments, so the arg->param
 // mapping lines the first real argument up with the first declared parameter.
-func lowerDefs(defNode interface{}, filename, moduleName, className string, localFuncs map[string]bool) *ir.Function {
+func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	name := identName(at(defNode, 3))
 	canonical := "ruby:" + className + "." + name
 	if className == "" {
@@ -238,7 +247,7 @@ func lowerDefs(defNode interface{}, filename, moduleName, className string, loca
 		CanonicalName: canonical,
 		Pos:           posFrom(filename, defNode),
 	}
-	fs := newFuncState(filename, moduleName, localFuncs)
+	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	// Synthetic receiver at slot 0 (the class / relation); never referenced.
 	fn.Params = append(fn.Params, regValue("self"))
 	for _, p := range paramNames(at(defNode, 4)) {
@@ -247,7 +256,7 @@ func lowerDefs(defNode interface{}, filename, moduleName, className string, loca
 		fs.env[p] = v
 		fs.paramNames[p] = true
 	}
-	fs.lowerBody(bodyStmts(at(defNode, 5)))
+	fs.lowerDefBody(bodyStmts(at(defNode, 5)))
 	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
 	return fn
 }
@@ -294,7 +303,13 @@ type funcState struct {
 	filename   string
 	moduleName string
 	localFuncs map[string]bool
-	counter    int
+	// qualifiedFuncs is the module-wide set of class-qualified def names
+	// ("<Class>.method"); classQual is this function's own class prefix
+	// ("<Class>." or "" at top level). Together they let a bare call resolve to
+	// a same-class method for implicit-self inter-procedural taint.
+	qualifiedFuncs map[string]bool
+	classQual      string
+	counter        int
 	env        map[string]*ir.Value
 	// paramNames is the set of this function's own parameter names. A member
 	// read / `[]` off a parameter (or off a free/unbound identifier) is an
@@ -304,13 +319,15 @@ type funcState struct {
 	instrs     []*ir.Instruction
 }
 
-func newFuncState(filename, moduleName string, localFuncs map[string]bool) *funcState {
+func newFuncState(filename, moduleName string, localFuncs, qualifiedFuncs map[string]bool, classQual string) *funcState {
 	return &funcState{
-		filename:   filename,
-		moduleName: moduleName,
-		localFuncs: localFuncs,
-		env:        map[string]*ir.Value{},
-		paramNames: map[string]bool{},
+		filename:       filename,
+		moduleName:     moduleName,
+		localFuncs:     localFuncs,
+		qualifiedFuncs: qualifiedFuncs,
+		classQual:      classQual,
+		env:            map[string]*ir.Value{},
+		paramNames:     map[string]bool{},
 	}
 }
 
@@ -334,6 +351,26 @@ func constString(s string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
 }
 
+func globalValue(name string) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
+}
+
+// ivarGlobal returns the synthetic global key for an instance variable `@f`
+// inside a class method, or "" outside a class. It is the cross-method channel
+// for instance-variable taint: keyed per (module, class, @ivar), `@f = tainted`
+// in one method and a read of `@f` in a sibling method of the same class link
+// through the engine's existing global-taint propagation with NO engine change
+// (the store/read carry this key as a GlobalName operand, which
+// recordGlobalStore / readGlobalTaint already handle). Object-insensitive (all
+// instances of the class share the key) and scoped to the method's own
+// class+module, so a same-named ivar on an unrelated class cannot alias.
+func (fs *funcState) ivarGlobal(ivarName string) string {
+	if fs.classQual == "" || ivarName == "" {
+		return ""
+	}
+	return "rubyfield:" + fs.moduleName + "." + fs.classQual + ivarName
+}
+
 func posFrom(filename string, n interface{}) *ir.Position {
 	if line, col, ok := firstPos(n); ok {
 		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col)}
@@ -344,6 +381,22 @@ func posFrom(filename string, n interface{}) *ir.Position {
 func (fs *funcState) lowerBody(stmts []interface{}) {
 	for _, s := range stmts {
 		fs.lowerStmt(s)
+	}
+}
+
+// lowerDefBody lowers a method body and emits an implicit RET of the last
+// expression's value — Ruby's implicit return. This lets the engine summarize a
+// helper that returns request data (`def fetch_path; params[:p]; end`) as
+// taint-returning, so a caller `p = fetch_path; File.read(p)` links up for
+// inter-procedural taint. An explicit `return x` inside the body emits its own
+// RET (see lowerStmt); the trailing RET here covers the fall-through value.
+func (fs *funcState) lowerDefBody(stmts []interface{}) {
+	var last *ir.Value
+	for _, s := range stmts {
+		last = fs.lowerStmt(s)
+	}
+	if last != nil {
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{last}})
 	}
 }
 
@@ -360,31 +413,56 @@ func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
 	return last
 }
 
-func (fs *funcState) lowerStmt(s interface{}) {
+// assignTarget binds val to an assignment target. A local (`@ident`) rebinds the
+// env. An instance variable (`@ivar`) rebinds the env too (intra-method precision)
+// AND stores into the per-(class, @ivar) synthetic global so a sibling method that
+// reads the same `@ivar` observes the taint cross-method (see ivarGlobal).
+func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
+	leaf := at(target, 1)
+	name := identName(leaf)
+	if name != "" {
+		fs.env[name] = val
+	}
+	if tag(leaf) == "@ivar" {
+		if g := fs.ivarGlobal(name); g != "" {
+			fs.emit(&ir.Instruction{
+				Op:       ir.OpCode_OP_CODE_STORE,
+				Operands: []*ir.Value{globalValue(g), val},
+				Pos:      posFrom(fs.filename, target),
+			})
+		}
+	}
+}
+
+// lowerStmt lowers one statement and returns its Ruby value (the value an
+// implicit return would yield); callers that don't need the value discard it.
+func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 	switch tag(s) {
 	case "void_stmt", "":
-		return
+		return nil
 	case "assign":
-		// ["assign", target, rhs]; target is ["var_field",["@ident","x",pos]].
+		// ["assign", target, rhs]; target is ["var_field",["@ident"/"@ivar","x",pos]].
 		val := fs.lowerExpr(at(s, 2))
-		if name := identName(at(at(s, 1), 1)); name != "" {
-			fs.env[name] = val
-		}
-		return
+		fs.assignTarget(at(s, 1), val)
+		return val // Ruby assignment evaluates to the assigned value.
 	case "opassign":
 		// ["opassign", target, ["@op","||="/"+="/…], rhs] — the rhs is at index 3
 		// (index 2 is the operator token), so `@x ||= expr` must lower at(s,3);
 		// lowering index 2 would emit the operator and drop the expression (and any
 		// source/sink/cross-call inside it).
 		val := fs.lowerExpr(at(s, 3))
-		if name := identName(at(at(s, 1), 1)); name != "" {
-			fs.env[name] = val
-		}
-		return
+		fs.assignTarget(at(s, 1), val)
+		return val
+	case "return":
+		// ["return", args] — an explicit return; emit RET of the returned value so
+		// the engine's taint-return summary sees it.
+		v := fs.lowerSeqLast(extractArgs(at(s, 1)))
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
+		return v
 	case "def", "class", "module":
-		return // lowered separately by convertModule.collect
+		return nil // lowered separately by convertModule.collect
 	default:
-		fs.lowerExpr(s)
+		return fs.lowerExpr(s)
 	}
 }
 
@@ -419,14 +497,40 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return constString("")
 	case "var_ref":
 		inner := at(n, 1)
-		if tag(inner) == "@ident" {
+		switch tag(inner) {
+		case "@ident":
 			return fs.lookup(identName(inner))
+		case "@ivar":
+			// An instance variable read: use the intra-method binding if this method
+			// assigned it, else read the per-(class, @ivar) synthetic global so taint
+			// stashed by a sibling method is observed cross-method (see ivarGlobal).
+			name := identName(inner)
+			if v, ok := fs.env[name]; ok {
+				return v
+			}
+			if g := fs.ivarGlobal(name); g != "" {
+				ld := fs.newValueInst(n)
+				ld.Op = ir.OpCode_OP_CODE_LOAD
+				ld.Operands = []*ir.Value{globalValue(g)}
+				fs.emit(ld)
+				return regValue(ld.Name)
+			}
+			return constString(scalarText(inner))
 		}
 		return constString(scalarText(inner)) // @const / @kw / @gvar
 	case "vcall":
-		// A bare name: a local variable read if bound, else a 0-arg call/const —
-		// exactly lookup's env-or-constant resolution.
-		return fs.lookup(identName(at(n, 1)))
+		// A bare name: a local variable read if bound; else, if it names a known
+		// method (same-class or top-level def), a 0-arg method call — lower it as a
+		// CALL so a helper that returns request data links up for inter-procedural
+		// taint (`p = fetch_path`); otherwise a free identifier / constant.
+		name := identName(at(n, 1))
+		if v, ok := fs.env[name]; ok {
+			return v
+		}
+		if fs.isKnownMethod(name) {
+			return fs.lowerCallExpr(fs.localCallee(name), nil, n)
+		}
+		return fs.lookup(name)
 	case "paren":
 		inner := at(n, 1)
 		if l, ok := asList(inner); ok && len(l) > 0 {
@@ -711,7 +815,23 @@ func constPathName(n interface{}) string {
 // localCallee builds the canonical callee for a bare function call `name(...)`,
 // qualifying a local (top-level) def with the module name so cross-function
 // taint resolves to the function's canonical name; other names stay bare.
+// isKnownMethod reports whether name is a def in this module — a same-class
+// instance method (implicit-self) or a top-level function — as opposed to a
+// local variable or an external/framework name.
+func (fs *funcState) isKnownMethod(name string) bool {
+	if fs.classQual != "" && fs.qualifiedFuncs[fs.classQual+name] {
+		return true
+	}
+	return fs.localFuncs[name]
+}
+
 func (fs *funcState) localCallee(name string) string {
+	// Implicit-self dispatch: a bare `foo(x)` inside a class method calls that
+	// same class's instance method, whose canonical name carries the class
+	// prefix. Prefer it so caller->callee links up for inter-procedural taint.
+	if fs.classQual != "" && fs.qualifiedFuncs[fs.classQual+name] {
+		return "ruby:" + fs.moduleName + "." + fs.classQual + name
+	}
 	if fs.localFuncs[name] {
 		return "ruby:" + fs.moduleName + "." + name
 	}
