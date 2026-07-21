@@ -151,9 +151,10 @@ func fieldAnyKey(base string) string {
 }
 
 // isTaintedArg reports whether a call argument carries taint for the purpose of
-// seeding a callee parameter: either the whole value is tainted, or the value is
-// a struct with at least one tainted field. Field reads use isTainted (precise);
-// only cross-call seeding uses this broader check.
+// seeding a callee parameter: either the whole value is tainted, or the value's
+// register carries the any-field marker (a struct with at least one tainted field
+// stored directly into it). Field reads use isTainted (precise); only cross-call
+// seeding uses this broader check.
 func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 	if pos, ok := isTainted(tainted, v); ok {
 		return pos, true
@@ -448,6 +449,30 @@ func markTainted(tainted taintState, reg string, pos *ir.Position) {
 	tainted[reg] = pos
 }
 
+// isByteOrRuneSlice reports whether t is a []byte or []rune (a slice of uint8 or
+// int32), including a named type whose underlying type is such a slice. It gates
+// the `builtin.append` propagator to character-level string reconstruction so
+// append is not a blanket taint carrier across every slice in a program.
+func isByteOrRuneSlice(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.GetKind() == ir.TypeKind_TYPE_KIND_NAMED {
+		if u := t.GetUnderlyingType(); u != nil {
+			t = u
+		}
+	}
+	if t.GetKind() != ir.TypeKind_TYPE_KIND_SLICE {
+		return false
+	}
+	el := t.GetElemType()
+	if el == nil || el.GetKind() != ir.TypeKind_TYPE_KIND_BASIC {
+		return false
+	}
+	k := el.GetBasicKind()
+	return k == ir.BasicTypeKind_BASIC_TYPE_KIND_UINT8 || k == ir.BasicTypeKind_BASIC_TYPE_KIND_INT32
+}
+
 // markTaintFromOperands marks `name` tainted (with the origin of the first
 // tainted operand) if name is non-empty and any operand is tainted.
 func markTaintFromOperands(tainted taintState, name string, operands []*ir.Value) {
@@ -456,36 +481,5 @@ func markTaintFromOperands(tainted taintState, name string, operands []*ir.Value
 	}
 	if _, pos, ok := firstTainted(tainted, operands); ok {
 		markTainted(tainted, name, pos)
-	}
-}
-
-// copyFieldPaths mirrors the field-path taint keys (base#fN and base#*) of `from`
-// onto `to`. A whole-aggregate load/copy (t2 = *t0) produces a struct VALUE that
-// carries every field of its source, so it must carry the source's per-field and
-// any-field taint too — otherwise a field-tainted struct loaded by value loses
-// its markers and is not recognized as field-tainted when passed across a call
-// (see fieldAnyKey / isTaintedArg), silently dropping the extremely common
-// "fill an options struct, pass it to a helper, read a field there" flow. Only
-// path keys (which contain '#') are copied; the plain whole-register taint is
-// left to the ordinary operand propagation, so this never widens scalar taint.
-func copyFieldPaths(tainted taintState, from, to string) {
-	if from == "" || to == "" || from == to {
-		return
-	}
-	prefix := from + "#"
-	var add []struct {
-		k   string
-		pos *ir.Position
-	}
-	for k, pos := range tainted {
-		if strings.HasPrefix(k, prefix) {
-			add = append(add, struct {
-				k   string
-				pos *ir.Position
-			}{to + "#" + k[len(prefix):], pos})
-		}
-	}
-	for _, a := range add {
-		markTainted(tainted, a.k, a.pos)
 	}
 }

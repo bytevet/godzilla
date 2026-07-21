@@ -26,9 +26,6 @@ func TestIsDefaultPropagator(t *testing.T) {
 		"go:(*net/http.Request).FormValue", // *http.Request -> string
 		"go:(*net/http.Request).Cookie",    // *http.Request -> *http.Cookie
 		"go:(net/http.Header).Get",         // http.Header -> string
-		// The Go `append` builtin: appending tainted bytes yields a tainted slice,
-		// which carries taint through character-level string reconstruction.
-		"builtin.append",
 	}
 	for _, c := range shouldMatch {
 		if !IsDefaultPropagator(c) {

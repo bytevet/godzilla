@@ -72,7 +72,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable:     e.reportable,
-		reqSourceHosts: buildReqSourceHosts(byKey, e.rs, e.reportable),
+		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -315,13 +315,27 @@ type sharedIndex struct {
 	reqSourceHosts map[string]bool
 }
 
-// buildReqSourceHosts returns the set of function keys whose body contains a call
-// to a request-object source (the union of every rule's request_object_sources
-// globs). These functions are taint origins wherever they live, so the worklist
-// must seed them even under a demand-driven dependency scope. It is consulted
-// ONLY when a reportable scope is set (dependencies were lowered) — with no scope
-// every function is already seeded — so skip the whole-program walk otherwise.
-func buildReqSourceHosts(byKey map[string]*ir.Function, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
+// buildReqSourceHosts returns the set of DEPENDENCY function keys that both
+// (a) contain a request-object source (the union of every rule's
+// request_object_sources globs) and (b) are DIRECTLY CALLED by user (reportable)
+// code. Such a function — e.g. beego's `Controller.Input`, which reads
+// `c.Ctx.Request` internally — generates request taint but takes no tainted
+// argument, so the demand-driven dependency scope never enqueues it; seeding it
+// lets its request taint escape to the user code that called it. Seeding
+// (analyzing the body) rather than tainting the call result unconditionally is
+// what keeps a SAFE accessor that reads the request but returns a constant from
+// being a false positive: its body has no tainted return, so nothing propagates.
+//
+// The DIRECT-CALL bound keeps this cheap and correct. A framework reads
+// *http.Request in many internal functions, but the ones that matter are the
+// accessor methods the app actually invokes (`c.Input()`, `c.Query()`). Crucially
+// it EXCLUDES a framework's request-pipeline entry like gin's ServeHTTP: that also
+// carries a request source, but user code never CALLS it (it calls user code via
+// an indirect dispatch), and seeding it made the worklist analyze a framework's
+// whole request pipeline — a large dep-heavy blow-up — for taint no user sink can
+// reach. Consulted ONLY under a reportable scope (with no scope every function is
+// already seeded), so the whole-program walk is skipped otherwise.
+func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.Module, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
 	if len(reportable) == 0 {
 		return nil
 	}
@@ -338,9 +352,43 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, rs *rules.RuleSet, repor
 	if len(globs) == 0 {
 		return nil
 	}
+	// Callees invoked DIRECTLY by user code (by canonical name — byKey is keyed on
+	// it). A concrete method call `c.Input()` names its callee; only these dep
+	// functions are candidates for seeding.
+	userCallees := map[string]bool{}
+	for key, fn := range byKey {
+		if fn == nil {
+			continue
+		}
+		if mod := modByKey[key]; mod == nil || !reportable[mod.Name] {
+			continue
+		}
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Instrs {
+				if inst.GetCall() == nil {
+					continue
+				}
+				if callee := inst.Call.GetCallee(); callee != "" {
+					userCallees[callee] = true
+				}
+			}
+		}
+	}
+	if len(userCallees) == 0 {
+		return nil
+	}
+
 	hosts := map[string]bool{}
 	for key, fn := range byKey {
 		if fn == nil {
+			continue
+		}
+		// Dependency functions only (user code is already seeded), and only those
+		// user code directly calls.
+		if mod := modByKey[key]; mod == nil || reportable[mod.Name] {
+			continue
+		}
+		if !userCallees[key] {
 			continue
 		}
 	scan:
@@ -448,11 +496,12 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// engine makes no language distinction. An empty scope seeds everything.
 		if len(idx.reportable) > 0 {
 			if mod := idx.modByKey[name]; mod != nil && !idx.reportable[mod.Name] {
-				// A dependency function is normally reached demand-driven. But if it
-				// HOSTS a request-object source (an inbound *http.Request read inside a
-				// lowered framework body), it is a taint origin and must be seeded — the
-				// source produces no taint if its function never runs. Its findings are
-				// still scoped out to user code downstream; only the taint escapes.
+				// A dependency function is reached demand-driven. But a source-host that
+				// user code DIRECTLY CALLS (idx.reqSourceHosts) is seeded: it generates
+				// request taint internally (no tainted arg would ever enqueue it), and
+				// analyzing its body is what correctly decides whether its RESULT is
+				// actually request-derived (vs a safe accessor that reads the request but
+				// returns a constant). Its own findings stay scoped out to user code.
 				if !idx.reqSourceHosts[name] {
 					continue
 				}
@@ -1040,6 +1089,15 @@ func analyzeFunc(
 			isSan = rule.IsSanitizer(callee)
 			isSrc = rule.IsSource(callee)
 			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+			// The Go `append` builtin propagates taint ONLY when its result is a
+			// byte/rune slice — i.e. character-level string reconstruction (the
+			// make([]byte); append(data, s[i]); string(data) idiom of a non-sanitizing
+			// normalize/snake_case helper). It is NOT a blanket propagator: append is
+			// called on every slice in a program, so tainting through slices of structs
+			// /pointers explodes the taint set in framework code (a large scan slowdown).
+			if !isProp && callee == "builtin.append" && isByteOrRuneSlice(inst.GetType()) {
+				isProp = true
+			}
 		}
 
 		// Record a validator application (ENG-9, linear case): mark the checked
@@ -1390,16 +1448,6 @@ func analyzeFunc(
 		default:
 			if propagatingOps[inst.Op] {
 				markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
-				// A whole-aggregate load/deref (t2 = *t0) copies the struct value, so
-				// it must also copy the source's field-path taint — else a field
-				// -tainted struct loaded by value loses its per-field/any-field markers
-				// and is not seen as tainted when passed across a call (fieldAnyKey).
-				if inst.Op == ir.OpCode_OP_CODE_LOAD ||
-					(inst.Op == ir.OpCode_OP_CODE_UN_OP && inst.GetUnOp() == ir.UnOpKind_UN_OP_DEREF) {
-					if ops := inst.GetOperands(); len(ops) == 1 {
-						copyFieldPaths(tainted, ops[0].GetRegName(), inst.Name)
-					}
-				}
 			}
 		}
 	}

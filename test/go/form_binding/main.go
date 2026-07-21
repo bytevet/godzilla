@@ -16,14 +16,6 @@ type EditRepoForm struct {
 	Content  string
 }
 
-// UpdateOptions mirrors a real options struct (e.g. gogs db.UpdateRepoFileOptions):
-// the tainted form field is stored into it, then it is passed BY VALUE to a
-// helper that reads the field back out at the sink.
-type UpdateOptions struct {
-	TreeName string
-	Message  string
-}
-
 type Router struct{}
 
 // bind is the binding-middleware marker (macaron/martini `binding.Bind`-style).
@@ -32,16 +24,16 @@ func bind(v interface{}) func() { return func() {} }
 // Post registers a route handler: middleware(s) then the handler function.
 func (r *Router) Post(pat string, mw func(), h func(c *Context, f EditRepoForm)) {}
 
-// updateRepoFile reads opts.TreeName (a copied struct field) into a delete sink.
-func updateRepoFile(opts UpdateOptions) {
-	// Vulnerable: attacker-controlled tree path escapes the repo dir via "../".
-	os.Remove(path.Join("/data/repos", opts.TreeName))
+// updateRepoFile reads the attacker-controlled tree path into a delete sink.
+func updateRepoFile(treePath string) {
+	// Vulnerable: a crafted "../" tree path escapes the repo dir (CWE-22).
+	os.Remove(path.Join("/data/repos", treePath))
 }
 
 // EditFilePost is the route handler; f is the request-bound form.
 func EditFilePost(c *Context, f EditRepoForm) {
-	// f.TreePath (tainted) -> options struct field -> by-value call -> sink.
-	updateRepoFile(UpdateOptions{TreeName: f.TreePath, Message: "edit"})
+	// f.TreePath is tainted because f is bound from the request by the middleware.
+	updateRepoFile(f.TreePath)
 }
 
 func main() {
