@@ -1,0 +1,4 @@
+findings:
+    - rule: go-path-traversal
+      min: 1
+      sink: os.ReadFile

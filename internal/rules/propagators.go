@@ -26,6 +26,12 @@ var defaultPropagatorGlobs = []string{
 	"go:*strings.Builder*.String", "go:*strings.Builder*.Write*",
 	"go:*fmt.Sprintf", "go:*fmt.Sprint", "go:*fmt.Sprintln",
 	"go:*net/url.QueryEscape", "go:*net/url.QueryUnescape", "go:*net/url.PathEscape", "go:*net/url.PathUnescape",
+	// url.Parse / ParseRequestURI: string -> *url.URL. The returned URL (and its
+	// .Path / .Host / .String()) is built ENTIRELY from the input string, so
+	// forwarding taint is semantically exact — recovers the very common
+	// request-string -> url.Parse -> os.Open(u.Path) / http.Get(u.String()) flow
+	// (e.g. minio CVE-2022-35919) that otherwise dies at the bodyless stdlib call.
+	"go:*net/url.Parse", "go:*net/url.ParseRequestURI",
 	// net/http + net/url request accessors: carry request taint through a lowered
 	// framework's INTERNAL stdlib parsing. A framework wraps the request in its own
 	// context type (gin.Context, echo.Context, …) and reads it via these stdlib
