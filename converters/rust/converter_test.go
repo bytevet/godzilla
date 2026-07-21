@@ -127,9 +127,18 @@ func TestAxumExtractorSource(t *testing.T) {
 		{"Path<String>", "rust:axum::extract::Path", true},
 		{"axum::extract::Json<Body>", "rust:axum::extract::Json", true},
 		{"Form<Login>", "rust:axum::extract::Form", true},
+		// actix-web (`web::Query`/`web::Path`/...) and rocket (`rocket::form::Form`)
+		// extractors are matched by the same bare-head logic — the namespace is
+		// stripped — so a single detector covers every framework whose extractor
+		// types share these names (this is what makes lemmy's actix handlers seed).
+		{"actix_web::web::Query<Params>", "rust:axum::extract::Query", true},
+		{"web::Path<String>", "rust:axum::extract::Path", true},
+		{"web::Json<Body>", "rust:axum::extract::Json", true},
+		{"rocket::form::Form<Login>", "rust:axum::extract::Form", true},
 		{"std::string::String", "", false}, // no generic, not an extractor
 		{"&str", "", false},                //
 		{"State<AppState>", "", false},     // an extractor, but not attacker data
+		{"web::Data<AppState>", "", false}, // actix app state, not attacker data
 	}
 	for _, c := range cases {
 		got, ok := axumExtractorSource(c.typ)
