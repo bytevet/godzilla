@@ -1,6 +1,7 @@
 // Package miniweb is a stand-in for a web framework Godzilla has no rules for.
-// It is a separate module so its method bodies are dependencies (not lowered),
-// exactly like a real third-party framework.
+// It is a separate module, exactly like a real third-party framework: its
+// bodies are lowered as dependencies, and request-object provenance still marks
+// the accessor's result untrusted even with no rule modeling this framework.
 package miniweb
 
 type Ctx struct{ req map[string]string }
