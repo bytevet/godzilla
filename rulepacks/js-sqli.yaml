@@ -53,6 +53,30 @@ rules:
     sinks:
       - "js:*.query#0"
       - "js:*.execute#0"
+      # ORM raw-query escape hatches (COV-13). Each takes a raw SQL string as
+      # logical arg 0 (JS method calls carry no receiver arg), so the `#0` pin
+      # keeps a PARAMETERIZED call from firing when only the bind values are
+      # tainted: knex.raw("... = ?", [id]) / prisma.$queryRawUnsafe(sql, ...binds)
+      # both put the untrusted value at arg 1+, not in the query text.
+      # Knex: knex.raw(...) plus the *Raw query-builder fragments. A chained
+      # builder (knex("t").whereRaw(...)) lowers its callee to
+      # "js:<dynamic>.<method>", which the leading `*` matches. `.raw` receiving a
+      # tainted arg-0 is overwhelmingly a knex raw SQL fragment; it cannot fire
+      # without taint, so the broad receiver adds no FP.
+      - "js:*.raw#0"
+      - "js:*.whereRaw#0"
+      - "js:*.andWhereRaw#0"
+      - "js:*.orWhereRaw#0"
+      - "js:*.havingRaw#0"
+      - "js:*.orderByRaw#0"
+      - "js:*.groupByRaw#0"
+      - "js:*.joinRaw#0"
+      - "js:*.fromRaw#0"
+      # Prisma: the *Unsafe raw APIs interpolate a plain string. The safe
+      # $queryRaw/$executeRaw tagged-template forms are NOT matched, so idiomatic
+      # parameterized Prisma is not flagged.
+      - "js:*.$queryRawUnsafe#0"
+      - "js:*.$executeRawUnsafe#0"
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
     sanitizers: []
