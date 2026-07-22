@@ -42,6 +42,10 @@ var defaultPropagatorGlobs = []string{
 	// when it derives from a request source, so ordinary code is untouched.
 	"go:*net/url*.Query", "go:*net/url*.ParseQuery", "go:*net/url.Values*.Get",
 	"go:*net/http.Request*.FormValue", "go:*net/http.Request*.PostFormValue",
+	// PathValue: the Go 1.22+ ServeMux path parameter r.PathValue("id") — a
+	// request accessor whose result is fully attacker-controlled. Forwards the
+	// receiver's request taint, exactly like the other net/http accessors here.
+	"go:*net/http.Request*.PathValue",
 	"go:*net/http.Request*.FormFile", "go:*net/http.Request*.Cookie",
 	"go:*net/http.Request*.Referer", "go:*net/http.Request*.UserAgent",
 	"go:*net/http.Header*.Get", "go:*net/http.Header*.Values",
