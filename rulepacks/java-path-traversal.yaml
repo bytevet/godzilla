@@ -14,27 +14,10 @@ rules:
       outside the intended directory. Validate the input against an allow-list
       and canonicalize the resolved path (e.g. Path.normalize + verify it stays
       under a fixed base directory) before opening it.
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getQueryString"
-      - "java:*ServletRequest.getParameter"
-      # Spring MVC controller parameter annotations (synthesized source CALLs;
-      # see converters/java/lower.go). Anchored on the annotation package so an
-      # ordinary method ending in the token is not mistaken for a source.
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     sinks:
       # Stream/reader/writer constructors take the path as (receiver-excluded)
       # argument 0; a File is constructed from any of its path components.

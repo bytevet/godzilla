@@ -12,14 +12,7 @@ rules:
       driver, which may allow SQL injection. Use parameterized queries / prepared
       statements (e.g. mysql_stmt_bind_param, sqlite3_bind_*) instead of building
       the query by concatenation.
-    sources:
-      - "c*:getenv"
-      - "c*:*scanf"
-      - "c*:fgets"
-      - "c*:gets"
-      - "c*:read"
-      - "c*:recv"
-      - "c*:argv"
+    extend: [$_c-sources.yaml, $_c-propagators.yaml]
     sinks:
       - "c*:mysql_query#1"       # mysql_query(MYSQL*, const char *stmt)
       - "c*:mysql_real_query#1"
@@ -29,12 +22,3 @@ rules:
       - "c*:PQexec#1"            # PQexec(PGconn*, const char *query)
       - "c*:PQsendQuery#1"
     sanitizers: []
-    propagators:
-      - "c*:strcpy"
-      - "c*:strncpy"
-      - "c*:strcat"
-      - "c*:strncat"
-      - "c*:sprintf"
-      - "c*:snprintf"
-      - "c*:memcpy"
-      - "c*:strdup"

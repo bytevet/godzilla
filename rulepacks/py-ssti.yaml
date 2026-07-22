@@ -15,37 +15,7 @@ rules:
       executes server-side — server-side template injection, a path to RCE. Never
       build a template from user input; render a fixed template and pass the user
       data as context instead.
-    sources:
-      # Route-handler parameter source (see converters/python/lower.go).
-      - "py:@http.param"
-      - "py:*request.args.get"
-      - "py:*request.args.__getitem__"
-      - "py:*request.headers.get"
-      - "py:*request.headers.__getitem__"
-      - "py:*request.cookies.get"
-      - "py:*request.cookies.__getitem__"
-      # Django request accessors.
-      - "py:*request.GET.get"
-      - "py:*request.GET.__getitem__"
-      - "py:*request.POST.get"
-      - "py:*request.POST.__getitem__"
-      # FastAPI / Starlette request accessors.
-      - "py:*request.query_params.__getitem__"
-      - "py:*request.query_params.get"
-      - "py:*request.path_params.__getitem__"
-      - "py:*request.path_params.get"
-      # Django REST Framework: request.data (the parsed request body).
-      - "py:*request.data"
-      - "py:*request.data.get"
-      - "py:*request.data.__getitem__"
-      - "py:*request.json"
-      - "py:*request.form"
-      - "py:*request.form.get"
-      - "py:*request.form.__getitem__"
-      - "py:*request.values.get"
-      - "py:*request.values.__getitem__"
-      - "py:*request.get_json"
-      - "py:*request.get_data"
+    extend: $_py-sources.yaml
     sinks:
       # The template SOURCE argument (#0) only — a user-controlled context kwarg
       # is the safe, intended path and must not fire.

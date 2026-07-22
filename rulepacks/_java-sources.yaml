@@ -1,0 +1,22 @@
+# Shared Java request sources: servlet accessors + Spring/JAX-RS parameter
+# annotations. Pulled into the java-*.yaml rules with `extend: $_java-sources.yaml`.
+sources:
+  - "java:*HttpServletRequest.getParameter"
+  - "java:*HttpServletRequest.getParameterValues"
+  - "java:*HttpServletRequest.getHeader"
+  - "java:*HttpServletRequest.getQueryString"
+  - "java:*HttpServletRequest.getReader"
+  - "java:*ServletRequest.getParameter"
+  - "java:*ServletRequest.getInputStream"
+  - "java:*Cookie.getValue"
+  - "java:*bind/annotation/RequestParam"
+  - "java:*bind/annotation/PathVariable"
+  - "java:*bind/annotation/RequestBody"
+  - "java:*bind/annotation/RequestHeader"
+  - "java:*bind/annotation/CookieValue"
+  - "java:*ws/rs/QueryParam"
+  - "java:*ws/rs/PathParam"
+  - "java:*ws/rs/FormParam"
+  - "java:*ws/rs/HeaderParam"
+  - "java:*ws/rs/MatrixParam"
+  - "java:*ws/rs/CookieParam"

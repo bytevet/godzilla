@@ -12,25 +12,10 @@ rules:
       deserializing untrusted input; if unavoidable, use a format without
       polymorphic type resolution and constrain allowed types (e.g. an
       ObjectInputFilter, SnakeYAML SafeConstructor, or a JSON allowlist).
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getReader"
-      - "java:*ServletRequest.getParameter"
-      - "java:*ServletRequest.getInputStream"
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     # The untrusted stream/string is logical arg 0: the ObjectInputStream is
     # constructed around a tainted InputStream, or the parser is handed a tainted
     # document directly.

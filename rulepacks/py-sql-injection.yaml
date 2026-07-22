@@ -17,37 +17,7 @@ rules:
       parameterized arguments, which may allow SQL injection. Use
       parameterized queries (e.g. cursor.execute(sql, params)) instead of
       concatenating or formatting user input into the query string.
-    sources:
-      # Route-handler parameter source (see converters/python/lower.go).
-      - "py:@http.param"
-      - "py:*request.args.get"
-      - "py:*request.headers.get"
-      - "py:*request.headers.__getitem__"
-      - "py:*request.cookies.get"
-      - "py:*request.cookies.__getitem__"
-      # Django request accessors.
-      - "py:*request.GET.get"
-      - "py:*request.GET.__getitem__"
-      - "py:*request.POST.get"
-      - "py:*request.POST.__getitem__"
-      # FastAPI / Starlette request accessors.
-      - "py:*request.query_params.__getitem__"
-      - "py:*request.query_params.get"
-      - "py:*request.path_params.__getitem__"
-      - "py:*request.path_params.get"
-      # Django REST Framework: request.data (the parsed request body).
-      - "py:*request.data"
-      - "py:*request.data.get"
-      - "py:*request.data.__getitem__"
-      - "py:*request.json"
-      - "py:*request.form"
-      - "py:*request.get_json"
-      - "py:*request.get_data"
-      - "py:*request.form.get"
-      - "py:*request.values.get"
-      - "py:*request.args.__getitem__"
-      - "py:*request.form.__getitem__"
-      - "py:*request.values.__getitem__"
+    extend: $_py-sources.yaml
     sinks:
       - "py:*.execute#0"
       - "py:*.executemany#0"

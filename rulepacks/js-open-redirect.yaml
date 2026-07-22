@@ -8,35 +8,7 @@ rules:
       Untrusted request input flows into a response redirect, which allows an
       open redirect. Validate the target against an allowlist instead of
       redirecting to a user-controlled URL.
-    sources:
-      - "js:*req.query*"
-      - "js:*req.headers*"
-      - "js:*req.cookies*"
-      - "js:*req.get"
-      - "js:*req.header"
-      - "js:*req.params*"
-      - "js:*req.body*"
-      # More Express request accessors (the URL/path are attacker-influenced).
-      - "js:*req.originalUrl"
-      - "js:*req.path*"
-      # Koa request accessors (ctx.query, ctx.params, ctx.headers, ctx.cookies,
-      # ctx.request.body/query).
-      - "js:*ctx.query*"
-      - "js:*ctx.params*"
-      - "js:*ctx.headers*"
-      - "js:*ctx.cookies*"
-      - "js:*ctx.request*"
-      # Fastify / Hapi request accessors (request.query/params/body/payload/
-      # headers/cookies) — base-scoped to the framework `request` object. The JS
-      # frontend only synthesizes a source for a member read off an OPAQUE base
-      # (a handler parameter or a free/global), so an ordinary local object named
-      # `request` is not turned into a source.
-      - "js:*request.query*"
-      - "js:*request.params*"
-      - "js:*request.body*"
-      - "js:*request.payload*"
-      - "js:*request.headers*"
-      - "js:*request.cookies*"
+    extend: $_js-sources.yaml
     sinks:
       - "js:*.redirect"
     sanitizers:

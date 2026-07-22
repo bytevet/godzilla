@@ -1,0 +1,9 @@
+# Shared Ruby request sources (base-scoped: params/cookies/request/req accessors).
+# Pulled into the ruby-*.yaml rules with `extend: $_ruby-sources.yaml`.
+sources:
+  - "ruby:params"
+  - "ruby:cookies"
+  - "ruby:params.*"
+  - "ruby:cookies.*"
+  - "ruby:request.*"
+  - "ruby:req.*"

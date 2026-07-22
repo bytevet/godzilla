@@ -8,35 +8,7 @@ rules:
       Untrusted input flows into a redirect destination, which allows an open
       redirect. Validate the target against an allowlist instead of redirecting
       to a user-controlled URL.
-    sources:
-      # Route-handler parameter source (see converters/python/lower.go).
-      - "py:@http.param"
-      - "py:*request.args.get"
-      - "py:*request.headers.get"
-      - "py:*request.headers.__getitem__"
-      - "py:*request.cookies.get"
-      - "py:*request.cookies.__getitem__"
-      # Django request accessors.
-      - "py:*request.GET.get"
-      - "py:*request.GET.__getitem__"
-      - "py:*request.POST.get"
-      - "py:*request.POST.__getitem__"
-      # FastAPI / Starlette request accessors.
-      - "py:*request.query_params.__getitem__"
-      - "py:*request.query_params.get"
-      - "py:*request.path_params.__getitem__"
-      - "py:*request.path_params.get"
-      # Django REST Framework: request.data (the parsed request body).
-      - "py:*request.data"
-      - "py:*request.data.get"
-      - "py:*request.data.__getitem__"
-      - "py:*request.json"
-      - "py:*request.form"
-      - "py:*request.get_json"
-      - "py:*request.get_data"
-      - "py:*request.args.__getitem__"
-      - "py:*request.form.get"
-      - "py:*request.values.get"
+    extend: $_py-sources.yaml
     sinks:
       - "py:*redirect"
     sanitizers: []

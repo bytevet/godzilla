@@ -1,0 +1,5 @@
+# Shared Ruby string propagators. Pulled into the ruby-*.yaml rules with
+# `extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]`.
+propagators:
+  - "ruby:*.to_s"
+  - "ruby:*.join"

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Severity ranks a finding's importance and drives exit-code gating.
@@ -47,11 +49,21 @@ func (s Severity) Rank() int {
 
 // Rule is a single taint rule loaded from YAML.
 type Rule struct {
-	ID         string   `yaml:"id"`
-	Languages  []string `yaml:"languages"` // empty => applies to all languages
-	Severity   Severity `yaml:"severity"`
-	CWE        string   `yaml:"cwe"`
-	Message    string   `yaml:"message"`
+	ID        string   `yaml:"id"`
+	Languages []string `yaml:"languages"` // empty => applies to all languages
+	Severity  Severity `yaml:"severity"`
+	CWE       string   `yaml:"cwe"`
+	Message   string   `yaml:"message"`
+
+	// Extend names one or more `_`-prefixed fragment files (e.g.
+	// "$_go-common.yaml") whose pattern-list fields are merged into this rule at
+	// load time — the DRY mechanism that keeps a language's shared request
+	// sources / propagators in one place instead of copy-pasted into every pack.
+	// The loader appends the fragment's entries ahead of this rule's own (deduped)
+	// and then clears Extend; it never reaches the matcher. Accepts a single
+	// scalar or a YAML sequence. See internal/rules/loader.
+	Extend ExtendRefs `yaml:"extend"`
+
 	Sources    []string `yaml:"sources"`
 	Sanitizers []string `yaml:"sanitizers"`
 
@@ -108,6 +120,25 @@ type Rule struct {
 	// Compile). Unexported and not from YAML; nil until compiled, when the
 	// matching methods fall back to the package-level cached path.
 	matchers *ruleMatchers
+}
+
+// ExtendRefs is a rule's `extend:` value: one or more fragment references. It
+// accepts either a single scalar (`extend: $_go-common.yaml`) or a YAML sequence
+// (`extend: [$_a.yaml, $_b.yaml]`) so a rule can compose several fragments.
+type ExtendRefs []string
+
+// UnmarshalYAML accepts either a scalar or a sequence of scalars.
+func (e *ExtendRefs) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		*e = ExtendRefs{value.Value}
+		return nil
+	}
+	var list []string
+	if err := value.Decode(&list); err != nil {
+		return err
+	}
+	*e = ExtendRefs(list)
+	return nil
 }
 
 // ConstArg is a dangerous-call rule's optional constant-argument condition.

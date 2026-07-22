@@ -9,14 +9,7 @@ rules:
       Untrusted input is rendered into an HTML response without escaping, which
       may allow reflected cross-site scripting (XSS). HTML-escape the value
       before embedding it (e.g. via a templating engine with auto-escaping).
-    sources:
-      - "rust:axum::extract::Query"
-      - "rust:axum::extract::Path"
-      - "rust:axum::extract::Json"
-      - "rust:axum::extract::Form"
-      - "rust:*Request::query"
-      - "rust:*Request::param"
-      - "rust:*HttpRequest::query_string"
+    extend: $_rust-web-sources.yaml
     sinks:
       - "rust:*Html::from"
       - "rust:*Html::new"
