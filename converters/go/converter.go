@@ -672,13 +672,15 @@ func collectRouteHandlers(allFns map[*ssa.Function]bool) (map[*ssa.Function]stri
 					continue
 				}
 				for _, arg := range common.Args {
-					for _, h := range handlerFuncArgs(arg) {
-						if reg, ok := contextParam(h); ok {
-							handlers[h] = reg
-						}
-						if fps := formParams(h); len(fps) > 0 {
-							forms[h] = fps
-						}
+					h := handlerFuncArg(arg)
+					if h == nil {
+						continue
+					}
+					if reg, ok := contextParam(h); ok {
+						handlers[h] = reg
+					}
+					if fps := formParams(h); len(fps) > 0 {
+						forms[h] = fps
 					}
 				}
 			}
@@ -734,55 +736,8 @@ func handlerFuncArg(arg ssa.Value) *ssa.Function {
 		if fn, ok := v.Fn.(*ssa.Function); ok {
 			return fn
 		}
-	case *ssa.ChangeType:
-		// A handler stored into a named func-type slot (e.g. gin/echo's
-		// `HandlerFunc`) is wrapped in a no-op ChangeType conversion; unwrap it.
-		return handlerFuncArg(v.X)
 	}
 	return nil
-}
-
-// handlerFuncArgs returns every handler *ssa.Function reachable from a routing
-// call argument. Besides a direct function/closure (handlerFuncArg), it unwraps
-// a VARIADIC handler slice: gin/echo/chi register routes as `GET(path,
-// ...HandlerFunc)`, which go/ssa lowers to a stack array whose elements are
-// Store'd the handler funcs and then Slice'd into the call — so the arg is an
-// *ssa.Slice, not the function. Without unwrapping it, the handler's context
-// param is never seeded as a request object and request taint never enters the
-// (now-lowered) framework body, which is why real gin needed explicit accessor
-// source globs. Walk the slice's array allocation to recover every stored
-// handler (middleware + final handler).
-func handlerFuncArgs(arg ssa.Value) []*ssa.Function {
-	if fn := handlerFuncArg(arg); fn != nil {
-		return []*ssa.Function{fn}
-	}
-	sl, ok := arg.(*ssa.Slice)
-	if !ok {
-		return nil
-	}
-	refs := sl.X.Referrers() // sl.X is the array Alloc backing the variadic slice
-	if refs == nil {
-		return nil
-	}
-	var out []*ssa.Function
-	for _, r := range *refs {
-		ia, ok := r.(*ssa.IndexAddr)
-		if !ok {
-			continue
-		}
-		iaRefs := ia.Referrers()
-		if iaRefs == nil {
-			continue
-		}
-		for _, sr := range *iaRefs {
-			if st, ok := sr.(*ssa.Store); ok {
-				if fn := handlerFuncArg(st.Val); fn != nil {
-					out = append(out, fn)
-				}
-			}
-		}
-	}
-	return out
 }
 
 // contextParam returns the register name of a handler's request/context

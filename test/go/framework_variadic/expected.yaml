@@ -1,5 +1,0 @@
-findings:
-    - rule: go-command-injection
-      min: 1
-    - rule: go-sql-injection
-      min: 1
