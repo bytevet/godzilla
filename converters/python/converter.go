@@ -252,7 +252,7 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 						continue // unset, or already resolves by exact name
 					}
 					raw := resolve(logical(callee))
-					if raw == "" || raw == callee {
+					if raw == "" {
 						continue
 					}
 					cc.Callee = raw

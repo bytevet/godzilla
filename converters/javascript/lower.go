@@ -602,12 +602,7 @@ func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.E
 		if localName == "" {
 			return
 		}
-		inst := fs.newValueInst(op.LeftBrace)
-		inst.Op = ir.OpCode_OP_CODE_FIELD
-		inst.Operands = []*ir.Value{base}
-		inst.Comment = "field:" + field
-		fs.emit(inst)
-		fs.env[localName] = regValue(inst.Name)
+		fs.env[localName] = fs.emitFieldRead(base, field, op.LeftBrace)
 	}
 	for _, p := range op.Properties {
 		switch prop := p.(type) {
@@ -809,7 +804,13 @@ func (fs *funcState) lowerDot(v *ast.DotExpression) *ir.Value {
 		return fs.emitRootPropertyRead(root, field, v.Idx0())
 	}
 
-	inst := fs.newValueInst(v.Idx0())
+	return fs.emitFieldRead(base, field, v.Idx0())
+}
+
+// emitFieldRead emits a FIELD read of field off base at idx and returns the
+// resulting register value.
+func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *ir.Value {
+	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_FIELD
 	inst.Operands = []*ir.Value{base}
 	inst.Comment = "field:" + field

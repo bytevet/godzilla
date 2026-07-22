@@ -193,9 +193,6 @@ func indexJavaSources(root string) map[string]string {
 // resolveJavaSource picks the source path for a class: its SourceFile base name
 // matched against the index, else the scan path (so a Pos is always populated).
 func resolveJavaSource(scanPath string, idx map[string]string, source string) string {
-	if source == "" {
-		return scanPath
-	}
 	if p, ok := idx[source]; ok {
 		return p
 	}

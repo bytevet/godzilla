@@ -799,11 +799,7 @@ func analyzeFunc(
 	for idx, targets := range funcSeeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
-				set := map[string]bool{}
-				for t := range targets {
-					set[t] = true
-				}
-				funcVal[reg] = set
+				funcVal[reg] = maps.Clone(targets)
 			}
 		}
 	}
@@ -1471,7 +1467,7 @@ func analyzeFunc(
 	// per-(rule × function) allocation. seedState is a fresh map owned by this
 	// analysis, so visiting mutates it in place harmlessly. nBlocks/onlyBlock were
 	// computed once above (also feeding linearFn).
-	if nBlocks <= 1 {
+	if linearFn {
 		tainted = seedState
 		if onlyBlock != nil {
 			curBlock = onlyBlock.GetIndex()
@@ -1512,9 +1508,7 @@ func analyzeFunc(
 			}
 			in := taintState{}
 			if idx == entry {
-				for k, v := range seedState {
-					in[k] = v
-				}
+				maps.Copy(in, seedState)
 			}
 			for _, p := range preds[idx] {
 				for k, v := range blockOut[p] {

@@ -324,8 +324,6 @@ func parseVerdict(text string) (Verdict, error) {
 	switch strings.ToLower(strings.TrimSpace(raw.Verdict)) {
 	case "false_positive", "false-positive":
 		v.FalsePositive = true
-	default:
-		v.FalsePositive = false // conservative: unrecognized => keep
 	}
 	return v, nil
 }

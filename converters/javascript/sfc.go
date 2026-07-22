@@ -88,9 +88,7 @@ func extractSFCToJS(path string, src []byte) (string, *sourcemap.Consumer, []dir
 	// findings are relocated by callee order in applyDirectivePositions, not by
 	// line — so they can sit past the script region.
 	var b strings.Builder
-	for i := 1; i < scriptLine; i++ {
-		b.WriteByte('\n')
-	}
+	b.WriteString(strings.Repeat("\n", scriptLine-1))
 	b.WriteString(script)
 	b.WriteByte('\n')
 	for _, d := range dirs {

@@ -92,20 +92,16 @@ func (a *AnthropicReviewer) reviewAgentic(ctx context.Context, f analysis.Findin
 			return Verdict{}, err
 		}
 
-		var text strings.Builder
 		var toolUses []anthropic.ToolUseBlock
 		for _, block := range resp.Content {
-			switch b := block.AsAny().(type) {
-			case anthropic.TextBlock:
-				text.WriteString(b.Text)
-			case anthropic.ToolUseBlock:
+			if b, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
 				toolUses = append(toolUses, b)
 			}
 		}
 
 		// No tool calls this turn: the model has reached a verdict.
 		if len(toolUses) == 0 || resp.StopReason != anthropic.StopReasonToolUse {
-			return parseVerdict(text.String())
+			return parseVerdict(collectText(resp))
 		}
 
 		// Execute each requested tool and feed the results back.

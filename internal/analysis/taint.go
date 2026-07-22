@@ -159,11 +159,9 @@ func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 	if pos, ok := isTainted(tainted, v); ok {
 		return pos, true
 	}
-	if v != nil {
-		if reg := v.GetRegName(); reg != "" {
-			if pos, ok := tainted[fieldAnyKey(reg)]; ok {
-				return pos, true
-			}
+	if reg := v.GetRegName(); reg != "" {
+		if pos, ok := tainted[fieldAnyKey(reg)]; ok {
+			return pos, true
 		}
 	}
 	return nil, false
@@ -412,9 +410,6 @@ func samePos(a, b *ir.Position) bool {
 // isTainted reports whether operand v refers to a tainted register, and if
 // so, the Position it originated from.
 func isTainted(tainted taintState, v *ir.Value) (*ir.Position, bool) {
-	if v == nil {
-		return nil, false
-	}
 	reg := v.GetRegName()
 	if reg == "" {
 		return nil, false

@@ -42,10 +42,7 @@ type Rules struct {
 // its directory is used. It returns (nil, "", nil) when no config file exists —
 // a missing config is not an error. The returned string is the path loaded.
 func Load(root string) (*Config, string, error) {
-	dir := root
-	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
-		dir = filepath.Dir(root)
-	}
+	dir := containingDir(root)
 	for _, name := range []string{".godzilla.yaml", ".godzilla.yml"} {
 		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err == nil {
@@ -54,6 +51,15 @@ func Load(root string) (*Config, string, error) {
 		}
 	}
 	return nil, "", nil
+}
+
+// containingDir returns path's parent directory when path is an existing file,
+// otherwise path unchanged.
+func containingDir(path string) string {
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		return filepath.Dir(path)
+	}
+	return path
 }
 
 // LoadFile parses a config file at an explicit path.
@@ -105,9 +111,7 @@ func (c *Config) FilterFindings(findings []analysis.Finding, root string) ([]ana
 	if err != nil {
 		absRoot = root
 	}
-	if fi, err := os.Stat(absRoot); err == nil && !fi.IsDir() {
-		absRoot = filepath.Dir(absRoot)
-	}
+	absRoot = containingDir(absRoot)
 	n := 0
 	for i := range findings {
 		if findings[i].Suppressed {
@@ -182,9 +186,6 @@ func pathMatches(glob, rel string) bool {
 	glob = filepath.ToSlash(glob)
 	rel = filepath.ToSlash(rel)
 	if !strings.Contains(glob, "/") {
-		if ok, _ := filepath.Match(glob, filepath.Base(rel)); ok {
-			return true
-		}
 		for _, seg := range strings.Split(rel, "/") {
 			if ok, _ := filepath.Match(glob, seg); ok {
 				return true

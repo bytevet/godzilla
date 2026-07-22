@@ -310,7 +310,7 @@ type funcState struct {
 	qualifiedFuncs map[string]bool
 	classQual      string
 	counter        int
-	env        map[string]*ir.Value
+	env            map[string]*ir.Value
 	// paramNames is the set of this function's own parameter names. A member
 	// read / `[]` off a parameter (or off a free/unbound identifier) is an
 	// "opaque base" — see isOpaqueBase — and the first opportunity to introduce
@@ -595,9 +595,6 @@ func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 			continue
 		}
 		acc = fs.emitBinOp(acc, v, part)
-	}
-	if acc == nil {
-		return constString("")
 	}
 	return acc
 }
@@ -925,8 +922,5 @@ func scalarText(n interface{}) string {
 	case json.Number:
 		return v.String()
 	}
-	if s := identName(n); s != "" {
-		return s
-	}
-	return ""
+	return identName(n)
 }

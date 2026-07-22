@@ -172,7 +172,7 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	// and the class qualname prefix so `self.method(x)` calls resolve to the
 	// sibling method. Guarding on the self/cls name keeps this from misfiring in
 	// ordinary functions.
-	if len(params) > 0 && (params[0] == "self" || params[0] == "cls") {
+	if hasSelfReceiver(params) {
 		fs.selfName = params[0]
 		fs.methodPrefix = qualPrefix
 	}
@@ -279,10 +279,16 @@ func decoratedRouteParams(node astNode, params []string) []string {
 // positionalAfterSelf returns the params after a leading self/cls receiver (the
 // URL route captures for a Tornado / MethodView verb method).
 func positionalAfterSelf(params []string) []string {
-	if len(params) > 0 && (params[0] == "self" || params[0] == "cls") {
+	if hasSelfReceiver(params) {
 		return params[1:]
 	}
 	return params
+}
+
+// hasSelfReceiver reports whether params begins with a conventional method
+// receiver (`self` or `cls`).
+func hasSelfReceiver(params []string) bool {
+	return len(params) > 0 && (params[0] == "self" || params[0] == "cls")
 }
 
 // collectClassBases records every class's declared base names (dotted) into out,
@@ -394,10 +400,16 @@ func (fs *funcState) selfRequestAccessor(n astNode) (attr string, ok bool) {
 		return "", false
 	}
 	base := req.node("value")
-	if base == nil || base.kind() != "Name" || base.str("id") != fs.selfName {
+	if !fs.isNameRef(base) {
 		return "", false
 	}
 	return n.str("attr"), true
+}
+
+// isNameRef reports whether node is a `Name` expression referencing this
+// function's self/cls receiver.
+func (fs *funcState) isNameRef(node astNode) bool {
+	return node != nil && node.kind() == "Name" && node.str("id") == fs.selfName
 }
 
 // selfArgMethod reports whether funcNode is `self.<get_argument-family>` for a
@@ -410,7 +422,7 @@ func (fs *funcState) selfArgMethod(funcNode astNode) bool {
 		return false
 	}
 	base := funcNode.node("value")
-	return base != nil && base.kind() == "Name" && base.str("id") == fs.selfName
+	return fs.isNameRef(base)
 }
 
 // funcState holds the per-function lowering state: a monotonically
@@ -633,7 +645,7 @@ func (fs *funcState) selfFieldGlobal(node astNode) string {
 		return ""
 	}
 	base := node.node("value")
-	if base == nil || base.kind() != "Name" || base.str("id") != fs.selfName {
+	if !fs.isNameRef(base) {
 		return ""
 	}
 	attr := node.str("attr")
@@ -1195,7 +1207,7 @@ func (fs *funcState) funcValueOf(node astNode) *ir.Value {
 		}
 	case "Attribute":
 		if fs.selfName != "" {
-			if base := node.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+			if base := node.node("value"); fs.isNameRef(base) {
 				return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + fs.methodPrefix + node.str("attr")}}
 			}
 		}
@@ -1264,7 +1276,7 @@ func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	// call path — without this args[0] would bind to the `self` slot, tainting the
 	// receiver and dropping the real first argument.
 	if targetNode.kind() == "Attribute" && fs.selfName != "" {
-		if base := targetNode.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+		if base := targetNode.node("value"); fs.isNameRef(base) {
 			cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
 		}
 	}
@@ -1345,7 +1357,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	// matches no function and the call simply stays unresolved (harmless).
 	isSelfMethod := false
 	if fs.selfName != "" && funcNode != nil && funcNode.kind() == "Attribute" {
-		if base := funcNode.node("value"); base != nil && base.kind() == "Name" && base.str("id") == fs.selfName {
+		if base := funcNode.node("value"); fs.isNameRef(base) {
 			callee = "py:" + fs.moduleName + "." + fs.methodPrefix + funcNode.str("attr")
 			isSelfMethod = true
 		}
