@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -92,7 +93,7 @@ func LoadDefault(userPath string) (*rules.RuleSet, error) {
 	}
 
 	return &rules.RuleSet{
-		Rules: append(append([]rules.Rule{}, builtin.Rules...), user.Rules...),
+		Rules: slices.Concat(builtin.Rules, user.Rules),
 	}, nil
 }
 

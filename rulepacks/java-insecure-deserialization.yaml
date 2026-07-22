@@ -42,7 +42,3 @@ rules:
       - "java:*Yaml.loadAll#0"
       - "java:*XStream.fromXML#0"
     sanitizers: []
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"

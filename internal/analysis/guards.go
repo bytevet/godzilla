@@ -1,6 +1,8 @@
 package analysis
 
 import (
+	"maps"
+
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -217,23 +219,11 @@ func computeDominators(fn *ir.Function) map[int32]map[int32]bool {
 				inter = map[int32]bool{}
 			}
 			inter[b] = true
-			if !sameSet(inter, dom[b]) {
+			if !maps.Equal(inter, dom[b]) {
 				dom[b] = inter
 				changed = true
 			}
 		}
 	}
 	return dom
-}
-
-func sameSet(a, b map[int32]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
 }

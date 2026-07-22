@@ -22,6 +22,8 @@ func TestIsDefaultPropagator(t *testing.T) {
 		// These carry request taint through a lowered framework's stdlib parsing.
 		"go:(*net/url.URL).Query",          // *url.URL -> url.Values (the gin path)
 		"go:net/url.ParseQuery",            // string -> url.Values
+		"go:net/url.Parse",                 // string -> *url.URL (minio CVE-2022-35919)
+		"go:net/url.ParseRequestURI",       // string -> *url.URL
 		"go:(net/url.Values).Get",          // url.Values -> string
 		"go:(*net/http.Request).FormValue", // *http.Request -> string
 		"go:(*net/http.Request).Cookie",    // *http.Request -> *http.Cookie

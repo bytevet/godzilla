@@ -151,18 +151,17 @@ func fieldAnyKey(base string) string {
 }
 
 // isTaintedArg reports whether a call argument carries taint for the purpose of
-// seeding a callee parameter: either the whole value is tainted, or the value is
-// a struct with at least one tainted field. Field reads use isTainted (precise);
-// only cross-call seeding uses this broader check.
+// seeding a callee parameter: either the whole value is tainted, or the value's
+// register carries the any-field marker (a struct with at least one tainted field
+// stored directly into it). Field reads use isTainted (precise); only cross-call
+// seeding uses this broader check.
 func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 	if pos, ok := isTainted(tainted, v); ok {
 		return pos, true
 	}
-	if v != nil {
-		if reg := v.GetRegName(); reg != "" {
-			if pos, ok := tainted[fieldAnyKey(reg)]; ok {
-				return pos, true
-			}
+	if reg := v.GetRegName(); reg != "" {
+		if pos, ok := tainted[fieldAnyKey(reg)]; ok {
+			return pos, true
 		}
 	}
 	return nil, false
@@ -411,9 +410,6 @@ func samePos(a, b *ir.Position) bool {
 // isTainted reports whether operand v refers to a tainted register, and if
 // so, the Position it originated from.
 func isTainted(tainted taintState, v *ir.Value) (*ir.Position, bool) {
-	if v == nil {
-		return nil, false
-	}
 	reg := v.GetRegName()
 	if reg == "" {
 		return nil, false
@@ -446,6 +442,30 @@ func markTainted(tainted taintState, reg string, pos *ir.Position) {
 		return
 	}
 	tainted[reg] = pos
+}
+
+// isByteOrRuneSlice reports whether t is a []byte or []rune (a slice of uint8 or
+// int32), including a named type whose underlying type is such a slice. It gates
+// the `builtin.append` propagator to character-level string reconstruction so
+// append is not a blanket taint carrier across every slice in a program.
+func isByteOrRuneSlice(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.GetKind() == ir.TypeKind_TYPE_KIND_NAMED {
+		if u := t.GetUnderlyingType(); u != nil {
+			t = u
+		}
+	}
+	if t.GetKind() != ir.TypeKind_TYPE_KIND_SLICE {
+		return false
+	}
+	el := t.GetElemType()
+	if el == nil || el.GetKind() != ir.TypeKind_TYPE_KIND_BASIC {
+		return false
+	}
+	k := el.GetBasicKind()
+	return k == ir.BasicTypeKind_BASIC_TYPE_KIND_UINT8 || k == ir.BasicTypeKind_BASIC_TYPE_KIND_INT32
 }
 
 // markTaintFromOperands marks `name` tainted (with the origin of the first

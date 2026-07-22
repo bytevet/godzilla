@@ -71,7 +71,8 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	idx := &sharedIndex{
 		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
-		reportable: e.reportable,
+		reportable:     e.reportable,
+		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -80,9 +81,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// does a lock-free slice walk instead of a mutexed cache lookup per match, the
 	// dominant engine cost as rule packs grow. Doing it here (not lazily inside a
 	// goroutine) avoids a data race on the shared matcher cache.
-	for i := range e.rs.Rules {
-		e.rs.Rules[i].Compile()
-	}
+	e.rs.Compile()
 
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
@@ -166,17 +165,10 @@ type funcResult struct {
 	findings      []Finding
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
-	// reqEffects records that a request-object-tainted value (see reqTainted) was
-	// passed as an argument to a lowered callee, so the callee's matching
-	// parameter becomes a request object too — this is what carries the
-	// request-object method-sugar coverage across function boundaries (e.g. a
-	// handler passing *http.Request / *gin.Context to a helper that calls an
-	// accessor on it). Mirrors callEffects, but for provenance rather than taint.
-	reqEffects []callEffect
 	// funcEffects records that a function value was passed as an argument to a
 	// callee (see funcValEffect): the callee's matching parameter then holds that
 	// callable, so an indirect call on the parameter resolves to it. This is the
-	// cross-function channel for higher-order-callback taint. Mirrors reqEffects
+	// cross-function channel for higher-order-callback taint. Mirrors callEffects
 	// (a points-to fact rather than taint), but its target store is a SET — a
 	// context-insensitive helper called from several sites accumulates the union of
 	// callbacks passed to it, and the engine only binds when that set is a singleton.
@@ -228,18 +220,6 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	return sel
 }
 
-// buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
-// method name -> every lowered concrete method exposing it. An INVOKE call names
-// a method abstractly (not a concrete function), so this lets taint flow into the
-// implementations. It over-approximates (any same-named method matches), which is
-// why such findings stay Medium confidence. It depends only on the immutable
-// function index, so it is built once and shared by every rule.
-//
-// A frontend marks every method — Go, Python, … — with Function.method_name, so
-// the engine identifies methods and their bare name from IR alone, parsing no
-// canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
-// only when the name is unambiguous) is likewise chosen from IR at the call site,
-// via CallCommon.untyped_dispatch, not from any language check here.
 // buildIndirectCallees indexes every function that CONTAINS an indirect call — a
 // CALL whose callee names no function (Callee == "") and is not an INVOKE, i.e. a
 // call through a function VALUE. A function-value points-to fact about a
@@ -273,6 +253,18 @@ func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
 	return has
 }
 
+// buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
+// method name -> every lowered concrete method exposing it. An INVOKE call names
+// a method abstractly (not a concrete function), so this lets taint flow into the
+// implementations. It over-approximates (any same-named method matches), which is
+// why such findings stay Medium confidence. It depends only on the immutable
+// function index, so it is built once and shared by every rule.
+//
+// A frontend marks every method — Go, Python, … — with Function.method_name, so
+// the engine identifies methods and their bare name from IR alone, parsing no
+// canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
+// only when the name is unambiguous) is likewise chosen from IR at the call site,
+// via CallCommon.untyped_dispatch, not from any language check here.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
@@ -283,9 +275,6 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	return methodImpls
 }
 
-// analyzeInterproc runs the worklist-based inter-procedural taint analysis for
-// a single rule. State (parameter taint, return taint) grows monotonically, so
-// iteration converges.
 // sharedIndex holds the rule-independent indexes over the immutable program,
 // built once in Analyze and shared read-only across the parallel per-rule
 // analyses (no goroutine mutates them). Hoisting them here — rather than
@@ -303,6 +292,107 @@ type sharedIndex struct {
 	// whose module is user-authored; dependency functions are then reached
 	// demand-driven via callEffects. Empty seeds every function.
 	reportable map[string]bool
+	// reqSourceHosts is the set of function keys that CONTAIN a request-object
+	// source call (e.g. the Go frontend's synthetic `go:@net/http.Request`,
+	// planted at every inbound *http.Request value — including field reads deep
+	// inside a lowered framework body like beego/macaron). Such a function is a
+	// taint ORIGIN, so it must seed the worklist even when it lives in a
+	// dependency module the reportable scope would otherwise reach only
+	// demand-driven — a source that never runs produces no taint. Built once,
+	// rule-independent (the union of all rules' request_object_sources).
+	reqSourceHosts map[string]bool
+}
+
+// buildReqSourceHosts returns the set of DEPENDENCY function keys that both
+// (a) contain a request-object source (the union of every rule's
+// request_object_sources globs) and (b) are DIRECTLY CALLED by user (reportable)
+// code. Such a function — e.g. beego's `Controller.Input`, which reads
+// `c.Ctx.Request` internally — generates request taint but takes no tainted
+// argument, so the demand-driven dependency scope never enqueues it; seeding it
+// lets its request taint escape to the user code that called it. Seeding
+// (analyzing the body) rather than tainting the call result unconditionally is
+// what keeps a SAFE accessor that reads the request but returns a constant from
+// being a false positive: its body has no tainted return, so nothing propagates.
+//
+// The DIRECT-CALL bound keeps this cheap and correct. A framework reads
+// *http.Request in many internal functions, but the ones that matter are the
+// accessor methods the app actually invokes (`c.Input()`, `c.Query()`). Crucially
+// it EXCLUDES a framework's request-pipeline entry like gin's ServeHTTP: that also
+// carries a request source, but user code never CALLS it (it calls user code via
+// an indirect dispatch), and seeding it made the worklist analyze a framework's
+// whole request pipeline — a large dep-heavy blow-up — for taint no user sink can
+// reach. Consulted ONLY under a reportable scope (with no scope every function is
+// already seeded), so the whole-program walk is skipped otherwise.
+func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.Module, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
+	if len(reportable) == 0 {
+		return nil
+	}
+	var globs []string
+	seen := map[string]bool{}
+	for i := range rs.Rules {
+		for _, s := range rs.Rules[i].RequestObjectSources {
+			if !seen[s] {
+				seen[s] = true
+				globs = append(globs, s)
+			}
+		}
+	}
+	if len(globs) == 0 {
+		return nil
+	}
+	// Callees invoked DIRECTLY by user code (by canonical name — byKey is keyed on
+	// it). A concrete method call `c.Input()` names its callee; only these dep
+	// functions are candidates for seeding.
+	userCallees := map[string]bool{}
+	for key, fn := range byKey {
+		if fn == nil {
+			continue
+		}
+		if mod := modByKey[key]; mod == nil || !reportable[mod.Name] {
+			continue
+		}
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Instrs {
+				if inst.GetCall() == nil {
+					continue
+				}
+				if callee := inst.Call.GetCallee(); callee != "" {
+					userCallees[callee] = true
+				}
+			}
+		}
+	}
+	if len(userCallees) == 0 {
+		return nil
+	}
+
+	hosts := map[string]bool{}
+	for key, fn := range byKey {
+		if fn == nil {
+			continue
+		}
+		// Dependency functions only (user code is already seeded), and only those
+		// user code directly calls.
+		if mod := modByKey[key]; mod == nil || reportable[mod.Name] {
+			continue
+		}
+		if !userCallees[key] {
+			continue
+		}
+	scan:
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Instrs {
+				if inst.GetCall() == nil {
+					continue
+				}
+				if callee := inst.Call.GetCallee(); callee != "" && rules.MatchAny(globs, callee) {
+					hosts[key] = true
+					break scan
+				}
+			}
+		}
+	}
+	return hosts
 }
 
 // buildCallers inverts the call graph: callee -> callers, so a callee becoming
@@ -344,12 +434,14 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 	return globalReaders
 }
 
+// analyzeInterproc runs the worklist-based inter-procedural taint analysis for
+// a single rule. State (parameter taint, return taint) grows monotonically, so
+// iteration converges.
 func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
 	indirectCallees := idx.indirectCallees
 	paramTaint := map[string]map[int]*ir.Position{}
-	paramReqTaint := map[string]map[int]*ir.Position{} // callee -> param index -> request-object provenance origin (PR4)
 	// paramFuncVal is the function-value points-to summary: callee -> param index ->
 	// the SET of concrete functions that param can hold, accumulated across every
 	// call site (context-insensitive). An indirect call on that param binds only
@@ -394,7 +486,15 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// engine makes no language distinction. An empty scope seeds everything.
 		if len(idx.reportable) > 0 {
 			if mod := idx.modByKey[name]; mod != nil && !idx.reportable[mod.Name] {
-				continue
+				// A dependency function is reached demand-driven. But a source-host that
+				// user code DIRECTLY CALLS (idx.reqSourceHosts) is seeded: it generates
+				// request taint internally (no tainted arg would ever enqueue it), and
+				// analyzing its body is what correctly decides whether its RESULT is
+				// actually request-derived (vs a safe accessor that reads the request but
+				// returns a constant). Its own findings stay scoped out to user code.
+				if !idx.reqSourceHosts[name] {
+					continue
+				}
 			}
 		}
 		enqueue(name)
@@ -411,7 +511,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			continue
 		}
 
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramReqTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, indirectCallees, reported)
+		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, byKey, methodImpls, indirectCallees, reported)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -426,21 +526,6 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			if m == nil {
 				m = map[int]*ir.Position{}
 				paramTaint[ce.callee] = m
-			}
-			if _, exists := m[ce.param]; !exists {
-				m[ce.param] = ce.origin
-				enqueue(ce.callee)
-			}
-		}
-
-		// Request-object provenance flowing into a callee parameter (PR4): merged
-		// and re-enqueued exactly like callEffects, so a request object passed to a
-		// helper makes that helper's parameter a request object too.
-		for _, ce := range res.reqEffects {
-			m := paramReqTaint[ce.callee]
-			if m == nil {
-				m = map[int]*ir.Position{}
-				paramReqTaint[ce.callee] = m
 			}
 			if _, exists := m[ce.param]; !exists {
 				m[ce.param] = ce.origin
@@ -538,53 +623,6 @@ func propagatorOperands(inst *ir.Instruction) []*ir.Value {
 	return args
 }
 
-// methodReceiverReg returns the register of a method call's receiver, or "" if
-// the call is not a method call whose receiver we can identify. For an INVOKE
-// (interface/virtual dispatch) the receiver is Call.Value; for a statically
-// resolved method call (non-invoke that names its method) the receiver is Args[0]
-// — both facts the converter records in the IR, so no callee-name parsing is
-// needed. Free-function calls return "" so their first argument is never mistaken
-// for a receiver.
-func methodReceiverReg(inst *ir.Instruction) string {
-	if inst.Call.GetIsInvoke() {
-		return inst.Call.GetValue().GetRegName()
-	}
-	if inst.Call.GetMethodName() != "" {
-		if args := inst.Call.GetArgs(); len(args) > 0 {
-			return args[0].GetRegName()
-		}
-	}
-	return ""
-}
-
-// methodOutParamArgs returns a method call's real arguments (receiver excluded),
-// for out-parameter tainting like c.Bind(&dst). A statically resolved method call
-// keeps the receiver in Args[0], so its real args are Args[1:]; an INVOKE keeps
-// the receiver in Call.Value, so all Args are real.
-func methodOutParamArgs(inst *ir.Instruction) []*ir.Value {
-	if inst.Call.GetIsInvoke() {
-		return inst.Call.GetArgs()
-	}
-	return logicalArgs(inst.Call)
-}
-
-// isAddressArg reports whether reg is defined by an address-producing
-// instruction (&x, &s.f, &a[i], or an alloc) — i.e. a plausible out-parameter
-// target such as the &dst in c.Bind(&dst).
-func isAddressArg(defs map[string]*ir.Instruction, reg string) bool {
-	def := defs[reg]
-	if def == nil {
-		return false
-	}
-	switch def.GetOp() {
-	case ir.OpCode_OP_CODE_ALLOC, ir.OpCode_OP_CODE_FIELD_ADDR, ir.OpCode_OP_CODE_INDEX_ADDR:
-		return true
-	case ir.OpCode_OP_CODE_UN_OP:
-		return def.GetUnOp() == ir.UnOpKind_UN_OP_ADDR
-	}
-	return false
-}
-
 // analyzeFunc runs the intra-procedural fixpoint for one function, seeded with
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
@@ -593,7 +631,6 @@ func analyzeFunc(
 	fn *ir.Function,
 	rule *rules.Rule,
 	seeds map[int]*ir.Position,
-	reqSeeds map[int]*ir.Position,
 	funcSeeds map[int]map[string]bool,
 	opaqueSeeds map[int]bool,
 	returnTaint map[string]*ir.Position,
@@ -649,15 +686,6 @@ func analyzeFunc(
 	// thus seen by the LLM reviewer).
 	interprocOrigins := map[*ir.Position]bool{}
 
-	// reqTainted records registers holding a request object (a value seeded from
-	// a request-object source, e.g. an HTTP handler's *http.Request or a
-	// route-registered framework context). It is function-scoped and monotonic —
-	// request-object-ness is a property of the value, not a per-block fact — so it
-	// is NOT reset by the flow-sensitive block driver like `tainted` is. It gates
-	// the request-object method-sugar rule in handleCall so that ordinary taint is
-	// never affected.
-	reqTainted := map[string]*ir.Position{}
-
 	seedState := taintState{}
 	for idx, origin := range seeds {
 		if idx >= 0 && idx < len(fn.Params) {
@@ -667,21 +695,9 @@ func analyzeFunc(
 			}
 		}
 	}
-	// Seed request-object provenance passed in from callers (inter-procedural):
-	// a parameter that a caller filled with a request object is itself a request
-	// object here, so accessor method calls on it are covered by the method-sugar
-	// rule even across the call boundary.
-	for idx, origin := range reqSeeds {
-		if idx >= 0 && idx < len(fn.Params) {
-			if reg := fn.Params[idx].GetRegName(); reg != "" {
-				reqTainted[reg] = origin
-			}
-		}
-	}
-
 	// funcVal maps a register to the SET of concrete functions it can hold (a
 	// points-to fact). It is function-scoped and monotonic — a callable identity is
-	// a property of the value, not a per-block fact — so, like reqTainted, it is NOT
+	// a property of the value, not a per-block fact — so it is NOT
 	// reset by the flow-sensitive block driver. Seeded from the caller-supplied
 	// funcSeeds (which param holds which callback), so an indirect call on a
 	// parameter can be resolved to the function value the caller passed in.
@@ -689,11 +705,7 @@ func analyzeFunc(
 	for idx, targets := range funcSeeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
-				set := map[string]bool{}
-				for t := range targets {
-					set[t] = true
-				}
-				funcVal[reg] = set
+				funcVal[reg] = maps.Clone(targets)
 			}
 		}
 	}
@@ -758,19 +770,6 @@ func analyzeFunc(
 		res.callEffects = append(res.callEffects, callEffect{callee: callee, param: param, origin: origin})
 	}
 
-	// addReqEffect mirrors addEffect but records request-object provenance flowing
-	// into a callee parameter (see funcResult.reqEffects). Keyed separately so it
-	// does not collide with the taint-effect dedup.
-	reqEffectSeen := map[string]bool{}
-	addReqEffect := func(callee string, param int, origin *ir.Position) {
-		key := callee + "#" + strconv.Itoa(param)
-		if reqEffectSeen[key] {
-			return
-		}
-		reqEffectSeen[key] = true
-		res.reqEffects = append(res.reqEffects, callEffect{callee: callee, param: param, origin: origin})
-	}
-
 	// addFuncEffect records that a function value flowed into a callee parameter
 	// (the higher-order channel). Dedup is keyed on callee#param#target — unlike the
 	// taint/req channels, which store a single origin per (callee,param), this stores
@@ -824,18 +823,6 @@ func analyzeFunc(
 			addFuncOpaque(callee, param)
 		}
 	}
-	reqTaintedArg := func(v *ir.Value) (*ir.Position, bool) {
-		if v == nil {
-			return nil, false
-		}
-		if reg := v.GetRegName(); reg != "" {
-			if pos, ok := reqTainted[reg]; ok {
-				return pos, true
-			}
-		}
-		return nil, false
-	}
-
 	// ENG-6(a): taint through package/module-level globals. A store of tainted
 	// data into a global publishes the taint program-wide (recorded as a global
 	// effect the orchestrator merges); a load from a global that is already tainted
@@ -979,6 +966,15 @@ func analyzeFunc(
 			isSan = rule.IsSanitizer(callee)
 			isSrc = rule.IsSource(callee)
 			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+			// The Go `append` builtin propagates taint ONLY when its result is a
+			// byte/rune slice — i.e. character-level string reconstruction (the
+			// make([]byte); append(data, s[i]); string(data) idiom of a non-sanitizing
+			// normalize/snake_case helper). It is NOT a blanket propagator: append is
+			// called on every slice in a program, so tainting through slices of structs
+			// /pointers explodes the taint set in framework code (a large scan slowdown).
+			if !isProp && callee == "builtin.append" && isByteOrRuneSlice(inst.GetType()) {
+				isProp = true
+			}
 		}
 
 		// Record a validator application (ENG-9, linear case): mark the checked
@@ -1005,15 +1001,9 @@ func analyzeFunc(
 			if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
 				addEffect(target, 0, p)
 			}
-			if p, ok := reqTaintedArg(inst.Call.GetValue()); ok {
-				addReqEffect(target, 0, p)
-			}
 			for j, a := range args {
 				if p, ok := isTaintedArg(tainted, a); ok {
 					addEffect(target, j+1, p)
-				}
-				if p, ok := reqTaintedArg(a); ok {
-					addReqEffect(target, j+1, p)
 				}
 				recordFuncArg(target, j+1, a)
 			}
@@ -1039,12 +1029,6 @@ func analyzeFunc(
 		case isSrc:
 			if inst.Name != "" {
 				markTainted(tainted, inst.Name, inst.Pos)
-				// Request-object sources additionally carry provenance so the
-				// method-sugar rule below can treat accessor calls on the request
-				// object as sources — even for a framework we have no rules for.
-				if rule.IsRequestObjectSource(callee) {
-					reqTainted[inst.Name] = inst.Pos
-				}
 			}
 		case isSink:
 			inj := injectableArgs(sinkArgs, inst.Call)
@@ -1122,9 +1106,6 @@ func analyzeFunc(
 					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(callee, j, p)
 					}
-					if p, ok := reqTaintedArg(a); ok {
-						addReqEffect(callee, j, p)
-					}
 					// A function value passed as an argument records a points-to fact
 					// on the callee's param, so an indirect call on that param inside
 					// the callee resolves back to it (higher-order channel); an
@@ -1183,9 +1164,6 @@ func analyzeFunc(
 					if p, ok := isTaintedArg(tainted, a); ok {
 						addEffect(target, j, p)
 					}
-					if p, ok := reqTaintedArg(a); ok {
-						addReqEffect(target, j, p)
-					}
 					recordFuncArg(target, j, a)
 				}
 				pullReturnTaint(target)
@@ -1221,32 +1199,6 @@ func analyzeFunc(
 			}
 		}
 
-		// Request-object method sugar (framework-agnostic accessor coverage): a
-		// method call whose receiver is a request object — c.Query(), c.Param(),
-		// c.Bind(&dst) on a value seeded from a request-object source — yields
-		// untrusted data, even for a web framework we have no rules for. This is
-		// the typed-Go analogue of the JS "every member read off req is a source"
-		// heuristic. It is gated on request-object provenance (reqTainted), so
-		// ordinary taint is unaffected, and only fires for an unresolved/external
-		// callee that the switch above did not already classify as a
-		// source/sink/sanitizer/propagator.
-		if byKey[callee] == nil && !isSink && !isSrc && !isSan && !isProp {
-			if recv := methodReceiverReg(inst); recv != "" {
-				if origin, ok := reqTainted[recv]; ok {
-					if inst.Name != "" {
-						markTainted(tainted, inst.Name, origin)
-					}
-					// c.Bind(&dst): the accessor fills untrusted data into a
-					// pointer argument's memory. Restrict to address-typed args so
-					// a by-value argument is never falsely tainted.
-					for _, a := range methodOutParamArgs(inst) {
-						if reg := a.GetRegName(); reg != "" && isAddressArg(defs, reg) {
-							taintCallerArg(a, origin)
-						}
-					}
-				}
-			}
-		}
 	}
 
 	// handleMakeClosure flows taint through a builtin.make_closure intrinsic,
@@ -1352,7 +1304,7 @@ func analyzeFunc(
 	// per-(rule × function) allocation. seedState is a fresh map owned by this
 	// analysis, so visiting mutates it in place harmlessly. nBlocks/onlyBlock were
 	// computed once above (also feeding linearFn).
-	if nBlocks <= 1 {
+	if linearFn {
 		tainted = seedState
 		if onlyBlock != nil {
 			curBlock = onlyBlock.GetIndex()
@@ -1393,9 +1345,7 @@ func analyzeFunc(
 			}
 			in := taintState{}
 			if idx == entry {
-				for k, v := range seedState {
-					in[k] = v
-				}
+				maps.Copy(in, seedState)
 			}
 			for _, p := range preds[idx] {
 				for k, v := range blockOut[p] {

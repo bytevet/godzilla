@@ -63,8 +63,19 @@ rules:
       - "go:os.ReadFile#0"
       - "go:os.WriteFile#0"
       - "go:os.Create#0"
+      # Arbitrary file DELETION via a tainted path is CWE-22 just as much as read
+      # or write — a crafted "../.." lets an attacker remove files outside the
+      # intended directory (e.g. gogs CVE-2024-55947, os.Remove of a repo TreePath).
+      - "go:os.Remove#0"
+      - "go:os.RemoveAll#0"
       - "go:*ioutil.ReadFile#0"
       - "go:*net/http.ServeFile#2"
+      # os.Rename/os.Mkdir(All) with a tainted destination likewise place or move
+      # a file at an attacker-chosen path.
+      - "go:os.Rename#0"
+      - "go:os.Rename#1"
+      - "go:os.Mkdir#0"
+      - "go:os.MkdirAll#0"
     # filepath.Base strips the directory component, so it genuinely prevents
     # traversal. filepath.Clean/filepath.Join do NOT contain input to a base
     # directory ("/data" + "../../etc" cleans to "/etc"), so they are propagators.
@@ -74,6 +85,14 @@ rules:
       - "go:strings.Join"
       - "go:*filepath.Join"
       - "go:*filepath.Clean"
+      # The stdlib `path` package (slash-based paths) is the analog of
+      # path/filepath used by web/git servers (e.g. gogs). Like filepath.Join/
+      # Clean it builds/normalizes a path WITHOUT confining it to a base dir, so
+      # it carries taint rather than sanitizing (path.Clean("/"+"../x") does not
+      # prevent traversal of a joined-in segment). path.Base is the sanitizer.
+      - "go:path.Join"
+      - "go:path.Clean"
+      - "go:path.Dir"
     # Guard/barrier validator (ENG-9): a containment check that, when it dominates
     # the branch reaching the sink, proves the path was validated and suppresses
     # the finding. filepath.IsLocal (rejects "..", absolute, reserved names) is

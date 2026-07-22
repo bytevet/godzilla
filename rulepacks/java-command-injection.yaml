@@ -35,7 +35,3 @@ rules:
       - "java:*ProcessBuilder.command"
       - "java:java/lang/ProcessBuilder.<init>"
     sanitizers: []
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"

@@ -1,6 +1,11 @@
 package analysis
 
-import ir "godzilla/pkg/ir/v1"
+import (
+	"maps"
+	"slices"
+
+	ir "godzilla/pkg/ir/v1"
+)
 
 // taintState maps a tainted register (or access-path key) to the source origin
 // its taint came from. It is the per-block dataflow fact for the flow-sensitive
@@ -19,15 +24,7 @@ func cloneState(s taintState) taintState {
 // statesEqual reports whether two taint states are identical (same keys mapped
 // to the same origin pointers) — the block-dataflow fixpoint's stop condition.
 func statesEqual(a, b taintState) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
+	return maps.Equal(a, b)
 }
 
 // reversePostOrder returns fn's block indices in reverse post-order from the
@@ -86,11 +83,8 @@ func reversePostOrder(fn *ir.Function) []int32 {
 		}
 	}
 
-	order := make([]int32, 0, len(post))
-	for i := len(post) - 1; i >= 0; i-- {
-		order = append(order, post[i])
-	}
-	return order
+	slices.Reverse(post)
+	return post
 }
 
 // nonEscapingAllocs returns the set of ALLOC result registers whose address does

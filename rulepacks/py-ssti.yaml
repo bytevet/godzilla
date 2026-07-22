@@ -54,6 +54,3 @@ rules:
       - "py:*Environment.from_string#0"
       - "py:*mako*.Template#0"
     sanitizers: []
-    propagators:
-      - "py:*.format"
-      - "py:*.join"

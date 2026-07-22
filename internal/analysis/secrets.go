@@ -217,10 +217,11 @@ var sourceFileExts = map[string]bool{
 // secret scanner should read.
 func isScannableConfigFile(path string) bool {
 	base := filepath.Base(path)
-	if sourceFileExts[strings.ToLower(filepath.Ext(base))] {
+	ext := strings.ToLower(filepath.Ext(base))
+	if sourceFileExts[ext] {
 		return false
 	}
-	if configFileExts[strings.ToLower(filepath.Ext(base))] {
+	if configFileExts[ext] {
 		return true
 	}
 	// Extensionless / specially-named infra files.

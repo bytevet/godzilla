@@ -762,9 +762,7 @@ func splitTop(s string, sep byte) []string {
 			start = i + 1
 		}
 	}
-	if start <= len(s) {
-		out = append(out, s[start:])
-	}
+	out = append(out, s[start:])
 	return out
 }
 

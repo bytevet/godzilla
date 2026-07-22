@@ -61,6 +61,4 @@ rules:
       - "go:*url.QueryEscape"
       - "go:*url.PathEscape"
     propagators:
-      - "go:fmt.Sprintf"
-      - "go:fmt.Sprint"
       - "go:strings.Join"

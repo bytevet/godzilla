@@ -450,14 +450,7 @@ func (s *methodState) blockPos(b block) *ir.Position {
 }
 
 func cloneState(st simState) simState {
-	out := simState{locals: make(map[int]*ir.Value, len(st.locals))}
-	if len(st.stack) > 0 {
-		out.stack = append([]*ir.Value(nil), st.stack...)
-	}
-	for k, v := range st.locals {
-		out.locals[k] = v
-	}
-	return out
+	return simState{stack: slices.Clone(st.stack), locals: maps.Clone(st.locals)}
 }
 
 // invoke lowers a method call. Calls with a receiver (virtual/interface/special)

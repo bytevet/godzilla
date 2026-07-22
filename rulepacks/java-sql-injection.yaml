@@ -50,7 +50,3 @@ rules:
       - "java:*Session.createQuery#0"
       - "java:*Session.createSQLQuery#0"
     sanitizers: []
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"

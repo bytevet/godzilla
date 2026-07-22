@@ -9,17 +9,11 @@ package py_converter
 type astNode map[string]any
 
 func (n astNode) kind() string {
-	if n == nil {
-		return ""
-	}
 	s, _ := n["kind"].(string)
 	return s
 }
 
 func (n astNode) str(key string) string {
-	if n == nil {
-		return ""
-	}
 	s, _ := n[key].(string)
 	return s
 }
@@ -27,9 +21,6 @@ func (n astNode) str(key string) string {
 // node returns the child value at key as an astNode, or nil if absent/null/
 // not an object.
 func (n astNode) node(key string) astNode {
-	if n == nil {
-		return nil
-	}
 	v, ok := n[key]
 	if !ok || v == nil {
 		return nil
@@ -44,9 +35,6 @@ func (n astNode) node(key string) astNode {
 // list returns the child value at key as a slice of astNode, keeping a nil
 // placeholder for non-object entries (e.g. a stray null) so indices align.
 func (n astNode) list(key string) []astNode {
-	if n == nil {
-		return nil
-	}
 	v, ok := n[key]
 	if !ok || v == nil {
 		return nil
@@ -69,9 +57,6 @@ func (n astNode) list(key string) []astNode {
 // strList returns the child value at key as a slice of strings (used for
 // FunctionDef.params).
 func (n astNode) strList(key string) []string {
-	if n == nil {
-		return nil
-	}
 	v, ok := n[key]
 	if !ok || v == nil {
 		return nil
@@ -92,8 +77,5 @@ func (n astNode) strList(key string) []string {
 // raw returns the raw decoded JSON value at key (used for Constant.value,
 // which may be a bool/json.Number/string/nil depending on value_type).
 func (n astNode) raw(key string) any {
-	if n == nil {
-		return nil
-	}
 	return n[key]
 }

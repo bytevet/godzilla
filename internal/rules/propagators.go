@@ -26,6 +26,12 @@ var defaultPropagatorGlobs = []string{
 	"go:*strings.Builder*.String", "go:*strings.Builder*.Write*",
 	"go:*fmt.Sprintf", "go:*fmt.Sprint", "go:*fmt.Sprintln",
 	"go:*net/url.QueryEscape", "go:*net/url.QueryUnescape", "go:*net/url.PathEscape", "go:*net/url.PathUnescape",
+	// url.Parse / ParseRequestURI: string -> *url.URL. The returned URL (and its
+	// .Path / .Host / .String()) is built ENTIRELY from the input string, so
+	// forwarding taint is semantically exact — recovers the very common
+	// request-string -> url.Parse -> os.Open(u.Path) / http.Get(u.String()) flow
+	// (e.g. minio CVE-2022-35919) that otherwise dies at the bodyless stdlib call.
+	"go:*net/url.Parse", "go:*net/url.ParseRequestURI",
 	// net/http + net/url request accessors: carry request taint through a lowered
 	// framework's INTERNAL stdlib parsing. A framework wraps the request in its own
 	// context type (gin.Context, echo.Context, …) and reads it via these stdlib
@@ -36,6 +42,10 @@ var defaultPropagatorGlobs = []string{
 	// when it derives from a request source, so ordinary code is untouched.
 	"go:*net/url*.Query", "go:*net/url*.ParseQuery", "go:*net/url.Values*.Get",
 	"go:*net/http.Request*.FormValue", "go:*net/http.Request*.PostFormValue",
+	// PathValue: the Go 1.22+ ServeMux path parameter r.PathValue("id") — a
+	// request accessor whose result is fully attacker-controlled. Forwards the
+	// receiver's request taint, exactly like the other net/http accessors here.
+	"go:*net/http.Request*.PathValue",
 	"go:*net/http.Request*.FormFile", "go:*net/http.Request*.Cookie",
 	"go:*net/http.Request*.Referer", "go:*net/http.Request*.UserAgent",
 	"go:*net/http.Header*.Get", "go:*net/http.Header*.Values",
@@ -48,6 +58,13 @@ var defaultPropagatorGlobs = []string{
 	"go:html/template.HTML", "go:html/template.HTMLAttr", "go:html/template.JS",
 	"go:html/template.JSStr", "go:html/template.URL", "go:html/template.CSS",
 	"go:html/template.Srcset",
+	// NOTE: the Go `append` builtin is NOT a blanket propagator — append is called
+	// on every slice in a program, so carrying taint through all of them explodes
+	// the taint set in framework code (a large dep-heavy scan slowdown). It is
+	// propagated ONLY when its result is a byte/rune slice — character-level string
+	// reconstruction (the make([]byte); append(data, s[i]); string(data) idiom of a
+	// non-sanitizing normalize helper) — gated by isByteOrRuneSlice in the engine's
+	// handleCall, not here.
 
 	// --- Python: str methods / builtins ---
 	"py:*.strip", "py:*.lstrip", "py:*.rstrip", "py:*.lower", "py:*.upper", "py:*.title",

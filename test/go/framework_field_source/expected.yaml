@@ -1,0 +1,3 @@
+findings:
+    - rule: go-command-injection
+      min: 1

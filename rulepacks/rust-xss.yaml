@@ -26,8 +26,5 @@ rules:
       - "rust:*encode_text"
       - "rust:*html_escape*"
     propagators:
-      - "rust:*to_string"
-      - "rust:*to_owned"
-      - "rust:*as_str"
       - "rust:format"
       - "rust:*::add"

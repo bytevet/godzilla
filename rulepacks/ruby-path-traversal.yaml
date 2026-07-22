@@ -36,6 +36,9 @@ rules:
       - "ruby:send_data"
       - "ruby:open"                 # Kernel#open(path)
       - "ruby:Kernel.open"
+      - "ruby:FileUtils.*"          # cp/mv/rm/copy/move/... all take path args
+      - "ruby:Dir.glob"             # attacker-controlled glob pattern escapes base
+      - "ruby:Dir.[]"
     # File.join / *.join do NOT contain input to a base directory ("/data" +
     # "../../etc" joins to "/data/../../etc", which still escapes "/data"), so they
     # are propagators, not sanitizers -- mirroring go/py's treatment of

@@ -146,23 +146,18 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
   calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
   Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
-  **Request-object method sugar** (framework-agnostic HTTP sources): a register seeded from a source the rules
-  tag `request_object_sources` (the Go frontend's synthetic `go:@net/http.Request` — the engine reads the rule
-  tag, not a hardcoded source name) carries **request-object provenance**
-  (`reqTainted`); a method call on such a receiver — `c.Query()`, `c.Param()`, `c.Bind(&x)` — is then treated
-  as untrusted (result tainted, pointer out-args filled), even for a framework with **no rules**. Gated on
-  provenance so ordinary taint is untouched, and only for unresolved/external callees. Provenance is
-  **inter-procedural** — a request object passed to a helper makes that helper's parameter a request object too
-  (a `reqEffects`/`paramReqTaint` summary channel mirroring the taint one), so the `*http.Request` direct-method
-  source globs (`FormValue`/`Cookie`/`PathValue`/`PostFormValue`) are redundant and removed; the kept Go request
-  sources are the synthetic `go:@net/http.Request`, `net/http.Header.Get` (a field sub-object), `net/url.Values.Get`,
-  and the free-function accessors (`chi.URLParam`, `mux.Vars`). Method sugar only fires for external callees, so a
-  **lowered** framework (gin/echo/… whose bodies dep-lowering analyzes) carries taint through its own code instead —
-  but that code bottoms out in stdlib request parsers that are NOT lowered (gin's `c.Query` → `c.Request.URL.Query()`
-  then a `queryCache[key]` map read), dropping taint there. The framework-agnostic fix lives in the rules:
-  the net/http+net/url request accessors (`net/url.URL.Query`, `net/url.Values.Get`, `net/http.Request.FormValue`/
-  `Cookie`/…, `net/http.Header.Get`) are **default propagators** (`internal/rules/propagators.go`) — they only
-  forward already-present request taint, so any unmodeled framework built on net/http is covered at no FP cost.
+  **Framework-agnostic HTTP request sources** are covered by two complementary, name-list-free mechanisms —
+  no engine-side per-framework special case. (1) A framework's own accessor is tainted at the **call site** by
+  a rule source glob (`gin:*Context.Query`, `echo:*Context.Param`, …): the accessor result is marked untrusted
+  without analysing the framework's request pipeline — a deliberate **performance** choice, since seeding the
+  framework context object itself would force taint through the whole lowered request machinery. (2) For an
+  **unmodeled** framework built on `net/http`, the net/http+net/url request accessors (`net/url.URL.Query`,
+  `net/url.Values.Get`, `net/http.Request.FormValue`/`Cookie`/`PathValue`/…, `net/http.Header.Get`) are
+  **default propagators** (`internal/rules/propagators.go`): they forward already-present request taint through
+  the framework's INTERNAL stdlib parsing, so any framework layered on net/http is covered at no FP cost.
+  A dependency function that internally reads an `*http.Request` field but exposes no request in its signature
+  (beego/macaron `Controller.Input`, registered via a non-routing verb) is seeded directly via `reqSourceHosts`
+  (`buildReqSourceHosts`, driven by the rules' `request_object_sources` tag — the synthetic `go:@net/http.Request`).
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic and free of any
   language callee-name matching. When an SSRF sink fires, it reconstructs how the tainted URL string was built
   and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`) precedes the first

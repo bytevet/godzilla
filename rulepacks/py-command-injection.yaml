@@ -51,7 +51,6 @@ rules:
     sanitizers:
       - "py:*shlex.quote"
     propagators:
-      - "py:*.join"
       # Deserializing an untrusted request body yields tainted data (the parsed
       # dict/list carries the attacker's input forward). Forwards EXISTING taint
       # only. CVE-2025-47782 motioneye: json.loads(self.request.body) -> device

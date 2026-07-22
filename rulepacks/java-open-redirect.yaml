@@ -36,7 +36,3 @@ rules:
       - "java:*RedirectView.<init>#0"
       - "java:*RedirectView.setUrl#0"
     sanitizers: []
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"

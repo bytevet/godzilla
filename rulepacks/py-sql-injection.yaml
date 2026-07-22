@@ -55,5 +55,3 @@ rules:
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
     sanitizers: []
-    propagators:
-      - "py:*.join"
