@@ -19,22 +19,12 @@ rules:
       - "go:@net/http.Request"
       # Framework request accessors, receiver-type-scoped so they never collide
       # with a same-named sink (e.g. sql.DB.Query).
-      # Gin.
-      - "go:*gin-gonic/gin.Context*.Query"
-      - "go:*gin-gonic/gin.Context*.DefaultQuery"
-      - "go:*gin-gonic/gin.Context*.QueryArray"
-      - "go:*gin-gonic/gin.Context*.QueryMap"
-      - "go:*gin-gonic/gin.Context*.GetQuery"
-      - "go:*gin-gonic/gin.Context*.Param"
-      - "go:*gin-gonic/gin.Context*.PostForm"
-      - "go:*gin-gonic/gin.Context*.DefaultPostForm"
-      - "go:*gin-gonic/gin.Context*.GetHeader"
-      # Echo.
-      - "go:*labstack/echo*Context*.QueryParam"
-      - "go:*labstack/echo*Context*.QueryParams"
-      - "go:*labstack/echo*Context*.Param"
-      - "go:*labstack/echo*Context*.FormValue"
-      - "go:*labstack/echo*Context*.FormParams"
+      # Gin and Echo request accessors are intentionally NOT listed: their route
+      # handlers are recognized (collectRouteHandlers, incl. variadic/named-
+      # HandlerFunc registration) and their accessor bodies are lowered as
+      # dependencies, so request-object provenance carries taint through them.
+      # Fiber/fasthttp remain below: their accessors bottom out in untraceable
+      # fasthttp byte-parsing, so the explicit source glob is still required.
       # Chi.
       - "go:*go-chi/chi*.URLParam"
       # Gorilla mux — path variables.
