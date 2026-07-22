@@ -35,5 +35,3 @@ rules:
     # os.path.join does NOT contain the name to a base directory (a leading
     # "../" still escapes), so it forwards taint rather than clearing it --
     # mirroring py-path-traversal's identical treatment.
-    propagators:
-      - "py:*.join"

@@ -47,6 +47,3 @@ rules:
       # (ElementTree's `.find`/`.findall` collide with str.find, so are excluded).
       - "py:*.xpath#0"
     sanitizers: []
-    propagators:
-      - "py:*.format"
-      - "py:*.join"

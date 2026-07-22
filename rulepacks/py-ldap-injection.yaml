@@ -51,6 +51,3 @@ rules:
     sanitizers:
       - "py:*escape_filter_chars"
       - "py:*escape_dn_chars"
-    propagators:
-      - "py:*.format"
-      - "py:*.join"

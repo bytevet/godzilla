@@ -81,9 +81,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// does a lock-free slice walk instead of a mutexed cache lookup per match, the
 	// dominant engine cost as rule packs grow. Doing it here (not lazily inside a
 	// goroutine) avoids a data race on the shared matcher cache.
-	for i := range e.rs.Rules {
-		e.rs.Rules[i].Compile()
-	}
+	e.rs.Compile()
 
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
@@ -222,18 +220,6 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	return sel
 }
 
-// buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
-// method name -> every lowered concrete method exposing it. An INVOKE call names
-// a method abstractly (not a concrete function), so this lets taint flow into the
-// implementations. It over-approximates (any same-named method matches), which is
-// why such findings stay Medium confidence. It depends only on the immutable
-// function index, so it is built once and shared by every rule.
-//
-// A frontend marks every method — Go, Python, … — with Function.method_name, so
-// the engine identifies methods and their bare name from IR alone, parsing no
-// canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
-// only when the name is unambiguous) is likewise chosen from IR at the call site,
-// via CallCommon.untyped_dispatch, not from any language check here.
 // buildIndirectCallees indexes every function that CONTAINS an indirect call — a
 // CALL whose callee names no function (Callee == "") and is not an INVOKE, i.e. a
 // call through a function VALUE. A function-value points-to fact about a
@@ -267,6 +253,18 @@ func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
 	return has
 }
 
+// buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
+// method name -> every lowered concrete method exposing it. An INVOKE call names
+// a method abstractly (not a concrete function), so this lets taint flow into the
+// implementations. It over-approximates (any same-named method matches), which is
+// why such findings stay Medium confidence. It depends only on the immutable
+// function index, so it is built once and shared by every rule.
+//
+// A frontend marks every method — Go, Python, … — with Function.method_name, so
+// the engine identifies methods and their bare name from IR alone, parsing no
+// canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
+// only when the name is unambiguous) is likewise chosen from IR at the call site,
+// via CallCommon.untyped_dispatch, not from any language check here.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
@@ -277,9 +275,6 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	return methodImpls
 }
 
-// analyzeInterproc runs the worklist-based inter-procedural taint analysis for
-// a single rule. State (parameter taint, return taint) grows monotonically, so
-// iteration converges.
 // sharedIndex holds the rule-independent indexes over the immutable program,
 // built once in Analyze and shared read-only across the parallel per-rule
 // analyses (no goroutine mutates them). Hoisting them here — rather than
@@ -439,6 +434,9 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 	return globalReaders
 }
 
+// analyzeInterproc runs the worklist-based inter-procedural taint analysis for
+// a single rule. State (parameter taint, return taint) grows monotonically, so
+// iteration converges.
 func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
@@ -699,7 +697,7 @@ func analyzeFunc(
 	}
 	// funcVal maps a register to the SET of concrete functions it can hold (a
 	// points-to fact). It is function-scoped and monotonic — a callable identity is
-	// a property of the value, not a per-block fact — so, like reqTainted, it is NOT
+	// a property of the value, not a per-block fact — so it is NOT
 	// reset by the flow-sensitive block driver. Seeded from the caller-supplied
 	// funcSeeds (which param holds which callback), so an indirect call on a
 	// parameter can be resolved to the function value the caller passed in.

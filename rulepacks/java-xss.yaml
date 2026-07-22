@@ -46,8 +46,3 @@ rules:
       - "java:*StringEscapeUtils.escapeHtml*"
       - "java:*Encode.forHtml*"
       - "java:*ESAPI*encodeForHTML*"
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"
-      - "java:*String.format"

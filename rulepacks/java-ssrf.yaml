@@ -47,8 +47,3 @@ rules:
       - "java:*HttpPost.<init>#0"
       - "java:*Request$Builder.url#0"
     sanitizers: []
-    propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"
-      - "java:*String.format"

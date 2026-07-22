@@ -62,9 +62,6 @@ rules:
       - "java:*Files.deleteIfExists#0"
     sanitizers: []
     propagators:
-      - "java:*String.concat"
-      - "java:*StringBuilder.append"
-      - "java:*StringBuilder.toString"
       # String -> Path (java.nio.file) and path composition, so taint flows from
       # the tainted string into a Files.* sink that takes the resulting Path.
       - "java:*Paths.get"

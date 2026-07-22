@@ -57,7 +57,6 @@ rules:
     # os.path.join does NOT contain input to a base directory ("/data" +
     # "../../etc" joins to "/data/../../etc", which still escapes "/data"),
     # so it is a propagator, not a sanitizer -- mirroring go-path-traversal's
-    # identical treatment of filepath.Join/Clean.
+    # identical treatment of filepath.Join/Clean. (py:*.join is a default
+    # propagator, so it need not be repeated here.)
     sanitizers: []
-    propagators:
-      - "py:*.join"
