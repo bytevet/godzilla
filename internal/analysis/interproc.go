@@ -327,36 +327,50 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 	if len(reportable) == 0 {
 		return nil
 	}
-	var globs []string
+	// Two tiers of source, seeded under different bounds:
+	//
+	//   reqObjGlobs — request_object_sources: the synthetic *http.Request, which
+	//     the frontend also plants on a framework's request-pipeline ENTRY (gin's
+	//     ServeHTTP receives the request too). Seeding such an entry makes the
+	//     worklist push request taint through the whole framework pipeline — a
+	//     dep-heavy blow-up — so these are seeded ONLY when user code calls the
+	//     host DIRECTLY (an app calls `c.Input()`, never the pipeline entry).
+	//
+	//   srcGlobs — ordinary sources (framework accessors: gin `c.Query`, echo
+	//     `c.Param`, …). A function hosting one of these CALLS the accessor and
+	//     yields a bounded string result; the pipeline entry does not call them.
+	//     So these are seeded at ANY depth, no direct-call bound — that closes the
+	//     nested-wrapper case (user → svc.Fetch → requtil.ReadQuery → c.Query):
+	//     seeding the innermost host fires the source, and the engine's
+	//     caller-re-enqueue then carries the return taint up the wrapper chain.
+	//
+	// @net/http.Request appears in BOTH lists (it is declared as a plain source
+	// too), so it is removed from srcGlobs below to keep it gated — otherwise the
+	// pipeline entry would be ungated and the blow-up would return.
+	reqObjSet := map[string]bool{}
+	var reqObjGlobs, srcGlobs []string
 	seen := map[string]bool{}
-	addGlob := func(s string) {
-		if !seen[s] {
-			seen[s] = true
-			globs = append(globs, s)
+	for i := range rs.Rules {
+		for _, s := range rs.Rules[i].RequestObjectSources {
+			if !reqObjSet[s] {
+				reqObjSet[s] = true
+				reqObjGlobs = append(reqObjGlobs, s)
+			}
 		}
 	}
 	for i := range rs.Rules {
-		// request_object_sources (the synthetic *http.Request), AND every ordinary
-		// source. A dependency WRAPPER a user calls — `requtil.ReadQuery(c, key)`
-		// that internally does `c.Query(key)` — hosts the source but receives no
-		// tainted argument (the accessor globs taint the RESULT at the call site,
-		// not the context), so the demand-driven scope never analyses it and the
-		// flow is lost. Seeding it (below) fires the source inside the wrapper and
-		// lets its return taint escape to the caller — the same treatment
-		// Controller.Input already gets, now for any framework-accessor wrapper.
-		for _, s := range rs.Rules[i].RequestObjectSources {
-			addGlob(s)
-		}
 		for _, s := range rs.Rules[i].Sources {
-			addGlob(s)
+			if !seen[s] && !reqObjSet[s] {
+				seen[s] = true
+				srcGlobs = append(srcGlobs, s)
+			}
 		}
 	}
-	if len(globs) == 0 {
+	if len(reqObjGlobs) == 0 && len(srcGlobs) == 0 {
 		return nil
 	}
 	// Callees invoked DIRECTLY by user code (by canonical name — byKey is keyed on
-	// it). A concrete method call `c.Input()` names its callee; only these dep
-	// functions are candidates for seeding.
+	// it), the gate for the request-object tier.
 	userCallees := map[string]bool{}
 	for key, fn := range byKey {
 		if fn == nil {
@@ -376,30 +390,35 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 			}
 		}
 	}
-	if len(userCallees) == 0 {
-		return nil
-	}
 
 	hosts := map[string]bool{}
 	for key, fn := range byKey {
 		if fn == nil {
 			continue
 		}
-		// Dependency functions only (user code is already seeded), and only those
-		// user code directly calls.
+		// Dependency functions only (user code is already seeded).
 		if mod := modByKey[key]; mod == nil || reportable[mod.Name] {
 			continue
 		}
-		if !userCallees[key] {
-			continue
-		}
+		userCalled := userCallees[key]
 	scan:
 		for _, b := range fn.Blocks {
 			for _, inst := range b.Instrs {
 				if inst.GetCall() == nil {
 					continue
 				}
-				if callee := inst.Call.GetCallee(); callee != "" && rules.MatchAny(globs, callee) {
+				callee := inst.Call.GetCallee()
+				if callee == "" {
+					continue
+				}
+				// Ordinary framework-accessor source: seed at any depth.
+				if rules.MatchAny(srcGlobs, callee) {
+					hosts[key] = true
+					break scan
+				}
+				// Request-object source: seed only if user code calls this host
+				// directly (excludes the framework's pipeline entry).
+				if userCalled && rules.MatchAny(reqObjGlobs, callee) {
 					hosts[key] = true
 					break scan
 				}
