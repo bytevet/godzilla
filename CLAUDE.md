@@ -158,6 +158,17 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   A dependency function that internally reads an `*http.Request` field but exposes no request in its signature
   (beego/macaron `Controller.Input`, registered via a non-routing verb) is seeded directly via `reqSourceHosts`
   (`buildReqSourceHosts`, driven by the rules' `request_object_sources` tag — the synthetic `go:@net/http.Request`).
+  The **sink-side twin** of source wrappers is the **sink-parameter summary** (`funcResult.taintsParamSink`,
+  mirroring the out-parameter channel `taintsParamMemory`): when untrusted data flows into a *dependency* function
+  that internally reaches a sink (`func Run(cmd string){ exec.Command(cmd) }`), the dep-internal finding is scoped
+  out, so the engine summarizes it and the caller reports it at its own **user-code** call site (Medium
+  confidence). Summaries propagate up a chain of forwarding wrappers until they land in user code. Two precision
+  guards keep this from re-surfacing over-approximations `scopeFindings` used to mask: (a) a summary forms **only
+  for a string-typed parameter** — a raw string into a sink is a precise injection, whereas taint reaching a sink
+  through an `interface{}`/struct param is usually the reflective-ORM over-approximation (xorm `Find`/`Get` bind
+  the value as a `?` placeholder, they do not concatenate it), which would flood findings; (b) a function that is
+  **itself a modeled sink** (gorm `db.Raw`) does not summarize, so its direct call site fires once instead of
+  double-reporting.
 - `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic and free of any
   language callee-name matching. When an SSRF sink fires, it reconstructs how the tainted URL string was built
   and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`) precedes the first
