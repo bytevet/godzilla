@@ -12,18 +12,11 @@ rules:
       command execution, which may allow OS command injection. Pass the command
       and its arguments as a list (e.g. system("cmd", arg1, arg2)) so no shell is
       invoked, and validate inputs.
-    # Request sources are base-scoped: the frontend synthesizes a source CALL
-    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base
-    # (a handler parameter or a free framework accessor), so these globs match a
-    # whole framework's request object rather than a fixed member list.
+    # Pack-specific source: environment / CGI variables (a secondary CLI/CGI
+    # source, not part of the shared request surface).
     sources:
-      - "ruby:params"                # params[:x] / params['x']
-      - "ruby:cookies"               # cookies[:x]
-      - "ruby:params.*"              # params.fetch(:x) / params.dig(...)
-      - "ruby:cookies.*"
-      - "ruby:request.*"             # request.<accessor> (Rails/Sinatra/Rack request)
-      - "ruby:req.*"                 # conventional `req` request receiver
-      - "ruby:*ENV*"                 # environment / CGI variables (secondary source)
+      - "ruby:*ENV*"
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
       # system/exec/spawn only invoke a shell when given a single command string;
       # pin the command argument (#0) so the safe multi-arg form
@@ -40,7 +33,5 @@ rules:
       - "ruby:Shellwords.escape"
       - "ruby:Shellwords.shellescape"
     propagators:
-      - "ruby:*.to_s"
       - "ruby:*.strip"
       - "ruby:*.chomp"
-      - "ruby:*.join"

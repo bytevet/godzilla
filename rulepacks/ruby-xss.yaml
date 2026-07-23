@@ -14,17 +14,7 @@ rules:
       which may allow cross-site scripting (XSS). Escape the value (e.g. the `h`
       / `sanitize` helper, `ERB::Util.html_escape`, or `CGI.escapeHTML`) or rely
       on Rails' automatic output escaping instead of `raw` / `html_safe`.
-    # Request sources are base-scoped: the frontend synthesizes a source CALL
-    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base
-    # (a handler parameter or a free framework accessor), so these globs match a
-    # whole framework's request object rather than a fixed member list.
-    sources:
-      - "ruby:params"          # params[:x] / params['x']
-      - "ruby:cookies"         # cookies[:x]
-      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
-      - "ruby:cookies.*"
-      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
-      - "ruby:req.*"           # conventional `req` request receiver
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
       # Explicit escape-bypassing HTML output helpers.
       - "ruby:raw"                  # raw(user_html) in a view
@@ -46,6 +36,4 @@ rules:
       - "ruby:CGI.escapeHTML"
       - "ruby:CGI.escape_html"
     propagators:
-      - "ruby:*.to_s"
       - "ruby:*.strip"
-      - "ruby:*.join"

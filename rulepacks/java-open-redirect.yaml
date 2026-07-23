@@ -10,26 +10,10 @@ rules:
       open redirect. Validate the target against an allowlist of known
       hosts/paths, or only permit relative paths, instead of redirecting to a
       user-controlled URL.
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameterValues"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getQueryString"
-      - "java:*ServletRequest.getParameter"
-      - "java:*Cookie.getValue"
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     # The redirect target URL is logical arg 0.
     sinks:
       - "java:*HttpServletResponse.sendRedirect#0"

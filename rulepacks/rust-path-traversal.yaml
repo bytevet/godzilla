@@ -14,41 +14,7 @@ rules:
       filesystem path without validation, which may allow path traversal
       (reading or writing files outside the intended directory). Canonicalize the
       path and confirm it stays within an allowed base directory.
-    sources:
-      # axum extractors — request data arrives as typed handler params
-      # (Query/Path/Json/Form), synthesized as sources by the frontend (COV-7).
-      - "rust:axum::extract::Query"
-      - "rust:axum::extract::Path"
-      - "rust:axum::extract::Json"
-      - "rust:axum::extract::Form"
-      # Non-generic axum body/query extractors (raw query string / raw form body).
-      - "rust:axum::extract::RawQuery"
-      - "rust:axum::extract::RawForm"
-      # HTTP request accessors — the real attack surface.
-      - "rust:*Request::query"
-      - "rust:*Request::header"
-      - "rust:*Request::body"
-      - "rust:*Request::get_param"
-      - "rust:*Request::param"
-      - "rust:*HttpRequest::query_string"
-      - "rust:*HttpRequest::headers"
-      - "rust:*HttpRequest::match_info"
-      - "rust:*HttpRequest::uri"
-      - "rust:*HttpRequest::cookie"
-      # rocket/warp/generic request accessors — the URI, headers and cookies are
-      # all attacker-controlled (base-scoped to the request type).
-      - "rust:*Request::uri"
-      - "rust:*Request::headers"
-      - "rust:*Request::cookies"
-      # Environment / CLI args — a real but secondary source (CLI tools, CGI).
-      - "rust:var"
-      - "rust:var_os"
-      - "rust:*env::var"
-      - "rust:*env::var_os"
-      - "rust:args"
-      - "rust:args_os"
-      - "rust:*env::args"
-      - "rust:*env::args_os"
+    extend: $_rust-sources.yaml
     sinks:
       - "rust:*fs::read_to_string#0"
       - "rust:*fs::read#0"
@@ -61,6 +27,7 @@ rules:
       - "rust:*File::create#0"
       - "rust:*OpenOptions::open#1"
     sanitizers: []
+    # Path-specific propagators, kept inline (differs from _rust-propagators.yaml).
     propagators:
       - "rust:*unwrap"
       - "rust:*unwrap_or"
@@ -81,7 +48,7 @@ rules:
       - "rust:*nth"
       - "rust:*first"
       - "rust:*last"
-      - "rust:*iter"                 # also matches *into_iter
+      - "rust:*iter"
       - "rust:*next"
       - "rust:*map"
       - "rust:*chars"

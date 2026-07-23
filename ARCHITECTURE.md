@@ -161,6 +161,8 @@ YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
 Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
 not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
 `rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
+Shared source/propagator lists live in `_`-prefixed **fragments** that a pack pulls
+in with `extend:`, so a language's request sources are defined once, not per pack.
 Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends

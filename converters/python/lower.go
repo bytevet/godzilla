@@ -224,7 +224,35 @@ var (
 	// @blueprint.route) whose URL captures (`<path:fname>`) arrive as params.
 	routeDecoratorVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true, "route": true}
 	handlerMethodVerbs  = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
-	handlerBaseClasses  = map[string]bool{"RequestHandler": true, "MethodView": true}
+	handlerBaseClasses  = map[string]bool{
+		"RequestHandler": true, // Tornado
+		"MethodView":     true, // Flask pluggable views
+		// Django class-based views + DRF APIView. A verb method (get/post/…) of a
+		// subclass takes the URL captures as params after (self, request); those
+		// captures are untrusted route input. Listed by simple base name (matched
+		// transitively), covering both direct `View` subclasses and the concrete
+		// generic views (whose own base `View` is declared in Django, not user
+		// code, so it cannot be resolved by the transitive closure alone).
+		"View":           true, // django.views.generic.View — base of all Django CBVs
+		"TemplateView":   true,
+		"ListView":       true,
+		"DetailView":     true,
+		"CreateView":     true,
+		"UpdateView":     true,
+		"DeleteView":     true,
+		"FormView":       true,
+		"RedirectView":   true,
+		"APIView":        true, // Django REST Framework
+		"GenericAPIView": true, // Django REST Framework
+	}
+	// requestObjectParams name a handler parameter that holds the framework
+	// REQUEST OBJECT itself rather than an untrusted URL capture. Django/DRF verb
+	// methods take it as the first positional after self (`get(self, request,
+	// pk)`); it is excluded from synthetic param sources because request.GET/
+	// .POST/.data accessors are already precise source globs, and seeding the
+	// whole object would be both broader than needed and less precise
+	// (request.user / request.method are not injection sources).
+	requestObjectParams = map[string]bool{"request": true, "websocket": true}
 )
 
 // routeHandlerParams returns the untrusted parameter names of a `def` when it is
@@ -276,13 +304,23 @@ func decoratedRouteParams(node astNode, params []string) []string {
 	return out
 }
 
-// positionalAfterSelf returns the params after a leading self/cls receiver (the
-// URL route captures for a Tornado / MethodView verb method).
+// positionalAfterSelf returns the untrusted params of a handler-class verb
+// method: those after a leading self/cls receiver (the URL route captures for a
+// Tornado / MethodView / Django CBV verb method), minus any that hold the
+// framework request object (see requestObjectParams). Tornado/MethodView methods
+// carry no request param, so the filter is a no-op there; a Django/DRF
+// `get(self, request, pk)` keeps only `pk`.
 func positionalAfterSelf(params []string) []string {
 	if hasSelfReceiver(params) {
-		return params[1:]
+		params = params[1:]
 	}
-	return params
+	out := make([]string, 0, len(params))
+	for _, p := range params {
+		if !requestObjectParams[p] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // hasSelfReceiver reports whether params begins with a conventional method

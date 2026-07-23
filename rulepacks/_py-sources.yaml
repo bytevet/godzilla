@@ -1,0 +1,30 @@
+# Shared Python HTTP request-accessor sources. Pulled into the py-*.yaml rules
+# with `extend: $_py-sources.yaml` (except py-zip-slip, which uses archive
+# sources).
+sources:
+  - "py:@http.param" # synthetic route-handler param source
+  - "py:*request.args.get"
+  - "py:*request.headers.get"
+  - "py:*request.headers.__getitem__"
+  - "py:*request.cookies.get"
+  - "py:*request.cookies.__getitem__"
+  - "py:*request.GET.get"
+  - "py:*request.GET.__getitem__"
+  - "py:*request.POST.get"
+  - "py:*request.POST.__getitem__"
+  - "py:*request.query_params.__getitem__"
+  - "py:*request.query_params.get"
+  - "py:*request.path_params.__getitem__"
+  - "py:*request.path_params.get"
+  - "py:*request.data"
+  - "py:*request.data.get"
+  - "py:*request.data.__getitem__"
+  - "py:*request.json"
+  - "py:*request.form"
+  - "py:*request.get_json"
+  - "py:*request.get_data"
+  - "py:*request.form.get"
+  - "py:*request.values.get"
+  - "py:*request.args.__getitem__"
+  - "py:*request.form.__getitem__"
+  - "py:*request.values.__getitem__"

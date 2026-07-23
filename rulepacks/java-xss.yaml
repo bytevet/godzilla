@@ -12,26 +12,10 @@ rules:
       (e.g. Spring HtmlUtils.htmlEscape, OWASP Encoder.forHtml, or Apache
       StringEscapeUtils.escapeHtml4) or render through a template engine that
       auto-escapes by context.
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getParameterValues"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getQueryString"
-      - "java:*ServletRequest.getParameter"
-      - "java:*Cookie.getValue"
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     # The tainted string is the value written; it is logical arg 0 of the
     # response writer/stream call.
     sinks:

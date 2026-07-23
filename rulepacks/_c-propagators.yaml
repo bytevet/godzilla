@@ -1,0 +1,11 @@
+# Shared C/C++ buffer-copy/string-format propagators. Pulled into the c-*.yaml
+# rules with `extend: [$_c-sources.yaml, $_c-propagators.yaml]`.
+propagators:
+  - "c*:strcpy"
+  - "c*:strncpy"
+  - "c*:strcat"
+  - "c*:strncat"
+  - "c*:sprintf"
+  - "c*:snprintf"
+  - "c*:memcpy"
+  - "c*:strdup"

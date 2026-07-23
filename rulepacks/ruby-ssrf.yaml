@@ -12,15 +12,7 @@ rules:
       server-side request forgery (SSRF) to internal or unintended hosts.
       Validate the destination against an allow-list of hosts before making the
       request.
-    # Request sources are base-scoped: the frontend synthesizes a source CALL
-    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base.
-    sources:
-      - "ruby:params"          # params[:x] / params['x']
-      - "ruby:cookies"         # cookies[:x]
-      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
-      - "ruby:cookies.*"
-      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
-      - "ruby:req.*"           # conventional `req` request receiver
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
       # net/http (canonical const-path names are scoped by the frontend).
       - "ruby:Net::HTTP.get"
@@ -42,6 +34,3 @@ rules:
     # No built-in sanitizer neutralizes tainted input for a request URL; the fix
     # is allow-listing the destination host, not escaping.
     sanitizers: []
-    propagators:
-      - "ruby:*.join"
-      - "ruby:*.to_s"

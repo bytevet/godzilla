@@ -3,6 +3,7 @@ package loader
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"godzilla/internal/rules"
@@ -168,6 +169,108 @@ func TestLoadFileRejectsMalformedSinkSpec(t *testing.T) {
 	}
 	if _, err := LoadFile(ok); err != nil {
 		t.Errorf("LoadFile(ok.yaml) with a valid #0 sink: unexpected error: %v", err)
+	}
+}
+
+// TestExtendMergesFragment verifies that `extend: $_fragment.yaml` merges the
+// fragment's pattern-list fields into the rule: the fragment's entries come
+// first, then the rule's own additions, with duplicates removed.
+func TestExtendMergesFragment(t *testing.T) {
+	dir := t.TempDir()
+	// A fragment is a partial rule (a mapping of pattern-list fields).
+	frag := "sources:\n  - \"go:*A\"\n  - \"go:*B\"\npropagators:\n  - \"go:*P\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "_custom.yaml"), []byte(frag), 0o644); err != nil {
+		t.Fatalf("writing fragment: %v", err)
+	}
+	path := filepath.Join(dir, "rules.yaml")
+	const doc = `
+rules:
+  - id: frag-rule
+    severity: high
+    extend: $_custom.yaml
+    sources:
+      - "go:*C"
+    sinks:
+      - "go:*Sink*"
+`
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatalf("writing rule file: %v", err)
+	}
+	rs, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile() error: %v", err)
+	}
+	if got, want := rs.Rules[0].Sources, []string{"go:*A", "go:*B", "go:*C"}; !slices.Equal(got, want) {
+		t.Errorf("Sources = %v, want %v", got, want)
+	}
+	if got, want := rs.Rules[0].Propagators, []string{"go:*P"}; !slices.Equal(got, want) {
+		t.Errorf("Propagators = %v, want %v", got, want)
+	}
+	// Extend is consumed at load and must not survive into the compiled rule.
+	if len(rs.Rules[0].Extend) != 0 {
+		t.Errorf("Extend = %v, want it cleared after apply", rs.Rules[0].Extend)
+	}
+}
+
+// TestExtendUsesBuiltinFragment verifies a user rule file can extend a fragment
+// shipped in the binary (e.g. $_go-common.yaml).
+func TestExtendUsesBuiltinFragment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	const doc = `
+rules:
+  - id: uses-builtin-frag
+    severity: high
+    extend: $_go-common.yaml
+    sinks:
+      - "go:*Sink*"
+`
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatalf("writing rule file: %v", err)
+	}
+	rs, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile() error: %v", err)
+	}
+	if n := len(rs.Rules[0].Sources); n < 10 {
+		t.Errorf("expected builtin $_go-common.yaml to contribute many sources, got %d", n)
+	}
+}
+
+// TestExtendUnknownFragment verifies that extending a fragment that does not
+// exist is a load error (a typo would otherwise silently drop the shared base).
+func TestExtendUnknownFragment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	const doc = `
+rules:
+  - id: bad-frag-rule
+    severity: high
+    extend: $_does-not-exist.yaml
+    sinks:
+      - "go:*Sink*"
+`
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatalf("writing rule file: %v", err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("LoadFile() extending an unknown fragment: want error, got nil")
+	}
+}
+
+// TestLoadDirRejectsDuplicateIDs verifies two rules sharing an id across a loaded
+// directory are rejected: duplicate ids silently double-report and make a rule
+// un-addressable by the baseline / godzilla:ignore machinery.
+func TestLoadDirRejectsDuplicateIDs(t *testing.T) {
+	dir := t.TempDir()
+	doc := "rules:\n  - id: dup\n    severity: high\n    sinks: [\"go:*Sink*\"]\n"
+	for _, name := range []string{"a.yaml", "b.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+	if _, err := LoadDir(dir); err == nil {
+		t.Fatal("LoadDir() with duplicate rule ids: want error, got nil")
 	}
 }
 

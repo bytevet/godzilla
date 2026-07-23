@@ -26,23 +26,10 @@ rules:
       Untrusted input flows into an unbounded buffer write (strcpy/strcat/sprintf)
       into a fixed-size buffer, which may overflow it. Use the bounded variants
       (strncpy/strncat/snprintf) with a correct size, or a safe string type.
-    sources:
-      - "c*:getenv"
-      - "c*:*scanf"
-      - "c*:fgets"
-      - "c*:gets"
-      - "c*:read"
-      - "c*:recv"
-      - "c*:argv"
+    extend: [$_c-sources.yaml, $_c-propagators.yaml]
     sinks:
       - "c*:strcpy"
       - "c*:strcat"
       - "c*:sprintf"
       - "c*:vsprintf"
     sanitizers: []
-    propagators:
-      - "c*:strncpy"
-      - "c*:strncat"
-      - "c*:snprintf"
-      - "c*:memcpy"
-      - "c*:strdup"

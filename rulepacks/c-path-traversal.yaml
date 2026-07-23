@@ -9,12 +9,7 @@ rules:
       containment, which may allow path traversal (e.g. "../" sequences) to
       access files outside the intended directory. Canonicalize the path and
       verify it stays within an allowed base directory.
-    sources:
-      - "c*:getenv"
-      - "c*:*scanf"
-      - "c*:fgets"
-      - "c*:read"
-      - "c*:recv"
+    extend: [$_c-sources.yaml, $_c-propagators.yaml]
     sinks:
       - "c*:fopen#0"
       - "c*:open#0"
@@ -26,10 +21,3 @@ rules:
     sanitizers:
       - "c*:realpath"
       - "c*:basename"
-    propagators:
-      - "c*:strcpy"
-      - "c*:strncpy"
-      - "c*:strcat"
-      - "c*:snprintf"
-      - "c*:sprintf"
-      - "c*:strdup"

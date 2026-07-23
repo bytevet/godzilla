@@ -10,12 +10,7 @@ rules:
       which may allow memory disclosure or corruption via format specifiers
       (e.g. %n, %s). Pass user input as an argument to a fixed format string
       (printf("%s", user)) instead of as the format itself.
-    sources:
-      - "c*:getenv"
-      - "c*:*scanf"
-      - "c*:fgets"
-      - "c*:read"
-      - "c*:recv"
+    extend: [$_c-sources.yaml, $_c-propagators.yaml]
     # The format argument index differs per function (receiver-excluded, which
     # for C is the actual arg index): printf(fmt), fprintf(stream, fmt),
     # sprintf(buf, fmt), snprintf(buf, size, fmt), syslog(pri, fmt).
@@ -27,7 +22,3 @@ rules:
       - "c*:snprintf#2"
       - "c*:syslog#1"
     sanitizers: []
-    propagators:
-      - "c*:strcpy"
-      - "c*:strncpy"
-      - "c*:strdup"
