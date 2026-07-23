@@ -125,18 +125,95 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	allFns := ssautil.AllFunctions(prog)
 	c.routeHandlers, c.routeFormParams = collectRouteHandlers(allFns)
 
+	// Lower only the functions REACHABLE from user (reportable) code. The whole
+	// dependency closure is enormous — gitea is ~84k functions across 600+ dep
+	// packages — but the demand-driven engine only ever analyses a dependency
+	// function when taint reaches it via a call from user code, so lowering the
+	// unreachable remainder is pure retained-gIR memory that pushes a big scan
+	// into OOM. reachableFuncs mirrors the engine's own dispatch (static callees,
+	// closures, and CHA-by-method-name for interface calls), so it cannot drop
+	// anything the engine could reach: recall is unchanged, only never-analysed
+	// dead dependency code is skipped. Reportable-package functions are always
+	// kept (they are the taint seeds and where findings surface).
+	reach := reachableFuncs(allFns, reportable)
+
 	// pkg.Members only exposes package-level funcs, not methods or anonymous
 	// function literals (closures) — and vulnerable code frequently lives inside
 	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
 	// function/method/closure; group them by their defining package.
 	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
 	for fn := range allFns {
-		if fn.Pkg != nil {
+		if fn.Pkg != nil && reach[fn] {
 			funcsByPkg[fn.Pkg] = append(funcsByPkg[fn.Pkg], fn)
 		}
 	}
 
 	return c.lowerModules(funcsByPkg, stdlibPkgs), nil
+}
+
+// reachableFuncs returns the functions reachable from user (reportable) code by
+// following the same call edges the taint engine does: direct/static calls,
+// function values referenced as instruction operands (closures via MakeClosure,
+// func-valued args, method values), and interface dispatch resolved by CHA —
+// every concrete method whose name matches an invoked interface method, exactly
+// as the engine's methodImpls index. This is a SOUND over-approximation of what
+// the engine can analyse: a function it omits is one no reachable call site can
+// target, so skipping its lowering cannot change any finding. Reportable-package
+// functions are always included (taint seeds; findings surface there), even ones
+// with no static caller (e.g. a handler registered by reflection or a route
+// verb). Bodiless (stdlib export-data) functions have no Blocks and contribute
+// no edges, matching the "stdlib is modeled by rules, not lowered" policy.
+func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) map[*ssa.Function]bool {
+	// method name -> concrete methods exposing it, for interface-call resolution.
+	methodsByName := map[string][]*ssa.Function{}
+	for fn := range allFns {
+		if fn.Signature != nil && fn.Signature.Recv() != nil {
+			methodsByName[fn.Name()] = append(methodsByName[fn.Name()], fn)
+		}
+	}
+	reach := make(map[*ssa.Function]bool, len(allFns))
+	var queue []*ssa.Function
+	add := func(fn *ssa.Function) {
+		if fn != nil && allFns[fn] && !reach[fn] {
+			reach[fn] = true
+			queue = append(queue, fn)
+		}
+	}
+	for fn := range allFns {
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil && reportable[fn.Pkg.Pkg.Path()] {
+			add(fn)
+		}
+	}
+	for len(queue) > 0 {
+		fn := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				if call, ok := instr.(ssa.CallInstruction); ok {
+					cc := call.Common()
+					if callee := cc.StaticCallee(); callee != nil {
+						add(callee)
+					} else if cc.IsInvoke() {
+						for _, m := range methodsByName[cc.Method.Name()] {
+							add(m)
+						}
+					}
+				}
+				// Any function VALUE referenced here (MakeClosure.Fn, a
+				// func-typed argument, a method value) can later be called.
+				rands := instr.Operands(nil)
+				for _, op := range rands {
+					if op == nil {
+						continue
+					}
+					if f, ok := (*op).(*ssa.Function); ok {
+						add(f)
+					}
+				}
+			}
+		}
+	}
+	return reach
 }
 
 // classifyPackages is Phase A of the two-phase load: a metadata-only `go list`
@@ -257,7 +334,16 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	// type alias into a transitive stdlib package), and the SSA builder panics
 	// on any referenced-but-uncreated package, so we additionally create the
 	// full transitive types.Package closure (types-only) of every import.
-	prog := ssa.NewProgram(initial[0].Fset, ssa.InstantiateGenerics)
+	// Build generic functions ONCE in their parameterized form (mode 0), NOT one
+	// monomorphized SSA copy per type-instantiation (ssa.InstantiateGenerics).
+	// The taint engine is context-insensitive — it merges all instantiations of a
+	// callee anyway — so instantiation adds no precision it can use, while on a
+	// generics-heavy dependency closure (e.g. the k8s client-go / apimachinery
+	// libraries that argo-workflows and gitea pull in) it multiplies the live SSA
+	// set enough to exhaust memory and OOM-kill a whole-repo scan. Dropping it
+	// keeps every generic body analyzed (AllFunctions still yields it) at a
+	// fraction of the footprint.
+	prog := ssa.NewProgram(initial[0].Fset, 0)
 	created := map[*types.Package]bool{}
 	var createTypesOnly func(tp *types.Package)
 	createTypesOnly = func(tp *types.Package) {

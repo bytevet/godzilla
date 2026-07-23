@@ -21,6 +21,7 @@ import (
 	"godzilla/internal/buildpolicy"
 	"godzilla/internal/config"
 	"godzilla/internal/llm"
+	"godzilla/internal/memlimit"
 	"godzilla/internal/report"
 	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
@@ -89,6 +90,11 @@ func usage() {
 }
 
 func main() {
+	// Cap the heap relative to available RAM so a large whole-repo scan GCs
+	// harder instead of being OOM-killed mid-analysis (the default GC target of
+	// ~2x the live set can exceed host memory on a big dependency closure).
+	memlimit.Configure()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(exitUsage)
