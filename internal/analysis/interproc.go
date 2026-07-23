@@ -329,12 +329,26 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 	}
 	var globs []string
 	seen := map[string]bool{}
+	addGlob := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			globs = append(globs, s)
+		}
+	}
 	for i := range rs.Rules {
+		// request_object_sources (the synthetic *http.Request), AND every ordinary
+		// source. A dependency WRAPPER a user calls — `requtil.ReadQuery(c, key)`
+		// that internally does `c.Query(key)` — hosts the source but receives no
+		// tainted argument (the accessor globs taint the RESULT at the call site,
+		// not the context), so the demand-driven scope never analyses it and the
+		// flow is lost. Seeding it (below) fires the source inside the wrapper and
+		// lets its return taint escape to the caller — the same treatment
+		// Controller.Input already gets, now for any framework-accessor wrapper.
 		for _, s := range rs.Rules[i].RequestObjectSources {
-			if !seen[s] {
-				seen[s] = true
-				globs = append(globs, s)
-			}
+			addGlob(s)
+		}
+		for _, s := range rs.Rules[i].Sources {
+			addGlob(s)
 		}
 	}
 	if len(globs) == 0 {

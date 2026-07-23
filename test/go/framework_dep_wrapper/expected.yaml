@@ -1,0 +1,4 @@
+# Source (c.Query) is inside a dependency wrapper; taint must still reach the sink.
+findings:
+    - rule: go-command-injection
+      min: 1
