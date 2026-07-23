@@ -9,10 +9,9 @@ rules:
       process execution (Runtime.exec / ProcessBuilder), which may allow OS
       command injection. Avoid passing user-controlled data to a shell; use a
       fixed argument list and validate inputs.
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     sinks:
       - "java:*Runtime.exec"
       - "java:*ProcessBuilder.command"

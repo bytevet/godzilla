@@ -15,10 +15,9 @@ rules:
       allow server-side request forgery (SSRF). Validate the target against an
       allowlist of permitted hosts and reject internal/link-local addresses
       before making the request.
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The request URL/URI is logical arg 0 in each case (receiver excluded).
     sinks:
       - "java:*java/net/URL.<init>#0"

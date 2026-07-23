@@ -1,0 +1,5 @@
+# Shared Java NON-request source: the process environment. Kept out of the
+# request-surface fragment (_java-sources.yaml) because env is not part of the
+# HTTP attack surface. Pulled into the java-*.yaml dataflow rules via `extend`.
+sources:
+  - "java:*System.getenv"

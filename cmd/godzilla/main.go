@@ -395,7 +395,7 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 		if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
 			return c // worst severity first
 		}
-		return cmp.Compare(posString(a.SinkPos), posString(b.SinkPos))
+		return cmp.Compare(analysis.PosString(a.SinkPos), analysis.PosString(b.SinkPos))
 	})
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
@@ -428,8 +428,8 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 	for _, f := range active {
 		fmt.Fprintf(w, "[%s] %s (%s, confidence: %s)\n", f.Severity, f.RuleID, f.CWE, f.Confidence)
 		fmt.Fprintf(w, "  %s\n", f.Message)
-		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", posString(f.SinkPos), f.SinkCallee)
-		fmt.Fprintf(w, "  source: %s\n", posString(f.SourcePos))
+		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", analysis.PosString(f.SinkPos), f.SinkCallee)
+		fmt.Fprintf(w, "  source: %s\n", analysis.PosString(f.SourcePos))
 		fmt.Fprintf(w, "  in:     %s\n\n", f.Function)
 	}
 
@@ -440,7 +440,7 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 			if by == "" {
 				by = "suppressed"
 			}
-			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s  (%s)\n", f.Severity, f.RuleID, posString(f.SinkPos), f.SinkCallee, by)
+			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s  (%s)\n", f.Severity, f.RuleID, analysis.PosString(f.SinkPos), f.SinkCallee, by)
 			if f.SuppressionReason != "" {
 				fmt.Fprintf(w, "    reason: %s\n", f.SuppressionReason)
 			}
@@ -452,13 +452,6 @@ func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Seve
 		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n", len(active), gated, threshold, len(suppressed))
 	}
 	return gated
-}
-
-func posString(p *ir.Position) string {
-	if p == nil {
-		return "<unknown>"
-	}
-	return fmt.Sprintf("%s:%d:%d", p.Filename, p.Line, p.Column)
 }
 
 // summary holds the aggregate counts and histograms computed from a

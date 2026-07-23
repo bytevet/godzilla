@@ -240,12 +240,12 @@ func writeFindingFacts(b *strings.Builder, f analysis.Finding) {
 	fmt.Fprintf(b, "Language: %s\n", f.Language)
 	fmt.Fprintf(b, "Function: %s\n", f.Function)
 	fmt.Fprintf(b, "Sink callee: %s\n", f.SinkCallee)
-	fmt.Fprintf(b, "Source location: %s\n", posString(f.SourcePos))
-	fmt.Fprintf(b, "Sink location: %s\n", posString(f.SinkPos))
+	fmt.Fprintf(b, "Source location: %s\n", analysis.PosString(f.SourcePos))
+	fmt.Fprintf(b, "Sink location: %s\n", analysis.PosString(f.SinkPos))
 	if len(f.Steps) >= 2 {
 		b.WriteString("Taint path (source -> sink):\n")
 		for _, p := range f.Steps {
-			fmt.Fprintf(b, "  - %s\n", posString(p))
+			fmt.Fprintf(b, "  - %s\n", analysis.PosString(p))
 		}
 	}
 	writeRuleDefinition(b, f)
@@ -354,7 +354,7 @@ func codeContextFor(f analysis.Finding) string {
 				case len(f.Steps) - 1:
 					label = "sink"
 				}
-				fmt.Fprintf(&b, "-- %s (%s) --\n", label, posString(p))
+				fmt.Fprintf(&b, "-- %s (%s) --\n", label, analysis.PosString(p))
 				b.WriteString(snip)
 			}
 		}
@@ -373,13 +373,6 @@ func codeContextFor(f analysis.Finding) string {
 		}
 	}
 	return b.String()
-}
-
-func posString(p *ir.Position) string {
-	if p == nil {
-		return "<unknown>"
-	}
-	return fmt.Sprintf("%s:%d:%d", p.GetFilename(), p.GetLine(), p.GetColumn())
 }
 
 // snippet returns up to ctx lines on either side of p's line, each prefixed with

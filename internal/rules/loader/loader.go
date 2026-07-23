@@ -17,6 +17,7 @@ package loader
 
 import (
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -60,30 +61,7 @@ func LoadDir(dir string) (*rules.RuleSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("loader: read dir %s: %w", dir, err)
-	}
-
-	out := &rules.RuleSet{}
-	for _, entry := range entries {
-		if entry.IsDir() || !isYAML(entry.Name()) || isFragment(entry.Name()) {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("loader: read %s: %w", entry.Name(), err)
-		}
-		rs, err := parse(entry.Name(), data, frags)
-		if err != nil {
-			return nil, err
-		}
-		out.Rules = append(out.Rules, rs.Rules...)
-	}
-	if err := checkDuplicateIDs(out); err != nil {
-		return nil, fmt.Errorf("loader: %s: %w", dir, err)
-	}
-	return out, nil
+	return loadRules(os.DirFS(dir), dir, frags)
 }
 
 // Builtin loads Godzilla's embedded, shipped-in-the-binary rule set (the
@@ -94,19 +72,26 @@ func Builtin() (*rules.RuleSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := rulepacks.Builtin.ReadDir(".")
-	if err != nil {
-		return nil, fmt.Errorf("loader: read embedded builtin rules: %w", err)
-	}
+	return loadRules(rulepacks.Builtin, "builtin rulepacks", frags)
+}
 
+// loadRules parses every non-fragment *.yaml/*.yml rulepack directly under fsys's
+// root against frags, concatenates their rules, and rejects duplicate ids. what
+// labels fsys in wrapped errors. Shared by LoadDir (an on-disk directory) and
+// Builtin (the embedded rulepacks FS), which differ only in the filesystem.
+func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, error) {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil, fmt.Errorf("loader: read %s: %w", what, err)
+	}
 	out := &rules.RuleSet{}
 	for _, entry := range entries {
 		if entry.IsDir() || !isYAML(entry.Name()) || isFragment(entry.Name()) {
 			continue
 		}
-		data, err := rulepacks.Builtin.ReadFile(entry.Name())
+		data, err := fs.ReadFile(fsys, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("loader: read embedded rule file %s: %w", entry.Name(), err)
+			return nil, fmt.Errorf("loader: read %s: %w", entry.Name(), err)
 		}
 		rs, err := parse(entry.Name(), data, frags)
 		if err != nil {
@@ -115,7 +100,7 @@ func Builtin() (*rules.RuleSet, error) {
 		out.Rules = append(out.Rules, rs.Rules...)
 	}
 	if err := checkDuplicateIDs(out); err != nil {
-		return nil, fmt.Errorf("loader: builtin rulepacks: %w", err)
+		return nil, fmt.Errorf("loader: %s: %w", what, err)
 	}
 	return out, nil
 }

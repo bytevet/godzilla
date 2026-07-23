@@ -1,0 +1,10 @@
+# Shared Python filesystem path sinks, pulled into py-path-traversal and
+# py-zip-slip via `extend: $_py-fs-sinks.yaml`: both treat the same
+# filesystem-write/serve primitives as the point at which a traversal takes
+# effect. (os.path.join does NOT contain the path — py:*.join is a default
+# propagator, not a sanitizer.)
+sinks:
+  - "py:*open"         # builtin open(), io.open, codecs.open, ...
+  - "py:os.remove"
+  - "py:*send_file"    # Flask file serving
+  - "py:*FileResponse" # Starlette/FastAPI, also RangedFileResponse

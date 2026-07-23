@@ -50,9 +50,10 @@ func detectAvailable() int64 {
 			best = v
 		}
 	}
-	consider(readMemTotal())
-	consider(readCgroupLimit("/sys/fs/cgroup/memory.max"))                   // cgroup v2
-	consider(readCgroupLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes")) // cgroup v1
+	memTotal := readMemTotal()
+	consider(memTotal)
+	consider(readCgroupLimit("/sys/fs/cgroup/memory.max", memTotal))                   // cgroup v2
+	consider(readCgroupLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes", memTotal)) // cgroup v1
 	return best
 }
 
@@ -79,7 +80,7 @@ func readMemTotal() int64 {
 // readCgroupLimit reads a cgroup memory limit file. It returns 0 for "max"
 // (v2 unlimited) or a sentinel-huge v1 value, so an unlimited cgroup does not
 // mask the real host bound.
-func readCgroupLimit(path string) int64 {
+func readCgroupLimit(path string, memTotal int64) int64 {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
@@ -94,7 +95,7 @@ func readCgroupLimit(path string) int64 {
 	}
 	// cgroup v1 encodes "unlimited" as a near-max int64 (e.g. PAGE_COUNTER_MAX);
 	// anything at or above the host's physical memory is not a real constraint.
-	if mt := readMemTotal(); mt > 0 && v >= mt {
+	if memTotal > 0 && v >= memTotal {
 		return 0
 	}
 	return v

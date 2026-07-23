@@ -12,10 +12,9 @@ rules:
       deserializing untrusted input; if unavoidable, use a format without
       polymorphic type resolution and constrain allowed types (e.g. an
       ObjectInputFilter, SnakeYAML SafeConstructor, or a JSON allowlist).
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The untrusted stream/string is logical arg 0: the ObjectInputStream is
     # constructed around a tainted InputStream, or the parser is handed a tainted
     # document directly.

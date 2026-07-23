@@ -104,18 +104,15 @@ package js_converter
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"sort"
 	"strings"
-	"sync"
 
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
 
+	"godzilla/internal/chunks"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -145,28 +142,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	var files []string
 	if info.IsDir() {
-		walkErr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				if walkignore.SkipDir(d.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if IsJSFamily(p) && !walkignore.SkipFile(d.Name()) {
-				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
-					return nil
-				}
-				files = append(files, p)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return nil, walkErr
+		files, err = walkignore.CollectSources(abs, IsJSFamily)
+		if err != nil {
+			return nil, err
 		}
-		sort.Strings(files)
 	} else {
 		files = []string{abs}
 	}
@@ -211,19 +190,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		err           error
 	}
 	results := make([]jsFileResult, len(files))
-	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
-	var wg sync.WaitGroup
-	for i, f := range files {
-		wg.Add(1)
-		go func(i int, f string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			mod, defaultExport, err := c.convertJSFile(f, moduleNameFor(root, f))
+	chunks.Run(len(files), func(start, end int) {
+		for i := start; i < end; i++ {
+			mod, defaultExport, err := c.convertJSFile(files[i], moduleNameFor(root, files[i]))
 			results[i] = jsFileResult{mod, defaultExport, err}
-		}(i, f)
-	}
-	wg.Wait()
+		}
+	})
 
 	prog := &ir.Program{Mode: "ast"}
 	// defaultExports maps each module name to its default-export function

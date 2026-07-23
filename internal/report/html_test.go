@@ -112,13 +112,13 @@ func TestWriteHTML_Empty(t *testing.T) {
 }
 
 func TestFormatPosition(t *testing.T) {
-	if got := formatPosition(nil); got != "<unknown>" {
-		t.Errorf("formatPosition(nil) = %q, want %q", got, "<unknown>")
+	if got := analysis.PosString(nil); got != "<unknown>" {
+		t.Errorf("PosString(nil) = %q, want %q", got, "<unknown>")
 	}
 
 	pos := &ir.Position{Filename: "foo.go", Line: 3, Column: 7}
-	if got, want := formatPosition(pos), "foo.go:3:7"; got != want {
-		t.Errorf("formatPosition(%+v) = %q, want %q", pos, got, want)
+	if got, want := analysis.PosString(pos), "foo.go:3:7"; got != want {
+		t.Errorf("PosString(%+v) = %q, want %q", pos, got, want)
 	}
 }
 

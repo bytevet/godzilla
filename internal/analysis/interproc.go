@@ -316,6 +316,34 @@ type sharedIndex struct {
 	// demand-driven — a source that never runs produces no taint. Built once,
 	// rule-independent (the union of all rules' request_object_sources).
 	reqSourceHosts map[string]bool
+	// fnDefs memoizes the rule-independent per-function structures (the def map +
+	// the non-escaping-alloc set). Both depend only on the immutable function and
+	// are read-only after build, so they are built once and shared across the
+	// parallel per-rule analyses instead of being rebuilt on every
+	// (function x rule x re-enqueue) call — the same O(rules x program) hoist the
+	// indexes above already apply to methodImpls/callers/globalReaders.
+	fnDefs sync.Map // *ir.Function -> *fnDefsEntry
+}
+
+// fnDefsEntry holds the memoized rule-independent per-function analysis inputs.
+type fnDefsEntry struct {
+	defs        map[string]*ir.Instruction
+	nonEscaping map[string]bool
+}
+
+// defsFor returns the (def map, non-escaping-alloc set) for fn, building them once
+// and caching on the shared index. Both are deterministic pure functions of the
+// immutable fn and read-only after build, so concurrent readers share one copy.
+func (idx *sharedIndex) defsFor(fn *ir.Function) (map[string]*ir.Instruction, map[string]bool) {
+	if v, ok := idx.fnDefs.Load(fn); ok {
+		e := v.(*fnDefsEntry)
+		return e.defs, e.nonEscaping
+	}
+	defs := buildDefs(fn)
+	e := &fnDefsEntry{defs: defs, nonEscaping: nonEscapingAllocs(fn, defs)}
+	actual, _ := idx.fnDefs.LoadOrStore(fn, e)
+	e = actual.(*fnDefsEntry)
+	return e.defs, e.nonEscaping
 }
 
 // buildReqSourceHosts returns the set of DEPENDENCY function keys that both
@@ -566,7 +594,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// caller to report instead (taintsParamSink). An empty scope makes every
 		// function reportable, matching the "seed everything" mode above.
 		funcReportable := len(idx.reportable) == 0 || idx.reportable[mod.Name]
-		res := analyzeFunc(mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
+		res := analyzeFunc(idx, mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -642,23 +670,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// (ENG-6b): record it on the callee's summary and re-enqueue its callers
 		// so the argument they pass at that position picks up the taint.
 		if len(res.taintsParamMemory) > 0 {
-			m := paramMemTaint[name]
-			if m == nil {
-				m = map[int]*ir.Position{}
-				paramMemTaint[name] = m
-			}
-			changed := false
-			for idx, origin := range res.taintsParamMemory {
-				if _, exists := m[idx]; !exists {
-					m[idx] = origin
-					changed = true
-				}
-			}
-			if changed {
-				for _, caller := range callers[name] {
-					enqueue(caller)
-				}
-			}
+			mergeParamSummary(paramMemTaint, name, res.taintsParamMemory, callers, enqueue)
 		}
 
 		// This (dependency) function routes one of its string parameters into a sink
@@ -666,27 +678,62 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// callers so a call passing tainted data at that position reports the flow at
 		// its own site. Mirrors the out-parameter-memory channel above.
 		if len(res.taintsParamSink) > 0 {
-			m := paramSinkTaint[name]
-			if m == nil {
-				m = map[int]*ir.Position{}
-				paramSinkTaint[name] = m
-			}
-			changed := false
-			for idx, pos := range res.taintsParamSink {
-				if _, exists := m[idx]; !exists {
-					m[idx] = pos
-					changed = true
-				}
-			}
-			if changed {
-				for _, caller := range callers[name] {
-					enqueue(caller)
-				}
-			}
+			mergeParamSummary(paramSinkTaint, name, res.taintsParamSink, callers, enqueue)
 		}
 	}
 
 	return findings
+}
+
+// newTaintFinding builds a source->sink Finding with the fields shared by every
+// taint report: the matched rule's identity/severity/message/globs, the enclosing
+// function's name+package (for user-code scoping), and the flow's positions. The
+// two call sites (a direct sink, and a dependency sink-wrapper reported at the
+// caller) differ only in Confidence and which positions they pass, so they share
+// this constructor to stay in lockstep as Finding evolves.
+func newTaintFinding(rule *rules.Rule, mod *ir.Module, fn *ir.Function, srcPos, sinkPos *ir.Position, callee string, steps []*ir.Position, conf Confidence) Finding {
+	return Finding{
+		RuleID:         rule.ID,
+		Severity:       rule.Severity,
+		Confidence:     conf,
+		CWE:            rule.CWE,
+		Message:        rule.Message,
+		Language:       mod.Language,
+		Function:       fn.CanonicalName,
+		Package:        fn.PackageName,
+		SourcePos:      srcPos,
+		SinkPos:        sinkPos,
+		SinkCallee:     callee,
+		Steps:          steps,
+		RuleSanitizers: rule.Sanitizers,
+		RuleSources:    rule.Sources,
+	}
+}
+
+// mergeParamSummary records a function's parameter-indexed summary (out-parameter
+// memory fill or dependency sink-wrapper) on the callee's shared map with
+// first-seen-wins semantics, and re-enqueues the callee's callers when a new
+// parameter index is added so they pick up the new fact. Shared by the two
+// per-parameter summary channels (taintsParamMemory, taintsParamSink), which have
+// the same map shape and propagation rule.
+func mergeParamSummary(dst map[string]map[int]*ir.Position, name string, src map[int]*ir.Position, callers map[string][]string, enqueue func(string)) {
+	m := dst[name]
+	if m == nil {
+		m = map[int]*ir.Position{}
+		dst[name] = m
+	}
+	changed := false
+	for idx, pos := range src {
+		if _, exists := m[idx]; !exists {
+			m[idx] = pos
+			changed = true
+		}
+	}
+	if changed {
+		for _, caller := range callers[name] {
+			enqueue(caller)
+		}
+	}
 }
 
 // propagatorOperands returns the values whose taint a propagating call carries
@@ -723,6 +770,7 @@ func isStringType(t *ir.Type) bool {
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
 func analyzeFunc(
+	idx *sharedIndex,
 	mod *ir.Module,
 	fn *ir.Function,
 	rule *rules.Rule,
@@ -744,8 +792,7 @@ func analyzeFunc(
 	// so the transfer closures below (which capture this variable) always operate
 	// on the right per-block facts.
 	tainted := map[string]*ir.Position{}
-	defs := buildDefs(fn)
-	nonEscaping := nonEscapingAllocs(fn, defs)
+	defs, nonEscaping := idx.defsFor(fn)
 
 	// Guard/barrier index (ENG-9), built once and only for a rule that declares
 	// validators (nil otherwise, so the common path pays nothing). curBlock tracks
@@ -1180,22 +1227,7 @@ func analyzeFunc(
 					// Leaving reported unset on suppression lets that real flow fire.
 					reported[inst] = true
 					steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
-					res.findings = append(res.findings, Finding{
-						RuleID:         rule.ID,
-						Severity:       rule.Severity,
-						Confidence:     confidenceFor(pos),
-						CWE:            rule.CWE,
-						Message:        rule.Message,
-						Language:       mod.Language,
-						Function:       fn.CanonicalName,
-						Package:        fn.PackageName,
-						SourcePos:      pos,
-						SinkPos:        inst.Pos,
-						SinkCallee:     callee,
-						Steps:          steps,
-						RuleSanitizers: rule.Sanitizers,
-						RuleSources:    rule.Sources,
-					})
+					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
 					// Dependency sink wrapper: this finding will be scoped out (the sink
 					// sits in a library). If the tainted value entered through one of THIS
 					// function's string parameters, summarize it so the caller reports the
@@ -1310,22 +1342,7 @@ func analyzeFunc(
 					}
 					reported[inst] = true
 					steps := reconstructPath(defs, tainted, a.GetRegName(), pos, inst.Pos)
-					res.findings = append(res.findings, Finding{
-						RuleID:         rule.ID,
-						Severity:       rule.Severity,
-						Confidence:     ConfidenceMedium, // sink lives across a call boundary
-						CWE:            rule.CWE,
-						Message:        rule.Message,
-						Language:       mod.Language,
-						Function:       fn.CanonicalName,
-						Package:        fn.PackageName,
-						SourcePos:      pos,
-						SinkPos:        inst.Pos, // the user call into the wrapper
-						SinkCallee:     callee,
-						Steps:          steps,
-						RuleSanitizers: rule.Sanitizers,
-						RuleSources:    rule.Sources,
-					})
+					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, ConfidenceMedium)) // SinkPos = user call into the wrapper; Medium: sink across a call boundary
 				} else if !fnIsSink {
 					// Still inside a dependency: propagate the summary up if the tainted
 					// arg forwards one of THIS function's string parameters.

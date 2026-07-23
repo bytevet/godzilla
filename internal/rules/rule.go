@@ -292,35 +292,37 @@ func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
 // (it reintroduces the parameterized-query false positive). The loader rejects
 // it so a typo fails loud at load time instead of quietly weakening the sink.
 func InvalidSinkSpec(entry string) bool {
-	_, spec, ok := strings.Cut(entry, "#")
-	if !ok {
-		return false // bare pattern legitimately means "all arguments"
-	}
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return true // "#" with nothing after it
-	}
-	for _, f := range strings.Split(spec, ",") {
-		if n, err := strconv.Atoi(strings.TrimSpace(f)); err != nil || n < 0 {
-			return true // a token that is not a non-negative integer
-		}
-	}
-	return false
+	_, _, valid := parseSinkSpec(entry)
+	return !valid
 }
 
 // parseSink splits a sink entry "pattern#i,j,..." into its glob pattern and the
 // injection-point indices. A bare pattern (no "#") yields nil indices (all args).
 func parseSink(entry string) (pattern string, args []int32) {
+	pattern, args, _ = parseSinkSpec(entry)
+	return pattern, args
+}
+
+// parseSinkSpec parses a sink entry "pattern#i,j,..." into its glob pattern and
+// injection-point indices, and reports whether the "#" spec is well-formed. valid
+// is true for a bare pattern (no "#"); for a "#" spec it is false when the spec is
+// empty/whitespace-only or any token is not a non-negative integer — such tokens
+// are leniently dropped from args, matching the runtime parser, but flip valid so
+// the loader can reject the typo (see InvalidSinkSpec).
+func parseSinkSpec(entry string) (pattern string, args []int32, valid bool) {
 	pattern, spec, ok := strings.Cut(entry, "#")
 	if !ok {
-		return entry, nil
+		return entry, nil, true // bare pattern: valid, all args
 	}
+	valid = strings.TrimSpace(spec) != "" // "#" with nothing after it is invalid
 	for _, f := range strings.Split(spec, ",") {
 		if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil && n >= 0 {
 			args = append(args, int32(n))
+		} else {
+			valid = false // a token that is not a non-negative integer
 		}
 	}
-	return pattern, args
+	return pattern, args, valid
 }
 
 // IsSanitizer reports whether callee matches any of the rule's sanitizer patterns.

@@ -8,7 +8,44 @@
 // that are too large or are obviously generated/minified bundles.
 package walkignore
 
-import "strings"
+import (
+	"io/fs"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// CollectSources walks root and returns the sorted list of files for which
+// match(path) is true, applying the shared prune policy: skip ignored directories
+// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig). A
+// walk error aborts. Shared by the interpreted-language frontends (Python, JS,
+// Ruby), whose directory walks differ only in the file predicate.
+func CollectSources(root string, match func(path string) bool) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if SkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if match(p) && !SkipFile(d.Name()) {
+			if fi, e := d.Info(); e == nil && TooBig(fi.Size()) {
+				return nil
+			}
+			files = append(files, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}
 
 // skipDirs are directory base names pruned from every source walk.
 var skipDirs = map[string]bool{

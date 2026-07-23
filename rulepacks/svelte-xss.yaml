@@ -15,25 +15,14 @@ rules:
       Scripting (XSS). Render the value with ordinary `{ }` interpolation, which
       auto-escapes, or sanitize it (e.g. DOMPurify.sanitize) before rendering it
       as HTML.
+    # Shared browser sources + HTML sanitizers come from the fragment; only the
+    # SvelteKit-specific sources stay inline. (Component props via `export let`
+    # bind to CommonJS exports after the esbuild lowering, so the reliable
+    # untrusted sources are the browser URL, $page, and query parsing.)
+    extend: $_js-sfc-xss.yaml
     sources:
-      # Component props passed via `export let` bind to CommonJS exports after the
-      # esbuild lowering; the reliable untrusted sources are the browser URL,
-      # SvelteKit's $page, and query parsing.
-      - "js:window.location*"
-      - "js:*.location.href"
-      - "js:*.location.search"
-      - "js:*.location.hash"
-      - "js:document.URL"
-      - "js:document.cookie"
-      - "js:*URLSearchParams*"
       - "js:*$page*"
       - "js:*useSearchParams*"
     sinks:
       - "js:__godzilla_svelte_html"
-    sanitizers:
-      - "js:*DOMPurify*"
-      - "js:*.sanitize"
-      - "js:*sanitizeHtml"
-      - "js:*escapeHtml"
-      - "js:*xss"
     propagators: []

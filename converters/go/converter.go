@@ -455,15 +455,12 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 // targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
 // on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
-	return &Converter{
-		fset:            c.fset,
-		typeCache:       make(map[types.Type]*ir.Type),
-		baseTypes:       c.typeCache,
-		fnNames:         make(map[*ssa.Function]string),
-		valueCache:      make(map[ssa.Value]*ir.Value),
-		routeHandlers:   c.routeHandlers,
-		routeFormParams: c.routeFormParams,
-	}
+	w := NewConverter() // shares NewConverter's per-converter cache initialization
+	w.fset = c.fset
+	w.baseTypes = c.typeCache
+	w.routeHandlers = c.routeHandlers
+	w.routeFormParams = c.routeFormParams
+	return w
 }
 
 // addPackageMembers lowers a package's exported types and globals into mod.
@@ -636,7 +633,19 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		if len(sb.Instrs) != len(irBlock.Instrs) {
 			continue // defensive: never seen, but don't misalign if it ever happens
 		}
-		var out []*ir.Instruction
+		// Fast path: most blocks read no inbound *http.Request, so the rebuilt slice
+		// would be value-identical to the original. Skip the allocation for them.
+		hasReq := false
+		for _, sinst := range sb.Instrs {
+			if inboundRequestValue(sinst) {
+				hasReq = true
+				break
+			}
+		}
+		if !hasReq {
+			continue
+		}
+		out := make([]*ir.Instruction, 0, len(irBlock.Instrs)+1)
 		for ii, sinst := range sb.Instrs {
 			irInst := irBlock.Instrs[ii]
 			out = append(out, irInst)
@@ -722,6 +731,17 @@ func (c *Converter) emitTemplateTrustedConv(irInst *ir.Instruction, t types.Type
 		Args:   []*ir.Value{c.convertValue(x)},
 	}
 	return true
+}
+
+// lowerConversion lowers a Go SSA type conversion (ChangeType / Convert): a
+// trusted-template-type source CALL when the destination is an html/template
+// trusted type, otherwise a plain CONVERT of the operand. Shared by the two SSA
+// conversion cases, which lower identically.
+func (c *Converter) lowerConversion(irInst *ir.Instruction, t types.Type, x ssa.Value) {
+	if !c.emitTemplateTrustedConv(irInst, t, x) {
+		irInst.Op = ir.OpCode_OP_CODE_CONVERT
+		irInst.Operands = append(irInst.Operands, c.convertValue(x))
+	}
 }
 
 // routingVerbs are the method names (lowercased) that register an HTTP handler
@@ -979,18 +999,12 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 		irInst.Op = ir.OpCode_OP_CODE_MAKE_INTERFACE
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
 	case *ssa.ChangeType:
-		if !c.emitTemplateTrustedConv(irInst, i.Type(), i.X) {
-			irInst.Op = ir.OpCode_OP_CODE_CONVERT
-			irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
-		}
+		c.lowerConversion(irInst, i.Type(), i.X)
 	case *ssa.ChangeInterface:
 		irInst.Op = ir.OpCode_OP_CODE_CONVERT
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
 	case *ssa.Convert:
-		if !c.emitTemplateTrustedConv(irInst, i.Type(), i.X) {
-			irInst.Op = ir.OpCode_OP_CODE_CONVERT
-			irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
-		}
+		c.lowerConversion(irInst, i.Type(), i.X)
 	case *ssa.TypeAssert:
 		irInst.Op = ir.OpCode_OP_CODE_TYPE_ASSERT
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X))
