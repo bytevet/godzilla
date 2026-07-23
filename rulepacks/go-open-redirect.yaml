@@ -8,57 +8,10 @@ rules:
       Untrusted input flows into an HTTP redirect destination, which allows an
       open redirect. Validate the target against an allowlist of known hosts/paths
       instead of redirecting to a user-controlled URL.
-    sources:
-      - "go:*net/url*.Get"
-      - "go:*net/http.Header*.Get"
-      # Synthetic source: the frontend taints an HTTP handler's *http.Request
-      # param (converters/go addHTTPRequestSource) so field reads off it
-      # (r.URL.Path, r.Form, …) are covered for net/http and any router on it.
-      - "go:@net/http.Request"
-      # Framework request accessors, receiver-type-scoped so they never collide
-      # with a same-named sink (e.g. sql.DB.Query).
-      # Gin.
-      - "go:*gin-gonic/gin.Context*.Query"
-      - "go:*gin-gonic/gin.Context*.DefaultQuery"
-      - "go:*gin-gonic/gin.Context*.QueryArray"
-      - "go:*gin-gonic/gin.Context*.QueryMap"
-      - "go:*gin-gonic/gin.Context*.GetQuery"
-      - "go:*gin-gonic/gin.Context*.Param"
-      - "go:*gin-gonic/gin.Context*.PostForm"
-      - "go:*gin-gonic/gin.Context*.DefaultPostForm"
-      - "go:*gin-gonic/gin.Context*.GetHeader"
-      # Echo.
-      - "go:*labstack/echo*Context*.QueryParam"
-      - "go:*labstack/echo*Context*.QueryParams"
-      - "go:*labstack/echo*Context*.Param"
-      - "go:*labstack/echo*Context*.FormValue"
-      - "go:*labstack/echo*Context*.FormParams"
-      # Chi.
-      - "go:*go-chi/chi*.URLParam"
-      # Gorilla mux — path variables.
-      - "go:*gorilla/mux.Vars"
-      # Macaron / Grafana route params (grafana/pkg/web.Params) — a free-function
-      # route accessor like mux.Vars returning untrusted path/query params.
-      - "go:*web.Params"
-      # Fiber — *fiber.Ctx.
-      - "go:*gofiber/fiber*.Ctx*.Query"
-      - "go:*gofiber/fiber*.Ctx*.Params"
-      - "go:*gofiber/fiber*.Ctx*.FormValue"
-      - "go:*gofiber/fiber*.Ctx*.Cookies"
-      - "go:*gofiber/fiber*.Ctx*.Get"
-      # fasthttp — *fasthttp.RequestCtx.
-      - "go:*fasthttp.RequestCtx*.FormValue"
-      - "go:*fasthttp.RequestCtx*.UserValue"
+    extend: $_go-common.yaml
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
-    # The synthetic request object also grants request-object provenance, so
-    # accessor calls on it are covered even for an unmodeled framework (engine
-    # reads this tag instead of a hardcoded source name).
-    request_object_sources:
-      - "go:@net/http.Request"
     sinks:
       - "go:*net/http.Redirect#2"
     sanitizers:
       - "go:*url.QueryEscape"
       - "go:*url.PathEscape"
-    propagators:
-      - "go:strings.Join"

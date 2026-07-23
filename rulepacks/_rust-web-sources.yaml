@@ -1,0 +1,10 @@
+# Web-only Rust request sources (no env/CLI args) for rust-open-redirect and
+# rust-xss. Pulled in with `extend: $_rust-web-sources.yaml`.
+sources:
+  - "rust:axum::extract::Query"
+  - "rust:axum::extract::Path"
+  - "rust:axum::extract::Json"
+  - "rust:axum::extract::Form"
+  - "rust:*Request::query"
+  - "rust:*Request::param"
+  - "rust:*HttpRequest::query_string"

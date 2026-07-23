@@ -10,14 +10,7 @@ rules:
       injection. Never pass user-controlled data as the shell command or the
       program path; use a fixed program with an argument vector and validate
       inputs.
-    sources:
-      - "c*:getenv"
-      - "c*:*scanf"
-      - "c*:fgets"
-      - "c*:gets"
-      - "c*:read"
-      - "c*:recv"
-      - "c*:argv"        # synthesized by the frontend for main(argc, argv)
+    extend: [$_c-sources.yaml, $_c-propagators.yaml]
     sinks:
       - "c*:system"
       - "c*:popen"
@@ -32,12 +25,3 @@ rules:
       - "c*:execveat"
       - "c*:fexecve"
     sanitizers: []
-    propagators:
-      - "c*:strcpy"
-      - "c*:strncpy"
-      - "c*:strcat"
-      - "c*:strncat"
-      - "c*:sprintf"
-      - "c*:snprintf"
-      - "c*:memcpy"
-      - "c*:strdup"

@@ -10,14 +10,7 @@ rules:
       Untrusted input flows into an HTTP redirect target, which may allow an
       open redirect to an attacker-controlled site. Validate the destination
       against an allow-list of paths/hosts before redirecting.
-    sources:
-      - "rust:axum::extract::Query"
-      - "rust:axum::extract::Path"
-      - "rust:axum::extract::Json"
-      - "rust:axum::extract::Form"
-      - "rust:*Request::query"
-      - "rust:*Request::param"
-      - "rust:*HttpRequest::query_string"
+    extend: $_rust-web-sources.yaml
     sinks:
       - "rust:*Redirect::to"
       - "rust:*Redirect::temporary"

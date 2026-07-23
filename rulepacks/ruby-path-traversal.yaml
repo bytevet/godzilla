@@ -13,15 +13,7 @@ rules:
       or write files outside the intended directory. Validate the resolved path
       is contained within an intended base directory (e.g. File.expand_path +
       a prefix check) before opening it.
-    # Request sources are base-scoped: the frontend synthesizes a source CALL
-    # `ruby:<base>.<accessor>` for any accessor read off an opaque request base.
-    sources:
-      - "ruby:params"          # params[:x] / params['x']
-      - "ruby:cookies"         # cookies[:x]
-      - "ruby:params.*"        # params.fetch(:x) / params.dig(...)
-      - "ruby:cookies.*"
-      - "ruby:request.*"       # request.<accessor> (Rails/Sinatra/Rack request)
-      - "ruby:req.*"           # conventional `req` request receiver
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
       - "ruby:File.read"
       - "ruby:File.open"
@@ -46,5 +38,3 @@ rules:
     sanitizers: []
     propagators:
       - "ruby:File.expand_path"
-      - "ruby:*.join"
-      - "ruby:*.to_s"

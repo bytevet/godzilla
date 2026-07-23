@@ -1,0 +1,10 @@
+# Shared C/C++ untrusted-input sources (`c*:` matches c: and cpp:). Pulled into
+# the c-*.yaml rules with `extend: $_c-sources.yaml`.
+sources:
+  - "c*:getenv"
+  - "c*:*scanf"
+  - "c*:fgets"
+  - "c*:gets"
+  - "c*:read"
+  - "c*:recv"
+  - "c*:argv" # synthesized for main(argc, argv)

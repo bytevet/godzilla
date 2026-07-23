@@ -1,0 +1,34 @@
+# Shared Go request sources, request-object provenance, and the strings.Join
+# propagator. Pulled into the go-*.yaml rules with `extend: $_go-common.yaml`.
+sources:
+  - "go:*net/url*.Get"
+  - "go:*net/http.Header*.Get"
+  - "go:@net/http.Request" # synthetic *http.Request source (addHTTPRequestSource)
+  - "go:*gin-gonic/gin.Context*.Query"
+  - "go:*gin-gonic/gin.Context*.DefaultQuery"
+  - "go:*gin-gonic/gin.Context*.QueryArray"
+  - "go:*gin-gonic/gin.Context*.QueryMap"
+  - "go:*gin-gonic/gin.Context*.GetQuery"
+  - "go:*gin-gonic/gin.Context*.Param"
+  - "go:*gin-gonic/gin.Context*.PostForm"
+  - "go:*gin-gonic/gin.Context*.DefaultPostForm"
+  - "go:*gin-gonic/gin.Context*.GetHeader"
+  - "go:*labstack/echo*Context*.QueryParam"
+  - "go:*labstack/echo*Context*.QueryParams"
+  - "go:*labstack/echo*Context*.Param"
+  - "go:*labstack/echo*Context*.FormValue"
+  - "go:*labstack/echo*Context*.FormParams"
+  - "go:*go-chi/chi*.URLParam"
+  - "go:*gorilla/mux.Vars"
+  - "go:*web.Params" # macaron/grafana free-function route params
+  - "go:*gofiber/fiber*.Ctx*.Query"
+  - "go:*gofiber/fiber*.Ctx*.Params"
+  - "go:*gofiber/fiber*.Ctx*.FormValue"
+  - "go:*gofiber/fiber*.Ctx*.Cookies"
+  - "go:*gofiber/fiber*.Ctx*.Get"
+  - "go:*fasthttp.RequestCtx*.FormValue"
+  - "go:*fasthttp.RequestCtx*.UserValue"
+request_object_sources:
+  - "go:@net/http.Request"
+propagators:
+  - "go:strings.Join"

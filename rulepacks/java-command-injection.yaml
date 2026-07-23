@@ -9,27 +9,10 @@ rules:
       process execution (Runtime.exec / ProcessBuilder), which may allow OS
       command injection. Avoid passing user-controlled data to a shell; use a
       fixed argument list and validate inputs.
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getQueryString"
-      - "java:*ServletRequest.getParameter"
-      # Spring MVC controller parameter annotations (synthesized source CALLs;
-      # see converters/java/lower.go). Anchored on the annotation package so an
-      # ordinary method ending in the token (e.g. getRequestBody) is not a source.
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     sinks:
       - "java:*Runtime.exec"
       - "java:*ProcessBuilder.command"

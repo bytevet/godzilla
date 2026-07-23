@@ -9,27 +9,10 @@ rules:
       Untrusted input flows into a JDBC query built by string concatenation,
       which may allow SQL injection. Use a PreparedStatement with bound "?"
       parameters instead of concatenating user input into the query string.
+    # Non-request source (stays inline; not part of the shared request surface).
     sources:
       - "java:*System.getenv"
-      - "java:*HttpServletRequest.getHeader"
-      - "java:*HttpServletRequest.getQueryString"
-      - "java:*ServletRequest.getParameter"
-      # Spring MVC controller parameter annotations (synthesized source CALLs;
-      # see converters/java/lower.go). Anchored on the annotation package so an
-      # ordinary method ending in the token (e.g. getRequestBody) is not a source.
-      - "java:*bind/annotation/RequestParam"
-      - "java:*bind/annotation/PathVariable"
-      - "java:*bind/annotation/RequestBody"
-      - "java:*bind/annotation/RequestHeader"
-      - "java:*bind/annotation/CookieValue"
-      # JAX-RS resource-method parameter annotations (javax.ws.rs and
-      # jakarta.ws.rs — the `ws/rs` fragment matches both).
-      - "java:*ws/rs/QueryParam"
-      - "java:*ws/rs/PathParam"
-      - "java:*ws/rs/FormParam"
-      - "java:*ws/rs/HeaderParam"
-      - "java:*ws/rs/MatrixParam"
-      - "java:*ws/rs/CookieParam"
+    extend: $_java-sources.yaml
     # The query string is the first (receiver-excluded) argument; a
     # PreparedStatement's bound parameters (set via setString/setInt) are not
     # injection points, so a parameterized query is not flagged.
