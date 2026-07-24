@@ -1,0 +1,5 @@
+# Untrusted param flows to system() from inside an if-branch nested in a while
+# loop; the finding must survive the loop + branch CFG.
+findings:
+  - rule: ruby-command-injection
+    min: 1

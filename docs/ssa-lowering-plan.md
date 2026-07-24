@@ -58,7 +58,7 @@ engine's linear fast path (no perf regression on straight-line handlers).
 - [ ] **Phase 1 — Ruby** (smallest; proving ground)
       - [x] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
             (immediate recall win, near-zero risk) + corpus samples. **DONE.**
-      - [ ] 1b: adopt `ssabuild` for real blocks/PHI/back-edges.
+      - [x] 1b: adopt `ssabuild` for real blocks/PHI/back-edges. **DONE.**
 - [ ] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
       comprehensions → real CFG; retire `lowerIfMerge`. Measure CVE-recall delta.
 - [ ] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
@@ -83,6 +83,21 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
+- **Phase 1b DONE** — Ruby lowering now drives `converters/ssabuild`: real CFG
+  blocks + PHI + loop back-edges (if/elsif/else/while/until/case), retiring the
+  single-block + manual `MergeBranchEnvs` model. Straight-line funcs still emit one
+  block (linear fast path kept). New samples: `loop_carried_command_injection` fires
+  (loop-carried taint the old model missed), `loop_carried_safe` silent,
+  `nested_if_in_loop`. Corpus TP=185 FP=0 FN=0. Adversarial SSA-review stage passed.
+  **Perf: same-machine benchstat Scan_Ruby −5.27% vs Phase 1a — no regression** (an
+  agent's crude cross-runner number falsely read +19%; only same-machine back-to-back
+  is valid, as the gate itself measures). ssabuild adoption pattern proven → Python/JS next.
+- **Phase 1a DONE** — Ruby `if`/`elsif`/`else`/`unless`/`while`/`until` (+ modifier
+  forms) now lower their bodies (were dropped to `ruby.unsupported`, bodies never
+  traversed — a recall bug). Flattened into the current block (single-block, linear
+  fast path preserved), `lowerutil.MergeBranchEnvs` for if/else assigned-var PHI.
+  Samples control_flow_if / control_flow_while fire ruby-command-injection; safe
+  control silent. Corpus TP=183 FP=0 FN=0. Gate: build/gofmt/vet/ruby-tests/corpus green.
 - **Phase 0 DONE** — `converters/ssabuild` (Braun SSA over `*ir.Value`): `NewBuilder`/
   `NewBlock`/`Seal`/`WriteVariable`/`ReadVariable`/`SetIf`/`SetJump`/`AddInstr`/`Finish`,
   with `readVariableRecursive` + `incompletePhis` (loop headers) + `removeTrivialPhi`,

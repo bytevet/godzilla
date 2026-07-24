@@ -1,0 +1,3 @@
+# The value carried across the loop is a constant, so no command-injection
+# finding — the false-positive guard for loop-carried taint.
+findings: []
