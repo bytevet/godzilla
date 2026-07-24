@@ -5,6 +5,33 @@
    which copies already-escaped DOM nodes without re-parsing, so it cannot
    introduce an XSS vector. With JS disabled every finding body stays reachable
    via the inline accordion, so the report degrades gracefully. */
+/* Theme toggle: overrides the OS preference by stamping data-theme on <html>,
+   persisted in localStorage. The button shows the icon of the theme the click
+   switches to. No finding data involved. */
+(function () {
+  "use strict";
+  var root = document.documentElement;
+  var btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  var KEY = "godzilla-theme";
+  var mq = window.matchMedia("(prefers-color-scheme: dark)");
+  function effective() { return root.getAttribute("data-theme") || (mq.matches ? "dark" : "light"); }
+  function refresh() { btn.setAttribute("data-eff", effective()); }
+  try {
+    var saved = localStorage.getItem(KEY);
+    if (saved === "dark" || saved === "light") root.setAttribute("data-theme", saved);
+  } catch (e) {}
+  refresh();
+  btn.addEventListener("click", function () {
+    var next = effective() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+    refresh();
+  });
+  if (mq.addEventListener) mq.addEventListener("change", refresh);
+  else if (mq.addListener) mq.addListener(refresh);
+})();
+
 (function () {
   "use strict";
   var findings = Array.prototype.slice.call(document.querySelectorAll(".finding"));

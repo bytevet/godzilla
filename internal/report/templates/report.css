@@ -96,12 +96,36 @@ body {
 .lede { max-width: 68ch; }
 
 /* --- header --- */
+header { position: relative; padding-right: 46px; }
 .eyebrow {
   font: 600 11px/1 var(--mono);
   letter-spacing: .14em;
   text-transform: uppercase;
   color: var(--accent-ink);
 }
+.theme-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--soft);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.theme-toggle:hover { color: var(--ink); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-toggle .ico-sun, .theme-toggle .ico-moon { display: none; }
+/* show the icon of the theme the click switches TO */
+.theme-toggle[data-eff="dark"] .ico-sun { display: inline; }
+.theme-toggle[data-eff="light"] .ico-moon { display: inline; }
 h1 { font-size: 27px; margin: 8px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
 h2 { font-size: 18px; margin: 34px 0 10px; letter-spacing: -.01em; }
 .lede { color: var(--soft); max-width: 68ch; margin: 0; }
@@ -346,6 +370,9 @@ a:hover { text-decoration: underline; }
 }
 .snippet .line.hl { background: color-mix(in srgb, var(--warn) 22%, transparent); }
 .snippet .line.hl .ln { color: var(--ink); opacity: 1; }
+/* compiler-style caret pointing at the exact source/sink column */
+.snippet .line.caret { color: var(--accent-ink); font-weight: 700; background: none; user-select: none; }
+.snippet .line.caret .ln { opacity: 0; }
 .snippet-missing { color: var(--soft); font-size: 12px; padding: 8px 10px; font-style: italic; }
 
 /* --- taint flow --- */

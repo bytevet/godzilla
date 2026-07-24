@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
@@ -542,6 +543,36 @@ type snippetLine struct {
 	Num       int32
 	Text      string
 	Highlight bool
+	Caret     string // for the highlighted line: whitespace prefix + "^" pointing at the column
+}
+
+// caretFor builds a compiler-style pointer line for a 1-based byte column: a
+// whitespace prefix (tabs preserved so it aligns under a tab-indented line)
+// followed by "^". Returns "" when col is unknown. One prefix char per source
+// rune keeps the caret aligned in the monospace <pre>.
+func caretFor(line string, col int32) string {
+	if col <= 0 {
+		return ""
+	}
+	n := int(col) - 1
+	if n > len(line) {
+		n = len(line)
+	}
+	var b strings.Builder
+	consumed := 0
+	for _, r := range line {
+		if consumed >= n {
+			break
+		}
+		if r == '\t' {
+			b.WriteByte('\t')
+		} else {
+			b.WriteByte(' ')
+		}
+		consumed += utf8.RuneLen(r)
+	}
+	b.WriteByte('^')
+	return b.String()
 }
 
 // buildSnippet best-effort reads the source file named by pos and returns a
@@ -573,11 +604,15 @@ func buildSnippet(cache snippetCache, pos *ir.Position) *codeSnippet {
 	lines := make([]snippetLine, 0, endIdx-startIdx+1)
 	for i := startIdx; i <= endIdx; i++ {
 		lineNum := int32(i + 1)
-		lines = append(lines, snippetLine{
+		line := snippetLine{
 			Num:       lineNum,
 			Text:      allLines[i],
 			Highlight: lineNum == target,
-		})
+		}
+		if line.Highlight {
+			line.Caret = caretFor(allLines[i], pos.GetColumn())
+		}
+		lines = append(lines, line)
 	}
 	return &codeSnippet{Filename: filename, Lines: lines}
 }

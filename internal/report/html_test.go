@@ -200,6 +200,25 @@ func TestWriteHTML_NoUnsafeInterpolation(t *testing.T) {
 	}
 }
 
+func TestCaretFor(t *testing.T) {
+	cases := []struct {
+		line string
+		col  int32
+		want string
+	}{
+		{"abcd", 3, "  ^"},        // 1-based col 3 → two spaces then caret
+		{"\tx = f()", 2, "\t^"},   // tab preserved so the caret aligns under a tab-indented line
+		{"abc", 0, ""},            // unknown column → no caret
+		{"abc", 1, "^"},           // first column
+		{"ab", 9, "  ^"},          // column past end clamps to line length
+	}
+	for _, c := range cases {
+		if got := caretFor(c.line, c.col); got != c.want {
+			t.Errorf("caretFor(%q, %d) = %q, want %q", c.line, c.col, got, c.want)
+		}
+	}
+}
+
 func TestFormatPosition(t *testing.T) {
 	if got := analysis.PosString(nil); got != "<unknown>" {
 		t.Errorf("PosString(nil) = %q, want %q", got, "<unknown>")

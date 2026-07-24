@@ -11,6 +11,9 @@
   <div class="layout{{if not .Findings}} single{{end}}">
   <div class="main">
   <header>
+    <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
+      <span class="ico-sun" aria-hidden="true">&#9788;</span><span class="ico-moon" aria-hidden="true">&#9789;</span>
+    </button>
     <div class="eyebrow">Godzilla &middot; SAST</div>
     <h1>Godzilla SAST Report</h1>
     <p class="lede">Generated {{.GeneratedAt}}. Total findings: <strong>{{.Total}}</strong>{{if .Total}} &mdash; sorted worst-severity first.{{end}}
@@ -132,4 +135,4 @@
 <script>{{.JS}}</script>
 </body>
 </html>
-{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{end}}</pre>{{end}}
+{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{if .Caret}}<span class="line caret"><span class="ln"></span>{{.Caret}}</span>{{end}}{{end}}</pre>{{end}}
