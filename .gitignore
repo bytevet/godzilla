@@ -32,6 +32,10 @@ bin/
 .claude/skills/*
 !.claude/skills/cve-recall/
 
+# Python bytecode cache (e.g. from the cve-recall skill's helper scripts)
+__pycache__/
+*.pyc
+
 # OS
 .DS_Store
 
