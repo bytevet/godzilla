@@ -82,6 +82,55 @@ rules:
 Without `const_arg` every call fires; with it, only calls whose constant string
 argument at `index` matches — `getInstance("MD5")`, not `("SHA-256")`.
 
+## Dynamic guards (`when`)
+
+A sink or callee entry can be a `{sink|callee, when}` mapping instead of a bare
+string: `when` is an [expr-lang](https://expr-lang.org) expression that must be
+true for the entry to fire. Use it when danger depends on an argument's *value* —
+a sink only dangerous in a certain format, or a cipher only weak in a certain mode.
+
+```yaml
+sinks:
+  - "go:*database/sql*.Query#0"           # static
+  - sink: "go:*exec.Command#0"            # dynamic
+    when: "arg[0].String startsWith 'cmd:'"
+callees:                                  # dangerous-call
+  - callee: "java:*Cipher.getInstance"
+    when: "arg[0].String contains '/ECB/'"
+```
+
+`arg[i]` is the i-th logical (receiver-excluded) argument, with fields:
+
+- `.String` — the argument's statically reconstructed value: constant runs
+  verbatim, `<DYN>` for a dynamic run. `"cmd:" + x` → `"cmd:<DYN>"`, a fully
+  dynamic argument → `"<DYN>"`. Incompleteness is encoded here, so
+  `arg[0].String == 'cmd:'` is false for a partial constant while
+  `arg[0].String startsWith 'cmd:'` is true.
+- `.Complete` — the whole argument is a compile-time constant.
+- `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, or `""` if unknown.
+
+Write the condition with expr's native operators/builtins — `startsWith`,
+`endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined
+with `&&`, `||`, `!`:
+
+```
+arg[0].String startsWith 'cmd:'
+arg[0].String contains '/ECB/'
+arg[0].Complete && arg[0].String == 'MD5'
+arg[0].String in ['DES', 'RC4', 'Blowfish']
+```
+
+A non-recoverable argument is `"<DYN>"`, so a prefix/exact check fails and the
+entry is **suppressed** (confirm, don't guess). Because a wildcard `matches` can
+span `<DYN>`, combine `matches`/`==` with `.Complete` when an exact match matters.
+Guards compile once at load; a syntax, type, or regexp error fails `rules lint`,
+and a guard that fails to compile suppresses its entry rather than firing.
+
+A guard is evaluated in the frame where the sink appears. So if a dependency
+*wrapper* forwards to a guarded sink (`func Run(c string) { exec.Command(c) }`),
+the argument there is always `"<DYN>"` — the guard can't confirm, and the sink is
+not reported through the wrapper. Guard sinks that user code calls directly.
+
 ## Fragments (`extend`)
 
 Packs for a language often share pattern lists — the same request **sources**,

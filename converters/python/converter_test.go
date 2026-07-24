@@ -85,7 +85,7 @@ func TestConvertFile_SQLInjectionSample(t *testing.T) {
 		CWE:       "CWE-89",
 		Message:   "untrusted input reaches a SQL execute call",
 		Sources:   []string{"py:*request.args.get"},
-		Sinks:     []string{"py:*.execute"},
+		Sinks:     rules.SinksOf("py:*.execute"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)
@@ -131,7 +131,7 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os.system",
 		Sources:   []string{"py:*request.args.get"},
-		Sinks:     []string{"py:os.system"},
+		Sinks:     rules.SinksOf("py:os.system"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)
@@ -180,7 +180,7 @@ func TestConvertFile_BranchMergeDefault(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os.system after a default-if-empty branch",
 		Sources:   []string{"py:*request.args.get"},
-		Sinks:     []string{"py:os.system"},
+		Sinks:     rules.SinksOf("py:os.system"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)
@@ -249,7 +249,7 @@ func TestConvertFile_SubscriptSourceSample(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input (subscript form) reaches os.system",
 		Sources:   []string{"py:*request.args.__getitem__"},
-		Sinks:     []string{"py:os.system"},
+		Sinks:     rules.SinksOf("py:os.system"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)
@@ -373,7 +373,7 @@ func TestConvertFile_DirectorySkipsUnparseableFile(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os.system",
 		Sources:   []string{"py:*request.args.get"},
-		Sinks:     []string{"py:os.system"},
+		Sinks:     rules.SinksOf("py:os.system"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)

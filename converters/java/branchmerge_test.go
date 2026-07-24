@@ -42,7 +42,7 @@ func TestBranchMerge_TernaryKeepsTaint(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "tainted value survives a ternary join",
 		Sources:   []string{"java:X.source"},
-		Sinks:     []string{"java:X.sink"},
+		Sinks:     rules.SinksOf("java:X.sink"),
 	}}}
 
 	findings := analysis.NewEngine(rs).Analyze(prog)
