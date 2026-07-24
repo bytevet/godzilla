@@ -91,7 +91,9 @@ body {
   font-family: var(--sans);
   line-height: 1.55;
 }
-.wrap { max-width: 1080px; margin: 0 auto; padding: 36px 22px 72px; }
+.wrap { max-width: 1600px; margin: 0 auto; padding: 36px 26px 72px; }
+/* keep long-form prose readable even though the shell is wide */
+.lede { max-width: 68ch; }
 
 /* --- header --- */
 .eyebrow {
@@ -384,16 +386,20 @@ a:hover { text-decoration: underline; }
 .no-findings { color: var(--soft); font-style: italic; }
 footer { color: var(--soft); font-size: 12px; margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); }
 
-/* --- wide screens: 2-column master-detail --- */
+/* --- wide screens: 2-column master-detail ---
+   Left column ("main") holds everything — summary, filters, findings list.
+   Right column ("detail") shows only the selected finding and sticks in view. */
 @media (min-width: 960px) {
   .layout {
     display: grid;
-    grid-template-columns: minmax(300px, 380px) 1fr;
-    gap: 16px;
+    grid-template-columns: minmax(0, 1.5fr) minmax(390px, 1fr);
+    gap: 22px;
     align-items: start;
   }
+  .layout.single { display: block; } /* no findings → no detail column */
+  .main { min-width: 0; }            /* allow inner tables/snippets to shrink+scroll */
   .list { min-width: 0; }
-  .list .body { display: none; }      /* on wide the body lives only in the detail pane */
+  .list .body { display: none; }     /* on wide the body lives only in the detail pane */
   .list .item { cursor: pointer; }
   .finding.active { box-shadow: 0 0 0 1px var(--accent) inset; }
   .detail {
