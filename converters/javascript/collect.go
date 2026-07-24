@@ -442,7 +442,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	fs.moduleAliases = moduleAliases
 	fs.relativeDefaults = relativeDefaults
 	fs.lowerBody(prog.Body)
-	moduleFn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	moduleFn.Blocks = fs.b.Finish()
 
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 	return mod, defaultExport

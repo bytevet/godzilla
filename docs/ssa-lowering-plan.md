@@ -61,8 +61,8 @@ engine's linear fast path (no perf regression on straight-line handlers).
       - [x] 1b: adopt `ssabuild` for real blocks/PHI/back-edges. **DONE.**
 - [x] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
       comprehensions → real CFG; retire `lowerIfMerge`. **DONE.**
-- [ ] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
-      retire its `lowerIfMerge`.
+- [x] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
+      retire its `lowerIfMerge`. **DONE.**
 - [ ] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
       corpus samples (per language, positive + safe control); confirm loops fire and
       dominator guards suppress; relax any rule scoping that compensated for
@@ -83,6 +83,19 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
+- **Phase 3 DONE** — JavaScript lowering now drives `converters/ssabuild`: real CFG
+  blocks + PHI + loop back-edges for if/else, for/for-in/for-of, while/do-while,
+  switch (per-case blocks with conservative fall-through edges), try/catch/finally
+  (exception edge into the catch block), labelled/block unwrapped; ternary/`&&`/`||`/`??`
+  keep their BIN_OP/PHI merges through the builder. Retired the JS `lowerIfMerge`/
+  `MergeBranchEnvs` path. Straight-line funcs still emit one block (linear fast path).
+  Inter-procedural surface (lowerCall/syntacticCallee/emitCallRecv/opaque-base reads/
+  funcRefValue/collect.go) untouched. New samples: `loop_carried_command_injection`
+  fires js-command-injection (loop-carried taint the old model missed),
+  `try_catch_command_injection` fires across the exception edge, `loop_carried_safe`
+  silent. Corpus TP=189 FP=0 FN=0 (262 samples). Adversarial SSA-review passed. Perf:
+  same-machine benchstat (n=15) Scan_JS time `~` (p=0.51, no significant change),
+  B/op+allocs +5.6% (well under +10%). All three straight-line frontends now on SSA.
 - **Phase 2 DONE** — Python lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges for if/elif/else, while(+else), for(+else),
   try/except/finally; `with`/bool-ops/ternary/comprehensions emit through the
