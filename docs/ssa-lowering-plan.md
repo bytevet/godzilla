@@ -51,10 +51,10 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 ## Phases (each independently shippable; gated before commit)
 
-- [ ] **Phase 0 — `converters/ssabuild`** package + table-driven unit tests
+- [x] **Phase 0 — `converters/ssabuild`** package + table-driven unit tests
       (straight-line, if/else diamond → PHI, while back-edge → loop PHI via sealed
       block, nested if-in-loop, self-referential PHI elimination, determinism). No
-      frontend wired yet.
+      frontend wired yet. **DONE.**
 - [ ] **Phase 1 — Ruby** (smallest; proving ground)
       - [ ] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
             (immediate recall win, near-zero risk) + corpus samples.
@@ -83,4 +83,10 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
+- **Phase 0 DONE** — `converters/ssabuild` (Braun SSA over `*ir.Value`): `NewBuilder`/
+  `NewBlock`/`Seal`/`WriteVariable`/`ReadVariable`/`SetIf`/`SetJump`/`AddInstr`/`Finish`,
+  with `readVariableRecursive` + `incompletePhis` (loop headers) + `removeTrivialPhi`,
+  deterministic numbering. Tests: diamond PHI, while-header loop PHI, nested if-in-loop,
+  trivial-PHI elimination, determinism — all green. Pure additive package, no frontend
+  wired yet → corpus unaffected. Gate: build/gofmt/vet/test clean.
 - _pending_ — Phase 0 kicked off.
