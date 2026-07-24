@@ -59,8 +59,8 @@ engine's linear fast path (no perf regression on straight-line handlers).
       - [x] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
             (immediate recall win, near-zero risk) + corpus samples. **DONE.**
       - [x] 1b: adopt `ssabuild` for real blocks/PHI/back-edges. **DONE.**
-- [ ] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
-      comprehensions → real CFG; retire `lowerIfMerge`. Measure CVE-recall delta.
+- [x] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
+      comprehensions → real CFG; retire `lowerIfMerge`. **DONE.**
 - [ ] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
       retire its `lowerIfMerge`.
 - [ ] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
@@ -83,6 +83,33 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
+- **Phase 2 DONE** — Python lowering now drives `converters/ssabuild`: real CFG
+  blocks + PHI + loop back-edges for if/elif/else, while(+else), for(+else),
+  try/except/finally; `with`/bool-ops/ternary/comprehensions emit through the
+  builder (comprehensions stay in the current block). Retired `lowerIfMerge` +
+  the `lowerutil.MergeBranchEnvs` path and the `env`/`instrs` maps (now
+  Builder `ReadVariable`/`WriteVariable`/`AddInstr` + an `assigned` set + a
+  `terminated` flag). Construct→block mapping: **if** = diamond (cond block →
+  then/else → merge, sealed after both arms; elif is a nested If in `orelse`);
+  **while/for** = header/body/exit with a body→header back-edge, header sealed
+  after the back-edge (loop-carried taint via the header PHI); a for-loop binds
+  its target to the iterable in the body block; **try** = try body inline, then
+  an exception edge (bodyEnd → single handler block, else → after) so try-body
+  taint reaches except/finally (conservative may-analysis, no exception typing);
+  **with** = inline (VAR=EXPR + body). The inter-procedural surface (lowerCall,
+  INVOKE/CHA/UntypedDispatch, opaque-base subscripts, thread/process dispatch,
+  param/handler sources, import aliasing) is untouched. Straight-line functions
+  still emit exactly ONE block (linear fast path preserved). New samples:
+  `loop_carried_command_injection` fires (loop-carried taint the old model
+  missed), `try_except_command_injection` fires (taint across the exception
+  edge), `loop_carried_safe` silent. Also fixed a pre-existing gap surfaced by the
+  now-lowered `while`-guards: Python **`Compare`** (`a < b`, `x == y`, `k in d`) had
+  no lowering (→ `py.unsupported`); now `pyast.py` emits its operands and `lower.go`
+  lowers them (so a source/sink/validator inside a comparison fires) behind an inert
+  `builtin.compare` intrinsic — which also gives branch conditions a def-use edge for
+  Phase 4's guard analysis. Corpus FP=0 FN=0 (259 samples, TP=187); python converter
+  + analysis tests green. Perf: same-machine benchstat Scan_Python `~` (p=0.063, no
+  significant change, well under +10%). Gate: build/gofmt/vet/python-tests/corpus clean.
 - **Phase 1b DONE** — Ruby lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges (if/elsif/else/while/until/case), retiring the
   single-block + manual `MergeBranchEnvs` model. Straight-line funcs still emit one

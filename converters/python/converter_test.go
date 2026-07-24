@@ -281,6 +281,18 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 		return astNode{"kind": "Subscript", "value": base, "slice": slice}
 	}
 
+	// curInstrs materializes the (single, branch-free) block the whitebox lowering
+	// produced and returns its instruction stream. Finish() emits PHIs, then body
+	// instructions, then any terminator; these cases have neither PHIs nor a
+	// terminator, so this is exactly the emitted body in order.
+	curInstrs := func(fs *funcState) []*ir.Instruction {
+		blocks := fs.b.Finish()
+		if len(blocks) != 1 {
+			t.Fatalf("expected exactly 1 block, got %d", len(blocks))
+		}
+		return blocks[0].Instrs
+	}
+
 	t.Run("global root is opaque", func(t *testing.T) {
 		fs := newFuncState("test.py")
 		// request.args["cmd"], where `request` is never bound locally (an
@@ -289,10 +301,11 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 
 		val := fs.lowerExpr(sub)
 
-		if len(fs.instrs) != 1 {
-			t.Fatalf("expected exactly 1 emitted instruction, got %d: %+v", len(fs.instrs), fs.instrs)
+		instrs := curInstrs(fs)
+		if len(instrs) != 1 {
+			t.Fatalf("expected exactly 1 emitted instruction, got %d: %+v", len(instrs), instrs)
 		}
-		inst := fs.instrs[0]
+		inst := instrs[0]
 		if inst.Op != ir.OpCode_OP_CODE_CALL {
 			t.Fatalf("Op = %v, want OP_CODE_CALL", inst.Op)
 		}
@@ -310,19 +323,20 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 
 	t.Run("function parameter root is opaque", func(t *testing.T) {
 		fs := newFuncState("test.py")
-		fs.env["req"] = regValue("req")
+		fs.write("req", regValue("req"))
 		fs.paramRegs["req"] = true
 		// req.args["cmd"], where `req` is this function's own parameter.
 		sub := subscriptNode(attrNode(nameNode("req"), "args"), strConst("cmd"))
 
 		fs.lowerExpr(sub)
 
-		if len(fs.instrs) != 1 || fs.instrs[0].Op != ir.OpCode_OP_CODE_CALL {
-			t.Fatalf("expected a single OP_CODE_CALL instruction, got %+v", fs.instrs)
+		instrs := curInstrs(fs)
+		if len(instrs) != 1 || instrs[0].Op != ir.OpCode_OP_CODE_CALL {
+			t.Fatalf("expected a single OP_CODE_CALL instruction, got %+v", instrs)
 		}
 		wantCallee := "py:req.args.__getitem__"
-		if fs.instrs[0].Call == nil || fs.instrs[0].Call.Callee != wantCallee {
-			t.Fatalf("callee = %v, want %q", fs.instrs[0].Call, wantCallee)
+		if instrs[0].Call == nil || instrs[0].Call.Callee != wantCallee {
+			t.Fatalf("callee = %v, want %q", instrs[0].Call, wantCallee)
 		}
 	})
 
@@ -331,16 +345,17 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 		// items = get_items(); items[0] -- `items` is bound to a
 		// locally-computed register (not a param, not unbound), so it must
 		// NOT be treated as an opaque source.
-		fs.env["items"] = regValue("t0")
+		fs.write("items", regValue("t0"))
 		sub := subscriptNode(nameNode("items"), strConst("0"))
 
 		fs.lowerExpr(sub)
 
-		if len(fs.instrs) != 1 {
-			t.Fatalf("expected exactly 1 emitted instruction, got %d: %+v", len(fs.instrs), fs.instrs)
+		instrs := curInstrs(fs)
+		if len(instrs) != 1 {
+			t.Fatalf("expected exactly 1 emitted instruction, got %d: %+v", len(instrs), instrs)
 		}
-		if fs.instrs[0].Op != ir.OpCode_OP_CODE_INDEX {
-			t.Fatalf("Op = %v, want OP_CODE_INDEX for a local-variable base", fs.instrs[0].Op)
+		if instrs[0].Op != ir.OpCode_OP_CODE_INDEX {
+			t.Fatalf("Op = %v, want OP_CODE_INDEX for a local-variable base", instrs[0].Op)
 		}
 	})
 }

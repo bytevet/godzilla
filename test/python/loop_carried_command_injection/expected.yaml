@@ -1,0 +1,6 @@
+# The tainted request param reaches os.system() only via the loop's back-edge
+# (header PHI), which the real CFG models and the old single-block lowering did
+# not — so this fires only after the Phase 2 SSA/CFG adoption.
+findings:
+    - rule: py-command-injection
+      min: 1
