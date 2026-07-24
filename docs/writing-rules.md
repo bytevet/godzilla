@@ -84,9 +84,11 @@ argument at `index` matches — `getInstance("MD5")`, not `("SHA-256")`.
 
 ## Fragments (`extend`)
 
-Packs for a language share the same request **sources** (and some
-**propagators**). Rather than copy-paste them into every rule — where they drift
-apart — put them in a **fragment** and `extend` it.
+Packs for a language often share pattern lists — the same request **sources**,
+but also common **sinks** (e.g. the filesystem sinks shared by path-traversal and
+zip-slip), **sanitizers** (the HTML sanitizers shared by the Vue and Svelte XSS
+packs), or **propagators**. Rather than copy-paste them into every rule — where
+they drift apart — put them in a **fragment** and `extend` it.
 
 A fragment is a `_`-prefixed file holding a *partial rule* (any pattern-list
 fields); it is never loaded as a rule itself. A rule pulls it in with `extend`,

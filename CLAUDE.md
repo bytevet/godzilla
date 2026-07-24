@@ -137,6 +137,10 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   path too but moved to the pure-Go MIR frontend above.)
 - Python, JS, and Ruby name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
+  These three straight-line frontends share their common scaffolding rather than re-implementing it:
+  `walkignore.CollectSources` (the pruned directory walk → sorted file list), `proc.WriteEmbeddedScript`
+  (materialize the embedded interpreter helper into a temp file), `internal/chunks.Run` (concurrent per-file
+  lowering), and `converters/lowerutil.MergeBranchEnvs` (the flattened if/else PHI-merge, shared by Python and JS).
 
 **Analysis (`internal/analysis/`).**
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
