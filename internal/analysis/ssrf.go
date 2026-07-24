@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -142,6 +143,59 @@ func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]
 		}
 	}
 	return "", false
+}
+
+// constSkeleton reconstructs v's string construction as a skeleton for a dynamic
+// guard: constant runs verbatim, rules.DynMarker for each dynamic (non-constant)
+// run. It returns the skeleton and whether the WHOLE value is constant. Unlike
+// leadingConst it does not stop at the first dynamic leaf — it emits a marker and
+// continues — so a guard can inspect constant pieces anywhere in the argument.
+func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
+	if s, ok := constStr(v); ok {
+		return s, true
+	}
+	def, ok := resolveDef(v, defs, seen)
+	if !ok {
+		return rules.DynMarker, false
+	}
+	next := markSeen(seen, v)
+
+	switch {
+	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
+		var b strings.Builder
+		complete := true
+		for _, op := range def.GetOperands() {
+			s, c := constSkeleton(op, defs, next)
+			b.WriteString(s)
+			complete = complete && c
+		}
+		return b.String(), complete
+	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_REM:
+		// Python `"tmpl" % value`: keep the template's constant head.
+		if ops := def.GetOperands(); len(ops) >= 1 {
+			if tmpl, ok := constStr(ops[0]); ok {
+				return prefixBeforePlaceholder(tmpl) + rules.DynMarker, false
+			}
+		}
+	case def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE:
+		switch {
+		case def.GetIntrinsic() == formatIntrinsic:
+			if args := def.Call.GetArgs(); len(args) >= 1 {
+				if tmpl, ok := constStr(args[0]); ok {
+					return prefixBeforePlaceholder(tmpl) + rules.DynMarker, false
+				}
+			}
+		case def.GetIntrinsic() == identityIntrinsic:
+			if args := def.Call.GetArgs(); len(args) >= 1 {
+				return constSkeleton(args[0], defs, next)
+			}
+		}
+	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:
+		if ops := def.GetOperands(); len(ops) >= 1 {
+			return constSkeleton(ops[0], defs, next)
+		}
+	}
+	return rules.DynMarker, false
 }
 
 // leadingConstSeq concatenates the leading constant text across an ordered list of

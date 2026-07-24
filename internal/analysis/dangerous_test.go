@@ -40,7 +40,7 @@ func TestDangerousCall_PlainCallee(t *testing.T) {
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "GO-WEAK-HASH", Kind: "dangerous-call", Languages: []string{"go"},
 		Severity: rules.SeverityMedium, CWE: "CWE-327", Message: "weak hash",
-		Callees: []string{"go:crypto/md5.*", "go:crypto/sha1.*"},
+		Callees: rules.CalleesOf("go:crypto/md5.*", "go:crypto/sha1.*"),
 	}}}
 
 	findings := ScanDangerousCalls(prog, rs)
@@ -55,6 +55,28 @@ func TestDangerousCall_PlainCallee(t *testing.T) {
 	}
 }
 
+// TestDangerousCall_Guard: a dynamic callee `when:` guard fires only on the
+// confirming constant argument — ECB mode is weak (fires), GCM is not.
+func TestDangerousCall_Guard(t *testing.T) {
+	prog := progWith("java",
+		callInstAt("java:javax/crypto/Cipher.getInstance", 5, "AES/ECB/PKCS5Padding"),
+		callInstAt("java:javax/crypto/Cipher.getInstance", 6, "AES/GCM/NoPadding"),
+	)
+	rs := &rules.RuleSet{Rules: []rules.Rule{{
+		ID: "JAVA-ECB", Kind: "dangerous-call", Languages: []string{"java"},
+		Severity: rules.SeverityMedium, CWE: "CWE-327", Message: "ECB mode",
+		Callees: []rules.Callee{{Pattern: "java:*Cipher.getInstance", When: "arg[0].String contains '/ECB/'"}},
+	}}}
+
+	findings := ScanDangerousCalls(prog, rs)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (ECB only), got %d", len(findings))
+	}
+	if findings[0].SinkPos.GetLine() != 5 {
+		t.Errorf("expected the ECB call at line 5, got line %d", findings[0].SinkPos.GetLine())
+	}
+}
+
 // TestDangerousCall_ConstArg: only the call whose constant argument matches the
 // regexp fires (MessageDigest.getInstance("MD5") but not ("SHA-256")).
 func TestDangerousCall_ConstArg(t *testing.T) {
@@ -65,7 +87,7 @@ func TestDangerousCall_ConstArg(t *testing.T) {
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "JAVA-WEAK-HASH", Kind: "dangerous-call", Languages: []string{"java"},
 		Severity: rules.SeverityMedium, CWE: "CWE-327", Message: "weak digest",
-		Callees:  []string{"java:*MessageDigest.getInstance"},
+		Callees:  rules.CalleesOf("java:*MessageDigest.getInstance"),
 		ConstArg: &rules.ConstArg{Index: 0, Matches: "(?i)^(MD5|SHA-?1)$"},
 	}}}
 
@@ -83,7 +105,7 @@ func TestDangerousCall_LanguageScoped(t *testing.T) {
 	prog := progWith("python", callInstAt("go:crypto/md5.New", 1))
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "GO-WEAK-HASH", Kind: "dangerous-call", Languages: []string{"go"},
-		Severity: rules.SeverityMedium, Callees: []string{"go:crypto/md5.*"},
+		Severity: rules.SeverityMedium, Callees: rules.CalleesOf("go:crypto/md5.*"),
 	}}}
 	if f := ScanDangerousCalls(prog, rs); len(f) != 0 {
 		t.Errorf("a go rule must not fire on a python module, got %d finding(s)", len(f))
@@ -96,7 +118,7 @@ func TestDangerousCall_IgnoresTaintRules(t *testing.T) {
 	prog := progWith("go", callInstAt("go:os/exec.Command", 1, "sh"))
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "GO-CMDI", Languages: []string{"go"}, Severity: rules.SeverityCritical,
-		Sinks: []string{"go:os/exec.Command"},
+		Sinks: rules.SinksOf("go:os/exec.Command"),
 	}}}
 	if f := ScanDangerousCalls(prog, rs); len(f) != 0 {
 		t.Errorf("taint rule must not be evaluated as a dangerous-call, got %d", len(f))

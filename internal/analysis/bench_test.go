@@ -52,7 +52,7 @@ func scaleRules(count int) *rules.RuleSet {
 			Severity:  rules.SeverityCritical,
 			CWE:       "CWE-78",
 			Sources:   []string{"go:*.FormValue", "go:*.Query", "go:*request*"},
-			Sinks:     []string{"go:os/exec.Command", "go:*.CommandContext"},
+			Sinks:     rules.SinksOf("go:os/exec.Command", "go:*.CommandContext"),
 			Propagators: []string{
 				"go:strings.*", "go:fmt.Sprintf", "go:*.Join",
 			},

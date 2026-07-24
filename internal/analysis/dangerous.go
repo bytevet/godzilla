@@ -68,10 +68,17 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 					}
 					callee := inst.Call.GetCallee()
 					for _, d := range dcs {
-						if !d.rule.AppliesTo(lang) || !d.rule.MatchesDangerousCallee(callee) {
+						guard, matched := d.rule.MatchDangerousCallee(callee)
+						if !d.rule.AppliesTo(lang) || !matched {
 							continue
 						}
 						if !constArgMatches(d.rule, d.re, inst.Call) {
+							continue
+						}
+						// Dynamic callee guard (`when:`): suppress unless it confirms
+						// against the call's constant argument values (nil defs — a
+						// dangerous-call arg is a literal, resolved by constStr alone).
+						if !guard.Eval(argVals(inst.Call, nil)) {
 							continue
 						}
 						key := d.rule.ID + "@" + posKey(inst.GetPos())

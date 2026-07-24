@@ -190,28 +190,29 @@ func (f fragmentSet) apply(rs *rules.RuleSet) error {
 	return nil
 }
 
-// mergeFragment prepends base's pattern-list entries to dst's (see mergeGlobs).
+// mergeFragment prepends base's pattern-list entries to dst's (see mergeUniq).
 // Scalar fields (id/severity/cwe/message/kind) are left to the rule itself.
 func mergeFragment(dst, base *rules.Rule) {
-	dst.Sources = mergeGlobs(base.Sources, dst.Sources)
-	dst.Sinks = mergeGlobs(base.Sinks, dst.Sinks)
-	dst.Sanitizers = mergeGlobs(base.Sanitizers, dst.Sanitizers)
-	dst.Propagators = mergeGlobs(base.Propagators, dst.Propagators)
-	dst.RequestObjectSources = mergeGlobs(base.RequestObjectSources, dst.RequestObjectSources)
-	dst.Validators = mergeGlobs(base.Validators, dst.Validators)
-	dst.Callees = mergeGlobs(base.Callees, dst.Callees)
+	dst.Sources = mergeUniq(base.Sources, dst.Sources)
+	dst.Sinks = mergeUniq(base.Sinks, dst.Sinks)
+	dst.Sanitizers = mergeUniq(base.Sanitizers, dst.Sanitizers)
+	dst.Propagators = mergeUniq(base.Propagators, dst.Propagators)
+	dst.RequestObjectSources = mergeUniq(base.RequestObjectSources, dst.RequestObjectSources)
+	dst.Validators = mergeUniq(base.Validators, dst.Validators)
+	dst.Callees = mergeUniq(base.Callees, dst.Callees)
 }
 
-// mergeGlobs returns base entries followed by own entries, with duplicates
+// mergeUniq returns base entries followed by own entries, with duplicates
 // removed (first occurrence wins), so a rule inherits its fragment's list and
-// then appends its own additions.
-func mergeGlobs(base, own []string) []string {
+// then appends its own additions. Works for glob strings and for the
+// Sink/Callee structs (a dynamic entry differing only in `when` is kept).
+func mergeUniq[T comparable](base, own []T) []T {
 	if len(base) == 0 {
 		return own
 	}
-	out := make([]string, 0, len(base)+len(own))
-	seen := make(map[string]bool, len(base)+len(own))
-	add := func(list []string) {
+	out := make([]T, 0, len(base)+len(own))
+	seen := make(map[T]bool, len(base)+len(own))
+	add := func(list []T) {
 		for _, e := range list {
 			if !seen[e] {
 				seen[e] = true
@@ -313,10 +314,20 @@ func validate(rs *rules.RuleSet) error {
 		}
 		// A sink with a "#" injection-point spec that names no valid argument
 		// index silently widens to "all arguments" (a false-positive-prone
-		// footgun); reject the typo instead of quietly weakening the sink.
+		// footgun); reject the typo instead of quietly weakening the sink. A
+		// dynamic sink's `when:` guard must compile (this is where a bad guard
+		// fails loud at load / `rules lint` instead of silently suppressing).
 		for _, s := range r.Sinks {
-			if rules.InvalidSinkSpec(s) {
-				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s))
+			if rules.InvalidSinkSpec(s.Pattern) {
+				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s.Pattern))
+			}
+			if _, err := rules.CompileGuard(s.When); err != nil {
+				problems = append(problems, fmt.Sprintf("rule %q sink %q has an invalid when: %v", r.ID, s.Pattern, err))
+			}
+		}
+		for _, c := range r.Callees {
+			if _, err := rules.CompileGuard(c.When); err != nil {
+				problems = append(problems, fmt.Sprintf("rule %q callee %q has an invalid when: %v", r.ID, c.Pattern, err))
 			}
 		}
 		// A dangerous-call rule (COV-4) is defined by its callees; without any it

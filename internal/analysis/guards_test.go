@@ -19,7 +19,7 @@ func pathRule() *rules.RuleSet {
 		CWE:        "CWE-22",
 		Message:    "path traversal",
 		Sources:    []string{"go:*net/url*.Get"},
-		Sinks:      []string{"go:os.ReadFile#0"},
+		Sinks:      rules.SinksOf("go:os.ReadFile#0"),
 		Validators: []string{"go:*filepath.IsLocal"},
 	}}}
 }

@@ -28,7 +28,7 @@ func jsRuleSet(id, cwe, msg string, sev rules.Severity, sinks ...string) *rules.
 		CWE:       cwe,
 		Message:   msg,
 		Sources:   reqSources,
-		Sinks:     sinks,
+		Sinks:     rules.SinksOf(sinks...),
 	}}}
 }
 
@@ -201,9 +201,7 @@ module.exports = app;
 				Sources: []string{
 					"js:*req.query*",
 				},
-				Sinks: []string{
-					"js:*axios*",
-				},
+				Sinks: rules.SinksOf("js:*axios*"),
 			},
 		},
 	}
