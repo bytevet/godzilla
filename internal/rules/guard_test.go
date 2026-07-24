@@ -71,4 +71,36 @@ func TestGuardEval(t *testing.T) {
 	if !(*Guard)(nil).Eval(nil) {
 		t.Error("nil guard should always fire")
 	}
+	if DenyGuard.Eval([]Arg{full}) {
+		t.Error("DenyGuard must never fire")
+	}
+}
+
+// TestGuardFailsClosed pins the safety property: a rule whose `when:` does not
+// compile must SUPPRESS its entry, never degrade to an unguarded one that fires
+// on everything. Compile reports the error and installs DenyGuard, so a RuleSet
+// built in Go (bypassing the loader) is safe too.
+func TestGuardFailsClosed(t *testing.T) {
+	r := &Rule{
+		ID:       "bad",
+		Severity: SeverityHigh,
+		Sinks:    []Sink{{Pattern: "go:*Sink", When: "nope(arg[0])"}},
+	}
+	err := r.Compile()
+	if err == nil {
+		t.Fatal("Compile() with an uncompilable guard: want error, got nil")
+	}
+	_, guard, ok := r.MatchSink("go:aSink")
+	if !ok {
+		t.Fatal("sink should still match structurally")
+	}
+	if guard.Eval([]Arg{{String: "anything", Complete: true}}) {
+		t.Error("a guard that failed to compile must suppress, not fire")
+	}
+
+	// Same on the uncompiled fallback path (Compile never called).
+	u := &Rule{Sinks: []Sink{{Pattern: "go:*Sink", When: "arg[0].String startsWith 'x'"}}}
+	if _, g, ok := u.MatchSink("go:aSink"); !ok || g.Eval([]Arg{{String: "xyz", Complete: true}}) {
+		t.Error("uncompiled guarded sink must deny, not fire unguarded")
+	}
 }

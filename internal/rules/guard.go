@@ -37,8 +37,13 @@ type Arg struct {
 // match matters. Compiled once at load.
 type Guard struct {
 	prog *vm.Program
-	src  string
 }
+
+// DenyGuard never fires. It stands in for a guard that could not be compiled or
+// is unavailable, so a malformed/unusable `when:` SUPPRESSES its entry instead of
+// degrading to "no guard" (which would fire unconditionally — the very
+// false-positive the guard exists to prevent). Fail closed, never open.
+var DenyGuard = &Guard{}
 
 // guardEnv is the evaluation environment: `arg[i]` is the i-th logical argument.
 type guardEnv struct {
@@ -56,17 +61,20 @@ func CompileGuard(src string) (*Guard, error) {
 	}
 	prog, err := expr.Compile(src, expr.Env(guardEnv{}), expr.AsBool())
 	if err != nil {
-		return nil, fmt.Errorf("guard %q: %w", src, err)
+		return DenyGuard, fmt.Errorf("guard %q: %w", src, err)
 	}
-	return &Guard{prog: prog, src: src}, nil
+	return &Guard{prog: prog}, nil
 }
 
 // Eval reports whether the guard holds for the call's arguments. A nil guard
-// always fires; a run error (e.g. an out-of-range arg index) is unconfirmed ->
-// false (suppress).
+// (no `when:`) always fires; DenyGuard never does; a run error (e.g. an
+// out-of-range arg index) is unconfirmed -> false (suppress).
 func (g *Guard) Eval(args []Arg) bool {
 	if g == nil {
 		return true
+	}
+	if g.prog == nil {
+		return false // DenyGuard
 	}
 	out, err := expr.Run(g.prog, guardEnv{Arg: args})
 	if err != nil {

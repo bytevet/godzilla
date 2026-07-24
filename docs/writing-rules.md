@@ -123,7 +123,13 @@ arg[0].String in ['DES', 'RC4', 'Blowfish']
 A non-recoverable argument is `"<DYN>"`, so a prefix/exact check fails and the
 entry is **suppressed** (confirm, don't guess). Because a wildcard `matches` can
 span `<DYN>`, combine `matches`/`==` with `.Complete` when an exact match matters.
-Guards compile once at load; a syntax, type, or regexp error fails `rules lint`.
+Guards compile once at load; a syntax, type, or regexp error fails `rules lint`,
+and a guard that fails to compile suppresses its entry rather than firing.
+
+A guard is evaluated in the frame where the sink appears. So if a dependency
+*wrapper* forwards to a guarded sink (`func Run(c string) { exec.Command(c) }`),
+the argument there is always `"<DYN>"` — the guard can't confirm, and the sink is
+not reported through the wrapper. Guard sinks that user code calls directly.
 
 ## Fragments (`extend`)
 

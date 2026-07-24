@@ -204,24 +204,22 @@ func mergeFragment(dst, base *rules.Rule) {
 
 // mergeUniq returns base entries followed by own entries, with duplicates
 // removed (first occurrence wins), so a rule inherits its fragment's list and
-// then appends its own additions. Works for glob strings and for the
-// Sink/Callee structs (a dynamic entry differing only in `when` is kept).
+// then appends its own additions. Works for glob strings and for the Sink/Callee
+// structs — note a dynamic entry differing only in `when` is a DISTINCT entry, and
+// MatchSink returns the first match, so a bare base entry shadows a guarded one
+// the rule adds for the same glob.
 func mergeUniq[T comparable](base, own []T) []T {
 	if len(base) == 0 {
 		return own
 	}
 	out := make([]T, 0, len(base)+len(own))
 	seen := make(map[T]bool, len(base)+len(own))
-	add := func(list []T) {
-		for _, e := range list {
-			if !seen[e] {
-				seen[e] = true
-				out = append(out, e)
-			}
+	for _, e := range slices.Concat(base, own) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
 		}
 	}
-	add(base)
-	add(own)
 	return out
 }
 
@@ -321,14 +319,12 @@ func validate(rs *rules.RuleSet) error {
 			if rules.InvalidSinkSpec(s.Pattern) {
 				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s.Pattern))
 			}
-			if _, err := rules.CompileGuard(s.When); err != nil {
-				problems = append(problems, fmt.Sprintf("rule %q sink %q has an invalid when: %v", r.ID, s.Pattern, err))
-			}
 		}
-		for _, c := range r.Callees {
-			if _, err := rules.CompileGuard(c.When); err != nil {
-				problems = append(problems, fmt.Sprintf("rule %q callee %q has an invalid when: %v", r.ID, c.Pattern, err))
-			}
+		// Compile the rule here (idempotent, so the engine's later Compile is a
+		// no-op): this compiles its dynamic `when:` guards exactly once per run and
+		// surfaces any guard error at load instead of letting it reach a scan.
+		if err := rs.Rules[i].Compile(); err != nil {
+			problems = append(problems, fmt.Sprintf("rule %q has an invalid when: %v", r.ID, err))
 		}
 		// A dangerous-call rule (COV-4) is defined by its callees; without any it
 		// can never fire, and its const_arg regexp must compile.

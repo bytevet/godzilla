@@ -171,10 +171,10 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 		}
 		return b.String(), complete
 	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_REM:
-		// Python `"tmpl" % value`: keep the template's constant head.
+		// Python `"tmpl" % value`.
 		if ops := def.GetOperands(); len(ops) >= 1 {
 			if tmpl, ok := constStr(ops[0]); ok {
-				return prefixBeforePlaceholder(tmpl) + rules.DynMarker, false
+				return templateSkeleton(tmpl), false
 			}
 		}
 	case def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE:
@@ -182,7 +182,7 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 		case def.GetIntrinsic() == formatIntrinsic:
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				if tmpl, ok := constStr(args[0]); ok {
-					return prefixBeforePlaceholder(tmpl) + rules.DynMarker, false
+					return templateSkeleton(tmpl), false
 				}
 			}
 		case def.GetIntrinsic() == identityIntrinsic:
@@ -253,6 +253,46 @@ func constStr(v *ir.Value) (string, bool) {
 		s = s[1 : len(s)-1]
 	}
 	return s, true
+}
+
+// templateSkeleton renders a printf/brace format template as a skeleton: literal
+// text verbatim, each interpolation placeholder replaced by rules.DynMarker — so
+// constant runs AFTER the first placeholder survive ("q=%s&safe=1" ->
+// "q=<DYN>&safe=1"), which a prefix-only view would drop.
+func templateSkeleton(tmpl string) string {
+	var b strings.Builder
+	for i := 0; i < len(tmpl); {
+		switch c := tmpl[i]; c {
+		case '%':
+			if i+1 < len(tmpl) && tmpl[i+1] == '%' {
+				b.WriteByte('%') // escaped %%
+				i += 2
+				continue
+			}
+			b.WriteString(rules.DynMarker)
+			for i++; i < len(tmpl) && !isVerbLetter(tmpl[i]); i++ { // flags/width/precision
+			}
+			i++ // the verb letter
+		case '{':
+			if i+1 < len(tmpl) && tmpl[i+1] == '{' {
+				b.WriteByte('{') // escaped {{
+				i += 2
+				continue
+			}
+			b.WriteString(rules.DynMarker)
+			for ; i < len(tmpl) && tmpl[i] != '}'; i++ {
+			}
+			i++ // the closing brace
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+func isVerbLetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // prefixBeforePlaceholder returns the literal text of a format template that

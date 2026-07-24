@@ -81,7 +81,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// does a lock-free slice walk instead of a mutexed cache lookup per match, the
 	// dominant engine cost as rule packs grow. Doing it here (not lazily inside a
 	// goroutine) avoids a data race on the shared matcher cache.
-	e.rs.Compile()
+	_ = e.rs.Compile() // guard-compile errors are already reported by the loader at load
 
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
@@ -279,15 +279,16 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
 		s, complete := constSkeleton(v, defs, map[string]bool{})
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s)}
+		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs)}
 	}
 	return out
 }
 
 // argType is an argument's best-effort static type for a guard's `.Type`: a
-// constant's kind, "string" for a reconstructed string skeleton with any constant
-// content, else "" (unknown/opaque).
-func argType(v *ir.Value, skeleton string) string {
+// constant's kind, else "string" when we recovered constant text or the defining
+// instruction is string-typed, else "" (unknown). The IR-type fallback matters:
+// without it a fully tainted string — the common guarded case — would report "".
+func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) string {
 	if c := v.GetConstant(); c != nil {
 		switch c.Value.(type) {
 		case *ir.Constant_StringVal:
@@ -301,6 +302,9 @@ func argType(v *ir.Value, skeleton string) string {
 		}
 	}
 	if skeleton != rules.DynMarker {
+		return "string" // recovered constant text => string-valued
+	}
+	if isStringType(defs[v.GetRegName()].GetType()) {
 		return "string"
 	}
 	return ""
@@ -826,7 +830,7 @@ func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds p
 	if !ok {
 		return
 	}
-	if _, fnIsSink := rule.SinkInjectionArgs(fn.CanonicalName); fnIsSink {
+	if rule.IsSink(fn.CanonicalName) {
 		return
 	}
 	if res.taintsParamSink == nil {
@@ -1274,6 +1278,12 @@ func analyzeFunc(
 				// unrecoverable (non-constant) arg makes the guard false, so the
 				// sink is suppressed (required-confirmation). Left un-reported so a
 				// later iteration re-evaluates as the arg's construction resolves.
+				//
+				// This runs BEFORE res.taintsParamSink is recorded below, so a
+				// suppressed sink forms no wrapper summary and consumeSink needs no
+				// guard of its own. Consequence: inside a dependency wrapper the
+				// guarded arg is a parameter (always <DYN>), so a guarded sink is
+				// never reported through a wrapper — documented in writing-rules.md.
 				if sinkGuard != nil && !sinkGuard.Eval(argVals(inst.Call, defs)) {
 					break
 				}

@@ -9,6 +9,8 @@
 package rules
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -148,19 +150,22 @@ type Sink struct {
 
 // UnmarshalYAML accepts a scalar (the glob) or a mapping {sink, when}.
 func (s *Sink) UnmarshalYAML(value *yaml.Node) error {
+	var err error
+	s.Pattern, s.When, err = unmarshalGuarded(value, "sink")
+	return err
+}
+
+// unmarshalGuarded decodes the string-or-mapping union shared by Sink and Callee:
+// a scalar is the bare glob; a mapping is {<key>, when}.
+func unmarshalGuarded(value *yaml.Node, key string) (pattern, when string, err error) {
 	if value.Kind == yaml.ScalarNode {
-		s.Pattern = value.Value
-		return nil
+		return value.Value, "", nil
 	}
-	var m struct {
-		Sink string `yaml:"sink"`
-		When string `yaml:"when"`
-	}
+	var m map[string]string
 	if err := value.Decode(&m); err != nil {
-		return err
+		return "", "", err
 	}
-	s.Pattern, s.When = m.Sink, m.When
-	return nil
+	return m[key], m["when"], nil
 }
 
 // Callee is a dangerous-call pattern with an optional dynamic guard, in the same
@@ -172,19 +177,9 @@ type Callee struct {
 
 // UnmarshalYAML accepts a scalar (the glob) or a mapping {callee, when}.
 func (c *Callee) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind == yaml.ScalarNode {
-		c.Pattern = value.Value
-		return nil
-	}
-	var m struct {
-		Callee string `yaml:"callee"`
-		When   string `yaml:"when"`
-	}
-	if err := value.Decode(&m); err != nil {
-		return err
-	}
-	c.Pattern, c.When = m.Callee, m.When
-	return nil
+	var err error
+	c.Pattern, c.When, err = unmarshalGuarded(value, "callee")
+	return err
 }
 
 // SinksOf / CalleesOf build static (guard-less) sink/callee lists from bare
@@ -221,21 +216,18 @@ type RuleSet struct {
 // analysis passes concurrently over the same rule set, so they don't race
 // building per-rule matchers (after this, all matcher access is read-only).
 // Idempotent.
-func (rs *RuleSet) Compile() {
+func (rs *RuleSet) Compile() error {
+	var errs []error
 	for i := range rs.Rules {
-		rs.Rules[i].Compile()
+		if err := rs.Rules[i].Compile(); err != nil {
+			errs = append(errs, fmt.Errorf("rule %q: %w", rs.Rules[i].ID, err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // IsDangerousCall reports whether the rule is a non-dataflow, call-site rule.
 func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "dangerous-call") }
-
-// MatchesDangerousCallee reports whether callee matches one of the rule's
-// dangerous-call globs.
-func (r *Rule) MatchesDangerousCallee(callee string) bool {
-	_, ok := r.MatchDangerousCallee(callee)
-	return ok
-}
 
 // MatchDangerousCallee reports whether callee matches one of the rule's
 // dangerous-call globs, returning that entry's optional dynamic guard.
@@ -250,10 +242,21 @@ func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
 	}
 	for _, c := range r.Callees {
 		if MatchGlob(c.Pattern, callee) {
-			return nil, true
+			return uncompiledGuard(c.When), true
 		}
 	}
 	return nil, false
+}
+
+// uncompiledGuard is the guard for a match found on the uncompiled fallback path
+// (Compile was never called, so no program exists). A guarded entry cannot be
+// evaluated there, so it DENIES rather than degrading to an unguarded entry that
+// fires on everything.
+func uncompiledGuard(when string) *Guard {
+	if strings.TrimSpace(when) == "" {
+		return nil
+	}
+	return DenyGuard
 }
 
 // AppliesTo reports whether the rule is active for the given source language
@@ -299,9 +302,9 @@ type compiledCallee struct {
 // Compile precompiles the rule's pattern lists into shape-matchers. Call it once
 // (single-threaded) before matching a rule against many call sites — the engine
 // does this for every rule before its parallel analysis. Idempotent.
-func (r *Rule) Compile() {
+func (r *Rule) Compile() error {
 	if r.matchers != nil {
-		return
+		return nil
 	}
 	m := &ruleMatchers{
 		sources:     classifyAll(r.Sources),
@@ -309,16 +312,24 @@ func (r *Rule) Compile() {
 		propagators: classifyAll(r.Propagators),
 		validators:  classifyAll(r.Validators),
 	}
+	var errs []error
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
-		guard, _ := CompileGuard(s.When) // guard errors are rejected earlier by the loader's validate
+		guard, err := CompileGuard(s.When) // DenyGuard on error: fail closed
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sink %q: %w", s.Pattern, err))
+		}
 		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx, guard: guard})
 	}
 	for _, c := range r.Callees {
-		guard, _ := CompileGuard(c.When)
+		guard, err := CompileGuard(c.When)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("callee %q: %w", c.Pattern, err))
+		}
 		m.callees = append(m.callees, compiledCallee{g: classifyGlob(c.Pattern), guard: guard})
 	}
 	r.matchers = m
+	return errors.Join(errs...)
 }
 
 func classifyAll(patterns []string) []*compiledGlob {
@@ -352,20 +363,10 @@ func (r *Rule) IsSink(callee string) bool {
 	return ok
 }
 
-// SinkInjectionArgs reports whether callee matches one of the rule's sinks and,
-// if so, returns that sink's injection-point argument indices (LOGICAL,
-// source-level). A nil/empty result with ok==true means every argument is an
-// injection point (a bare pattern with no "#" spec).
-func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
-	args, _, ok = r.MatchSink(callee)
-	return args, ok
-}
-
 // MatchSink reports whether callee matches one of the rule's sinks and, if so,
 // returns that sink's LOGICAL injection-point argument indices and optional
 // dynamic guard. nil/empty args with ok==true means every argument is an
-// injection point. Guards apply only on the compiled path (the engine compiles
-// before scanning); the uncompiled fallback returns a nil guard.
+// injection point.
 func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	if r.matchers != nil {
 		for _, s := range r.matchers.sinks {
@@ -378,7 +379,7 @@ func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
 		if MatchGlob(pattern, callee) {
-			return idx, nil, true
+			return idx, uncompiledGuard(s.When), true
 		}
 	}
 	return nil, nil, false
