@@ -102,7 +102,10 @@ func TestHTML_MarksSuppressedRow(t *testing.T) {
 		t.Fatalf("WriteHTML: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "SUPPRESSED") || !strings.Contains(out, "class=\"suppressed\"") {
+	// A suppressed finding must be visually marked: the SUPPRESSED chip and a
+	// "suppressed" class token on the finding card (combined with its severity
+	// class, so we match the class token rather than a standalone attribute).
+	if !strings.Contains(out, "SUPPRESSED") || !strings.Contains(out, " suppressed\"") {
 		t.Errorf("suppressed finding not visually marked in HTML report")
 	}
 }
