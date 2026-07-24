@@ -42,4 +42,14 @@ rules:
       - "py:*html.escape"
       - "py:*flask.escape"
       - "py:*cgi.escape"
-    propagators: []
+    # json.dumps/json.dump serialize their argument into a string that still
+    # contains the argument's data verbatim, so a tainted value dumped and then
+    # written into a response body (`HttpResponse(json.dumps(user_data))`, a
+    # reflected-JSON XSS when the body is served without a safe content type)
+    # keeps its taint. They forward taint from arg to result rather than
+    # clearing it, mirroring py-path-traversal's treatment of normalizers.
+    # Propagators create no findings on their own -- they only extend taint that
+    # is already present toward an already-modeled sink -- so this adds no FPs.
+    propagators:
+      - "py:*json.dumps"
+      - "py:*json.dump"

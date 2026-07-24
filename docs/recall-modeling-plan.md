@@ -85,6 +85,22 @@ designated-branch policy — which grows an already-large PR. Flag for the human
 
 (updated as items land — newest first)
 
+- **`json.dumps` XSS propagator — LANDED (breadth, not a campaign flip).** Investigated the
+  next four "source-works, class-doesn't-reach-fix-line" Python misses (llama-index SQLi &
+  code-injection, langflow code-injection, label-studio XSS) by reading each fix commit. None
+  is an R3-style rule-fixable flip: llama-index SQLi/code-injection are **source** gaps (LLM
+  query param; outbound HTTP-response/SSE body) whose only rule-level fixes are high-FP and
+  still wouldn't fire; langflow needs an **arg-value predicate** (`allow_dangerous_code=True`)
+  the rule model can't express; label-studio XSS dies **upstream** in lxml/dict taint the
+  straight-line frontend drops. The one clean, FP-safe gap found: `json.dumps`/`json.dump` was
+  not a py-xss propagator, so `HttpResponse(json.dumps(user))` (reflected-JSON XSS) lost taint.
+  Added them to `py-xss.yaml` + a `test/python/xss_json` corpus sample (fires only with the
+  propagator). FP-safe confirmed: campaign findings_total **flat 118→118**, recall unchanged at
+  6/27, corpus FP=0/FN=0. Landed on correctness merit; documented as breadth, not a metric flip.
+  **Conclusion: the rules-first recall lever is now exhausted for this campaign's residual
+  misses** — further gains need frontend/engine capabilities (dict/XML taint-through,
+  untrusted-artifact & response-body sources, arg-value predicates), each a larger change with
+  real FP surface, tracked under R1/R2 (#87/#88) rather than autonomous rule edits.
 - **R3 (path-traversal propagators) — LANDED.** Recall **5/27 → 6/27 (22.2%)** on the
   py/js/ruby campaign. Root cause of the gradio misses was a **propagator gap**, not a
   source/sink gap: the FastAPI path param source *is* seeded and the `open`/`FileResponse`
