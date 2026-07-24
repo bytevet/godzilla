@@ -1,52 +1,133 @@
-/* Godzilla SAST report — client-side filtering.
-   This script is static: it contains NO finding data. It only reads data-*
-   attributes and textContent already rendered (and escaped) by html/template,
-   and toggles card visibility. It never writes finding data into the DOM via
-   innerHTML, so it cannot reintroduce an XSS vector. With JS disabled every
-   card stays visible, so the report degrades gracefully. */
+/* Godzilla SAST report — client-side interaction.
+   Static: contains NO finding data. It reads data-* attributes and textContent
+   already rendered (and escaped) by html/template and toggles visibility /
+   selection. The wide-screen detail pane is produced with cloneNode(true),
+   which copies already-escaped DOM nodes without re-parsing, so it cannot
+   introduce an XSS vector. With JS disabled every finding body stays reachable
+   via the inline accordion, so the report degrades gracefully. */
 (function () {
   "use strict";
-  var cards = Array.prototype.slice.call(document.querySelectorAll(".finding"));
+  var findings = Array.prototype.slice.call(document.querySelectorAll(".finding"));
   var sevBoxes = Array.prototype.slice.call(document.querySelectorAll(".controls input[data-sev]"));
   var ruleSel = document.getElementById("f-rule");
   var search = document.getElementById("f-search");
   var counter = document.getElementById("f-count");
-  if (!cards.length) return;
+  var detail = document.querySelector(".detail");
+  var empty = detail ? detail.querySelector(".pane-empty") : null;
+  if (!findings.length) return;
 
-  function activeSeverities() {
-    var on = {};
-    sevBoxes.forEach(function (b) {
-      on[b.getAttribute("data-sev")] = b.checked;
-      var lab = b.closest("label");
-      if (lab) lab.classList.toggle("off", !b.checked);
+  var wideMQ = window.matchMedia("(min-width: 960px)");
+  var active = null;
+
+  function isWide() { return wideMQ.matches; }
+
+  function renderPane() {
+    if (!detail) return;
+    var prev = detail.querySelector(".pane");
+    if (prev) prev.remove();
+    if (active && isWide()) {
+      var clone = active.querySelector(".body").cloneNode(true);
+      clone.classList.remove("body");
+      clone.classList.add("pane");
+      detail.appendChild(clone);
+      if (empty) empty.hidden = true;
+    } else if (empty) {
+      empty.hidden = false;
+    }
+  }
+
+  function setActive(f) {
+    active = f;
+    findings.forEach(function (x) {
+      var on = x === f;
+      x.classList.toggle("active", on);
+      var btn = x.querySelector(".item");
+      if (btn) btn.setAttribute("aria-expanded", on && !isWide() ? "true" : String(on && isWide()));
     });
-    return on;
+    renderPane();
+  }
+
+  function onClick(f) {
+    if (isWide()) {
+      setActive(f);
+    } else {
+      // Narrow: inline accordion — toggle this finding open/closed.
+      var openNow = !f.classList.contains("open");
+      f.classList.toggle("open", openNow);
+      var btn = f.querySelector(".item");
+      if (btn) btn.setAttribute("aria-expanded", String(openNow));
+      active = openNow ? f : null;
+      findings.forEach(function (x) { x.classList.toggle("active", x === f && openNow); });
+    }
+  }
+
+  function firstVisible() {
+    for (var i = 0; i < findings.length; i++) if (!findings[i].hidden) return findings[i];
+    return null;
   }
 
   function apply() {
-    var sev = activeSeverities();
+    var sev = {};
+    sevBoxes.forEach(function (b) {
+      sev[b.getAttribute("data-sev")] = b.checked;
+      var lab = b.closest("label");
+      if (lab) lab.classList.toggle("off", !b.checked);
+    });
     var rule = ruleSel ? ruleSel.value : "";
     var q = search ? search.value.trim().toLowerCase() : "";
     var shown = 0;
-    for (var i = 0; i < cards.length; i++) {
-      var c = cards[i];
-      var ok = sev[c.getAttribute("data-severity")] !== false;
-      if (ok && rule && c.getAttribute("data-rule") !== rule) ok = false;
-      if (ok && q && c.textContent.toLowerCase().indexOf(q) === -1) ok = false;
-      c.hidden = !ok;
+    findings.forEach(function (f) {
+      var ok = sev[f.getAttribute("data-severity")] !== false;
+      if (ok && rule && f.getAttribute("data-rule") !== rule) ok = false;
+      if (ok && q && f.textContent.toLowerCase().indexOf(q) === -1) ok = false;
+      f.hidden = !ok;
       if (ok) shown++;
+    });
+    if (counter) counter.textContent = shown + " / " + findings.length + " shown";
+    // Keep a sensible selection on wide screens.
+    if (isWide()) {
+      if (!active || active.hidden) setActive(firstVisible());
+    } else if (active && active.hidden) {
+      active.classList.remove("open", "active");
+      active = null;
     }
-    if (counter) counter.textContent = shown + " / " + cards.length + " shown";
   }
 
-  var timer = null;
-  function debounced() {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(apply, 120);
+  function onBreakpoint() {
+    if (isWide()) {
+      // Entering wide: ensure a pane is shown.
+      findings.forEach(function (x) { x.classList.remove("open"); });
+      if (!active || active.hidden) active = firstVisible();
+      setActive(active);
+    } else {
+      // Entering narrow: drop the cloned pane; reflect selection as an open row.
+      var prev = detail ? detail.querySelector(".pane") : null;
+      if (prev) prev.remove();
+      if (empty) empty.hidden = false;
+      if (active) {
+        active.classList.add("open");
+        var btn = active.querySelector(".item");
+        if (btn) btn.setAttribute("aria-expanded", "true");
+      }
+    }
   }
 
+  findings.forEach(function (f) {
+    var btn = f.querySelector(".item");
+    if (btn) btn.addEventListener("click", function () { onClick(f); });
+  });
   sevBoxes.forEach(function (b) { b.addEventListener("change", apply); });
   if (ruleSel) ruleSel.addEventListener("change", apply);
-  if (search) search.addEventListener("input", debounced);
+  if (search) {
+    var timer = null;
+    search.addEventListener("input", function () {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(apply, 120);
+    });
+  }
+  if (wideMQ.addEventListener) wideMQ.addEventListener("change", onBreakpoint);
+  else if (wideMQ.addListener) wideMQ.addListener(onBreakpoint);
+
   apply();
+  if (isWide()) setActive(firstVisible());
 })();

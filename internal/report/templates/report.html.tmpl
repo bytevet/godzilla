@@ -11,7 +11,8 @@
   <header>
     <div class="eyebrow">Godzilla &middot; SAST</div>
     <h1>Godzilla SAST Report</h1>
-    <p class="lede">Generated {{.GeneratedAt}}. Total findings: <strong>{{.Total}}</strong>{{if .Total}} &mdash; sorted worst-severity first; click any finding to expand its source, sink, and taint flow.{{end}}</p>
+    <p class="lede">Generated {{.GeneratedAt}}. Total findings: <strong>{{.Total}}</strong>{{if .Total}} &mdash; sorted worst-severity first.{{end}}
+    {{if .Root}}<br><span class="muted">Paths shown relative to <code>{{.Root}}</code>.</span>{{end}}</p>
   </header>
 
   <section class="summary">
@@ -49,6 +50,7 @@
     {{if not .Findings}}
       <p class="no-findings">No findings.</p>
     {{else}}
+    <p class="hint">Select a finding to view its source, taint flow, and sink.</p>
     <div class="controls">
       <div class="grp">
         {{range .SeverityFilter}}
@@ -67,64 +69,77 @@
       <span class="count" id="f-count">{{.Total}} / {{.Total}} shown</span>
     </div>
 
-    {{range .Findings}}
-    <details class="finding {{.SeverityClass}}{{if .Suppressed}} suppressed{{end}}" id="{{.AnchorID}}"
+    <div class="layout">
+      <div class="list" role="list">
+        {{range .Findings}}
+        <div class="finding {{.SeverityClass}}{{if .Suppressed}} suppressed{{end}}" id="{{.AnchorID}}"
              data-severity="{{.SevKey}}" data-rule="{{.RuleID}}" data-cwe="{{.CWE}}" data-conf="{{.ConfKey}}">
-      <summary>
-        <span class="chip {{.SeverityClass}}">{{.SeverityLabel}}</span>
-        <span class="klass">{{.RuleID}}</span>
-        {{if .CWE}}<span class="chip cwe">{{.CWE}}</span>{{end}}
-        <span class="conf {{.ConfidenceClass}}">{{.ConfidenceLabel}}</span>
-        {{if .Suppressed}}<span class="chip suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
-        <span class="msg">{{.Message}}</span>
-        <span class="sink-loc">{{.SinkLocation}}</span>
-      </summary>
-      <div class="body">
-        <div class="meta-line">
-          in <code>{{.Function}}</code>{{if .Language}} &middot; <span class="muted">{{.Language}}</span>{{end}}
-          &middot; sink <span class="callee">{{.SinkCallee}}</span>
-          {{if .ReviewConfirmed}}<br><span class="muted">LLM review confirmed: {{.ReviewNote}}</span>{{end}}
-        </div>
+          <button class="item" type="button" aria-expanded="false">
+            <span class="item-head">
+              <span class="chip {{.SeverityClass}}">{{.SeverityLabel}}</span>
+              <span class="klass">{{.RuleID}}</span>
+              {{if .CWE}}<span class="chip cwe">{{.CWE}}</span>{{end}}
+              <span class="conf {{.ConfidenceClass}}" title="confidence{{if .ConfidenceNote}}: {{.ConfidenceNote}}{{end}}"><span class="conf-k">confidence</span>{{.ConfidenceLabel}}</span>
+              {{if .Suppressed}}<span class="chip suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
+              <span class="chev" aria-hidden="true">&rsaquo;</span>
+            </span>
+            <span class="msg">{{.Message}}</span>
+            <span class="sink-loc">{{.SinkLocation}}</span>
+          </button>
+          <div class="body">
+            <div class="meta-line">
+              in <code>{{.Function}}</code>{{if .Language}} &middot; <span class="muted">{{.Language}}</span>{{end}}
+              &middot; sink <span class="callee">{{.SinkCallee}}</span>
+            </div>
+            <div class="meta-line">
+              confidence <b>{{.ConfidenceLabel}}</b>{{if .ConfidenceNote}} &mdash; {{.ConfidenceNote}}{{end}}
+              {{if .ReviewConfirmed}}<br><span class="muted">LLM review confirmed: {{.ReviewNote}}</span>{{end}}
+            </div>
 
-        <div class="subhead">Source</div>
-        {{if .SourceSnippet}}
-        <div class="panel">
-          <div class="filehdr">{{.SourceLocation}}</div>
-          {{template "snippet" .SourceSnippet}}
-        </div>
-        {{else}}
-        <div class="snippet-missing">Source location unavailable ({{.SourceLocation}}).</div>
-        {{end}}
+            <div class="subhead">Source</div>
+            {{if .SourceSnippet}}
+            <div class="panel">
+              <div class="filehdr">{{.SourceLocation}}</div>
+              {{template "snippet" .SourceSnippet}}
+            </div>
+            {{else}}
+            <div class="snippet-missing">Source location unavailable ({{.SourceLocation}}).</div>
+            {{end}}
 
-        <div class="subhead">Sink</div>
-        {{if .SinkSnippet}}
-        <div class="panel">
-          <div class="filehdr">{{.SinkLocation}} &rarr; {{.SinkCallee}}</div>
-          {{template "snippet" .SinkSnippet}}
-        </div>
-        {{else}}
-        <div class="snippet-missing">Sink location unavailable ({{.SinkLocation}}).</div>
-        {{end}}
+            {{if .HasFlow}}
+            <div class="subhead">Taint spread flow</div>
+            {{if .FlowEndpointsOnly}}<p class="flow-note">Endpoints only — the intermediate path crossed a function boundary and was not reconstructed.</p>{{end}}
+            <div class="flow">
+              {{range .Flow}}
+              <details class="step">
+                <summary>
+                  <span class="idx">{{.Index}}</span>
+                  {{if .Kind}}<span class="kind {{.Kind}}">{{.Kind}}</span>{{end}}
+                  <span class="loc">{{.Location}}</span>
+                </summary>
+                {{if .Snippet}}{{template "snippet" .Snippet}}{{else}}<div class="snippet-missing">Snippet unavailable.</div>{{end}}
+              </details>
+              {{end}}
+            </div>
+            {{end}}
 
-        {{if .HasFlow}}
-        <div class="subhead">Taint spread flow</div>
-        {{if .FlowEndpointsOnly}}<p class="flow-note">Endpoints only — the intermediate path crossed a function boundary and was not reconstructed.</p>{{end}}
-        <div class="flow">
-          {{range .Flow}}
-          <details class="step">
-            <summary>
-              <span class="idx">{{.Index}}</span>
-              {{if .Kind}}<span class="kind {{.Kind}}">{{.Kind}}</span>{{end}}
-              <span class="loc">{{.Location}}</span>
-            </summary>
-            {{if .Snippet}}{{template "snippet" .Snippet}}{{else}}<div class="snippet-missing">Snippet unavailable.</div>{{end}}
-          </details>
-          {{end}}
+            <div class="subhead">Sink</div>
+            {{if .SinkSnippet}}
+            <div class="panel">
+              <div class="filehdr">{{.SinkLocation}} &rarr; {{.SinkCallee}}</div>
+              {{template "snippet" .SinkSnippet}}
+            </div>
+            {{else}}
+            <div class="snippet-missing">Sink location unavailable ({{.SinkLocation}}).</div>
+            {{end}}
+          </div>
         </div>
         {{end}}
       </div>
-    </details>
-    {{end}}
+      <aside class="detail">
+        <div class="pane-empty">Select a finding to view its source, taint flow, and sink.</div>
+      </aside>
+    </div>
     {{end}}
   </section>
 
@@ -133,5 +148,4 @@
 <script>{{.JS}}</script>
 </body>
 </html>
-{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>
-{{end}}</pre>{{end}}
+{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{end}}</pre>{{end}}

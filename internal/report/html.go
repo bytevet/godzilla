@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -71,10 +72,15 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	// test never observes stale file contents.
 	cache := snippetCache{}
 
+	// Positions are rendered relative to the common project root so the report
+	// shows "models/group.go:322" rather than an absolute scan path.
+	root := commonRoot(sorted)
+
 	data := reportData{
 		Title:          "Godzilla SAST Report",
 		GeneratedAt:    time.Now().Format(time.RFC1123),
 		Total:          len(sorted),
+		Root:           root,
 		Tiles:          summaryTiles(sorted),
 		ByRule:         ruleRows(sorted),
 		SeverityFilter: severityFilters(),
@@ -82,7 +88,7 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 		JS:             template.JS(reportJS),
 	}
 	for _, f := range sorted {
-		data.Findings = append(data.Findings, newFindingView(cache, f))
+		data.Findings = append(data.Findings, newFindingView(cache, root, f))
 	}
 
 	return reportTemplate.Execute(w, data)
@@ -118,6 +124,7 @@ type reportData struct {
 	Title          string
 	GeneratedAt    string
 	Total          int
+	Root           string // common path prefix stripped from displayed locations
 	Tiles          []tile
 	ByRule         []ruleRow
 	SeverityFilter []severityFilter
@@ -270,6 +277,7 @@ type findingView struct {
 	ConfidenceLabel   string
 	ConfidenceClass   string
 	ConfKey           string
+	ConfidenceNote    string // plain-language explanation of the confidence level
 	RuleID            string
 	CWE               string
 	Message           string
@@ -299,8 +307,8 @@ type flowStep struct {
 	Snippet  *codeSnippet
 }
 
-func newFindingView(cache snippetCache, f analysis.Finding) findingView {
-	flow, endpointsOnly := buildFlow(cache, f)
+func newFindingView(cache snippetCache, root string, f analysis.Finding) findingView {
+	flow, endpointsOnly := buildFlow(cache, root, f)
 	return findingView{
 		SeverityLabel:     strings.ToUpper(string(f.Severity)),
 		SeverityClass:     severityClass(f.Severity),
@@ -308,14 +316,15 @@ func newFindingView(cache snippetCache, f analysis.Finding) findingView {
 		ConfidenceLabel:   strings.ToUpper(string(f.Confidence)),
 		ConfidenceClass:   confidenceClass(f.Confidence),
 		ConfKey:           string(normalizeConfidence(f.Confidence)),
+		ConfidenceNote:    confidenceNote(f.Confidence),
 		RuleID:            f.RuleID,
 		CWE:               f.CWE,
 		Message:           f.Message,
 		Language:          f.Language,
 		Function:          f.Function,
 		SinkCallee:        f.SinkCallee,
-		SinkLocation:      analysis.PosString(f.SinkPos),
-		SourceLocation:    analysis.PosString(f.SourcePos),
+		SinkLocation:      displayPos(root, f.SinkPos),
+		SourceLocation:    displayPos(root, f.SourcePos),
 		SourceSnippet:     buildSnippet(cache, f.SourcePos),
 		SinkSnippet:       buildSnippet(cache, f.SinkPos),
 		Flow:              flow,
@@ -333,7 +342,7 @@ func newFindingView(cache snippetCache, f analysis.Finding) findingView {
 // intra-procedural path (Finding.Steps), each step is a position along it;
 // otherwise it falls back to the source and sink endpoints and flags the flow
 // as endpoints-only.
-func buildFlow(cache snippetCache, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
+func buildFlow(cache snippetCache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
 	positions := f.Steps
 	if len(positions) == 0 {
 		endpointsOnly = true
@@ -356,11 +365,96 @@ func buildFlow(cache snippetCache, f analysis.Finding) (steps []flowStep, endpoi
 		steps = append(steps, flowStep{
 			Index:    i + 1,
 			Kind:     kind,
-			Location: analysis.PosString(p),
+			Location: displayPos(root, p),
 			Snippet:  buildSnippet(cache, p),
 		})
 	}
 	return steps, endpointsOnly
+}
+
+// confidenceNote returns a short plain-language explanation of a confidence
+// level, so the report never shows a bare "MEDIUM" the reader must decode.
+func confidenceNote(c analysis.Confidence) string {
+	switch normalizeConfidence(c) {
+	case analysis.ConfidenceHigh:
+		return "intra-procedural source → sink flow"
+	case analysis.ConfidenceMedium:
+		return "flow crosses a function boundary (interprocedural)"
+	default:
+		return ""
+	}
+}
+
+// commonRoot returns the longest common directory prefix shared by the
+// findings' source/sink/step file paths, so the report can render locations
+// relative to the scanned project instead of as long absolute paths. Go module
+// cache paths (third-party dependency sources) are excluded from the
+// computation and shortened separately by displayPath.
+func commonRoot(findings []analysis.Finding) string {
+	var common []string
+	have := false
+	consider := func(p *ir.Position) {
+		if p == nil {
+			return
+		}
+		fn := p.GetFilename()
+		if fn == "" || strings.Contains(fn, "/pkg/mod/") {
+			return
+		}
+		segs := strings.Split(fn, "/")
+		segs = segs[:len(segs)-1] // directory segments only (drop basename)
+		if !have {
+			common = segs
+			have = true
+			return
+		}
+		n := 0
+		for n < len(common) && n < len(segs) && common[n] == segs[n] {
+			n++
+		}
+		common = common[:n]
+	}
+	for _, f := range findings {
+		consider(f.SourcePos)
+		consider(f.SinkPos)
+		for _, s := range f.Steps {
+			consider(s)
+		}
+	}
+	if !have || len(common) == 0 {
+		return ""
+	}
+	return strings.Join(common, "/")
+}
+
+// displayPath renders filename relative to root; a Go module-cache path becomes
+// a short "dep: <module@version>/..." form; anything outside root is returned
+// unchanged.
+func displayPath(root, filename string) string {
+	if filename == "" {
+		return ""
+	}
+	if i := strings.LastIndex(filename, "/pkg/mod/"); i >= 0 {
+		return "dep: " + filename[i+len("/pkg/mod/"):]
+	}
+	if root != "" {
+		if filename == root {
+			return path.Base(filename)
+		}
+		if strings.HasPrefix(filename, root+"/") {
+			return filename[len(root)+1:]
+		}
+	}
+	return filename
+}
+
+// displayPos formats a position as "path:line:col" with path shortened via
+// displayPath, or "<unknown>" when pos is nil.
+func displayPos(root string, pos *ir.Position) string {
+	if pos == nil {
+		return "<unknown>"
+	}
+	return fmt.Sprintf("%s:%d:%d", displayPath(root, pos.GetFilename()), pos.GetLine(), pos.GetColumn())
 }
 
 // normalizeSeverity maps an arbitrary/unknown severity string down to one of
