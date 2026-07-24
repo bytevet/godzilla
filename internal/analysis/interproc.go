@@ -159,6 +159,42 @@ type funcParamRef struct {
 	param  int
 }
 
+// paramPositions maps a function-parameter index to a source position. It is the
+// shape of every per-function parameter summary: which parameters an out-parameter
+// fill writes taint into (taintsParamMemory), which route a string parameter into
+// a sink (taintsParamSink), and which arrive already tainted (a callee's seeds).
+type paramPositions map[int]*ir.Position
+
+// paramSummaries is the orchestrator's callee-keyed collection of paramPositions —
+// one entry per lowered function, accumulated across the worklist. The parameter
+// summary channels (paramTaint, paramMemTaint, paramSinkTaint) all share this
+// shape and merge/re-enqueue the same way (see merge).
+type paramSummaries map[string]paramPositions
+
+// merge records src on callee `name`'s summary with first-seen-wins semantics and,
+// when a new parameter index is added, re-enqueues the callee's callers so they
+// pick up the new fact. Shared by the out-parameter-memory and sink-wrapper
+// channels, which differ only in what they record, not how it propagates.
+func (s paramSummaries) merge(name string, src paramPositions, callers map[string][]string, enqueue func(string)) {
+	m := s[name]
+	if m == nil {
+		m = paramPositions{}
+		s[name] = m
+	}
+	changed := false
+	for idx, pos := range src {
+		if _, exists := m[idx]; !exists {
+			m[idx] = pos
+			changed = true
+		}
+	}
+	if changed {
+		for _, caller := range callers[name] {
+			enqueue(caller)
+		}
+	}
+}
+
 // funcResult is the outcome of analyzing one function under a set of
 // tainted-parameter seeds.
 type funcResult struct {
@@ -183,7 +219,7 @@ type funcResult struct {
 	// memory reachable from parameter i (an out-parameter fill, ENG-6b): a store
 	// whose address roots at param i. Callers then mark the argument they pass at
 	// that position tainted, so `fill(&dst); use(dst)` flows.
-	taintsParamMemory map[int]*ir.Position
+	taintsParamMemory paramPositions
 	// taintsParamSink[i] is set when tainted data reaching THIS function through
 	// STRING parameter i flows into a sink inside its (or a callee's) body — a
 	// dependency "sink wrapper" (e.g. Run(cmd string) -> exec.Command(cmd)). The
@@ -198,7 +234,7 @@ type funcResult struct {
 	// concatenate it into the query string — so summarizing those floods findings
 	// (xorm Find/Get/Update et al.). String-only keeps the real wrapper class and
 	// drops the reflective-container noise. See the isSink branch in analyzeFunc.
-	taintsParamSink map[int]*ir.Position
+	taintsParamSink paramPositions
 }
 
 // logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping a method
@@ -517,7 +553,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	byKey, modByKey, methodImpls := idx.byKey, idx.modByKey, idx.methodImpls
 	callers, globalReaders := idx.callers, idx.globalReaders
 	indirectCallees := idx.indirectCallees
-	paramTaint := map[string]map[int]*ir.Position{}
+	paramTaint := paramSummaries{}
 	// paramFuncVal is the function-value points-to summary: callee -> param index ->
 	// the SET of concrete functions that param can hold, accumulated across every
 	// call site (context-insensitive). An indirect call on that param binds only
@@ -530,8 +566,8 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	paramFuncOpaque := map[string]map[int]bool{}
 	returnTaint := map[string]*ir.Position{}
 	globalTaint := map[string]*ir.Position{}
-	paramMemTaint := map[string]map[int]*ir.Position{}  // callee -> out-param index -> origin (ENG-6b)
-	paramSinkTaint := map[string]map[int]*ir.Position{} // callee -> string-param index -> wrapped sink pos (dep sink wrapper)
+	paramMemTaint := paramSummaries{}  // callee -> out-param index -> origin (ENG-6b)
+	paramSinkTaint := paramSummaries{} // callee -> string-param index -> wrapped sink pos (dep sink wrapper)
 	reported := map[*ir.Instruction]bool{}
 	var findings []Finding
 
@@ -607,7 +643,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		for _, ce := range res.callEffects {
 			m := paramTaint[ce.callee]
 			if m == nil {
-				m = map[int]*ir.Position{}
+				m = paramPositions{}
 				paramTaint[ce.callee] = m
 			}
 			if _, exists := m[ce.param]; !exists {
@@ -670,7 +706,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// (ENG-6b): record it on the callee's summary and re-enqueue its callers
 		// so the argument they pass at that position picks up the taint.
 		if len(res.taintsParamMemory) > 0 {
-			mergeParamSummary(paramMemTaint, name, res.taintsParamMemory, callers, enqueue)
+			paramMemTaint.merge(name, res.taintsParamMemory, callers, enqueue)
 		}
 
 		// This (dependency) function routes one of its string parameters into a sink
@@ -678,7 +714,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// callers so a call passing tainted data at that position reports the flow at
 		// its own site. Mirrors the out-parameter-memory channel above.
 		if len(res.taintsParamSink) > 0 {
-			mergeParamSummary(paramSinkTaint, name, res.taintsParamSink, callers, enqueue)
+			paramSinkTaint.merge(name, res.taintsParamSink, callers, enqueue)
 		}
 	}
 
@@ -707,32 +743,6 @@ func newTaintFinding(rule *rules.Rule, mod *ir.Module, fn *ir.Function, srcPos, 
 		Steps:          steps,
 		RuleSanitizers: rule.Sanitizers,
 		RuleSources:    rule.Sources,
-	}
-}
-
-// mergeParamSummary records a function's parameter-indexed summary (out-parameter
-// memory fill or dependency sink-wrapper) on the callee's shared map with
-// first-seen-wins semantics, and re-enqueues the callee's callers when a new
-// parameter index is added so they pick up the new fact. Shared by the two
-// per-parameter summary channels (taintsParamMemory, taintsParamSink), which have
-// the same map shape and propagation rule.
-func mergeParamSummary(dst map[string]map[int]*ir.Position, name string, src map[int]*ir.Position, callers map[string][]string, enqueue func(string)) {
-	m := dst[name]
-	if m == nil {
-		m = map[int]*ir.Position{}
-		dst[name] = m
-	}
-	changed := false
-	for idx, pos := range src {
-		if _, exists := m[idx]; !exists {
-			m[idx] = pos
-			changed = true
-		}
-	}
-	if changed {
-		for _, caller := range callers[name] {
-			enqueue(caller)
-		}
 	}
 }
 
@@ -774,13 +784,13 @@ func analyzeFunc(
 	mod *ir.Module,
 	fn *ir.Function,
 	rule *rules.Rule,
-	seeds map[int]*ir.Position,
+	seeds paramPositions,
 	funcSeeds map[int]map[string]bool,
 	opaqueSeeds map[int]bool,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
-	paramMemTaint map[string]map[int]*ir.Position,
-	paramSinkTaint map[string]map[int]*ir.Position,
+	paramMemTaint paramSummaries,
+	paramSinkTaint paramSummaries,
 	byKey map[string]*ir.Function,
 	methodImpls map[string][]string,
 	indirectCallees map[string]bool,
@@ -1064,7 +1074,7 @@ func analyzeFunc(
 		}
 		effectSeen[key] = true
 		if res.taintsParamMemory == nil {
-			res.taintsParamMemory = map[int]*ir.Position{}
+			res.taintsParamMemory = paramPositions{}
 		}
 		res.taintsParamMemory[idx] = pos
 	}
@@ -1237,7 +1247,7 @@ func analyzeFunc(
 					if !funcReportable && !fnIsSink {
 						if k, isParam := paramOrigins[pos]; isParam && stringParam(k) {
 							if res.taintsParamSink == nil {
-								res.taintsParamSink = map[int]*ir.Position{}
+								res.taintsParamSink = paramPositions{}
 							}
 							if _, exists := res.taintsParamSink[k]; !exists {
 								res.taintsParamSink[k] = inst.Pos
@@ -1348,7 +1358,7 @@ func analyzeFunc(
 					// arg forwards one of THIS function's string parameters.
 					if k, isParam := paramOrigins[pos]; isParam && stringParam(k) {
 						if res.taintsParamSink == nil {
-							res.taintsParamSink = map[int]*ir.Position{}
+							res.taintsParamSink = paramPositions{}
 						}
 						if _, exists := res.taintsParamSink[k]; !exists {
 							res.taintsParamSink[k] = sinkPos
