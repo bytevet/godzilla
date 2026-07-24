@@ -77,10 +77,13 @@ type Finding struct {
 func (f Finding) String() string {
 	return fmt.Sprintf("[%s/%s/%s] %s: %s -> %s (%s) in %s at %s (source: %s)",
 		f.RuleID, f.Severity, f.Confidence, f.CWE, f.Message, f.SinkCallee, f.Language,
-		f.Function, formatPos(f.SinkPos), formatPos(f.SourcePos))
+		f.Function, PosString(f.SinkPos), PosString(f.SourcePos))
 }
 
-func formatPos(p *ir.Position) string {
+// PosString renders an *ir.Position as "file:line:col", or "<unknown>" when p is
+// nil. Shared by the CLI, the LLM reviewer, and the report writer so they all
+// format positions identically.
+func PosString(p *ir.Position) string {
 	if p == nil {
 		return "<unknown>"
 	}

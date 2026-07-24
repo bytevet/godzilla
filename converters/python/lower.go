@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strings"
 
+	"godzilla/converters/lowerutil"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -882,32 +883,13 @@ func (fs *funcState) lowerIfMerge(s astNode) {
 	fs.lowerBody(s.list("orelse"))
 	afterElse := fs.env
 
-	merged := maps.Clone(afterElse)
-	names := map[string]bool{}
-	for k := range afterBody {
-		names[k] = true
-	}
-	for k := range afterElse {
-		names[k] = true
-	}
-	for name := range names {
-		bv, ev := afterBody[name], afterElse[name]
-		if bv == nil {
-			bv = before[name] // else-only rebind: body kept the pre-branch value
-		}
-		if ev == nil {
-			ev = before[name] // body-only rebind: else kept the pre-branch value
-		}
-		if bv == ev || bv == nil || ev == nil {
-			continue // unchanged on both paths, or only ever bound on one path
-		}
+	fs.env = lowerutil.MergeBranchEnvs(before, afterBody, afterElse, func(bv, ev *ir.Value) *ir.Value {
 		phi := fs.newValueInst(s)
 		phi.Op = ir.OpCode_OP_CODE_PHI
 		phi.Operands = []*ir.Value{bv, ev}
 		fs.emit(phi)
-		merged[name] = regValue(phi.Name)
-	}
-	fs.env = merged
+		return regValue(phi.Name)
+	})
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;

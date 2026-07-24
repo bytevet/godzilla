@@ -17,6 +17,7 @@ package loader
 
 import (
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -60,30 +61,7 @@ func LoadDir(dir string) (*rules.RuleSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("loader: read dir %s: %w", dir, err)
-	}
-
-	out := &rules.RuleSet{}
-	for _, entry := range entries {
-		if entry.IsDir() || !isYAML(entry.Name()) || isFragment(entry.Name()) {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("loader: read %s: %w", entry.Name(), err)
-		}
-		rs, err := parse(entry.Name(), data, frags)
-		if err != nil {
-			return nil, err
-		}
-		out.Rules = append(out.Rules, rs.Rules...)
-	}
-	if err := checkDuplicateIDs(out); err != nil {
-		return nil, fmt.Errorf("loader: %s: %w", dir, err)
-	}
-	return out, nil
+	return loadRules(os.DirFS(dir), dir, frags)
 }
 
 // Builtin loads Godzilla's embedded, shipped-in-the-binary rule set (the
@@ -94,19 +72,26 @@ func Builtin() (*rules.RuleSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := rulepacks.Builtin.ReadDir(".")
-	if err != nil {
-		return nil, fmt.Errorf("loader: read embedded builtin rules: %w", err)
-	}
+	return loadRules(rulepacks.Builtin, "builtin rulepacks", frags)
+}
 
+// loadRules parses every non-fragment *.yaml/*.yml rulepack directly under fsys's
+// root against frags, concatenates their rules, and rejects duplicate ids. what
+// labels fsys in wrapped errors. Shared by LoadDir (an on-disk directory) and
+// Builtin (the embedded rulepacks FS), which differ only in the filesystem.
+func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, error) {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil, fmt.Errorf("loader: read %s: %w", what, err)
+	}
 	out := &rules.RuleSet{}
 	for _, entry := range entries {
 		if entry.IsDir() || !isYAML(entry.Name()) || isFragment(entry.Name()) {
 			continue
 		}
-		data, err := rulepacks.Builtin.ReadFile(entry.Name())
+		data, err := fs.ReadFile(fsys, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("loader: read embedded rule file %s: %w", entry.Name(), err)
+			return nil, fmt.Errorf("loader: read %s: %w", entry.Name(), err)
 		}
 		rs, err := parse(entry.Name(), data, frags)
 		if err != nil {
@@ -115,7 +100,7 @@ func Builtin() (*rules.RuleSet, error) {
 		out.Rules = append(out.Rules, rs.Rules...)
 	}
 	if err := checkDuplicateIDs(out); err != nil {
-		return nil, fmt.Errorf("loader: builtin rulepacks: %w", err)
+		return nil, fmt.Errorf("loader: %s: %w", what, err)
 	}
 	return out, nil
 }
@@ -205,37 +190,36 @@ func (f fragmentSet) apply(rs *rules.RuleSet) error {
 	return nil
 }
 
-// mergeFragment prepends base's pattern-list entries to dst's (see mergeGlobs).
+// mergeFragment prepends base's pattern-list entries to dst's (see mergeUniq).
 // Scalar fields (id/severity/cwe/message/kind) are left to the rule itself.
 func mergeFragment(dst, base *rules.Rule) {
-	dst.Sources = mergeGlobs(base.Sources, dst.Sources)
-	dst.Sinks = mergeGlobs(base.Sinks, dst.Sinks)
-	dst.Sanitizers = mergeGlobs(base.Sanitizers, dst.Sanitizers)
-	dst.Propagators = mergeGlobs(base.Propagators, dst.Propagators)
-	dst.RequestObjectSources = mergeGlobs(base.RequestObjectSources, dst.RequestObjectSources)
-	dst.Validators = mergeGlobs(base.Validators, dst.Validators)
-	dst.Callees = mergeGlobs(base.Callees, dst.Callees)
+	dst.Sources = mergeUniq(base.Sources, dst.Sources)
+	dst.Sinks = mergeUniq(base.Sinks, dst.Sinks)
+	dst.Sanitizers = mergeUniq(base.Sanitizers, dst.Sanitizers)
+	dst.Propagators = mergeUniq(base.Propagators, dst.Propagators)
+	dst.RequestObjectSources = mergeUniq(base.RequestObjectSources, dst.RequestObjectSources)
+	dst.Validators = mergeUniq(base.Validators, dst.Validators)
+	dst.Callees = mergeUniq(base.Callees, dst.Callees)
 }
 
-// mergeGlobs returns base entries followed by own entries, with duplicates
+// mergeUniq returns base entries followed by own entries, with duplicates
 // removed (first occurrence wins), so a rule inherits its fragment's list and
-// then appends its own additions.
-func mergeGlobs(base, own []string) []string {
+// then appends its own additions. Works for glob strings and for the Sink/Callee
+// structs — note a dynamic entry differing only in `when` is a DISTINCT entry, and
+// MatchSink returns the first match, so a bare base entry shadows a guarded one
+// the rule adds for the same glob.
+func mergeUniq[T comparable](base, own []T) []T {
 	if len(base) == 0 {
 		return own
 	}
-	out := make([]string, 0, len(base)+len(own))
-	seen := make(map[string]bool, len(base)+len(own))
-	add := func(list []string) {
-		for _, e := range list {
-			if !seen[e] {
-				seen[e] = true
-				out = append(out, e)
-			}
+	out := make([]T, 0, len(base)+len(own))
+	seen := make(map[T]bool, len(base)+len(own))
+	for _, e := range slices.Concat(base, own) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
 		}
 	}
-	add(base)
-	add(own)
 	return out
 }
 
@@ -328,11 +312,19 @@ func validate(rs *rules.RuleSet) error {
 		}
 		// A sink with a "#" injection-point spec that names no valid argument
 		// index silently widens to "all arguments" (a false-positive-prone
-		// footgun); reject the typo instead of quietly weakening the sink.
+		// footgun); reject the typo instead of quietly weakening the sink. A
+		// dynamic sink's `when:` guard must compile (this is where a bad guard
+		// fails loud at load / `rules lint` instead of silently suppressing).
 		for _, s := range r.Sinks {
-			if rules.InvalidSinkSpec(s) {
-				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s))
+			if rules.InvalidSinkSpec(s.Pattern) {
+				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s.Pattern))
 			}
+		}
+		// Compile the rule here (idempotent, so the engine's later Compile is a
+		// no-op): this compiles its dynamic `when:` guards exactly once per run and
+		// surfaces any guard error at load instead of letting it reach a scan.
+		if err := rs.Rules[i].Compile(); err != nil {
+			problems = append(problems, fmt.Sprintf("rule %q has an invalid when: %v", r.ID, err))
 		}
 		// A dangerous-call rule (COV-4) is defined by its callees; without any it
 		// can never fire, and its const_arg regexp must compile.

@@ -233,7 +233,7 @@ func isScannableConfigFile(path string) bool {
 		return true
 	case strings.HasPrefix(lower, ".env"): // .env, .env.local, .env.production
 		return true
-	case lower == ".npmrc" || lower == ".netrc" || lower == ".pypirc":
+	case lower == ".pypirc": // .npmrc/.netrc are matched earlier via configFileExts
 		return true
 	}
 	return false

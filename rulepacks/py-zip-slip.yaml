@@ -13,6 +13,10 @@ rules:
       to write files outside the intended directory (zip-slip). Validate each
       entry against the destination root (os.path.realpath + startswith), or
       sanitize the name (e.g. werkzeug.utils.secure_filename), before writing.
+    # Filesystem sinks come from the shared fragment (also used by
+    # py-path-traversal): the entry name reaching any of them is the moment the
+    # traversal takes effect.
+    extend: $_py-fs-sinks.yaml
     sources:
       # Archive entry enumerators: zipfile.ZipFile.namelist/infolist and
       # tarfile.TarFile.getnames/getmembers. The returned names (or the .name/
@@ -21,13 +25,6 @@ rules:
       - "py:*.infolist"
       - "py:*.getnames"
       - "py:*.getmembers"
-    sinks:
-      # Same filesystem-write/serve primitives as py-path-traversal: the entry
-      # name reaching any of these is the moment the traversal takes effect.
-      - "py:*open"
-      - "py:os.remove"
-      - "py:*send_file"
-      - "py:*FileResponse"
     sanitizers:
       # secure_filename strips directory separators and "../", collapsing the
       # entry to a safe basename -- the documented Flask/Werkzeug mitigation.

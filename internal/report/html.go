@@ -166,21 +166,12 @@ func newFindingView(f analysis.Finding) findingView {
 		Message:           f.Message,
 		Function:          f.Function,
 		SinkCallee:        f.SinkCallee,
-		SinkLocation:      formatPosition(f.SinkPos),
-		SourceLocation:    formatPosition(f.SourcePos),
+		SinkLocation:      analysis.PosString(f.SinkPos),
+		SourceLocation:    analysis.PosString(f.SourcePos),
 		Snippet:           buildSnippet(f.SinkPos),
 		Suppressed:        f.Suppressed,
 		SuppressionReason: f.SuppressionReason,
 	}
-}
-
-// formatPosition renders an *ir.Position as "file:line:col", or "<unknown>"
-// when pos is nil.
-func formatPosition(pos *ir.Position) string {
-	if pos == nil {
-		return "<unknown>"
-	}
-	return fmt.Sprintf("%s:%d:%d", pos.GetFilename(), pos.GetLine(), pos.GetColumn())
 }
 
 // normalizeSeverity maps an arbitrary/unknown severity string down to one of

@@ -24,7 +24,7 @@ func cmdiRules() *rules.RuleSet {
 		CWE:       "CWE-78",
 		Message:   "command injection",
 		Sources:   []string{"ruby:params", "ruby:request.*", "ruby:req.*"},
-		Sinks:     []string{"ruby:system#0", "ruby:%x"},
+		Sinks:     rules.SinksOf("ruby:system#0", "ruby:%x"),
 	}}}
 }
 

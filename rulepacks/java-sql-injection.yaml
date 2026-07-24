@@ -9,10 +9,9 @@ rules:
       Untrusted input flows into a JDBC query built by string concatenation,
       which may allow SQL injection. Use a PreparedStatement with bound "?"
       parameters instead of concatenating user input into the query string.
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The query string is the first (receiver-excluded) argument; a
     # PreparedStatement's bound parameters (set via setString/setInt) are not
     # injection points, so a parameterized query is not flagged.

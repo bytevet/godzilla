@@ -2,12 +2,14 @@ package js_converter
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/token"
 
+	"godzilla/converters/lowerutil"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -458,48 +460,21 @@ func (fs *funcState) lowerBodyStmt(s ast.Statement) {
 // statement-level analogue of the ConditionalExpression PHI above. There is no
 // CFG here, so both arms are lowered and their divergent bindings unioned.
 func (fs *funcState) lowerIfMerge(v *ast.IfStatement) {
-	before := cloneEnv(fs.env)
+	before := maps.Clone(fs.env)
 	fs.lowerBody(stmtList(v.Consequent))
 	afterBody := fs.env
-	fs.env = cloneEnv(before)
+	fs.env = maps.Clone(before)
 	if v.Alternate != nil {
 		fs.lowerBody(stmtList(v.Alternate))
 	}
 	afterElse := fs.env
-	merged := cloneEnv(afterElse)
-	names := map[string]bool{}
-	for k := range afterBody {
-		names[k] = true
-	}
-	for k := range afterElse {
-		names[k] = true
-	}
-	for name := range names {
-		bv, ev := afterBody[name], afterElse[name]
-		if bv == nil {
-			bv = before[name]
-		}
-		if ev == nil {
-			ev = before[name]
-		}
-		if bv == ev || bv == nil || ev == nil {
-			continue
-		}
+	fs.env = lowerutil.MergeBranchEnvs(before, afterBody, afterElse, func(bv, ev *ir.Value) *ir.Value {
 		inst := fs.newValueInst(v.Idx0())
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{bv, ev}
 		fs.emit(inst)
-		merged[name] = regValue(inst.Name)
-	}
-	fs.env = merged
-}
-
-func cloneEnv(env map[string]*ir.Value) map[string]*ir.Value {
-	out := make(map[string]*ir.Value, len(env))
-	for k, v := range env {
-		out[k] = v
-	}
-	return out
+		return regValue(inst.Name)
+	})
 }
 
 // lowerForInit lowers a `for(...)` loop's initializer clause, which may be a

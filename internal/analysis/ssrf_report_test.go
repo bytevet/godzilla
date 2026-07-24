@@ -15,7 +15,7 @@ func ssrfRule() *rules.RuleSet {
 		CWE:       "CWE-918",
 		Message:   "ssrf",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*net/http.Get"},
+		Sinks:     rules.SinksOf("go:*net/http.Get"),
 		Propagators: []string{
 			"go:fmt.Sprintf", "go:fmt.Sprint",
 		},

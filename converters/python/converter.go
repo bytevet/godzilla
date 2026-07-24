@@ -39,11 +39,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"godzilla/internal/chunks"
@@ -79,28 +77,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	var files []string
 	if info.IsDir() {
-		walkErr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				if walkignore.SkipDir(d.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if strings.HasSuffix(p, ".py") && !walkignore.SkipFile(d.Name()) {
-				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
-					return nil
-				}
-				files = append(files, p)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return nil, walkErr
+		files, err = walkignore.CollectSources(abs, func(p string) bool { return strings.HasSuffix(p, ".py") })
+		if err != nil {
+			return nil, err
 		}
-		slices.Sort(files)
 	} else {
 		files = []string{abs}
 	}
@@ -350,21 +330,11 @@ func globalHandlerClasses(results []pyFileResult) map[string]bool {
 // can be invoked as `python3 <path> <file.py>`. The caller must invoke the
 // returned cleanup function once done.
 func writeHelperScript() (string, func(), error) {
-	tmp, err := os.CreateTemp("", "godzilla-pyast-*.py")
+	path, cleanup, err := proc.WriteEmbeddedScript("godzilla-pyast-*.py", pyASTScript)
 	if err != nil {
-		return "", nil, fmt.Errorf("py_converter: failed to create temp helper script: %w", err)
+		return "", nil, fmt.Errorf("py_converter: %w", err)
 	}
-	if _, err := tmp.Write(pyASTScript); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return "", nil, fmt.Errorf("py_converter: failed to write temp helper script: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return "", nil, fmt.Errorf("py_converter: failed to close temp helper script: %w", err)
-	}
-	path := tmp.Name()
-	return path, func() { _ = os.Remove(path) }, nil
+	return path, cleanup, nil
 }
 
 // moduleNameFor derives a module name unique to the file: its path relative to

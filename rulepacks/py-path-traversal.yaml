@@ -11,17 +11,8 @@ rules:
       Untrusted input flows into a filesystem path without being cleaned or
       validated, which may allow path traversal (e.g. "../" sequences) to
       read or write files outside the intended directory.
-    extend: $_py-sources.yaml
-    sinks:
-      # Broad "*open" (matches builtin open(), io.open, codecs.open, ...) plus
-      # the common filesystem-mutation and Flask file-serving primitives.
-      - "py:*open"
-      - "py:os.remove"
-      - "py:*send_file"
-      # Starlette/FastAPI file-serving responses (Gradio CVE-2023-51449): serving
-      # an attacker-controlled path is path traversal, exactly like Flask
-      # send_file. `*FileResponse` also matches RangedFileResponse.
-      - "py:*FileResponse"
+    # Filesystem sinks come from the shared fragment (also used by py-zip-slip).
+    extend: [$_py-sources.yaml, $_py-fs-sinks.yaml]
     # os.path.join does NOT contain input to a base directory ("/data" +
     # "../../etc" joins to "/data/../../etc", which still escapes "/data"),
     # so it is a propagator, not a sanitizer -- mirroring go-path-traversal's

@@ -1,0 +1,2 @@
+# Dependency wrapper reads the request but returns a constant: no taint, no finding.
+findings: []

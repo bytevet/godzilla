@@ -498,13 +498,25 @@ func buildProject(dir string, sys buildSystem) ([]string, error) {
 // classOutputDirs finds every compiled-main output directory under root; a
 // multi-module reactor has one per module.
 func classOutputDirs(root, suffix string) []string {
+	// The compiled output lives UNDER directories the source-scan ignore set
+	// deliberately excludes: Maven's target/classes, Gradle's build/classes/...
+	// (walkignore skips both "target" and "build" so source scans don't descend
+	// into build artifacts). Reusing that skip set here would prune the very
+	// directory we are looking for, so every build was silently discarded as
+	// "produced no classes". Exempt the directory names that make up the expected
+	// suffix, so the walk descends into them while still skipping unrelated
+	// ignored trees (a nested node_modules, a sibling module's vendored dir).
+	suffixParts := map[string]bool{}
+	for _, part := range strings.Split(suffix, string(filepath.Separator)) {
+		suffixParts[part] = true
+	}
 	var dirs []string
 	// WalkDir visits each directory exactly once, so no dedup is needed.
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
 		}
-		if walkignore.SkipDir(d.Name()) {
+		if !suffixParts[d.Name()] && walkignore.SkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 		if strings.HasSuffix(p, suffix) {
