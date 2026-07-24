@@ -116,7 +116,7 @@ func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
 // engine and the dangerous-call pass don't race building per-rule matchers.
 // A nil filePath skips the raw-file secrets scan (callers that already did it).
 func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkgs map[string]bool) []analysis.Finding {
-	rs.Compile()
+	_ = rs.Compile() // guard-compile errors are already reported by the loader at load
 	var (
 		taint, danger, secrets, fileSecrets []analysis.Finding
 		wg                                  sync.WaitGroup

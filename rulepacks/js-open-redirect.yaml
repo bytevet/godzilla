@@ -14,3 +14,10 @@ rules:
     sanitizers:
       - "js:encodeURIComponent"
     propagators: []
+    # An application allowlist predicate (isSafeUrl(target)) that gates the
+    # redirect: when its boolean result controls an IF that dominates the sink on
+    # the path taken, the target was validated and the redirect is not open
+    # (ENG-9). Requires the real CFG + dominators (guards.go), which the JS
+    # frontend now emits.
+    validators:
+      - "js:*isSafeUrl"

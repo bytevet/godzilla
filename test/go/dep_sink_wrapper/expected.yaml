@@ -1,0 +1,5 @@
+# The command sink lives inside a dependency wrapper (cmdutil.Run); the finding
+# must surface at the user call site via the sink-parameter summary channel.
+findings:
+    - rule: go-command-injection
+      min: 1

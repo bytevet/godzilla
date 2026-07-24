@@ -92,7 +92,7 @@ rules:
 	if len(r.Sources) != 1 || r.Sources[0] != "go:*Request*.URL*" {
 		t.Errorf("Sources = %v", r.Sources)
 	}
-	if len(r.Sinks) != 1 || r.Sinks[0] != "go:*Sink*" {
+	if len(r.Sinks) != 1 || r.Sinks[0].Pattern != "go:*Sink*" {
 		t.Errorf("Sinks = %v", r.Sinks)
 	}
 	if len(r.Sanitizers) != 1 || r.Sanitizers[0] != "go:*Sanitize*" {
@@ -271,6 +271,37 @@ func TestLoadDirRejectsDuplicateIDs(t *testing.T) {
 	}
 	if _, err := LoadDir(dir); err == nil {
 		t.Fatal("LoadDir() with duplicate rule ids: want error, got nil")
+	}
+}
+
+// TestLoadFileRejectsBadGuard locks in that a dynamic sink/callee whose `when:`
+// expression fails to compile (bad syntax, unknown function, non-bool, invalid
+// regexp) is rejected at load — the enriched lint that keeps a broken guard from
+// silently suppressing findings at scan time.
+func TestLoadFileRejectsBadGuard(t *testing.T) {
+	dir := t.TempDir()
+	for name, when := range map[string]string{
+		"unknown-fn": "nope(arg[0])",
+		"non-bool":   "arg[0].String",
+		"bad-regex":  "arg[0].String matches '('",
+	} {
+		path := filepath.Join(dir, name+".yaml")
+		doc := "rules:\n  - id: r\n    severity: high\n    sinks:\n      - sink: \"go:*Sink\"\n        when: \"" + when + "\"\n"
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Errorf("LoadFile(%s, when=%q): want error, got nil", name, when)
+		}
+	}
+	// A well-formed guard must still load cleanly.
+	ok := filepath.Join(dir, "ok.yaml")
+	doc := "rules:\n  - id: r\n    severity: high\n    sinks:\n      - sink: \"go:*Sink\"\n        when: \"arg[0].String startsWith 'cmd:'\"\n"
+	if err := os.WriteFile(ok, []byte(doc), 0o644); err != nil {
+		t.Fatalf("writing ok.yaml: %v", err)
+	}
+	if _, err := LoadFile(ok); err != nil {
+		t.Errorf("LoadFile(ok.yaml) with a valid guard: unexpected error: %v", err)
 	}
 }
 

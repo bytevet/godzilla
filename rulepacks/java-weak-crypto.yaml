@@ -29,3 +29,19 @@ rules:
     const_arg:
       index: 0
       matches: "(?i)(^|/)(DES|DESede|RC4|ARCFOUR|Blowfish)(/|$)"
+
+  # ECB mode leaks plaintext block patterns (identical blocks -> identical
+  # ciphertext), a CWE-327 weakness even with a strong cipher like AES. The
+  # transformation is `algo/mode/padding`, so a dynamic guard on the constant
+  # arg catches the mode where a fixed algo list can't.
+  - id: java-ecb-mode
+    kind: dangerous-call
+    languages: [java]
+    severity: medium
+    cwe: CWE-327
+    message: >-
+      A cipher was requested in ECB mode, which leaks plaintext block patterns.
+      Use an authenticated mode such as AES/GCM.
+    callees:
+      - callee: "java:*Cipher.getInstance"
+        when: "arg[0].String contains '/ECB/'"

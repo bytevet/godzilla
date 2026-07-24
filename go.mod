@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.55.0
 	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
 	github.com/evanw/esbuild v0.28.1
+	github.com/expr-lang/expr v1.17.8
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible
 	github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f
 	golang.org/x/net v0.50.0

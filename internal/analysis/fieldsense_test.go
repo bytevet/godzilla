@@ -16,7 +16,7 @@ func cmdiRuleSet(id string) *rules.RuleSet {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 }
 
@@ -59,7 +59,7 @@ func TestFieldSensitivity_TaintedFieldStillFlagged(t *testing.T) {
 		CWE:       "CWE-89",
 		Message:   "untrusted input reaches a SQL query",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*database/sql*.QueryRow", "go:*database/sql*.Query"},
+		Sinks:     rules.SinksOf("go:*database/sql*.QueryRow", "go:*database/sql*.Query"),
 	}}}
 	findings := NewEngine(rs).Analyze(prog)
 	// handler3: &User{ID: tainted} -> user.GetByID() -> u.ID -> QueryRow.

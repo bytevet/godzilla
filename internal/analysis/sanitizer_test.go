@@ -29,7 +29,7 @@ func TestAnalyze_SanitizerSuppressesReturnFlow(t *testing.T) {
 		CWE:        "CWE-78",
 		Message:    "untrusted input reaches os/exec",
 		Sources:    []string{"go:*net/url*.Get"},
-		Sinks:      []string{"go:*os/exec.Command*"},
+		Sinks:      rules.SinksOf("go:*os/exec.Command*"),
 		Sanitizers: []string{"go:*Sanitize"},
 	}}}
 
@@ -61,7 +61,7 @@ func TestAnalyze_SanitizerFlowFiresWithoutSanitizerRule(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)

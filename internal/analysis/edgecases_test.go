@@ -25,7 +25,7 @@ func TestAnalyze_DeferAndMapFlows(t *testing.T) {
 			CWE:       "CWE-89",
 			Message:   "tainted query reaches a deferred DB call",
 			Sources:   []string{"go:*Request*.FormValue"},
-			Sinks:     []string{"go:*database/sql*.Query*"},
+			Sinks:     rules.SinksOf("go:*database/sql*.Query*"),
 		},
 		{
 			ID:        "GO-CMDI-MAP",
@@ -34,7 +34,7 @@ func TestAnalyze_DeferAndMapFlows(t *testing.T) {
 			CWE:       "CWE-78",
 			Message:   "tainted value flows through a map into os/exec",
 			Sources:   []string{"go:*Request*.FormValue"},
-			Sinks:     []string{"go:*os/exec.Command*"},
+			Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 		},
 	}}
 

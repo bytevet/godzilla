@@ -28,7 +28,7 @@ func TestAnalyze_GlobalTaintFlow(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec via a package global",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)
@@ -66,7 +66,7 @@ func TestAnalyze_GlobalTaintSafe(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec via a package global",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)
@@ -97,7 +97,7 @@ func TestAnalyze_OutParamFill(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec via an out-parameter fill",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)
@@ -133,7 +133,7 @@ func TestAnalyze_OutParamFillSafe(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec via an out-parameter fill",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -184,7 +185,8 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 	}
 	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, "")
 	fs.lowerBody(top)
-	if len(fs.instrs) == 0 {
+	blocks := fs.b.Finish()
+	if instrCount(blocks) == 0 {
 		return nil
 	}
 	return &ir.Function{
@@ -193,8 +195,17 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 		PackageName:   moduleName,
 		CanonicalName: "ruby:" + moduleName + ".<module>",
 		Synthetic:     true,
-		Blocks:        []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}},
+		Blocks:        blocks,
 	}
+}
+
+// instrCount totals the instructions across a function's basic blocks.
+func instrCount(blocks []*ir.BasicBlock) int {
+	n := 0
+	for _, b := range blocks {
+		n += len(b.Instrs)
+	}
+	return n
 }
 
 // lowerDef lowers one `def` into a function.
@@ -212,12 +223,12 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 	for _, p := range paramNames(at(defNode, 2)) {
 		v := regValue(p)
 		fn.Params = append(fn.Params, v)
-		fs.env[p] = v
+		fs.write(p, v)
 		fs.paramNames[p] = true
 	}
 	// def name params bodystmt → the body is the bodystmt at index 3.
 	fs.lowerDefBody(bodyStmts(at(defNode, 3)))
-	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
@@ -253,11 +264,11 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 	for _, p := range paramNames(at(defNode, 4)) {
 		v := regValue(p)
 		fn.Params = append(fn.Params, v)
-		fs.env[p] = v
+		fs.write(p, v)
 		fs.paramNames[p] = true
 	}
 	fs.lowerDefBody(bodyStmts(at(defNode, 5)))
-	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
@@ -296,9 +307,14 @@ func paramNames(n interface{}) []string {
 	return out
 }
 
-// funcState holds the per-function lowering state: a temp-register counter, the
-// env mapping a Ruby local name to its current gIR value, and the flat
-// instruction list for the function's single basic block.
+// funcState holds the per-function lowering state. Variable values and the
+// per-block instruction stream are owned by an ssabuild.Builder (real CFG +
+// on-demand PHI insertion, Braun et al.); `cur` is the block currently being
+// lowered into (threaded through the AST walk instead of appending to one flat
+// instruction list). `assigned` tracks which Ruby names have been written as a
+// local/ivar SO FAR in the traversal — it replaces the old env's key-presence
+// test (is this bare name a bound local, or a free identifier / method?) that
+// the Builder's per-block value map cannot answer directly.
 type funcState struct {
 	filename   string
 	moduleName string
@@ -310,23 +326,36 @@ type funcState struct {
 	qualifiedFuncs map[string]bool
 	classQual      string
 	counter        int
-	env            map[string]*ir.Value
+	b              *ssabuild.Builder
+	cur            ssabuild.BlockID
+	assigned       map[string]bool
+	// terminated reports whether the current block (cur) has already emitted a
+	// block-terminating RET (an explicit `return`). Such a block must NOT then
+	// receive a fall-through JUMP and must NOT become a predecessor of a merge /
+	// loop header — otherwise a returning arm spuriously feeds its (possibly
+	// tainted) values into the join, a false positive. Reset to false whenever
+	// lowering begins in a fresh block.
+	terminated bool
 	// paramNames is the set of this function's own parameter names. A member
 	// read / `[]` off a parameter (or off a free/unbound identifier) is an
 	// "opaque base" — see isOpaqueBase — and the first opportunity to introduce
 	// taint, mirroring the JS/Python frontends' opaque-base source heuristic.
 	paramNames map[string]bool
-	instrs     []*ir.Instruction
 }
 
 func newFuncState(filename, moduleName string, localFuncs, qualifiedFuncs map[string]bool, classQual string) *funcState {
+	b := ssabuild.NewBuilder()
+	entry := b.NewBlock()
+	b.Seal(entry) // the entry block has no predecessors, so it is sealed at once.
 	return &funcState{
 		filename:       filename,
 		moduleName:     moduleName,
 		localFuncs:     localFuncs,
 		qualifiedFuncs: qualifiedFuncs,
 		classQual:      classQual,
-		env:            map[string]*ir.Value{},
+		b:              b,
+		cur:            entry,
+		assigned:       map[string]bool{},
 		paramNames:     map[string]bool{},
 	}
 }
@@ -337,7 +366,22 @@ func (fs *funcState) newReg() string {
 	return r
 }
 
-func (fs *funcState) emit(inst *ir.Instruction) { fs.instrs = append(fs.instrs, inst) }
+// emit appends an instruction to the block currently being lowered.
+func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
+
+// write records val as the current value of a Ruby local/ivar name in the
+// current block and marks the name as assigned (so a later bare read resolves
+// it as a variable rather than a free identifier / method call).
+func (fs *funcState) write(name string, val *ir.Value) {
+	fs.b.WriteVariable(name, fs.cur, val)
+	fs.assigned[name] = true
+}
+
+// read returns the SSA value current for a Ruby local in the current block,
+// inserting PHIs on demand (branch joins / loop headers) via the Builder.
+func (fs *funcState) read(name string) *ir.Value {
+	return fs.b.ReadVariable(name, fs.cur)
+}
 
 func (fs *funcState) newValueInst(n interface{}) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posFrom(fs.filename, n)}
@@ -421,7 +465,7 @@ func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
 	leaf := at(target, 1)
 	name := identName(leaf)
 	if name != "" {
-		fs.env[name] = val
+		fs.write(name, val)
 	}
 	if tag(leaf) == "@ivar" {
 		if g := fs.ivarGlobal(name); g != "" {
@@ -458,6 +502,15 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		// the engine's taint-return summary sees it.
 		v := fs.lowerSeqLast(extractArgs(at(s, 1)))
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
+		fs.terminated = true // the current block ends here; no fall-through edge.
+		return v
+	case "return0":
+		// bare `return` (Ripper tags an argument-less return "return0") — returns
+		// nil. Emit the RET (so the block terminates, no fall-through edge) rather
+		// than falling through to a ruby.unsupported intrinsic.
+		v := constString("")
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
+		fs.terminated = true
 		return v
 	case "def", "class", "module":
 		return nil // lowered separately by convertModule.collect
@@ -505,8 +558,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 			// assigned it, else read the per-(class, @ivar) synthetic global so taint
 			// stashed by a sibling method is observed cross-method (see ivarGlobal).
 			name := identName(inner)
-			if v, ok := fs.env[name]; ok {
-				return v
+			if fs.assigned[name] {
+				return fs.read(name)
 			}
 			if g := fs.ivarGlobal(name); g != "" {
 				ld := fs.newValueInst(n)
@@ -524,8 +577,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		// CALL so a helper that returns request data links up for inter-procedural
 		// taint (`p = fetch_path`); otherwise a free identifier / constant.
 		name := identName(at(n, 1))
-		if v, ok := fs.env[name]; ok {
-			return v
+		if fs.assigned[name] {
+			return fs.read(name)
 		}
 		if fs.isKnownMethod(name) {
 			return fs.lowerCallExpr(fs.localCallee(name), nil, n)
@@ -557,6 +610,14 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerCallExpr("ruby:"+identName(at(n, 1)), nil, n)
 	case "case":
 		return fs.lowerCase(n)
+	case "if", "elsif", "unless":
+		return fs.lowerIf(n)
+	case "while", "until":
+		return fs.lowerWhile(n)
+	case "if_mod", "unless_mod":
+		return fs.lowerCondMod(n)
+	case "while_mod", "until_mod":
+		return fs.lowerLoopMod(n)
 	case "array":
 		// Lower elements (so a source/sink inside fires); the container itself is
 		// left untainted, matching the other frontends' list handling.
@@ -634,6 +695,198 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 		return constString("")
 	}
 	return last
+}
+
+// lowerStmtSeqLast lowers a statement list inline and returns the last
+// statement's value. Unlike lowerSeqLast (which lowers *expressions*), this
+// dispatches through lowerStmt so an `assign`/`opassign`/`return` inside a
+// branch or loop body rebinds the env instead of falling through lowerExpr's
+// default to a `ruby.unsupported` intrinsic.
+func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
+	var last *ir.Value
+	for _, s := range stmts {
+		last = fs.lowerStmt(s)
+	}
+	return last
+}
+
+// lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end` into a
+// REAL CFG diamond via the Builder: the condition is lowered in the current
+// block, which ends in an OP_CODE_IF to a fresh then-block and else-block; each
+// arm is lowered in its own block and jumps to a fresh merge block; the merge is
+// sealed once both arm-ends are its known predecessors, so any variable rebound
+// on one or both arms reconciles automatically via an on-demand ReadVariable PHI
+// (retiring the manual lowerutil.MergeBranchEnvs path). `if`, `unless`, and
+// `elsif` share the layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
+// the polarity of `unless` is immaterial to taint (both arms are reachable), so
+// it is lowered like `if`. A nested `elsif` recurses into the else-block, so an
+// arbitrarily long chain becomes nested diamonds.
+func (fs *funcState) lowerIf(n interface{}) *ir.Value {
+	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
+	thenB := fs.b.NewBlock()
+	elseB := fs.b.NewBlock()
+	merge := fs.b.NewBlock()
+	fs.b.SetIf(fs.cur, cond, thenB, elseB)
+	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
+	fs.b.Seal(elseB)
+
+	fs.cur = thenB
+	fs.terminated = false
+	var lastBody *ir.Value
+	if body, ok := asList(at(n, 2)); ok {
+		lastBody = fs.lowerStmtSeqLast(body)
+	}
+	thenEnd := fs.cur // the arm may itself have branched; jump from its END
+	thenTerm := fs.terminated
+	if !thenTerm { // a returning arm has no fall-through edge to the merge
+		fs.b.SetJump(thenEnd, merge)
+	}
+
+	fs.cur = elseB
+	fs.terminated = false
+	lastElse := fs.lowerElseTail(at(n, 3))
+	elseEnd := fs.cur
+	elseTerm := fs.terminated
+	if !elseTerm {
+		fs.b.SetJump(elseEnd, merge)
+	}
+
+	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
+	fs.cur = merge
+	// The merge is dead only if BOTH arms returned; otherwise it falls through.
+	fs.terminated = thenTerm && elseTerm
+	return fs.branchResult(lastBody, lastElse, thenEnd, elseEnd, merge)
+}
+
+// branchResult reconciles the two arms' RESULT values of an if/unless used as an
+// expression (`x = if c; a; else; b; end`). When both arms yield a distinct
+// value it stashes each into a synthetic variable at its arm-end and reads it
+// back in the merge block, so the Builder emits a proper PHI (with correct
+// predecessor labels) that keeps taint from either arm; otherwise it forwards
+// whichever arm produced a value.
+func (fs *funcState) branchResult(a, b *ir.Value, thenEnd, elseEnd, merge ssabuild.BlockID) *ir.Value {
+	switch {
+	case a != nil && b != nil && a != b:
+		key := "__br." + fs.newReg()
+		fs.b.WriteVariable(key, thenEnd, a)
+		fs.b.WriteVariable(key, elseEnd, b)
+		return fs.b.ReadVariable(key, merge)
+	case a != nil:
+		return a
+	case b != nil:
+		return b
+	}
+	return constString("")
+}
+
+// lowerElseTail lowers the tail of an if/unless chain in the current (else)
+// block: an `elsif` (recursively — its own diamond), an `else` body, or nil.
+func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
+	switch tag(node) {
+	case "elsif":
+		return fs.lowerIf(node)
+	case "else":
+		if body, ok := asList(at(node, 1)); ok {
+			return fs.lowerStmtSeqLast(body)
+		}
+	}
+	return nil
+}
+
+// lowerWhile lowers `while`/`until cond; body; end` into a REAL loop CFG:
+// header/body/exit blocks. The current block jumps to the header; the header
+// lowers the condition and branches (body, exit); the body is lowered and jumps
+// BACK to the header (the back-edge). The header is left UNSEALED while the body
+// is built, so a loop variable read in the condition or body parks an incomplete
+// PHI that is filled when the header is sealed after the back-edge is wired —
+// this is what gives loop-carried taint: a value written in the body and read at
+// the top of the next iteration flows through the header PHI (which the old
+// single-block lowering could not model). `until` differs only in condition
+// polarity, immaterial to taint. The header PHI over [pre-loop, back-edge]
+// carries taint into and out of the loop.
+func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
+	header := fs.b.NewBlock()
+	body := fs.b.NewBlock()
+	exit := fs.b.NewBlock()
+
+	fs.b.SetJump(fs.cur, header) // enter the loop
+	fs.cur = header
+	cond := fs.lowerExpr(at(n, 1)) // condition, lowered in the (unsealed) header
+	fs.b.SetIf(header, cond, body, exit)
+
+	fs.b.Seal(body) // body's sole predecessor (header) is known
+	fs.cur = body
+	fs.terminated = false
+	if bstmts, ok := asList(at(n, 2)); ok {
+		fs.lowerStmtSeqLast(bstmts)
+	}
+	if !fs.terminated { // a body that always returns has no back-edge
+		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
+	}
+
+	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
+	fs.b.Seal(exit)   // exit's sole predecessor is the header
+	fs.cur = exit
+	fs.terminated = false
+	return constString("")
+}
+
+// lowerCondMod lowers the statement-modifier conditionals `stmt if cond` and
+// `stmt unless cond` (`[tag, cond, stmt]`, the body being a single statement).
+// It is a one-armed diamond: the current block branches to a then-block (the
+// guarded statement) or straight to the merge; the then-block jumps to the merge.
+// A binding rebound in the guarded statement reconciles against the pre-modifier
+// value via the merge PHI (the false edge carries the pre-modifier value), so a
+// modifier assignment (`x = safe unless c`) keeps the original value live on the
+// not-taken path.
+func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
+	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
+	thenB := fs.b.NewBlock()
+	merge := fs.b.NewBlock()
+	fs.b.SetIf(fs.cur, cond, thenB, merge) // false edge goes straight to merge
+	fs.b.Seal(thenB)
+
+	fs.cur = thenB
+	fs.terminated = false
+	last := fs.lowerStmt(at(n, 2)) // guarded statement (the taken arm)
+	if !fs.terminated {            // a `return x if c` arm has no edge to the merge
+		fs.b.SetJump(fs.cur, merge)
+	}
+
+	fs.b.Seal(merge) // predecessors: the branch block (false) [+ the then-end]
+	fs.cur = merge
+	fs.terminated = false // the merge is always reachable via the false edge
+	return last
+}
+
+// lowerLoopMod lowers the statement-modifier loops `stmt while cond` and
+// `stmt until cond` (`[tag, cond, stmt]`) into the same header/body/exit loop
+// CFG as lowerWhile, so loop-carried taint through the guarded statement is
+// modeled (a pre-test loop; `stmt until cond` on a non-begin statement is
+// pre-test in Ruby, and treating it so is conservative for taint).
+func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
+	header := fs.b.NewBlock()
+	body := fs.b.NewBlock()
+	exit := fs.b.NewBlock()
+
+	fs.b.SetJump(fs.cur, header)
+	fs.cur = header
+	cond := fs.lowerExpr(at(n, 1))
+	fs.b.SetIf(header, cond, body, exit)
+
+	fs.b.Seal(body)
+	fs.cur = body
+	fs.terminated = false
+	fs.lowerStmt(at(n, 2)) // loop body statement
+	if !fs.terminated {    // a body that always returns has no back-edge
+		fs.b.SetJump(fs.cur, header)
+	}
+
+	fs.b.Seal(header)
+	fs.b.Seal(exit)
+	fs.cur = exit
+	fs.terminated = false
+	return constString("")
 }
 
 // lowerBacktick lowers a backtick command literal “ `cmd #{x}` “ (and %x{}) —
@@ -908,8 +1161,8 @@ func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interf
 }
 
 func (fs *funcState) lookup(name string) *ir.Value {
-	if v, ok := fs.env[name]; ok {
-		return v
+	if fs.assigned[name] {
+		return fs.read(name)
 	}
 	return constString(name)
 }

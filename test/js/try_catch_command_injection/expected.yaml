@@ -1,0 +1,5 @@
+# Untrusted input read in the try body reaches child_process.exec() in the
+# catch handler across the exception edge modeled by the real CFG.
+findings:
+    - rule: js-command-injection
+      min: 1

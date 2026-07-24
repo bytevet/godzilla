@@ -1,0 +1,21 @@
+# Shared browser-controlled sources and HTML sanitizers for the SFC template-XSS
+# packs (vue-xss, svelte-xss), which model the same browser attack surface and
+# accept the same HTML sanitizers. Pulled in with `extend: $_js-sfc-xss.yaml`;
+# each pack keeps its framework-specific sources (Vue props/router, Svelte $page)
+# inline.
+sources:
+  # Browser-controlled input (the URL and cookies).
+  - "js:window.location*"
+  - "js:*.location.href"
+  - "js:*.location.search"
+  - "js:*.location.hash"
+  - "js:document.URL"
+  - "js:document.cookie"
+  - "js:*URLSearchParams*"
+sanitizers:
+  # HTML sanitizers neutralize the value before it is bound as raw HTML.
+  - "js:*DOMPurify*"
+  - "js:*.sanitize"
+  - "js:*sanitizeHtml"
+  - "js:*escapeHtml"
+  - "js:*xss"

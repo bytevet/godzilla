@@ -32,7 +32,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		if !r.IsDangerousCall() || len(r.Callees) == 0 {
 			continue
 		}
-		r.Compile() // precompile callee globs so the per-call match is lock-free
+		_ = r.Compile() // precompile callee globs so the per-call match is lock-free
 		c := compiled{rule: r}
 		if r.ConstArg != nil && r.ConstArg.Matches != "" {
 			re, err := regexp.Compile(r.ConstArg.Matches)
@@ -68,10 +68,18 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 					}
 					callee := inst.Call.GetCallee()
 					for _, d := range dcs {
-						if !d.rule.AppliesTo(lang) || !d.rule.MatchesDangerousCallee(callee) {
+						if !d.rule.AppliesTo(lang) {
+							continue // cheap language gate before the glob walk
+						}
+						guard, matched := d.rule.MatchDangerousCallee(callee)
+						if !matched || !constArgMatches(d.rule, d.re, inst.Call) {
 							continue
 						}
-						if !constArgMatches(d.rule, d.re, inst.Call) {
+						// Dynamic callee guard (`when:`): suppress unless it confirms
+						// against the call's constant argument values (nil defs — a
+						// dangerous-call arg is a literal, resolved by constStr alone).
+						// Built lazily: no reconstruction for the common unguarded rule.
+						if guard != nil && !guard.Eval(argVals(inst.Call, nil)) {
 							continue
 						}
 						key := d.rule.ID + "@" + posKey(inst.GetPos())

@@ -15,7 +15,7 @@ func cmdiRule() *rules.RuleSet {
 		CWE:       "CWE-78",
 		Message:   "command injection",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 }
 

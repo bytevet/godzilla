@@ -9,9 +9,33 @@ package proc
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 )
+
+// WriteEmbeddedScript materializes an embedded helper script (e.g. the Python
+// ast dumper, the Ruby Ripper dumper) into a temp file named after pattern
+// (e.g. "godzilla-pyast-*.py") and returns its path plus a cleanup func the
+// caller must invoke when done. Shared by the frontends that shell out to an
+// interpreter with an embedded helper.
+func WriteEmbeddedScript(pattern string, content []byte) (string, func(), error) {
+	tmp, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp helper script: %w", err)
+	}
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", nil, fmt.Errorf("write temp helper script: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", nil, fmt.Errorf("close temp helper script: %w", err)
+	}
+	path := tmp.Name()
+	return path, func() { _ = os.Remove(path) }, nil
+}
 
 const (
 	defaultParseTimeout = 120 * time.Second // per-file parse/dump: python3, JavaDump, rustc, clang

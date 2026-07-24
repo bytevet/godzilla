@@ -67,7 +67,7 @@ func sqlInjectionRuleSet() *rules.RuleSet {
 				CWE:         "CWE-89",
 				Message:     "Untrusted HTTP query parameter flows into a SQL query without sanitization",
 				Sources:     []string{"go:*Values*.Get"},
-				Sinks:       []string{"go:*database/sql*.Query*"},
+				Sinks:       rules.SinksOf("go:*database/sql*.Query*"),
 				Propagators: []string{"go:fmt.Sprintf"},
 			},
 		},
@@ -254,7 +254,7 @@ func TestAnalyze_Sanitizer(t *testing.T) {
 
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "SANI-1", Severity: rules.SeverityHigh,
-		Sources: []string{"go:source.Get"}, Sinks: []string{"go:sink.Exec"},
+		Sources: []string{"go:source.Get"}, Sinks: rules.SinksOf("go:sink.Exec"),
 		Sanitizers: []string{"go:sanitize.Escape"},
 	}}}
 
@@ -297,7 +297,7 @@ func TestAnalyze_PhiFixpoint(t *testing.T) {
 
 	rs := &rules.RuleSet{Rules: []rules.Rule{{
 		ID: "PHI-1", Severity: rules.SeverityMedium,
-		Sources: []string{"go:source.Get"}, Sinks: []string{"go:sink.Exec"},
+		Sources: []string{"go:source.Get"}, Sinks: rules.SinksOf("go:sink.Exec"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)
@@ -330,8 +330,8 @@ func TestAnalyze_DedupeAndRuleIsolation(t *testing.T) {
 	prog := &ir.Program{Modules: []*ir.Module{{Language: "go", Functions: []*ir.Function{fn}}}}
 
 	rs := &rules.RuleSet{Rules: []rules.Rule{
-		{ID: "R1", Severity: rules.SeverityLow, Sources: []string{"go:source.Get"}, Sinks: []string{"go:sink.Exec"}},
-		{ID: "R2-nomatch", Severity: rules.SeverityLow, Sources: []string{"go:other.Source"}, Sinks: []string{"go:sink.Exec"}},
+		{ID: "R1", Severity: rules.SeverityLow, Sources: []string{"go:source.Get"}, Sinks: rules.SinksOf("go:sink.Exec")},
+		{ID: "R2-nomatch", Severity: rules.SeverityLow, Sources: []string{"go:other.Source"}, Sinks: rules.SinksOf("go:sink.Exec")},
 	}}
 
 	findings := NewEngine(rs).Analyze(prog)

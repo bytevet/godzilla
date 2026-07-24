@@ -10,10 +10,9 @@ rules:
       open redirect. Validate the target against an allowlist of known
       hosts/paths, or only permit relative paths, instead of redirecting to a
       user-controlled URL.
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The redirect target URL is logical arg 0.
     sinks:
       - "java:*HttpServletResponse.sendRedirect#0"

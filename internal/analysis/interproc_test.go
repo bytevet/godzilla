@@ -26,7 +26,7 @@ func TestAnalyze_Interprocedural(t *testing.T) {
 		CWE:       "CWE-78",
 		Message:   "untrusted input reaches os/exec across a function call",
 		Sources:   []string{"go:*Values*.Get"},
-		Sinks:     []string{"go:*os/exec.Command*"},
+		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
 	}}}
 
 	findings := NewEngine(rs).Analyze(prog)

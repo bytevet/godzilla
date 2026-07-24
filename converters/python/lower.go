@@ -3,9 +3,9 @@ package py_converter
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -130,7 +130,7 @@ func convertModuleInit(root astNode, filename, moduleName string, localFuncs map
 	fs.aliases = aliases
 	fs.importedNames = imported
 	fs.lowerBody(root.list("body"))
-	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
@@ -165,7 +165,7 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	for _, p := range params {
 		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
 		fn.Params = append(fn.Params, v)
-		fs.env[p] = v
+		fs.write(p, v)
 		fs.paramRegs[p] = true
 	}
 	// A method's first parameter is conventionally `self` (or `cls`); record it
@@ -184,14 +184,14 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 	// same frontend trick JS/Python opaque-base reads and the Java @RequestParam
 	// source use, needing no gIR/engine change.
 	for _, p := range srcParams {
-		if _, ok := fs.env[p]; !ok {
+		if !fs.assigned[p] {
 			continue // defensive: name not an actual parameter
 		}
-		fs.env[p] = fs.emitParamSource(p, node)
+		fs.write(p, fs.emitParamSource(p, node))
 	}
 
 	fs.lowerBody(node.list("body"))
-	fn.Blocks = []*ir.BasicBlock{{Index: 0, Instrs: fs.instrs}}
+	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
@@ -463,18 +463,26 @@ func (fs *funcState) selfArgMethod(funcNode astNode) bool {
 	return fs.isNameRef(base)
 }
 
-// funcState holds the per-function lowering state: a monotonically
-// increasing temp-register counter, an environment mapping the current
-// Python variable name to its most recent gIR value (constant or register),
-// the set of register names that are this function's own parameters (see
-// isOpaqueBase), and the flat instruction list for the function's single
-// basic block.
+// funcState holds the per-function lowering state. Variable values and the
+// per-block instruction stream are owned by an ssabuild.Builder (real CFG +
+// on-demand PHI insertion, Braun et al.); `cur` is the block currently being
+// lowered into (threaded through the AST walk instead of appending to one flat
+// instruction list). `assigned` tracks which Python names have been written as
+// a local SO FAR in the traversal — it replaces the old env's key-presence
+// test (is this bare name a bound local, or a free identifier / module global /
+// import?) that the Builder's per-block value map cannot answer directly.
+// `paramRegs` is the set of register names that are this function's own
+// parameters (see isOpaqueBase); `terminated` reports whether the current block
+// has already emitted a block-terminating RET (an explicit `return`), so a
+// returning arm is not wired into a merge / loop header as a predecessor.
 type funcState struct {
-	filename  string
-	counter   int
-	env       map[string]*ir.Value
-	paramRegs map[string]bool
-	instrs    []*ir.Instruction
+	filename   string
+	counter    int
+	b          *ssabuild.Builder
+	cur        ssabuild.BlockID
+	assigned   map[string]bool
+	paramRegs  map[string]bool
+	terminated bool
 
 	// moduleName and localFuncs let lowerCall qualify a bare local call
 	// (helper(x)) with the module name so its callee "py:<module>.helper"
@@ -520,7 +528,32 @@ type funcState struct {
 }
 
 func newFuncState(filename string) *funcState {
-	return &funcState{filename: filename, env: map[string]*ir.Value{}, paramRegs: map[string]bool{}, localAlias: map[string]string{}}
+	b := ssabuild.NewBuilder()
+	entry := b.NewBlock()
+	b.Seal(entry) // the entry block has no predecessors, so it is sealed at once.
+	return &funcState{
+		filename:   filename,
+		b:          b,
+		cur:        entry,
+		assigned:   map[string]bool{},
+		paramRegs:  map[string]bool{},
+		localAlias: map[string]string{},
+	}
+}
+
+// emit appends an instruction to the block currently being lowered.
+func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
+
+// read returns the SSA value current for a Python local in the current block,
+// inserting PHIs on demand (branch joins / loop headers) via the Builder.
+func (fs *funcState) read(name string) *ir.Value { return fs.b.ReadVariable(name, fs.cur) }
+
+// write records val as the current value of a Python local name in the current
+// block and marks the name as assigned (so a later bare read resolves it as a
+// variable rather than a free identifier / module global / import).
+func (fs *funcState) write(name string, val *ir.Value) {
+	fs.b.WriteVariable(name, fs.cur, val)
+	fs.assigned[name] = true
 }
 
 // requestAliasPath returns the request-rooted attribute path a variable is being
@@ -660,10 +693,6 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Pos: posFromNode(fs.filename, n)}
 }
 
-func (fs *funcState) emit(inst *ir.Instruction) {
-	fs.instrs = append(fs.instrs, inst)
-}
-
 func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
@@ -748,8 +777,8 @@ func (fs *funcState) lowerIterTarget(n astNode) {
 // classify a chain's root without emitting anything: a Name lookup has no
 // side effects.
 func (fs *funcState) lookupName(id string) *ir.Value {
-	if v, ok := fs.env[id]; ok {
-		return v
+	if fs.assigned[id] {
+		return fs.read(id)
 	}
 	// A bare reference to a module-level function used as a VALUE (passed as a
 	// callback, `Thread(target=fn)`, `walk(data, fn)`) resolves to its canonical
@@ -806,40 +835,29 @@ func rootName(n astNode) string {
 	return ""
 }
 
-// lowerBody lowers a statement list, flattening control-flow compounds
-// (If/For/While/With/Try) into the enclosing straight-line block and skipping
-// FunctionDef/ClassDef (handled separately as their own ir.Function by
-// convertModule.collect). See the package doc comment for the rationale and
-// tradeoffs of this approximation.
+// lowerBody lowers a statement list, building a REAL CFG (blocks + preds/succs +
+// PHI) via the Builder for control-flow compounds (If/For/While/Try) and lowering
+// straight-line statements (and non-branching With) into the current block, so a
+// function with no branches still emits exactly ONE block (the engine's linear
+// fast path). FunctionDef/ClassDef are skipped (each becomes its own ir.Function
+// via convertModule.collect).
 func (fs *funcState) lowerBody(stmts []astNode) {
 	for _, s := range stmts {
 		switch s.kind() {
 		case "FunctionDef", "ClassDef":
 			// Converted separately; do not inline.
 		case "If":
-			// Lower the condition for its side effects: a source bound by a
-			// walrus (if (x := request.args.get(...)):) or a sink/source call in
-			// the test would otherwise be dropped.
-			if t := s.node("test"); t != nil {
-				fs.lowerExpr(t)
-			}
-			fs.lowerIfMerge(s)
+			fs.lowerIf(s)
 		case "While":
-			if t := s.node("test"); t != nil {
-				fs.lowerExpr(t)
-			}
-			fs.lowerBody(s.list("body"))
-			fs.lowerBody(s.list("orelse"))
+			fs.lowerWhile(s)
 		case "For":
-			// `for x in iter:` — lower the iterable and bind the loop target to it.
-			fs.lowerIterTarget(s)
-			fs.lowerBody(s.list("body"))
-			fs.lowerBody(s.list("orelse"))
+			fs.lowerFor(s)
 		case "With":
 			// `with EXPR as VAR:` lowers as `VAR = EXPR`: lower each context-manager
 			// expression (so a sink/source CALL such as open(...) is emitted, not
-			// dropped) and bind its `as` target, then lower the body. Without this
-			// the whole `with open(tainted) as f: ...` idiom was invisible.
+			// dropped) and bind its `as` target, then lower the body — straight into
+			// the current block (its body may itself branch, which lowerBody handles).
+			// Without this the whole `with open(tainted) as f: ...` idiom was invisible.
 			for _, it := range s.list("items") {
 				ctx := it.node("context")
 				if ctx == nil {
@@ -852,62 +870,190 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 			}
 			fs.lowerBody(s.list("body"))
 		case "Try":
-			fs.lowerBody(s.list("body"))
-			for _, h := range s.list("handlers") {
-				fs.lowerBody(h.list("body"))
-			}
-			fs.lowerBody(s.list("orelse"))
-			fs.lowerBody(s.list("finalbody"))
+			fs.lowerTry(s)
 		default:
 			fs.lowerStmt(s)
 		}
 	}
 }
 
-// lowerIfMerge lowers a flattened If's body and orelse and PHI-merges the names
-// each branch rebinds, instead of the previous last-write-wins overwrite (FE-5).
-// Without this, the ubiquitous "default if empty" branch (`if not x: x = "d"`)
-// dropped the attacker-controlled value bound before the branch — a real,
-// deterministic false negative. A PHI over the two branch values keeps taint
-// from EITHER path (the taint engine treats PHI as a propagator).
-func (fs *funcState) lowerIfMerge(s astNode) {
-	before := maps.Clone(fs.env)
+// lowerIf lowers `if cond: body [elif/else: orelse]` into a REAL CFG diamond via
+// the Builder: the condition is lowered in the current block, which ends in an
+// OP_CODE_IF to a fresh then-block and else-block; each arm is lowered in its own
+// block and jumps to a fresh merge block; the merge is sealed once both arm-ends
+// are its known predecessors, so any variable rebound on one or both arms
+// reconciles automatically via an on-demand ReadVariable PHI (retiring the manual
+// lowerutil.MergeBranchEnvs path — including the ubiquitous "default if empty"
+// idiom `if not x: x = "d"`, whose pre-branch tainted value is now kept by the
+// merge PHI). Python's `elif` is an `If` node in the parent's `orelse`, so an
+// arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
+func (fs *funcState) lowerIf(s astNode) {
+	// Lower the condition for its side effects and as the branch value: a source
+	// bound by a walrus (if (x := request.args.get(...)):) or a sink/source call
+	// in the test would otherwise be dropped.
+	var cond *ir.Value
+	if t := s.node("test"); t != nil {
+		cond = fs.lowerExpr(t)
+	} else {
+		cond = stringValue("")
+	}
+	thenB := fs.b.NewBlock()
+	elseB := fs.b.NewBlock()
+	merge := fs.b.NewBlock()
+	fs.b.SetIf(fs.cur, cond, thenB, elseB)
+	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
+	fs.b.Seal(elseB)
 
+	fs.cur = thenB
+	fs.terminated = false
 	fs.lowerBody(s.list("body"))
-	afterBody := maps.Clone(fs.env)
+	thenTerm := fs.terminated
+	if !thenTerm { // a returning arm has no fall-through edge to the merge
+		fs.b.SetJump(fs.cur, merge)
+	}
 
-	// Lower the else branch from the pre-branch bindings (the two branches are
-	// mutually exclusive), keeping the already-emitted body instructions.
-	fs.env = maps.Clone(before)
+	fs.cur = elseB
+	fs.terminated = false
 	fs.lowerBody(s.list("orelse"))
-	afterElse := fs.env
+	elseTerm := fs.terminated
+	if !elseTerm {
+		fs.b.SetJump(fs.cur, merge)
+	}
 
-	merged := maps.Clone(afterElse)
-	names := map[string]bool{}
-	for k := range afterBody {
-		names[k] = true
+	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
+	fs.cur = merge
+	// The merge is dead only if BOTH arms returned; otherwise it falls through.
+	fs.terminated = thenTerm && elseTerm
+}
+
+// lowerWhile lowers `while cond: body [else: orelse]` into a REAL loop CFG:
+// header/body/exit blocks. The current block jumps to the header; the header
+// lowers the condition and branches (body, exit); the body is lowered and jumps
+// BACK to the header (the back-edge). The header is left UNSEALED while the body
+// is built, so a loop variable read in the condition or body parks an incomplete
+// PHI that is filled when the header is sealed after the back-edge is wired —
+// this is what gives loop-carried taint: a value written in the body and read at
+// the top of the next iteration flows through the header PHI (which the old
+// single-block lowering could not model). The `else` clause runs after normal
+// loop completion, so it is lowered into the exit block.
+func (fs *funcState) lowerWhile(s astNode) {
+	header := fs.b.NewBlock()
+	body := fs.b.NewBlock()
+	exit := fs.b.NewBlock()
+
+	fs.b.SetJump(fs.cur, header) // enter the loop
+	fs.cur = header
+	var cond *ir.Value
+	if t := s.node("test"); t != nil {
+		cond = fs.lowerExpr(t) // condition, lowered in the (unsealed) header
+	} else {
+		cond = stringValue("")
 	}
-	for k := range afterElse {
-		names[k] = true
+	fs.b.SetIf(header, cond, body, exit)
+
+	fs.b.Seal(body) // body's sole predecessor (header) is known
+	fs.cur = body
+	fs.terminated = false
+	fs.lowerBody(s.list("body"))
+	if !fs.terminated { // a body that always returns has no back-edge
+		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
 	}
-	for name := range names {
-		bv, ev := afterBody[name], afterElse[name]
-		if bv == nil {
-			bv = before[name] // else-only rebind: body kept the pre-branch value
-		}
-		if ev == nil {
-			ev = before[name] // body-only rebind: else kept the pre-branch value
-		}
-		if bv == ev || bv == nil || ev == nil {
-			continue // unchanged on both paths, or only ever bound on one path
-		}
-		phi := fs.newValueInst(s)
-		phi.Op = ir.OpCode_OP_CODE_PHI
-		phi.Operands = []*ir.Value{bv, ev}
-		fs.emit(phi)
-		merged[name] = regValue(phi.Name)
+
+	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
+	fs.b.Seal(exit)   // exit's sole predecessor is the header
+	fs.cur = exit
+	fs.terminated = false
+	fs.lowerBody(s.list("orelse")) // while-else: runs after normal completion
+}
+
+// lowerFor lowers `for target in iter: body [else: orelse]` into the same
+// header/body/exit loop CFG as lowerWhile. The iterable is lowered once in the
+// pre-loop block; the loop target is bound to the iterable's value at the top of
+// the BODY block each iteration (element taint == container taint, so a tainted
+// iterable taints the target). Reassignments/accumulations in the body flow
+// through the header PHI, modeling loop-carried taint. The iteration condition
+// is opaque (a placeholder), so the engine traverses both the body and the exit.
+func (fs *funcState) lowerFor(s astNode) {
+	var iterVal *ir.Value
+	if it := s.node("iter"); it != nil {
+		iterVal = fs.lowerExpr(it) // evaluate the iterable in the pre-loop block
 	}
-	fs.env = merged
+	header := fs.b.NewBlock()
+	body := fs.b.NewBlock()
+	exit := fs.b.NewBlock()
+
+	fs.b.SetJump(fs.cur, header)
+	fs.cur = header
+	fs.b.SetIf(header, stringValue(""), body, exit)
+
+	fs.b.Seal(body)
+	fs.cur = body
+	fs.terminated = false
+	if tgt := s.node("target"); tgt != nil && iterVal != nil {
+		fs.assign(tgt, iterVal) // bind the loop variable each iteration
+	}
+	fs.lowerBody(s.list("body"))
+	if !fs.terminated {
+		fs.b.SetJump(fs.cur, header) // back-edge
+	}
+
+	fs.b.Seal(header)
+	fs.b.Seal(exit)
+	fs.cur = exit
+	fs.terminated = false
+	fs.lowerBody(s.list("orelse")) // for-else: runs after normal completion
+}
+
+// lowerTry lowers `try: body [else: orelse] except ...: handler [finally: fin]`
+// conservatively (a may-analysis; no exception typing). The try body (and its
+// `else`, which runs on normal completion) is lowered into the current block. An
+// EXCEPTION EDGE then models that an exception may occur anywhere in the body:
+// the body-end block branches to a single handler block (all `except` clauses
+// lowered sequentially into it — conservative) or to an after block, so taint a
+// source in the try body assigned reaches the handler via that predecessor edge
+// (and, through the after block, code following the try). `finally` runs on both
+// paths, so it is lowered into the after block. When the body always returns
+// there is no exception edge (rare; the handler's body-var reads are then
+// undefined — a minor recall gap, never a false positive).
+func (fs *funcState) lowerTry(s astNode) {
+	fs.lowerBody(s.list("body"))
+	fs.lowerBody(s.list("orelse"))
+	bodyEnd := fs.cur
+	bodyTerm := fs.terminated
+
+	handlers := s.list("handlers")
+	finalbody := s.list("finalbody")
+
+	if len(handlers) == 0 {
+		// try/finally with no except clause: finally is a straight-line
+		// continuation of the body.
+		fs.lowerBody(finalbody)
+		return
+	}
+
+	handlerB := fs.b.NewBlock()
+	after := fs.b.NewBlock()
+	if !bodyTerm {
+		// Exception edge: the body may branch into the handler, else fall through
+		// to the after block. The condition is opaque (both edges are traversed).
+		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+	}
+	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
+
+	fs.cur = handlerB
+	fs.terminated = false
+	for _, h := range handlers {
+		fs.lowerBody(h.list("body"))
+	}
+	handlerTerm := fs.terminated
+	if !handlerTerm {
+		fs.b.SetJump(fs.cur, after)
+	}
+
+	fs.b.Seal(after)
+	fs.cur = after
+	fs.terminated = bodyTerm && handlerTerm
+	fs.lowerBody(finalbody) // finally runs on both the normal and handler paths
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;
@@ -945,6 +1091,9 @@ func (fs *funcState) lowerStmt(s astNode) {
 			inst.Operands = []*ir.Value{fs.lowerExpr(v)}
 		}
 		fs.emit(inst)
+		// The current block ends here: no fall-through edge to a merge / loop
+		// header (an arm that returns must not feed its values into the join).
+		fs.terminated = true
 	case "Pass", "Import", "ImportFrom", "Global", "Nonlocal", "Break", "Continue", "Raise", "Assert", "Delete", "Unknown":
 		// No-ops / unsupported: dropped. Unlike unsupported expressions
 		// (which must still yield a value for their parent), a dropped
@@ -964,7 +1113,7 @@ func (fs *funcState) lowerStmt(s astNode) {
 func (fs *funcState) assign(target astNode, val *ir.Value) {
 	switch target.kind() {
 	case "Name":
-		fs.env[target.str("id")] = val
+		fs.write(target.str("id"), val)
 	case "Attribute", "Subscript":
 		base := fs.lowerExpr(target.node("value"))
 		inst := fs.newVoidInst(target)
@@ -997,10 +1146,10 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 }
 
 // lowerExpr lowers an expression to a gIR Value, emitting whatever
-// instructions are needed to compute it (appended to fs.instrs). Names bound
-// in fs.env resolve to their current value directly (constant or register);
-// unbound names (module globals like `request`, `os`, imported symbols) fall
-// back to a GlobalName reference.
+// instructions are needed to compute it (into the current block). Names
+// assigned as locals resolve through the Builder to their current SSA value
+// (constant, register, or an on-demand PHI); unbound names (module globals like
+// `request`, `os`, imported symbols) fall back to a GlobalName reference.
 func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 	if n == nil {
 		return nil
@@ -1211,6 +1360,23 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 
 	case "Call":
 		return fs.lowerCall(n)
+
+	case "Compare":
+		// `a < b` / `x == y` / `k in d`: lower every operand so a source/sink/
+		// validator call inside the comparison fires; the boolean result does not
+		// carry operand taint, so emit an inert builtin.compare intrinsic over the
+		// operands (this also gives a branch condition a def-use edge for the
+		// engine's guard analysis).
+		ops := []*ir.Value{fs.lowerExpr(n.node("left"))}
+		for _, c := range n.list("comparators") {
+			ops = append(ops, fs.lowerExpr(c))
+		}
+		inst := fs.newValueInst(n)
+		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+		inst.Intrinsic = "builtin.compare"
+		inst.Operands = ops
+		fs.emit(inst)
+		return regValue(inst.Name)
 
 	default:
 		inst := fs.newValueInst(n)
@@ -1445,8 +1611,8 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	var indirectVal *ir.Value
 	if !invoke && !isSelfMethod && funcNode != nil && funcNode.kind() == "Name" {
 		id := funcNode.str("id")
-		if !fs.localFuncs[id] && !fs.importedNames[id] {
-			if v, ok := fs.env[id]; ok && (fs.paramRegs[id] || v.GetFuncName() != "") {
+		if !fs.localFuncs[id] && !fs.importedNames[id] && fs.assigned[id] {
+			if v := fs.read(id); fs.paramRegs[id] || v.GetFuncName() != "" {
 				indirect = true
 				indirectVal = v
 			}

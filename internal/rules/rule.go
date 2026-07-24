@@ -9,6 +9,8 @@
 package rules
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,17 +79,12 @@ type Rule struct {
 	// (list them in Sources too); this only tags the flavor.
 	RequestObjectSources []string `yaml:"request_object_sources"`
 
-	// Sinks are dangerous callee globs. Each entry may append an injection-point
-	// spec directly to its pattern with a "#" suffix: "pattern#i[,j...]" limits
-	// the sink to LOGICAL (source-level, receiver-excluded) argument indices
-	// i,j,... — so taint reaching any OTHER argument is not a finding. A bare
-	// pattern (no "#") means every argument is an injection point.
-	//
-	// This is what prevents parameterized-query false positives: for
-	// "go:...Query#0" only the query-string argument is an injection point, so
-	// db.Query("... = ?", taintedParam) — where taintedParam is a safe bound
-	// placeholder at a later position — is correctly NOT flagged.
-	Sinks []string `yaml:"sinks"`
+	// Sinks are taint-sink patterns; each is a bare glob string or a `{sink, when}`
+	// mapping adding a dynamic guard (see Sink). A pattern may append a "#i[,j...]"
+	// suffix limiting the sink to LOGICAL (receiver-excluded) argument indices — so
+	// for "go:...Query#0" only arg 0 is an injection point and a bound-parameter
+	// query `db.Query("... = ?", taintedParam)` is correctly NOT flagged.
+	Sinks []Sink `yaml:"sinks"`
 
 	Propagators []string `yaml:"propagators"` // callees that pass taint arg->result (e.g. fmt.Sprintf)
 
@@ -98,8 +95,9 @@ type Rule struct {
 	// crypto, weak ciphers, and insecure randomness that need no taint tracking.
 	Kind string `yaml:"kind"`
 
-	// Callees are the dangerous call globs for a kind: dangerous-call rule.
-	Callees []string `yaml:"callees"`
+	// Callees are the dangerous-call patterns for a kind: dangerous-call rule —
+	// each a bare glob string or a `{callee, when}` mapping adding a guard (see Callee).
+	Callees []Callee `yaml:"callees"`
 
 	// ConstArg optionally restricts a dangerous-call match to calls whose constant
 	// string argument at the LOGICAL index Index matches the Matches regexp — e.g.
@@ -141,6 +139,67 @@ func (e *ExtendRefs) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// Sink is a taint-sink pattern with an optional dynamic guard. In YAML a sink
+// entry is either a bare glob string (static) or a `{sink, when}` mapping
+// (dynamic): the sink fires only when taint reaches it AND `when` proves true
+// against the call's argument values. Pattern keeps the "#idx" suffix (parseSink).
+type Sink struct {
+	Pattern string
+	When    string
+}
+
+// UnmarshalYAML accepts a scalar (the glob) or a mapping {sink, when}.
+func (s *Sink) UnmarshalYAML(value *yaml.Node) error {
+	var err error
+	s.Pattern, s.When, err = unmarshalGuarded(value, "sink")
+	return err
+}
+
+// unmarshalGuarded decodes the string-or-mapping union shared by Sink and Callee:
+// a scalar is the bare glob; a mapping is {<key>, when}.
+func unmarshalGuarded(value *yaml.Node, key string) (pattern, when string, err error) {
+	if value.Kind == yaml.ScalarNode {
+		return value.Value, "", nil
+	}
+	var m map[string]string
+	if err := value.Decode(&m); err != nil {
+		return "", "", err
+	}
+	return m[key], m["when"], nil
+}
+
+// Callee is a dangerous-call pattern with an optional dynamic guard, in the same
+// string-or-{callee, when} shape as Sink.
+type Callee struct {
+	Pattern string
+	When    string
+}
+
+// UnmarshalYAML accepts a scalar (the glob) or a mapping {callee, when}.
+func (c *Callee) UnmarshalYAML(value *yaml.Node) error {
+	var err error
+	c.Pattern, c.When, err = unmarshalGuarded(value, "callee")
+	return err
+}
+
+// SinksOf / CalleesOf build static (guard-less) sink/callee lists from bare
+// patterns — a convenience for programmatic and test rule construction.
+func SinksOf(patterns ...string) []Sink {
+	out := make([]Sink, len(patterns))
+	for i, p := range patterns {
+		out[i] = Sink{Pattern: p}
+	}
+	return out
+}
+
+func CalleesOf(patterns ...string) []Callee {
+	out := make([]Callee, len(patterns))
+	for i, p := range patterns {
+		out[i] = Callee{Pattern: p}
+	}
+	return out
+}
+
 // ConstArg is a dangerous-call rule's optional constant-argument condition.
 type ConstArg struct {
 	Index   int    `yaml:"index"`   // logical (receiver-excluded) argument index
@@ -157,22 +216,47 @@ type RuleSet struct {
 // analysis passes concurrently over the same rule set, so they don't race
 // building per-rule matchers (after this, all matcher access is read-only).
 // Idempotent.
-func (rs *RuleSet) Compile() {
+func (rs *RuleSet) Compile() error {
+	var errs []error
 	for i := range rs.Rules {
-		rs.Rules[i].Compile()
+		if err := rs.Rules[i].Compile(); err != nil {
+			errs = append(errs, fmt.Errorf("rule %q: %w", rs.Rules[i].ID, err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // IsDangerousCall reports whether the rule is a non-dataflow, call-site rule.
 func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "dangerous-call") }
 
-// MatchesDangerousCallee reports whether callee matches one of the rule's
-// dangerous-call globs.
-func (r *Rule) MatchesDangerousCallee(callee string) bool {
+// MatchDangerousCallee reports whether callee matches one of the rule's
+// dangerous-call globs, returning that entry's optional dynamic guard.
+func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
 	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.callees, callee)
+		for _, c := range r.matchers.callees {
+			if c.g.match(callee) {
+				return c.guard, true
+			}
+		}
+		return nil, false
 	}
-	return MatchAny(r.Callees, callee)
+	for _, c := range r.Callees {
+		if MatchGlob(c.Pattern, callee) {
+			return uncompiledGuard(c.When), true
+		}
+	}
+	return nil, false
+}
+
+// uncompiledGuard is the guard for a match found on the uncompiled fallback path
+// (Compile was never called, so no program exists). A guarded entry cannot be
+// evaluated there, so it DENIES rather than degrading to an unguarded entry that
+// fires on everything.
+func uncompiledGuard(when string) *Guard {
+	if strings.TrimSpace(when) == "" {
+		return nil
+	}
+	return DenyGuard
 }
 
 // AppliesTo reports whether the rule is active for the given source language
@@ -198,35 +282,54 @@ type ruleMatchers struct {
 	sanitizers  []*compiledGlob
 	propagators []*compiledGlob
 	validators  []*compiledGlob
-	callees     []*compiledGlob
+	callees     []compiledCallee
 }
 
 // compiledSink pairs a sink's shape-matcher with its parsed injection-point
-// argument indices (nil = all arguments).
+// argument indices (nil = all arguments) and an optional dynamic guard.
 type compiledSink struct {
-	g    *compiledGlob
-	args []int32
+	g     *compiledGlob
+	args  []int32
+	guard *Guard
+}
+
+// compiledCallee pairs a dangerous-call shape-matcher with an optional guard.
+type compiledCallee struct {
+	g     *compiledGlob
+	guard *Guard
 }
 
 // Compile precompiles the rule's pattern lists into shape-matchers. Call it once
 // (single-threaded) before matching a rule against many call sites — the engine
 // does this for every rule before its parallel analysis. Idempotent.
-func (r *Rule) Compile() {
+func (r *Rule) Compile() error {
 	if r.matchers != nil {
-		return
+		return nil
 	}
 	m := &ruleMatchers{
 		sources:     classifyAll(r.Sources),
 		sanitizers:  classifyAll(r.Sanitizers),
 		propagators: classifyAll(r.Propagators),
 		validators:  classifyAll(r.Validators),
-		callees:     classifyAll(r.Callees),
 	}
-	for _, entry := range r.Sinks {
-		pattern, idx := parseSink(entry)
-		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx})
+	var errs []error
+	for _, s := range r.Sinks {
+		pattern, idx := parseSink(s.Pattern)
+		guard, err := CompileGuard(s.When) // DenyGuard on error: fail closed
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sink %q: %w", s.Pattern, err))
+		}
+		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx, guard: guard})
+	}
+	for _, c := range r.Callees {
+		guard, err := CompileGuard(c.When)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("callee %q: %w", c.Pattern, err))
+		}
+		m.callees = append(m.callees, compiledCallee{g: classifyGlob(c.Pattern), guard: guard})
 	}
 	r.matchers = m
+	return errors.Join(errs...)
 }
 
 func classifyAll(patterns []string) []*compiledGlob {
@@ -256,30 +359,30 @@ func (r *Rule) IsSource(callee string) bool {
 
 // IsSink reports whether callee matches any of the rule's sink patterns.
 func (r *Rule) IsSink(callee string) bool {
-	_, ok := r.SinkInjectionArgs(callee)
+	_, _, ok := r.MatchSink(callee)
 	return ok
 }
 
-// SinkInjectionArgs reports whether callee matches one of the rule's sinks and,
-// if so, returns that sink's injection-point argument indices (LOGICAL,
-// source-level). A nil/empty result with ok==true means every argument is an
-// injection point (a bare pattern with no "#" spec).
-func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
+// MatchSink reports whether callee matches one of the rule's sinks and, if so,
+// returns that sink's LOGICAL injection-point argument indices and optional
+// dynamic guard. nil/empty args with ok==true means every argument is an
+// injection point.
+func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	if r.matchers != nil {
 		for _, s := range r.matchers.sinks {
 			if s.g.match(callee) {
-				return s.args, true
+				return s.args, s.guard, true
 			}
 		}
-		return nil, false
+		return nil, nil, false
 	}
-	for _, entry := range r.Sinks {
-		pattern, idx := parseSink(entry)
+	for _, s := range r.Sinks {
+		pattern, idx := parseSink(s.Pattern)
 		if MatchGlob(pattern, callee) {
-			return idx, true
+			return idx, uncompiledGuard(s.When), true
 		}
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 // InvalidSinkSpec reports whether a sink entry carries a "#" injection-point
@@ -292,35 +395,37 @@ func (r *Rule) SinkInjectionArgs(callee string) (args []int32, ok bool) {
 // (it reintroduces the parameterized-query false positive). The loader rejects
 // it so a typo fails loud at load time instead of quietly weakening the sink.
 func InvalidSinkSpec(entry string) bool {
-	_, spec, ok := strings.Cut(entry, "#")
-	if !ok {
-		return false // bare pattern legitimately means "all arguments"
-	}
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return true // "#" with nothing after it
-	}
-	for _, f := range strings.Split(spec, ",") {
-		if n, err := strconv.Atoi(strings.TrimSpace(f)); err != nil || n < 0 {
-			return true // a token that is not a non-negative integer
-		}
-	}
-	return false
+	_, _, valid := parseSinkSpec(entry)
+	return !valid
 }
 
 // parseSink splits a sink entry "pattern#i,j,..." into its glob pattern and the
 // injection-point indices. A bare pattern (no "#") yields nil indices (all args).
 func parseSink(entry string) (pattern string, args []int32) {
+	pattern, args, _ = parseSinkSpec(entry)
+	return pattern, args
+}
+
+// parseSinkSpec parses a sink entry "pattern#i,j,..." into its glob pattern and
+// injection-point indices, and reports whether the "#" spec is well-formed. valid
+// is true for a bare pattern (no "#"); for a "#" spec it is false when the spec is
+// empty/whitespace-only or any token is not a non-negative integer — such tokens
+// are leniently dropped from args, matching the runtime parser, but flip valid so
+// the loader can reject the typo (see InvalidSinkSpec).
+func parseSinkSpec(entry string) (pattern string, args []int32, valid bool) {
 	pattern, spec, ok := strings.Cut(entry, "#")
 	if !ok {
-		return entry, nil
+		return entry, nil, true // bare pattern: valid, all args
 	}
+	valid = strings.TrimSpace(spec) != "" // "#" with nothing after it is invalid
 	for _, f := range strings.Split(spec, ",") {
 		if n, err := strconv.Atoi(strings.TrimSpace(f)); err == nil && n >= 0 {
 			args = append(args, int32(n))
+		} else {
+			valid = false // a token that is not a non-negative integer
 		}
 	}
-	return pattern, args
+	return pattern, args, valid
 }
 
 // IsSanitizer reports whether callee matches any of the rule's sanitizer patterns.

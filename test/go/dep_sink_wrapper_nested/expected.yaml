@@ -1,0 +1,6 @@
+# The command sink is two dependency layers deep (svc.Fetch -> cmdutil.Run); the
+# sink-parameter summary must propagate up through both string-param wrappers and
+# report at the user call site (svc.Fetch).
+findings:
+    - rule: go-command-injection
+      min: 1

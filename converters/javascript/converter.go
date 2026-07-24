@@ -15,13 +15,17 @@
 // # Lowering model
 //
 // Every JS function (function declaration, function expression, or arrow
-// function) becomes its own ir.Function containing exactly one straight-line
-// ir.BasicBlock: like converters/python, this converter does not build a
-// control-flow graph. if/for/while/do-while/try/switch/labelled/with bodies
-// are flattened into the enclosing block in source order (conditions are
-// evaluated for side effects and then dropped, loop bodies execute
-// conceptually once). This trades path precision for recall, which is the
-// right tradeoff for a taint scanner focused on straight-line handler code.
+// function) becomes its own ir.Function whose body is a REAL CFG — blocks +
+// preds/succs + on-demand PHI — built by converters/ssabuild (Braun et al.),
+// exactly the shape converters/go and converters/python emit. if/else lowers to
+// a diamond (cond block -> then/else -> merge, PHI-merged); for/for-in/for-of/
+// while/do-while lower to header/body/exit loops with a body->header back-edge,
+// so loop-carried taint (a value accumulated across iterations) flows through
+// the header PHI; switch lowers to a decision cascade with conservative
+// case-to-case fall-through edges (break is not modeled precisely — a
+// may-analysis); try/catch/finally adds a conservative exception edge from the
+// try body into the catch block. A function with NO branches still emits exactly
+// ONE block, so straight-line handlers keep the engine's linear fast path.
 //
 // Top-level statements in a file that are not function declarations are
 // collected into one synthetic "<module>" ir.Function per file, the JS
@@ -62,9 +66,10 @@
 //
 // # Known limitations
 //
-//   - No control-flow graph (see above): branches/loops are flattened, and a
-//     loop body's taint effects are only modeled for one (conceptual)
-//     iteration.
+//   - break/continue are not modeled precisely: a switch case conservatively
+//     falls through to the next case, and a labelled loop is lowered as its
+//     underlying loop (the label is ignored). This is a conservative
+//     may-analysis (it can only over-approximate reachable taint).
 //   - Closures are not modeled: each function's variable environment starts
 //     empty (plus its own parameters), so a reference to an enclosing
 //     function's or module's local variable always falls back to a
@@ -104,18 +109,15 @@ package js_converter
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"sort"
 	"strings"
-	"sync"
 
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
 
+	"godzilla/internal/chunks"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -145,28 +147,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	var files []string
 	if info.IsDir() {
-		walkErr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				if walkignore.SkipDir(d.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if IsJSFamily(p) && !walkignore.SkipFile(d.Name()) {
-				if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
-					return nil
-				}
-				files = append(files, p)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return nil, walkErr
+		files, err = walkignore.CollectSources(abs, IsJSFamily)
+		if err != nil {
+			return nil, err
 		}
-		sort.Strings(files)
 	} else {
 		files = []string{abs}
 	}
@@ -211,19 +195,12 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		err           error
 	}
 	results := make([]jsFileResult, len(files))
-	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
-	var wg sync.WaitGroup
-	for i, f := range files {
-		wg.Add(1)
-		go func(i int, f string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			mod, defaultExport, err := c.convertJSFile(f, moduleNameFor(root, f))
+	chunks.Run(len(files), func(start, end int) {
+		for i := start; i < end; i++ {
+			mod, defaultExport, err := c.convertJSFile(files[i], moduleNameFor(root, files[i]))
 			results[i] = jsFileResult{mod, defaultExport, err}
-		}(i, f)
-	}
-	wg.Wait()
+		}
+	})
 
 	prog := &ir.Program{Mode: "ast"}
 	// defaultExports maps each module name to its default-export function

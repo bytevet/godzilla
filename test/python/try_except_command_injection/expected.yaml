@@ -1,0 +1,5 @@
+# Untrusted input read in the try body reaches os.system() in the except
+# handler across the exception edge modeled by the real CFG.
+findings:
+    - rule: py-command-injection
+      min: 1

@@ -1,0 +1,6 @@
+# The tainted request param reaches child_process.exec() only via the loop's
+# back-edge (header PHI), which the real CFG models and the old single-block
+# lowering did not — so this fires only after the Phase 3 SSA/CFG adoption.
+findings:
+    - rule: js-command-injection
+      min: 1

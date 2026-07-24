@@ -12,10 +12,9 @@ rules:
       (e.g. Spring HtmlUtils.htmlEscape, OWASP Encoder.forHtml, or Apache
       StringEscapeUtils.escapeHtml4) or render through a template engine that
       auto-escapes by context.
-    # Non-request source (stays inline; not part of the shared request surface).
-    sources:
-      - "java:*System.getenv"
-    extend: $_java-sources.yaml
+    # Sources: the shared request surface plus the process environment, both from
+    # fragments (env first so getenv keeps its position in the merged list).
+    extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The tainted string is the value written; it is logical arg 0 of the
     # response writer/stream call.
     sinks:

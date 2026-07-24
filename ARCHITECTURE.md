@@ -134,7 +134,14 @@ Inter-procedural taint tracking (`internal/analysis/`):
    propagator so `+` concatenation carries taint.
 3. **Inter-procedural flow** via per-function summaries: a tainted argument taints
    the callee's matching parameter, and a taint-returning function taints its
-   caller's call result.
+   caller's call result. Two out-of-band summary channels carry taint that flows
+   through, not out of, a dependency: an **out-parameter fill** (the callee writes
+   taint into memory reachable from a parameter) and a **sink-parameter summary**
+   (the callee routes a *string* parameter into a sink internally — a dependency
+   "sink wrapper" like `Run(cmd string){ exec.Command(cmd) }`), so the finding is
+   reported at the user call site the dep-internal sink was scoped out of. The
+   string-parameter restriction keeps reflective-ORM over-approximations (an
+   `interface{}` bean bound as a `?` placeholder) from surfacing.
 4. **Alias tracking** is approximated with value-flow (def-use + container taint for
    aggregates/variadics) plus CHA — sound and sufficient for the target vuln classes,
    short of a full demand-driven points-to.
@@ -161,8 +168,9 @@ YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
 Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
 not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
 `rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
-Shared source/propagator lists live in `_`-prefixed **fragments** that a pack pulls
-in with `extend:`, so a language's request sources are defined once, not per pack.
+Shared source/sink/sanitizer/propagator lists live in `_`-prefixed **fragments**
+that a pack pulls in with `extend:`, so a language's request sources (and any other
+list two packs share) are defined once, not per pack.
 Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends

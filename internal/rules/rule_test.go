@@ -3,7 +3,44 @@ package rules
 import (
 	"reflect"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+// TestSinkCalleeUnmarshal locks in the string-or-mapping union: a bare glob is a
+// static sink/callee; a `{sink|callee, when}` mapping is a dynamic (guarded) one.
+func TestSinkCalleeUnmarshal(t *testing.T) {
+	const doc = `
+rules:
+  - id: r
+    severity: high
+    sinks:
+      - "go:*.Query#0"
+      - sink: "go:*testonly*.Run#0"
+        when: "arg[0].String startsWith 'cmd:'"
+    callees:
+      - "java:*MessageDigest.getInstance"
+      - callee: "java:*Cipher.getInstance"
+        when: "arg[0].String contains '/ECB/'"
+`
+	var rs RuleSet
+	if err := yaml.Unmarshal([]byte(doc), &rs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	sinks, callees := rs.Rules[0].Sinks, rs.Rules[0].Callees
+	if want := (Sink{Pattern: "go:*.Query#0"}); sinks[0] != want {
+		t.Errorf("static sink = %+v, want %+v", sinks[0], want)
+	}
+	if want := (Sink{Pattern: "go:*testonly*.Run#0", When: "arg[0].String startsWith 'cmd:'"}); sinks[1] != want {
+		t.Errorf("dynamic sink = %+v, want %+v", sinks[1], want)
+	}
+	if want := (Callee{Pattern: "java:*MessageDigest.getInstance"}); callees[0] != want {
+		t.Errorf("static callee = %+v, want %+v", callees[0], want)
+	}
+	if want := (Callee{Pattern: "java:*Cipher.getInstance", When: "arg[0].String contains '/ECB/'"}); callees[1] != want {
+		t.Errorf("dynamic callee = %+v, want %+v", callees[1], want)
+	}
+}
 
 func TestParseSink(t *testing.T) {
 	cases := []struct {
@@ -25,23 +62,23 @@ func TestParseSink(t *testing.T) {
 	}
 }
 
-func TestSinkInjectionArgs(t *testing.T) {
-	r := &Rule{Sinks: []string{
+func TestMatchSink(t *testing.T) {
+	r := &Rule{Sinks: SinksOf(
 		"go:*database/sql*.Query#0",
 		"go:*database/sql*.QueryContext#1",
 		"go:*os/exec.Command", // bare = all args
-	}}
+	)}
 
-	if args, ok := r.SinkInjectionArgs("go:(*database/sql.DB).Query"); !ok || !reflect.DeepEqual(args, []int32{0}) {
+	if args, _, ok := r.MatchSink("go:(*database/sql.DB).Query"); !ok || !reflect.DeepEqual(args, []int32{0}) {
 		t.Errorf("Query: got (%v,%v), want ([0],true)", args, ok)
 	}
-	if args, ok := r.SinkInjectionArgs("go:(*database/sql.DB).QueryContext"); !ok || !reflect.DeepEqual(args, []int32{1}) {
+	if args, _, ok := r.MatchSink("go:(*database/sql.DB).QueryContext"); !ok || !reflect.DeepEqual(args, []int32{1}) {
 		t.Errorf("QueryContext: got (%v,%v), want ([1],true)", args, ok)
 	}
-	if args, ok := r.SinkInjectionArgs("go:os/exec.Command"); !ok || len(args) != 0 {
+	if args, _, ok := r.MatchSink("go:os/exec.Command"); !ok || len(args) != 0 {
 		t.Errorf("Command (bare): got (%v,%v), want (nil,true)", args, ok)
 	}
-	if _, ok := r.SinkInjectionArgs("go:fmt.Println"); ok {
+	if _, _, ok := r.MatchSink("go:fmt.Println"); ok {
 		t.Errorf("Println: expected no sink match")
 	}
 	// The '#0' suffix must NOT reach the glob matcher: a callee literally

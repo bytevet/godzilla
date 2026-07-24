@@ -1,0 +1,5 @@
+# Precision control: the interface{}-bean ORM wrapper (orm.Find) reaches a SQL sink
+# only via the engine's over-approximation of reflective query building. Because the
+# flow enters through a non-string parameter, no sink-parameter summary forms and
+# there must be NO finding (locks out the xorm-style false-positive flood).
+findings: []

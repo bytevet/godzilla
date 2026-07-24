@@ -359,6 +359,14 @@ def conv_expr(node):
         # as a taint-merging BIN_OP.
         return {"kind": "BoolOp", "values": [conv_expr(v) for v in node.values], "pos": p}
 
+    if isinstance(node, ast.Compare):
+        # `a < b`, `x == y`, `k in d`, ...: the boolean result does not carry the
+        # operands' taint, but lower every operand so a source/sink/validator call
+        # inside the comparison fires and the branch condition references it (the
+        # ops themselves are irrelevant to taint).
+        return {"kind": "Compare", "left": conv_expr(node.left),
+                "comparators": [conv_expr(c) for c in node.comparators], "pos": p}
+
     if isinstance(node, ast.IfExp):
         # ternary `a if cond else b`: the result is a or b, so taint from either
         # branch can reach it. `test` is emitted for its side effects only.

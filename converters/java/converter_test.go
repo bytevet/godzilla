@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	ir "godzilla/pkg/ir/v1"
@@ -143,6 +144,66 @@ func TestResolveJavaSource(t *testing.T) {
 	if got := resolveJavaSource("/proj", idx, ""); got != "/proj" {
 		t.Errorf("empty source should fall back to scan path, got %q", got)
 	}
+}
+
+// TestClassOutputDirs guards the build-output discovery: Maven's target/classes
+// and Gradle's build/classes/java/main live under directories (target, build)
+// that the source-scan ignore set skips. classOutputDirs must still descend into
+// them — otherwise every project build is silently discarded as "no classes" and
+// the frontend falls back to a depless source compile (losing framework sinks).
+// A nested ignored tree (node_modules) must still be pruned.
+func TestClassOutputDirs(t *testing.T) {
+	mavenSuffix := filepath.Join("target", "classes")
+	gradleSuffix := filepath.Join("build", "classes", "java", "main")
+	root := t.TempDir()
+	mkClass := func(parts ...string) string {
+		dir := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "App.class"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	mavenDir := mkClass("target", "classes")
+	// second reactor module, so a multi-module walk must return both
+	moduleDir := mkClass("sub", "target", "classes")
+	gradleDir := mkClass("build", "classes", "java", "main")
+	// a vendored dependency's own build output must NOT be reported
+	mkClass("node_modules", "pkg", "target", "classes")
+
+	contains := func(dirs []string, want string) bool {
+		for _, d := range dirs {
+			if d == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	maven := classOutputDirs(root, mavenSuffix)
+	if !contains(maven, mavenDir) || !contains(maven, moduleDir) {
+		t.Errorf("maven: want both %q and %q, got %v", mavenDir, moduleDir, maven)
+	}
+	for _, d := range maven {
+		if filepath.Base(filepath.Dir(filepath.Dir(d))) == "node_modules" ||
+			containsSegment(d, "node_modules") {
+			t.Errorf("maven: vendored node_modules output must be pruned, got %q", d)
+		}
+	}
+	if gradle := classOutputDirs(root, gradleSuffix); !contains(gradle, gradleDir) {
+		t.Errorf("gradle: want %q, got %v", gradleDir, gradle)
+	}
+}
+
+func containsSegment(p, seg string) bool {
+	for _, s := range strings.Split(p, string(filepath.Separator)) {
+		if s == seg {
+			return true
+		}
+	}
+	return false
 }
 
 // TestJavaSourceFilePositions is the FE-8 end-to-end guard: a two-file Java

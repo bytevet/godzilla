@@ -111,14 +111,122 @@ func TestWriteHTML_Empty(t *testing.T) {
 	}
 }
 
+func TestWriteHTML_TaintFlow(t *testing.T) {
+	withSteps := analysis.Finding{
+		RuleID:     "GO-SQL-INJECTION",
+		Severity:   rules.SeverityHigh,
+		Confidence: analysis.ConfidenceHigh,
+		CWE:        "CWE-89",
+		Message:    "tainted value flows into SQL query",
+		Language:   "go",
+		Function:   "main.handler",
+		SourcePos:  &ir.Position{Filename: "h.go", Line: 10, Column: 5},
+		SinkPos:    &ir.Position{Filename: "h.go", Line: 42, Column: 9},
+		SinkCallee: "go:database/sql.(*DB).Query",
+		Steps: []*ir.Position{
+			{Filename: "h.go", Line: 10, Column: 5},
+			{Filename: "h.go", Line: 25, Column: 3},
+			{Filename: "h.go", Line: 42, Column: 9},
+		},
+	}
+	endpointsOnly := analysis.Finding{
+		RuleID:     "GO-CMD-INJECTION",
+		Severity:   rules.SeverityHigh,
+		Confidence: analysis.ConfidenceMedium,
+		CWE:        "CWE-78",
+		Message:    "cross-function flow",
+		Language:   "go",
+		Function:   "main.run",
+		SourcePos:  &ir.Position{Filename: "a.go", Line: 3, Column: 1},
+		SinkPos:    &ir.Position{Filename: "b.go", Line: 7, Column: 1},
+		SinkCallee: "go:os/exec.Command",
+		// no Steps
+	}
+
+	var buf bytes.Buffer
+	if err := WriteHTML(&buf, []analysis.Finding{withSteps, endpointsOnly}); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Taint spread flow") {
+		t.Error("expected a taint spread flow section")
+	}
+	// The reconstructed intra-procedural path renders each step location.
+	for _, loc := range []string{"h.go:10:5", "h.go:25:3", "h.go:42:9"} {
+		if !strings.Contains(out, loc) {
+			t.Errorf("taint flow missing step location %q", loc)
+		}
+	}
+	// The endpoints-only finding must carry the fallback note.
+	if !strings.Contains(out, "Endpoints only") {
+		t.Error("expected an endpoints-only note for a finding without reconstructed steps")
+	}
+}
+
+// TestWriteHTML_NoUnsafeInterpolation guards the invariant that finding-derived
+// text never lands inside the inline <script>: it is only ever rendered into
+// the DOM through html/template's auto-escaping. A JS-breaking payload in a
+// finding message must appear nowhere inside the script block.
+func TestWriteHTML_NoUnsafeInterpolation(t *testing.T) {
+	payload := `"};alert(document.cookie);//`
+	var buf bytes.Buffer
+	if err := WriteHTML(&buf, []analysis.Finding{{
+		RuleID:     "GO-XSS",
+		Severity:   rules.SeverityHigh,
+		Confidence: analysis.ConfidenceHigh,
+		CWE:        "CWE-79",
+		Message:    payload,
+		Language:   "go",
+		Function:   "main.h",
+		SinkCallee: "go:fmt.Fprintf",
+	}}); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+
+	start := strings.LastIndex(out, "<script>")
+	end := strings.LastIndex(out, "</script>")
+	if start == -1 || end == -1 || end < start {
+		t.Fatal("could not locate inline <script> block")
+	}
+	script := out[start:end]
+	if strings.Contains(script, "alert(document.cookie)") {
+		t.Error("finding-derived payload leaked into the inline <script> block")
+	}
+	// The payload must not appear raw anywhere (it is escaped in the DOM).
+	if strings.Contains(out, payload) {
+		t.Error("raw finding payload appears unescaped in the report")
+	}
+}
+
+func TestCaretFor(t *testing.T) {
+	cases := []struct {
+		line string
+		col  int32
+		want string
+	}{
+		{"abcd", 3, "  ^"},      // 1-based col 3 → two spaces then caret
+		{"\tx = f()", 2, "\t^"}, // tab preserved so the caret aligns under a tab-indented line
+		{"abc", 0, ""},          // unknown column → no caret
+		{"abc", 1, "^"},         // first column
+		{"ab", 9, "  ^"},        // column past end clamps to line length
+	}
+	for _, c := range cases {
+		if got := caretFor(c.line, c.col); got != c.want {
+			t.Errorf("caretFor(%q, %d) = %q, want %q", c.line, c.col, got, c.want)
+		}
+	}
+}
+
 func TestFormatPosition(t *testing.T) {
-	if got := formatPosition(nil); got != "<unknown>" {
-		t.Errorf("formatPosition(nil) = %q, want %q", got, "<unknown>")
+	if got := analysis.PosString(nil); got != "<unknown>" {
+		t.Errorf("PosString(nil) = %q, want %q", got, "<unknown>")
 	}
 
 	pos := &ir.Position{Filename: "foo.go", Line: 3, Column: 7}
-	if got, want := formatPosition(pos), "foo.go:3:7"; got != want {
-		t.Errorf("formatPosition(%+v) = %q, want %q", pos, got, want)
+	if got, want := analysis.PosString(pos), "foo.go:3:7"; got != want {
+		t.Errorf("PosString(%+v) = %q, want %q", pos, got, want)
 	}
 }
 
