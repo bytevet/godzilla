@@ -377,8 +377,10 @@ a:hover { text-decoration: underline; }
   color: var(--accent-ink);
   font-weight: 700;
 }
-.flow .step .kind { color: var(--accent-ink); font-weight: 600; }
+.flow .step .kind { color: var(--accent-ink); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
 .flow .step .kind.sink { color: var(--crit); }
+.flow .step .kind.step-mid { color: var(--soft); }
+.flow .step.endpoint { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
 .flow .step .loc { color: var(--ink); word-break: break-all; }
 .flow .step .snippet { border-top: 1px solid var(--line); }
 .flow-note { color: var(--soft); font-size: 12px; margin: 6px 0; }
@@ -386,35 +388,52 @@ a:hover { text-decoration: underline; }
 .no-findings { color: var(--soft); font-style: italic; }
 footer { color: var(--soft); font-size: 12px; margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); }
 
-/* --- wide screens: 2-column master-detail ---
-   Left column ("main") holds everything — summary, filters, findings list.
-   Right column ("detail") shows only the selected finding and sticks in view. */
+/* --- wide screens: full-height 2-column flex ---
+   The layout fills the viewport (100dvh, 100vh fallback). The left column
+   ("main") holds everything — header, summary, filters, findings list, footer —
+   and scrolls on its own. The right column ("detail") shows only the selected
+   finding and scrolls independently. */
 @media (min-width: 960px) {
+  .wrap { max-width: none; padding: 0; }
   .layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1.5fr) minmax(390px, 1fr);
-    gap: 22px;
-    align-items: start;
+    display: flex;
+    align-items: stretch;
+    min-height: 100vh;
+    min-height: 100dvh;
   }
-  .layout.single { display: block; } /* no findings → no detail column */
-  .main { min-width: 0; }            /* allow inner tables/snippets to shrink+scroll */
+  .main {
+    flex: 1 1 auto;
+    min-width: 0;               /* allow inner tables/snippets to shrink + scroll */
+    padding: 30px 34px 48px;
+  }
   .list { min-width: 0; }
   .list .body { display: none; }     /* on wide the body lives only in the detail pane */
   .list .item { cursor: pointer; }
   .finding.active { box-shadow: 0 0 0 1px var(--accent) inset; }
   .detail {
-    display: block;
-    position: sticky;
-    top: 12px;
-    align-self: start;
-    max-height: calc(100vh - 24px);
-    overflow: auto;
+    display: block;              /* override the narrow-screen `display: none` */
+    flex: 0 0 42%;
+    min-width: 400px;
+    max-width: 760px;
     background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 12px;
+    border-left: 1px solid var(--line);
   }
-  .detail .pane { border-top: 0; }
+  /* the detail content sticks in view while the left column scrolls the page */
+  .detail .pane,
+  .detail .pane-empty {
+    position: sticky;
+    top: 0;
+    max-height: 100vh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    border-top: 0;
+    padding: 24px 24px 48px;
+  }
   .chev { display: none; } /* selection, not expansion, on wide */
+
+  /* no findings → no detail column; fall back to a normal centered page */
+  .layout.single { display: block; min-height: 0; }
+  .layout.single .main { max-width: 1100px; margin: 0 auto; }
 }
 
 /* --- narrow screens --- */

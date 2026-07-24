@@ -286,8 +286,6 @@ type findingView struct {
 	SinkCallee        string
 	SinkLocation      string
 	SourceLocation    string
-	SourceSnippet     *codeSnippet
-	SinkSnippet       *codeSnippet
 	Flow              []flowStep
 	HasFlow           bool
 	FlowEndpointsOnly bool
@@ -298,11 +296,13 @@ type findingView struct {
 	ReviewNote        string
 }
 
-// flowStep is one position along the taint spread flow. The snippet is
-// best-effort and rendered inside a nested, collapsed <details>.
+// flowStep is one position along the taint spread flow, rendered inside a
+// nested <details>. The endpoints (source and sink) are expanded by default
+// (Open); intermediate steps stay collapsed. The snippet is best-effort.
 type flowStep struct {
 	Index    int
 	Kind     string // "source", "sink", or "" for intermediate steps
+	Open     bool   // expand this step's snippet by default (source/sink)
 	Location string
 	Snippet  *codeSnippet
 }
@@ -325,8 +325,6 @@ func newFindingView(cache snippetCache, root string, f analysis.Finding) finding
 		SinkCallee:        f.SinkCallee,
 		SinkLocation:      displayPos(root, f.SinkPos),
 		SourceLocation:    displayPos(root, f.SourcePos),
-		SourceSnippet:     buildSnippet(cache, f.SourcePos),
-		SinkSnippet:       buildSnippet(cache, f.SinkPos),
 		Flow:              flow,
 		HasFlow:           len(flow) > 0,
 		FlowEndpointsOnly: endpointsOnly,
@@ -343,28 +341,36 @@ func newFindingView(cache snippetCache, root string, f analysis.Finding) finding
 // otherwise it falls back to the source and sink endpoints and flags the flow
 // as endpoints-only.
 func buildFlow(cache snippetCache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
-	positions := f.Steps
-	if len(positions) == 0 {
+	// kinds[i] labels position i as source/sink/intermediate. The endpoints are
+	// expanded (Open) by default; intermediate steps stay collapsed.
+	var positions []*ir.Position
+	var kinds []string
+	if len(f.Steps) > 0 {
+		positions = f.Steps
+		kinds = make([]string, len(positions))
+		kinds[0] = "source"
+		if len(positions) > 1 {
+			kinds[len(positions)-1] = "sink"
+		}
+	} else {
 		endpointsOnly = true
+		// Label by role, not index, so a finding with only a sink (e.g. a
+		// dangerous-call finding with no source) is never mislabeled "source".
 		if f.SourcePos != nil {
 			positions = append(positions, f.SourcePos)
+			kinds = append(kinds, "source")
 		}
 		if f.SinkPos != nil {
 			positions = append(positions, f.SinkPos)
+			kinds = append(kinds, "sink")
 		}
 	}
 	steps = make([]flowStep, 0, len(positions))
 	for i, p := range positions {
-		kind := ""
-		if i == 0 {
-			kind = "source"
-		}
-		if i == len(positions)-1 && len(positions) > 1 {
-			kind = "sink"
-		}
 		steps = append(steps, flowStep{
 			Index:    i + 1,
-			Kind:     kind,
+			Kind:     kinds[i],
+			Open:     kinds[i] != "", // expand the source and sink endpoints
 			Location: displayPos(root, p),
 			Snippet:  buildSnippet(cache, p),
 		})
