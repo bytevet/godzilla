@@ -1,18 +1,27 @@
 // Package report renders a slice of analysis.Finding values into a
 // self-contained, standalone HTML document. The report has no external
-// assets (CSS is inlined) and uses html/template so that untrusted content
-// coming from analyzed source code (messages, callee names, code snippets,
-// etc.) can never make the report itself vulnerable to XSS.
+// assets (CSS and JS are inlined) and uses html/template so that untrusted
+// content coming from analyzed source code (messages, callee names, code
+// snippets, etc.) can never make the report itself vulnerable to XSS.
+//
+// The document's markup, styling, and filter script live in separate source
+// files under templates/ and are compiled into the binary with go:embed; the
+// CSS/JS are static (they carry no finding data) and are injected into the
+// single template as template.CSS/template.JS typed values, so they emit
+// verbatim while every finding-derived value stays contextually auto-escaped.
 package report
 
 import (
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
@@ -20,6 +29,15 @@ import (
 
 	"html/template"
 )
+
+//go:embed templates/report.html.tmpl
+var reportTemplateSrc string
+
+//go:embed templates/report.css
+var reportCSS string
+
+//go:embed templates/report.js
+var reportJS string
 
 // severityOrder lists severities from worst to best; it drives both sort
 // order and the fixed ordering of the summary table.
@@ -50,15 +68,28 @@ const snippetContext = 3
 func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	sorted := sortedFindings(findings)
 
+	// A per-call cache so a source file shared by many findings/steps is read
+	// off disk once. Kept call-scoped (not package-global) so a later scan or
+	// test never observes stale file contents.
+	cache := snippetCache{}
+
+	// Positions are rendered relative to the common project root so the report
+	// shows "models/group.go:322" rather than an absolute scan path.
+	root := commonRoot(sorted)
+
 	data := reportData{
-		Title:            "Godzilla SAST Report",
-		GeneratedAt:      time.Now().Format(time.RFC1123),
-		Total:            len(sorted),
-		SeverityCounts:   severityCounts(sorted),
-		ConfidenceCounts: confidenceCounts(sorted),
+		Title:          "Godzilla SAST Report",
+		GeneratedAt:    time.Now().Format(time.RFC1123),
+		Total:          len(sorted),
+		Root:           root,
+		Tiles:          summaryTiles(sorted),
+		ByRule:         ruleRows(sorted),
+		SeverityFilter: severityFilters(),
+		CSS:            template.CSS(reportCSS),
+		JS:             template.JS(reportJS),
 	}
 	for _, f := range sorted {
-		data.Findings = append(data.Findings, newFindingView(f))
+		data.Findings = append(data.Findings, newFindingView(cache, root, f))
 	}
 
 	return reportTemplate.Execute(w, data)
@@ -91,48 +122,151 @@ func sinkSortKey(f analysis.Finding) string {
 
 // reportData is the top-level structure fed to the HTML template.
 type reportData struct {
-	Title            string
-	GeneratedAt      string
-	Total            int
-	SeverityCounts   []countRow
-	ConfidenceCounts []countRow
-	Findings         []findingView
+	Title          string
+	GeneratedAt    string
+	Total          int
+	Root           string // common path prefix stripped from displayed locations
+	Tiles          []tile
+	ByRule         []ruleRow
+	SeverityFilter []severityFilter
+	Findings       []findingView
+	CSS            template.CSS
+	JS             template.JS
 }
 
-// countRow is one row of a summary table: a label, its CSS badge class, and
-// the finding count.
-type countRow struct {
+// tile is one summary stat card.
+type tile struct {
+	Label string
+	Count int
+	Class string // optional severity class for coloring the number
+	Lead  bool   // the headline tile (accent-colored)
+}
+
+// summaryTiles derives the headline stat cards from the findings.
+func summaryTiles(findings []analysis.Finding) []tile {
+	bySev := map[rules.Severity]int{}
+	files := map[string]struct{}{}
+	for _, f := range findings {
+		bySev[normalizeSeverity(f.Severity)]++
+		if f.SinkPos != nil && f.SinkPos.GetFilename() != "" {
+			files[f.SinkPos.GetFilename()] = struct{}{}
+		}
+	}
+	return []tile{
+		{Label: "Total findings", Count: len(findings), Lead: true},
+		{Label: "Critical", Count: bySev[rules.SeverityCritical], Class: "sev-critical"},
+		{Label: "High", Count: bySev[rules.SeverityHigh], Class: "sev-high"},
+		{Label: "Medium", Count: bySev[rules.SeverityMedium], Class: "sev-medium"},
+		{Label: "Low / Info", Count: bySev[rules.SeverityLow] + bySev[rules.SeverityInfo], Class: "sev-low"},
+		{Label: "Files affected", Count: len(files)},
+	}
+}
+
+// severityFilter is one toggle in the filter bar.
+type severityFilter struct {
+	Key   string // data-sev value (lower-case severity)
 	Label string
 	Class string
-	Count int
 }
 
-// summaryRows tallies findings by a normalized string key and emits one
-// countRow per value in order (fixed order, zeros included).
-func summaryRows[T ~string](findings []analysis.Finding, order []T, keyOf func(analysis.Finding) T, class func(T) string) []countRow {
-	counts := make(map[T]int, len(order))
-	for _, f := range findings {
-		counts[keyOf(f)]++
-	}
-	rows := make([]countRow, 0, len(order))
-	for _, v := range order {
-		rows = append(rows, countRow{
-			Label: strings.ToUpper(string(v)),
-			Class: class(v),
-			Count: counts[v],
+func severityFilters() []severityFilter {
+	out := make([]severityFilter, 0, len(severityOrder))
+	for _, s := range severityOrder {
+		out = append(out, severityFilter{
+			Key:   string(s),
+			Label: strings.ToUpper(string(s)),
+			Class: severityClass(s),
 		})
 	}
+	return out
+}
+
+// ruleRow is one row of the "findings by rule" summary table.
+type ruleRow struct {
+	RuleID   string
+	CWE      string
+	Count    int
+	SevClass string // chip/text class of this rule's worst observed severity
+}
+
+// ruleRows tallies findings per rule, ordered by count desc, then worst
+// severity first, then rule id — a deterministic order that also keeps the
+// rule ids appearing in severity order for the severity-ordering test.
+func ruleRows(findings []analysis.Finding) []ruleRow {
+	type agg struct {
+		cwe     string
+		count   int
+		bestSev int
+	}
+	byRule := map[string]*agg{}
+	for _, f := range findings {
+		a := byRule[f.RuleID]
+		if a == nil {
+			a = &agg{cwe: f.CWE}
+			byRule[f.RuleID] = a
+		}
+		a.count++
+		if r := normalizeSeverity(f.Severity).Rank(); r > a.bestSev {
+			a.bestSev = r
+		}
+		if a.cwe == "" {
+			a.cwe = f.CWE
+		}
+	}
+	rows := make([]ruleRow, 0, len(byRule))
+	for id, a := range byRule {
+		rows = append(rows, ruleRow{
+			RuleID:   id,
+			CWE:      a.cwe,
+			Count:    a.count,
+			SevClass: severityClass(rules.Severity(rankSeverity(a.bestSev))),
+		})
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Count != rows[j].Count {
+			return rows[i].Count > rows[j].Count
+		}
+		// Tie-break by worst severity (so rule ids also appear in severity
+		// order), then rule id for determinism.
+		si, sj := sevRankOfClass(rows[i].SevClass), sevRankOfClass(rows[j].SevClass)
+		if si != sj {
+			return si > sj
+		}
+		return rows[i].RuleID < rows[j].RuleID
+	})
 	return rows
 }
 
-func severityCounts(findings []analysis.Finding) []countRow {
-	return summaryRows(findings, severityOrder,
-		func(f analysis.Finding) rules.Severity { return normalizeSeverity(f.Severity) }, severityClass)
+// rankSeverity maps a 1..5 rank back to its severity string.
+func rankSeverity(rank int) string {
+	switch rank {
+	case 5:
+		return string(rules.SeverityCritical)
+	case 4:
+		return string(rules.SeverityHigh)
+	case 3:
+		return string(rules.SeverityMedium)
+	case 2:
+		return string(rules.SeverityLow)
+	default:
+		return string(rules.SeverityInfo)
+	}
 }
 
-func confidenceCounts(findings []analysis.Finding) []countRow {
-	return summaryRows(findings, confidenceOrder,
-		func(f analysis.Finding) analysis.Confidence { return normalizeConfidence(f.Confidence) }, confidenceClass)
+// sevRankOfClass returns the severity rank encoded by a "sev-*" css class.
+func sevRankOfClass(class string) int {
+	switch class {
+	case "sev-critical":
+		return 5
+	case "sev-high":
+		return 4
+	case "sev-medium":
+		return 3
+	case "sev-low":
+		return 2
+	default:
+		return 1
+	}
 }
 
 // findingView is the per-finding data made available to the template; it
@@ -140,38 +274,194 @@ func confidenceCounts(findings []analysis.Finding) []countRow {
 type findingView struct {
 	SeverityLabel     string
 	SeverityClass     string
+	SevKey            string
 	ConfidenceLabel   string
 	ConfidenceClass   string
+	ConfKey           string
+	ConfidenceNote    string // plain-language explanation of the confidence level
 	RuleID            string
 	CWE               string
 	Message           string
+	Language          string
 	Function          string
 	SinkCallee        string
 	SinkLocation      string
 	SourceLocation    string
-	Snippet           *codeSnippet
+	Flow              []flowStep
+	HasFlow           bool
+	FlowEndpointsOnly bool
+	AnchorID          string
 	Suppressed        bool
 	SuppressionReason string
+	ReviewConfirmed   bool
+	ReviewNote        string
 }
 
-func newFindingView(f analysis.Finding) findingView {
-	// severityClass/confidenceClass normalize their input, so pass the raw values.
+// flowStep is one position along the taint spread flow, rendered inside a
+// nested <details>. The endpoints (source and sink) are expanded by default
+// (Open); intermediate steps stay collapsed. The snippet is best-effort.
+type flowStep struct {
+	Index    int
+	Kind     string // "source", "sink", or "" for intermediate steps
+	Open     bool   // expand this step's snippet by default (source/sink)
+	Location string
+	Snippet  *codeSnippet
+}
+
+func newFindingView(cache snippetCache, root string, f analysis.Finding) findingView {
+	flow, endpointsOnly := buildFlow(cache, root, f)
 	return findingView{
 		SeverityLabel:     strings.ToUpper(string(f.Severity)),
 		SeverityClass:     severityClass(f.Severity),
+		SevKey:            string(normalizeSeverity(f.Severity)),
 		ConfidenceLabel:   strings.ToUpper(string(f.Confidence)),
 		ConfidenceClass:   confidenceClass(f.Confidence),
+		ConfKey:           string(normalizeConfidence(f.Confidence)),
+		ConfidenceNote:    confidenceNote(f.Confidence),
 		RuleID:            f.RuleID,
 		CWE:               f.CWE,
 		Message:           f.Message,
+		Language:          f.Language,
 		Function:          f.Function,
 		SinkCallee:        f.SinkCallee,
-		SinkLocation:      analysis.PosString(f.SinkPos),
-		SourceLocation:    analysis.PosString(f.SourcePos),
-		Snippet:           buildSnippet(f.SinkPos),
+		SinkLocation:      displayPos(root, f.SinkPos),
+		SourceLocation:    displayPos(root, f.SourcePos),
+		Flow:              flow,
+		HasFlow:           len(flow) > 0,
+		FlowEndpointsOnly: endpointsOnly,
+		AnchorID:          "f-" + analysis.Fingerprint(f),
 		Suppressed:        f.Suppressed,
 		SuppressionReason: f.SuppressionReason,
+		ReviewConfirmed:   f.ReviewConfirmed,
+		ReviewNote:        f.ReviewNote,
 	}
+}
+
+// buildFlow builds the taint spread flow. When the engine reconstructed an
+// intra-procedural path (Finding.Steps), each step is a position along it;
+// otherwise it falls back to the source and sink endpoints and flags the flow
+// as endpoints-only.
+func buildFlow(cache snippetCache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
+	// kinds[i] labels position i as source/sink/intermediate. The endpoints are
+	// expanded (Open) by default; intermediate steps stay collapsed.
+	var positions []*ir.Position
+	var kinds []string
+	if len(f.Steps) > 0 {
+		positions = f.Steps
+		kinds = make([]string, len(positions))
+		kinds[0] = "source"
+		if len(positions) > 1 {
+			kinds[len(positions)-1] = "sink"
+		}
+	} else {
+		endpointsOnly = true
+		// Label by role, not index, so a finding with only a sink (e.g. a
+		// dangerous-call finding with no source) is never mislabeled "source".
+		if f.SourcePos != nil {
+			positions = append(positions, f.SourcePos)
+			kinds = append(kinds, "source")
+		}
+		if f.SinkPos != nil {
+			positions = append(positions, f.SinkPos)
+			kinds = append(kinds, "sink")
+		}
+	}
+	steps = make([]flowStep, 0, len(positions))
+	for i, p := range positions {
+		steps = append(steps, flowStep{
+			Index:    i + 1,
+			Kind:     kinds[i],
+			Open:     kinds[i] != "", // expand the source and sink endpoints
+			Location: displayPos(root, p),
+			Snippet:  buildSnippet(cache, p),
+		})
+	}
+	return steps, endpointsOnly
+}
+
+// confidenceNote returns a short plain-language explanation of a confidence
+// level, so the report never shows a bare "MEDIUM" the reader must decode.
+func confidenceNote(c analysis.Confidence) string {
+	switch normalizeConfidence(c) {
+	case analysis.ConfidenceHigh:
+		return "intra-procedural source → sink flow"
+	case analysis.ConfidenceMedium:
+		return "flow crosses a function boundary (interprocedural)"
+	default:
+		return ""
+	}
+}
+
+// commonRoot returns the longest common directory prefix shared by the
+// findings' source/sink/step file paths, so the report can render locations
+// relative to the scanned project instead of as long absolute paths. Go module
+// cache paths (third-party dependency sources) are excluded from the
+// computation and shortened separately by displayPath.
+func commonRoot(findings []analysis.Finding) string {
+	var common []string
+	have := false
+	consider := func(p *ir.Position) {
+		if p == nil {
+			return
+		}
+		fn := p.GetFilename()
+		if fn == "" || strings.Contains(fn, "/pkg/mod/") {
+			return
+		}
+		segs := strings.Split(fn, "/")
+		segs = segs[:len(segs)-1] // directory segments only (drop basename)
+		if !have {
+			common = segs
+			have = true
+			return
+		}
+		n := 0
+		for n < len(common) && n < len(segs) && common[n] == segs[n] {
+			n++
+		}
+		common = common[:n]
+	}
+	for _, f := range findings {
+		consider(f.SourcePos)
+		consider(f.SinkPos)
+		for _, s := range f.Steps {
+			consider(s)
+		}
+	}
+	if !have || len(common) == 0 {
+		return ""
+	}
+	return strings.Join(common, "/")
+}
+
+// displayPath renders filename relative to root; a Go module-cache path becomes
+// a short "dep: <module@version>/..." form; anything outside root is returned
+// unchanged.
+func displayPath(root, filename string) string {
+	if filename == "" {
+		return ""
+	}
+	if i := strings.LastIndex(filename, "/pkg/mod/"); i >= 0 {
+		return "dep: " + filename[i+len("/pkg/mod/"):]
+	}
+	if root != "" {
+		if filename == root {
+			return path.Base(filename)
+		}
+		if strings.HasPrefix(filename, root+"/") {
+			return filename[len(root)+1:]
+		}
+	}
+	return filename
+}
+
+// displayPos formats a position as "path:line:col" with path shortened via
+// displayPath, or "<unknown>" when pos is nil.
+func displayPos(root string, pos *ir.Position) string {
+	if pos == nil {
+		return "<unknown>"
+	}
+	return fmt.Sprintf("%s:%d:%d", displayPath(root, pos.GetFilename()), pos.GetLine(), pos.GetColumn())
 }
 
 // normalizeSeverity maps an arbitrary/unknown severity string down to one of
@@ -223,7 +513,26 @@ func confidenceClass(c analysis.Confidence) string {
 	}
 }
 
-// codeSnippet holds a small window of source lines around a finding's sink,
+// snippetCache memoizes source-file line reads across the many snippets a
+// single report renders. A nil entry records an unreadable file so we don't
+// retry it.
+type snippetCache map[string][]string
+
+func (c snippetCache) lines(filename string) ([]string, bool) {
+	if v, ok := c[filename]; ok {
+		return v, v != nil
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		c[filename] = nil
+		return nil, false
+	}
+	lines := strings.Split(string(data), "\n")
+	c[filename] = lines
+	return lines, true
+}
+
+// codeSnippet holds a small window of source lines around a finding position,
 // for best-effort inline display in the report.
 type codeSnippet struct {
 	Filename string
@@ -234,6 +543,36 @@ type snippetLine struct {
 	Num       int32
 	Text      string
 	Highlight bool
+	Caret     string // for the highlighted line: whitespace prefix + "^" pointing at the column
+}
+
+// caretFor builds a compiler-style pointer line for a 1-based byte column: a
+// whitespace prefix (tabs preserved so it aligns under a tab-indented line)
+// followed by "^". Returns "" when col is unknown. One prefix char per source
+// rune keeps the caret aligned in the monospace <pre>.
+func caretFor(line string, col int32) string {
+	if col <= 0 {
+		return ""
+	}
+	n := int(col) - 1
+	if n > len(line) {
+		n = len(line)
+	}
+	var b strings.Builder
+	consumed := 0
+	for _, r := range line {
+		if consumed >= n {
+			break
+		}
+		if r == '\t' {
+			b.WriteByte('\t')
+		} else {
+			b.WriteByte(' ')
+		}
+		consumed += utf8.RuneLen(r)
+	}
+	b.WriteByte('^')
+	return b.String()
 }
 
 // buildSnippet best-effort reads the source file named by pos and returns a
@@ -241,7 +580,7 @@ type snippetLine struct {
 // line flagged for highlighting. It returns nil whenever the position is
 // missing/invalid or the file cannot be read — code context is a nice-to-have,
 // never a hard requirement.
-func buildSnippet(pos *ir.Position) *codeSnippet {
+func buildSnippet(cache snippetCache, pos *ir.Position) *codeSnippet {
 	if pos == nil {
 		return nil
 	}
@@ -251,12 +590,10 @@ func buildSnippet(pos *ir.Position) *codeSnippet {
 		return nil
 	}
 
-	data, err := os.ReadFile(filename)
-	if err != nil {
+	allLines, ok := cache.lines(filename)
+	if !ok {
 		return nil
 	}
-
-	allLines := strings.Split(string(data), "\n")
 	if int(target) > len(allLines) {
 		return nil
 	}
@@ -267,166 +604,21 @@ func buildSnippet(pos *ir.Position) *codeSnippet {
 	lines := make([]snippetLine, 0, endIdx-startIdx+1)
 	for i := startIdx; i <= endIdx; i++ {
 		lineNum := int32(i + 1)
-		lines = append(lines, snippetLine{
+		line := snippetLine{
 			Num:       lineNum,
 			Text:      allLines[i],
 			Highlight: lineNum == target,
-		})
+		}
+		if line.Highlight {
+			line.Caret = caretFor(allLines[i], pos.GetColumn())
+		}
+		lines = append(lines, line)
 	}
 	return &codeSnippet{Filename: filename, Lines: lines}
 }
 
-// reportTemplate is the full HTML document template. All dynamic values are
-// inserted through html/template actions, which contextually auto-escape
-// them, so untrusted content in findings cannot break out of its context.
+// reportTemplate is the full HTML document template, parsed from the embedded
+// template file. All dynamic values are inserted through html/template
+// actions, which contextually auto-escape them, so untrusted content in
+// findings cannot break out of its context.
 var reportTemplate = template.Must(template.New("report").Parse(reportTemplateSrc))
-
-const reportTemplateSrc = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{{.Title}}</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --sev-critical: #7f1d1d;
-    --sev-high: #b91c1c;
-    --sev-medium: #b45309;
-    --sev-low: #1d4ed8;
-    --sev-info: #4b5563;
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    margin: 0;
-    padding: 0 1.5rem 3rem;
-    background: #0b0d10;
-    color: #e5e7eb;
-    line-height: 1.5;
-  }
-  header {
-    padding: 2rem 0 1rem;
-    border-bottom: 1px solid #2b2f36;
-    margin-bottom: 1.5rem;
-  }
-  header h1 { margin: 0 0 0.25rem; font-size: 1.75rem; }
-  header p { margin: 0; color: #9ca3af; font-size: 0.9rem; }
-  h2 { font-size: 1.2rem; border-bottom: 1px solid #2b2f36; padding-bottom: 0.4rem; }
-  section { margin-bottom: 2rem; }
-  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0 1.5rem; }
-  table.summary-table { width: auto; min-width: 260px; margin-right: 2rem; }
-  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #1f2329; vertical-align: top; }
-  th { color: #9ca3af; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
-  .summary-tables { display: flex; flex-wrap: wrap; gap: 1rem; }
-  .badge {
-    display: inline-block;
-    padding: 0.15rem 0.55rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    color: #fff;
-  }
-  .sev-critical { background: var(--sev-critical); }
-  .sev-high { background: var(--sev-high); }
-  .sev-medium { background: var(--sev-medium); }
-  .sev-low { background: var(--sev-low); }
-  .sev-info { background: var(--sev-info); }
-  .conf-high { color: #22c55e; font-weight: 600; }
-  .conf-medium { color: #eab308; font-weight: 600; }
-  .conf-low { color: #9ca3af; font-weight: 600; }
-  .loc { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; color: #d1d5db; }
-  .callee { color: #93c5fd; }
-  pre.snippet {
-    background: #14171c;
-    border: 1px solid #2b2f36;
-    border-radius: 6px;
-    padding: 0.5rem 0.75rem;
-    margin-top: 0.5rem;
-    overflow-x: auto;
-    font-size: 0.8rem;
-    line-height: 1.4;
-  }
-  pre.snippet .line { display: block; white-space: pre; }
-  pre.snippet .line.hl { background: #402626; color: #fecaca; }
-  tr.suppressed { opacity: 0.5; }
-  .tag-suppressed { background: #4b5563; margin-left: 0.4rem; }
-  .no-findings { color: #9ca3af; font-style: italic; }
-  footer { color: #6b7280; font-size: 0.75rem; margin-top: 2rem; }
-</style>
-</head>
-<body>
-<header>
-  <h1>Godzilla SAST Report</h1>
-  <p>Generated {{.GeneratedAt}}</p>
-</header>
-
-<section class="summary">
-  <h2>Summary</h2>
-  <p>Total findings: <strong>{{.Total}}</strong></p>
-  <div class="summary-tables">
-    <table class="summary-table">
-      <thead><tr><th>Severity</th><th>Count</th></tr></thead>
-      <tbody>
-      {{range .SeverityCounts}}
-        <tr><td><span class="badge {{.Class}}">{{.Label}}</span></td><td>{{.Count}}</td></tr>
-      {{end}}
-      </tbody>
-    </table>
-    <table class="summary-table">
-      <thead><tr><th>Confidence</th><th>Count</th></tr></thead>
-      <tbody>
-      {{range .ConfidenceCounts}}
-        <tr><td>{{.Label}}</td><td>{{.Count}}</td></tr>
-      {{end}}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="findings">
-  <h2>Findings</h2>
-  {{if not .Findings}}
-    <p class="no-findings">No findings.</p>
-  {{else}}
-  <table>
-    <thead>
-      <tr>
-        <th>Severity</th>
-        <th>Confidence</th>
-        <th>Rule</th>
-        <th>CWE</th>
-        <th>Message</th>
-        <th>Function</th>
-        <th>Sink</th>
-        <th>Source</th>
-      </tr>
-    </thead>
-    <tbody>
-    {{range .Findings}}
-      <tr{{if .Suppressed}} class="suppressed"{{end}}>
-        <td><span class="badge {{.SeverityClass}}">{{.SeverityLabel}}</span></td>
-        <td><span class="{{.ConfidenceClass}}">{{.ConfidenceLabel}}</span></td>
-        <td>{{.RuleID}}{{if .Suppressed}}<span class="badge tag-suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}</td>
-        <td>{{.CWE}}</td>
-        <td>{{.Message}}</td>
-        <td>{{.Function}}</td>
-        <td>
-          <div class="loc">{{.SinkLocation}} -&gt; <span class="callee">{{.SinkCallee}}</span></div>
-          {{if .Snippet}}
-          <pre class="snippet">{{range .Snippet.Lines}}<span class="line{{if .Highlight}} hl{{end}}">{{printf "%4d" .Num}}: {{.Text}}</span>
-{{end}}</pre>
-          {{end}}
-        </td>
-        <td class="loc">{{.SourceLocation}}</td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{end}}
-</section>
-
-<footer>Generated by Godzilla SAST.</footer>
-</body>
-</html>
-`

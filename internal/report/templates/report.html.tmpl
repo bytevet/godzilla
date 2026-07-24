@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="layout{{if not .Findings}} single{{end}}">
+  <div class="main">
+  <header>
+    <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
+      <span class="ico-sun" aria-hidden="true">&#9788;</span><span class="ico-moon" aria-hidden="true">&#9789;</span>
+    </button>
+    <div class="eyebrow">Godzilla &middot; SAST</div>
+    <h1>Godzilla SAST Report</h1>
+    <p class="lede">Generated {{.GeneratedAt}}. Total findings: <strong>{{.Total}}</strong>{{if .Total}} &mdash; sorted worst-severity first.{{end}}
+    {{if .Root}}<br><span class="muted">Paths shown relative to <code>{{.Root}}</code>.</span>{{end}}</p>
+  </header>
+  <section class="summary">
+    <h2>Summary</h2>
+    <div class="tiles">
+      {{range .Tiles}}
+      <div class="tile{{if .Lead}} lead{{end}}{{if .Class}} {{.Class}}{{end}}">
+        <div class="n">{{.Count}}</div>
+        <div class="l">{{.Label}}</div>
+      </div>
+      {{end}}
+    </div>
+
+    {{if .ByRule}}
+    <h2>Findings by rule</h2>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>Rule</th><th>CWE</th><th class="num">Count</th></tr></thead>
+        <tbody>
+        {{range .ByRule}}
+          <tr>
+            <td><span class="klass">{{.RuleID}}</span></td>
+            <td class="mono muted">{{.CWE}}</td>
+            <td class="num {{.SevClass}}">{{.Count}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{end}}
+  </section>
+
+  <section class="findings">
+    <h2>Details</h2>
+    {{if not .Findings}}
+      <p class="no-findings">No findings.</p>
+    {{else}}
+    <p class="hint">Select a finding to view its source, taint flow, and sink.</p>
+    <div class="controls">
+      <div class="grp">
+        {{range .SeverityFilter}}
+        <label class="sev {{.Class}}"><input type="checkbox" data-sev="{{.Key}}" checked>{{.Label}}</label>
+        {{end}}
+      </div>
+      <div class="grp">
+        <select id="f-rule" aria-label="Filter by rule">
+          <option value="">All rules</option>
+          {{range .ByRule}}
+          <option value="{{.RuleID}}">{{.RuleID}} ({{.Count}})</option>
+          {{end}}
+        </select>
+      </div>
+      <input id="f-search" type="search" placeholder="Search file, message, callee…" aria-label="Search findings">
+      <span class="count" id="f-count">{{.Total}} / {{.Total}} shown</span>
+    </div>
+
+    <div class="list" role="list">
+        {{range .Findings}}
+        <div class="finding {{.SeverityClass}}{{if .Suppressed}} suppressed{{end}}" id="{{.AnchorID}}"
+             data-severity="{{.SevKey}}" data-rule="{{.RuleID}}" data-cwe="{{.CWE}}" data-conf="{{.ConfKey}}">
+          <button class="item" type="button" aria-expanded="false">
+            <span class="item-head">
+              <span class="chip {{.SeverityClass}}">{{.SeverityLabel}}</span>
+              <span class="klass">{{.RuleID}}</span>
+              {{if .CWE}}<span class="chip cwe">{{.CWE}}</span>{{end}}
+              <span class="conf {{.ConfidenceClass}}" title="confidence{{if .ConfidenceNote}}: {{.ConfidenceNote}}{{end}}"><span class="conf-k">confidence</span>{{.ConfidenceLabel}}</span>
+              {{if .Suppressed}}<span class="chip suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
+              <span class="chev" aria-hidden="true">&rsaquo;</span>
+            </span>
+            <span class="msg">{{.Message}}</span>
+            <span class="sink-loc">{{.SinkLocation}}</span>
+          </button>
+          <div class="body">
+            <div class="meta-line">
+              in <code>{{.Function}}</code>{{if .Language}} &middot; <span class="muted">{{.Language}}</span>{{end}}
+              &middot; sink <span class="callee">{{.SinkCallee}}</span>
+            </div>
+            <div class="meta-line">
+              confidence <b>{{.ConfidenceLabel}}</b>{{if .ConfidenceNote}} &mdash; {{.ConfidenceNote}}{{end}}
+              {{if .ReviewConfirmed}}<br><span class="muted">LLM review confirmed: {{.ReviewNote}}</span>{{end}}
+            </div>
+
+            {{if .HasFlow}}
+            <div class="subhead">Taint spread flow</div>
+            <p class="flow-note">Source &rarr; sink, expanded by default; intermediate steps collapsed.{{if .FlowEndpointsOnly}} Endpoints only — the intermediate path crossed a function boundary and was not reconstructed.{{end}}</p>
+            <div class="flow">
+              {{range .Flow}}
+              <details class="step{{if .Kind}} endpoint{{end}}"{{if .Open}} open{{end}}>
+                <summary>
+                  <span class="idx">{{.Index}}</span>
+                  {{if .Kind}}<span class="kind {{.Kind}}">{{.Kind}}</span>{{else}}<span class="kind step-mid">step</span>{{end}}
+                  <span class="loc">{{.Location}}</span>
+                </summary>
+                {{if .Snippet}}{{template "snippet" .Snippet}}{{else}}<div class="snippet-missing">Snippet unavailable.</div>{{end}}
+              </details>
+              {{end}}
+            </div>
+            {{else}}
+            <div class="snippet-missing">No location information for this finding.</div>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+  </section>
+  <footer>Generated by Godzilla SAST.</footer>
+  </div><!-- /.main -->
+  {{if .Findings}}
+  <aside class="detail">
+    <div class="pane-empty">Select a finding to view its source, taint flow, and sink.</div>
+  </aside>
+  {{end}}
+  </div><!-- /.layout -->
+</div>
+<script>{{.JS}}</script>
+</body>
+</html>
+{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{if .Caret}}<span class="line caret"><span class="ln"></span>{{.Caret}}</span>{{end}}{{end}}</pre>{{end}}
