@@ -851,34 +851,46 @@ func analyzeFunc(
 		}
 	}
 
-	// paramOrigins inverts the parameter seeds: a tainted value whose origin is a
-	// seed origin entered THIS function through that parameter (even after a
-	// propagator transforms it, since propagation preserves the origin position).
-	// Used to attribute a sink-reaching value back to the string parameter it
-	// arrived on, for the dependency sink-wrapper summary (taintsParamSink).
-	paramOrigins := map[*ir.Position]int{}
-	for idx, origin := range seeds {
-		paramOrigins[origin] = idx
-	}
-	// fnIsSink marks a function that is itself a modeled sink for this rule (e.g.
-	// gorm db.Raw). Its direct call site already fires, so it must NOT also form a
-	// sink-wrapper summary — that would double-report every db.Raw(tainted) call.
-	_, fnIsSink := rule.SinkInjectionArgs(fn.CanonicalName)
-	// stringParam reports whether logical parameter i (an index into fn.Params) is
-	// a string. Only string-param sink flows form a taintsParamSink summary — see
-	// that field's doc. fn.Params carries the SSA receiver at index 0 for a method,
-	// while Signature.Params excludes it, so shift by the receiver when present.
-	recvOffset := 0
-	if fn.GetSignature().GetRecv() != nil {
-		recvOffset = 1
-	}
-	sigParams := fn.GetSignature().GetParams()
-	stringParam := func(i int) bool {
-		si := i - recvOffset
-		if si < 0 || si >= len(sigParams) {
-			return false // receiver or captured free variable: not a wrapper param
+	// Dependency sink-wrapper summaries (taintsParamSink) form only inside a
+	// NON-reportable dependency (recordParamSink no-ops for user code), so the setup
+	// they need — a glob scan (fnIsSink), the seed-origin index (paramOrigins), and
+	// the string-parameter predicate — is computed only then, off the user-code hot
+	// path (each user function is re-analyzed per rule across the worklist).
+	var (
+		paramOrigins map[*ir.Position]int
+		fnIsSink     bool
+		stringParam  func(int) bool
+	)
+	if !funcReportable {
+		// paramOrigins inverts the parameter seeds: a tainted value whose origin is a
+		// seed origin entered THIS function through that parameter (even after a
+		// propagator transforms it, since propagation preserves the origin position),
+		// so a sink-reaching value can be attributed back to the string parameter it
+		// arrived on.
+		paramOrigins = make(map[*ir.Position]int, len(seeds))
+		for idx, origin := range seeds {
+			paramOrigins[origin] = idx
 		}
-		return isStringType(sigParams[si])
+		// fnIsSink marks a function that is itself a modeled sink for this rule (e.g.
+		// gorm db.Raw): its direct call site already fires, so it must NOT also form a
+		// summary — that would double-report every db.Raw(tainted) call.
+		_, fnIsSink = rule.SinkInjectionArgs(fn.CanonicalName)
+		// stringParam reports whether logical parameter i (an index into fn.Params) is
+		// a string — the only params that form a summary (see taintsParamSink). Params
+		// carries the SSA receiver at index 0 for a method while Signature.Params
+		// excludes it, so shift by the receiver when present.
+		recvOffset := 0
+		if fn.GetSignature().GetRecv() != nil {
+			recvOffset = 1
+		}
+		sigParams := fn.GetSignature().GetParams()
+		stringParam = func(i int) bool {
+			si := i - recvOffset
+			if si < 0 || si >= len(sigParams) {
+				return false // receiver or captured free variable: not a wrapper param
+			}
+			return isStringType(sigParams[si])
+		}
 	}
 	// funcVal maps a register to the SET of concrete functions it can hold (a
 	// points-to fact). It is function-scoped and monotonic — a callable identity is
@@ -1033,6 +1045,26 @@ func analyzeFunc(
 		}
 		effectSeen[key] = true
 		res.globalEffects = append(res.globalEffects, globalEffect{name: g, origin: pos})
+	}
+
+	// recordParamSink summarizes a dependency sink wrapper: when a tainted value that
+	// entered THIS function through string parameter k reaches a sink — directly, or
+	// by forwarding into an already-summarized callee at sinkPos — record k so the
+	// caller reports the flow at its own (user-code) call site. A no-op for user code
+	// (funcReportable) and for a function that is itself a modeled sink (fnIsSink).
+	// Shared by the direct-sink and dep-forwarding sites, which differ only in sinkPos.
+	recordParamSink := func(pos, sinkPos *ir.Position) {
+		if funcReportable || fnIsSink {
+			return
+		}
+		if k, isParam := paramOrigins[pos]; isParam && stringParam(k) {
+			if res.taintsParamSink == nil {
+				res.taintsParamSink = paramPositions{}
+			}
+			if _, exists := res.taintsParamSink[k]; !exists {
+				res.taintsParamSink[k] = sinkPos
+			}
+		}
 	}
 
 	// ENG-6(b): out-parameter fill. When this function stores tainted data into
@@ -1202,6 +1234,23 @@ func analyzeFunc(
 				interprocOrigins[ro] = true
 			}
 		}
+		// eachArgParam calls fn(paramIdx, arg) for each argument, mapped to the
+		// callee's LOGICAL parameter index: an INVOKE's receiver (Call.Value) is
+		// param 0 and its explicit args shift by one; a direct call's args align.
+		// Shared by the out-parameter-fill and sink-wrapper consumers below, which
+		// both need this receiver-offset mapping (easy to get off by one when inlined).
+		eachArgParam := func(fn func(paramIdx int, a *ir.Value)) {
+			if inst.Call.GetIsInvoke() {
+				fn(0, inst.Call.GetValue())
+				for j, a := range args {
+					fn(j+1, a)
+				}
+			} else {
+				for j, a := range args {
+					fn(j, a)
+				}
+			}
+		}
 
 		switch {
 		case isSan:
@@ -1238,22 +1287,10 @@ func analyzeFunc(
 					reported[inst] = true
 					steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
 					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
-					// Dependency sink wrapper: this finding will be scoped out (the sink
-					// sits in a library). If the tainted value entered through one of THIS
-					// function's string parameters, summarize it so the caller reports the
-					// flow at its own (user-code) call site. Skip when this function is
-					// itself a modeled sink — its direct call site already fires, so a
-					// summary would double-report. See taintsParamSink.
-					if !funcReportable && !fnIsSink {
-						if k, isParam := paramOrigins[pos]; isParam && stringParam(k) {
-							if res.taintsParamSink == nil {
-								res.taintsParamSink = paramPositions{}
-							}
-							if _, exists := res.taintsParamSink[k]; !exists {
-								res.taintsParamSink[k] = inst.Pos
-							}
-						}
-					}
+					// Dependency sink wrapper: this finding is scoped out (the sink sits in
+					// a library), so if the tainted value entered through a string parameter,
+					// summarize it for the caller to report at its own site.
+					recordParamSink(pos, inst.Pos)
 				}
 			}
 		case isProp:
@@ -1301,26 +1338,13 @@ func analyzeFunc(
 			}
 			pullReturnTaint(callee)
 			// The callee fills tainted data into one of its out-parameters: taint
-			// the argument passed at that position (ENG-6b), using the same
-			// arg->param mapping as the seeding above (receiver = param 0 for an
-			// INVOKE, args shifted by one; direct alignment otherwise).
+			// the argument passed at that position (ENG-6b).
 			if pm := paramMemTaint[callee]; len(pm) > 0 {
-				if inst.Call.GetIsInvoke() {
-					if o, ok := pm[0]; ok {
-						taintCallerArg(inst.Call.GetValue(), o)
+				eachArgParam(func(paramIdx int, a *ir.Value) {
+					if o, ok := pm[paramIdx]; ok {
+						taintCallerArg(a, o)
 					}
-					for j, a := range args {
-						if o, ok := pm[j+1]; ok {
-							taintCallerArg(a, o)
-						}
-					}
-				} else {
-					for j, a := range args {
-						if o, ok := pm[j]; ok {
-							taintCallerArg(a, o)
-						}
-					}
-				}
+				})
 			}
 		}
 
@@ -1353,29 +1377,13 @@ func analyzeFunc(
 					reported[inst] = true
 					steps := reconstructPath(defs, tainted, a.GetRegName(), pos, inst.Pos)
 					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, ConfidenceMedium)) // SinkPos = user call into the wrapper; Medium: sink across a call boundary
-				} else if !fnIsSink {
+				} else {
 					// Still inside a dependency: propagate the summary up if the tainted
 					// arg forwards one of THIS function's string parameters.
-					if k, isParam := paramOrigins[pos]; isParam && stringParam(k) {
-						if res.taintsParamSink == nil {
-							res.taintsParamSink = paramPositions{}
-						}
-						if _, exists := res.taintsParamSink[k]; !exists {
-							res.taintsParamSink[k] = sinkPos
-						}
-					}
+					recordParamSink(pos, sinkPos)
 				}
 			}
-			if inst.Call.GetIsInvoke() {
-				consumeSink(0, inst.Call.GetValue())
-				for j, a := range args {
-					consumeSink(j+1, a)
-				}
-			} else {
-				for j, a := range args {
-					consumeSink(j, a)
-				}
-			}
+			eachArgParam(consumeSink)
 		}
 
 		// Inter-procedural, INDIRECT call through a function value: the callee is not

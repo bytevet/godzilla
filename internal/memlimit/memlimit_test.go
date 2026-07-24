@@ -20,7 +20,9 @@ func TestConfigureRespectsEnv(t *testing.T) {
 // positive soft limit below total memory (leaving headroom) and actually applies
 // it to the runtime.
 func TestConfigureSetsLimit(t *testing.T) {
-	os.Unsetenv("GOMEMLIMIT")
+	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+		t.Fatalf("unset GOMEMLIMIT: %v", err)
+	}
 	// Restore whatever limit the test process had afterwards.
 	prev := debug.SetMemoryLimit(-1)
 	t.Cleanup(func() { debug.SetMemoryLimit(prev) })

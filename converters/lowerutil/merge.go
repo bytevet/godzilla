@@ -1,6 +1,6 @@
 // Package lowerutil holds small lowering helpers shared by the straight-line,
-// env-based frontends (Python, JavaScript, Ruby), which lower without a real CFG
-// and so reconstruct branch joins the same way.
+// env-based frontends that lower without a real CFG and so reconstruct branch
+// joins the same way (currently the Python and JavaScript if/else PHI merge).
 package lowerutil
 
 import (
