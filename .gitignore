@@ -26,7 +26,11 @@ bin/
 # IDEs
 .idea/
 .vscode/
-.claude/
+# Local Claude Code state stays untracked, except committed project skills.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/cve-recall/
 
 # OS
 .DS_Store
