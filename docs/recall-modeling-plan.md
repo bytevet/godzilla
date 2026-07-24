@@ -85,4 +85,17 @@ designated-branch policy — which grows an already-large PR. Flag for the human
 
 (updated as items land — newest first)
 
+- **R3 (path-traversal propagators) — LANDED.** Recall **5/27 → 6/27 (22.2%)** on the
+  py/js/ruby campaign. Root cause of the gradio misses was a **propagator gap**, not a
+  source/sink gap: the FastAPI path param source *is* seeded and the `open`/`FileResponse`
+  sink *is* modeled, but taint died at the ubiquitous `pathlib.Path(x)` / `os.path.normpath(x)`
+  normalization hop because Python — unlike Java (`Paths.get`/`Path.of`/`Path.resolve`) — had no
+  path-normalization propagators. Added them to `py-path-traversal.yaml` and `py-zip-slip.yaml`
+  (both share `_py-fs-sinks.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
+  `.expanduser`, `os.path.normpath`/`.abspath`/`.realpath`. Propagators forward existing taint
+  and create no findings on their own, so the FP blast radius is structurally zero — confirmed:
+  **CVE-2024-4941 gradio flips MISS→HIT** (`py-path-traversal` → `open` in `processing_utils.py`,
+  a fix-changed file, cross-function), **CVE-2026-28414 gradio MISS→CLASS-ONLY**, and **all 26
+  other targets are byte-identical** (findings_total 102→118, the +16 entirely inside gradio's
+  two vulnerable file-serving flows). Corpus FP=0/FN=0.
 - _pending_ — baseline re-measured; backlog to be refined from per-miss fix files.
