@@ -36,5 +36,12 @@ rules:
     # are propagators, not sanitizers -- mirroring go/py's treatment of
     # filepath.Join / os.path.join.
     sanitizers: []
+    # An application containment predicate (safe_path?(name)) that gates the file
+    # access: when its boolean result controls an IF that dominates the sink on
+    # the path taken, the path was validated as contained and the read is not
+    # traversal (ENG-9). Requires the real CFG + dominators (guards.go), which the
+    # Ruby frontend now emits.
+    validators:
+      - "ruby:*safe_path?"
     propagators:
       - "ruby:File.expand_path"

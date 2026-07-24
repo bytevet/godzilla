@@ -63,10 +63,10 @@ engine's linear fast path (no perf regression on straight-line handlers).
       comprehensions → real CFG; retire `lowerIfMerge`. **DONE.**
 - [x] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
       retire its `lowerIfMerge`. **DONE.**
-- [ ] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
+- [x] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
       corpus samples (per language, positive + safe control); confirm loops fire and
       dominator guards suppress; relax any rule scoping that compensated for
-      straight-line imprecision.
+      straight-line imprecision. **DONE.**
 
 ## Acceptance gate (every phase, before commit)
 
@@ -83,6 +83,18 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
+- **Phase 4 DONE** — flow-sensitive precision proven ON for all three new-CFG
+  frontends. The engine's dominator-based guard/sanitizer analysis (`guards.go`) +
+  the CFG fixpoint could never run for Python/JS/Ruby before (single-block → linear
+  fast path); now that they emit real CFGs, a validator whose branch **dominates** the
+  sink suppresses the finding. Added paired samples per language (`*_guarded_safe`
+  suppressed = 0 findings; `*_guard_bypass` control still fires = 1 finding), sharing
+  the same source + validator and differing only in dominance structure, plus the
+  rule `validators` to recognise each language's check (`rulepacks/js-open-redirect.yaml`,
+  `rulepacks/ruby-path-traversal.yaml`). Rules-only + samples — no engine/frontend Go
+  change, so no perf change. Corpus TP=192 FP=0 FN=0 (268 samples); analysis + all
+  converter tests green. Guard suppression confirmed working in **JavaScript, Python,
+  and Ruby**. **All phases 0-4 complete.**
 - **Phase 3 DONE** — JavaScript lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges for if/else, for/for-in/for-of, while/do-while,
   switch (per-case blocks with conservative fall-through edges), try/catch/finally
