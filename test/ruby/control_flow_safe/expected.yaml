@@ -1,0 +1,2 @@
+# The value reaching system() is a constant, so no command-injection finding.
+findings: []

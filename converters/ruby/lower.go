@@ -3,7 +3,9 @@ package ruby_converter
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 
+	"godzilla/converters/lowerutil"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -557,6 +559,14 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerCallExpr("ruby:"+identName(at(n, 1)), nil, n)
 	case "case":
 		return fs.lowerCase(n)
+	case "if", "elsif", "unless":
+		return fs.lowerIf(n)
+	case "while", "until":
+		return fs.lowerWhile(n)
+	case "if_mod", "unless_mod":
+		return fs.lowerCondMod(n)
+	case "while_mod", "until_mod":
+		return fs.lowerLoopMod(n)
 	case "array":
 		// Lower elements (so a source/sink inside fires); the container itself is
 		// left untainted, matching the other frontends' list handling.
@@ -634,6 +644,129 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 		return constString("")
 	}
 	return last
+}
+
+// lowerStmtSeqLast lowers a statement list inline and returns the last
+// statement's value. Unlike lowerSeqLast (which lowers *expressions*), this
+// dispatches through lowerStmt so an `assign`/`opassign`/`return` inside a
+// branch or loop body rebinds the env instead of falling through lowerExpr's
+// default to a `ruby.unsupported` intrinsic.
+func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
+	var last *ir.Value
+	for _, s := range stmts {
+		last = fs.lowerStmt(s)
+	}
+	return last
+}
+
+// lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end`. The
+// condition and every arm are flattened inline into the current straight-line
+// block, exactly like lowerCase, so a source or sink inside any branch is
+// analyzed instead of being dropped as an unsupported node (the recall bug this
+// fixes). A variable rebound across arms is reconciled with
+// lowerutil.MergeBranchEnvs — the same if/else PHI-merge the Python/JS
+// frontends use — so branch-assigned taint survives on every path (fixing the
+// "default if empty"/"overwrite with safe" false negatives). No real CFG or
+// back-edges yet: that is Phase 1b. `if`, `unless`, and `elsif` all share this
+// layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil).
+func (fs *funcState) lowerIf(n interface{}) *ir.Value {
+	fs.lowerExpr(at(n, 1)) // condition (for any embedded source/sink)
+	before := maps.Clone(fs.env)
+	var lastBody *ir.Value
+	if body, ok := asList(at(n, 2)); ok {
+		lastBody = fs.lowerStmtSeqLast(body)
+	}
+	afterBody := fs.env
+	fs.env = maps.Clone(before)
+	lastElse := fs.lowerElseTail(at(n, 3))
+	afterElse := fs.env
+	fs.env = lowerutil.MergeBranchEnvs(before, afterBody, afterElse, fs.emitPhi(n))
+	return fs.phiValue(lastBody, lastElse, n)
+}
+
+// lowerElseTail lowers the tail of an if/unless chain: an `elsif` (recursively,
+// so it lowers its own condition and merge), an `else` body, or nil.
+func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
+	switch tag(node) {
+	case "elsif":
+		return fs.lowerIf(node)
+	case "else":
+		if body, ok := asList(at(node, 1)); ok {
+			return fs.lowerStmtSeqLast(body)
+		}
+	}
+	return nil
+}
+
+// lowerWhile lowers `while`/`until cond; body; end`. The condition and the loop
+// body are flattened inline into the current block so a source/sink inside the
+// loop fires. Loop-carried taint (back-edges/loop PHIs) is Phase 1b; here the
+// body is lowered once, straight-line.
+func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
+	fs.lowerExpr(at(n, 1)) // loop condition (for any embedded source/sink)
+	if body, ok := asList(at(n, 2)); ok {
+		fs.lowerStmtSeqLast(body)
+	}
+	return constString("")
+}
+
+// lowerCondMod lowers the statement-modifier conditionals `stmt if cond` and
+// `stmt unless cond` (`[tag, cond, stmt]`, the body being a single statement,
+// not a list). The guarded statement is lowered inline so a sink like
+// `system(x) if flag` fires; the conditionally-rebound bindings are merged
+// against the pre-modifier env so a modifier assignment (`x = safe unless c`)
+// keeps the pre-branch value live via a PHI, mirroring lowerIf.
+func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
+	fs.lowerExpr(at(n, 1)) // condition (for any embedded source/sink)
+	before := maps.Clone(fs.env)
+	last := fs.lowerStmt(at(n, 2)) // guarded statement (the taken arm)
+	afterBody := fs.env
+	// The not-taken arm keeps the pre-modifier bindings.
+	fs.env = lowerutil.MergeBranchEnvs(before, afterBody, maps.Clone(before), fs.emitPhi(n))
+	return last
+}
+
+// lowerLoopMod lowers the statement-modifier loops `stmt while cond` and
+// `stmt until cond` (`[tag, cond, stmt]`). The guarded statement is lowered
+// inline so a sink inside a modifier loop fires; like lowerCondMod, a
+// conditionally-rebound binding is merged against the pre-loop env. Loop-carried
+// taint is Phase 1b.
+func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
+	fs.lowerExpr(at(n, 1)) // loop condition (for any embedded source/sink)
+	before := maps.Clone(fs.env)
+	last := fs.lowerStmt(at(n, 2)) // loop body statement
+	afterBody := fs.env
+	fs.env = lowerutil.MergeBranchEnvs(before, afterBody, maps.Clone(before), fs.emitPhi(n))
+	return last
+}
+
+// emitPhi returns a MergeBranchEnvs callback that emits a gIR PHI reconciling a
+// variable's two branch values (the engine treats a PHI as a taint propagator),
+// positioned at node n.
+func (fs *funcState) emitPhi(n interface{}) func(bv, ev *ir.Value) *ir.Value {
+	return func(bv, ev *ir.Value) *ir.Value {
+		inst := fs.newValueInst(n)
+		inst.Op = ir.OpCode_OP_CODE_PHI
+		inst.Operands = []*ir.Value{bv, ev}
+		fs.emit(inst)
+		return regValue(inst.Name)
+	}
+}
+
+// phiValue reconciles the two arms' *result values* of an if/unless used as an
+// expression (`x = if c; a; else; b; end`): a PHI when both arms yield a
+// distinct value (so taint from either is kept), else whichever arm produced a
+// value.
+func (fs *funcState) phiValue(a, b *ir.Value, n interface{}) *ir.Value {
+	switch {
+	case a != nil && b != nil && a != b:
+		return fs.emitPhi(n)(a, b)
+	case a != nil:
+		return a
+	case b != nil:
+		return b
+	}
+	return constString("")
 }
 
 // lowerBacktick lowers a backtick command literal “ `cmd #{x}` “ (and %x{}) —

@@ -56,8 +56,8 @@ engine's linear fast path (no perf regression on straight-line handlers).
       block, nested if-in-loop, self-referential PHI elimination, determinism). No
       frontend wired yet. **DONE.**
 - [ ] **Phase 1 — Ruby** (smallest; proving ground)
-      - [ ] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
-            (immediate recall win, near-zero risk) + corpus samples.
+      - [x] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
+            (immediate recall win, near-zero risk) + corpus samples. **DONE.**
       - [ ] 1b: adopt `ssabuild` for real blocks/PHI/back-edges.
 - [ ] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
       comprehensions → real CFG; retire `lowerIfMerge`. Measure CVE-recall delta.
