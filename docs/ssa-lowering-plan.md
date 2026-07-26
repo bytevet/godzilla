@@ -55,18 +55,20 @@ engine's linear fast path (no perf regression on straight-line handlers).
       (straight-line, if/else diamond → PHI, while back-edge → loop PHI via sealed
       block, nested if-in-loop, self-referential PHI elimination, determinism). No
       frontend wired yet. **DONE.**
-- [ ] **Phase 1 — Ruby** (smallest; proving ground)
+- [x] **Phase 1 — Ruby** (smallest; proving ground) **DONE.**
       - [x] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
             (immediate recall win, near-zero risk) + corpus samples. **DONE.**
       - [x] 1b: adopt `ssabuild` for real blocks/PHI/back-edges. **DONE.**
 - [x] **Phase 2 — Python** (biggest surface): if/for/while/try/with/bool-ops/
       comprehensions → real CFG; retire `lowerIfMerge`. **DONE.**
-- [ ] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
-      retire its `lowerIfMerge`.
-- [ ] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
+- [x] **Phase 3 — JavaScript**: if/for/while/do-while/switch/try/labelled → real CFG;
+      retire its `lowerIfMerge`. **DONE.**
+- [x] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
       corpus samples (per language, positive + safe control); confirm loops fire and
-      dominator guards suppress; relax any rule scoping that compensated for
-      straight-line imprecision.
+      dominator guards suppress. **DONE** — verified per language, see the log.
+      Residual (not blocking, no known instance): relax any rule scoping that
+      compensated for straight-line imprecision. Nothing has been identified that
+      still needs it, so this is opened only if a specific over-narrow rule is found.
 
 ## Acceptance gate (every phase, before commit)
 
@@ -82,6 +84,20 @@ engine's linear fast path (no perf regression on straight-line handlers).
 ## Progress log
 
 (updated as phases land — newest first)
+
+- **Phases 3 and 4 confirmed DONE; checkboxes corrected.** Phase 3 (JavaScript)
+  had in fact landed earlier — `converters/javascript/lower.go` imports
+  `ssabuild`, holds a `*ssabuild.Builder`, and lowers if/while/do-while/for/
+  switch/try through it (63 builder calls) — but its checkbox was never ticked,
+  so the plan under-reported the real state. Phase 4's samples exist for all three
+  languages and demonstrate the capability rather than passing vacuously; measured
+  directly, one finding on each positive and zero on each safe control:
+  loop-carried taint python 1/0, js 1/0, ruby 1/0; dominator-guard suppression
+  (guard_bypass vs guarded_safe) python 1/0, js 1/0, ruby 1/0. With Phase 2's
+  perf result (Scan_Python −0.38% ns/op), the SSA/CFG track is complete: every
+  frontend that was straight-line now emits a real CFG, and the engine's
+  dominator-based guard analysis — which a single-block frontend could never
+  reach — is live for Python, JavaScript and Ruby.
 
 - **Phase 2 DONE** — Python lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges for if/elif/else, while(+else), for(+else),
