@@ -140,7 +140,48 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	}
 	wg.Wait()
 
-	return slices.Concat(taint, danger, secrets, fileSecrets)
+	return slices.Concat(taint, dropCoLocatedDangerous(danger, taint), secrets, fileSecrets)
+}
+
+// dropCoLocatedDangerous removes every dangerous-call finding that sits on a call
+// the taint engine ALREADY reported. The two passes are independent by design —
+// one matches a call syntactically, the other PROVES that an untrusted source
+// reaches it — so `eval(user_input)` is legitimately matched by both. Reporting
+// it twice adds no information: the dataflow finding is strictly richer (it names
+// the source and carries the taint path/Steps that drive SARIF codeFlows and LLM
+// triage), so it is the one that survives. A dangerous-call finding with no
+// dataflow twin is untouched — flagging exactly those is the whole point of a
+// call-site rule.
+//
+// It is deliberately given only (danger, taint), never the secrets passes: a
+// hardcoded-secret finding can legitimately sit on the same call as a taint
+// finding (a literal credential passed to a flagged API) and must not vanish.
+func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding {
+	if len(danger) == 0 || len(taint) == 0 {
+		return danger
+	}
+	// Keyed on (sink position, sink callee), not position alone: nested calls can
+	// share a line — `exec(compile(src, ...))` — and a position-only key would let
+	// one call's dataflow finding mask a DIFFERENT call's call-site finding. A
+	// finding with no position is never keyed on either side, so position-less
+	// findings don't all collapse into one bucket.
+	key := func(f analysis.Finding) string {
+		return analysis.PosString(f.SinkPos) + "\x00" + f.SinkCallee
+	}
+	confirmed := make(map[string]bool, len(taint))
+	for _, f := range taint {
+		if f.SinkPos != nil {
+			confirmed[key(f)] = true
+		}
+	}
+	kept := danger[:0]
+	for _, f := range danger {
+		if f.SinkPos != nil && confirmed[key(f)] {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 // ScanFiles analyzes an explicit list of paths (a changed-files / pre-commit

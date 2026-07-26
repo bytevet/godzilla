@@ -12,9 +12,12 @@ rules:
       against an allow-list of paths/hosts before redirecting.
     extend: $_rust-web-sources.yaml
     sinks:
-      - "rust:*Redirect::to"
-      - "rust:*Redirect::temporary"
-      - "rust:*Redirect::permanent"
+      - sink: "rust:*Redirect::to"
+        when: 'not hostFixed()'
+      - sink: "rust:*Redirect::temporary"
+        when: 'not hostFixed()'
+      - sink: "rust:*Redirect::permanent"
+        when: 'not hostFixed()'
     sanitizers: []
     propagators:
       - "rust:format"

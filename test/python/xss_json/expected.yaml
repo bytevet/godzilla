@@ -1,0 +1,7 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Reflected-JSON XSS: request.POST.get -> json.dumps (propagator) -> HttpResponse.
+# Exercises the py-xss json.dumps/json.dump propagators.
+findings:
+    - rule: py-xss
+      min: 1

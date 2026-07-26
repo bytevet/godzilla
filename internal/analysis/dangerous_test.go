@@ -100,6 +100,36 @@ func TestDangerousCall_ConstArg(t *testing.T) {
 	}
 }
 
+// TestDangerousCall_RuleConfidence: a dangerous-call rule may declare its own
+// confidence — the dial that decides whether the LLM reviewer will triage the
+// finding (it only adjudicates at/below medium) — while an unset field keeps the
+// call-site-deterministic High default every shipped rule was written against.
+func TestDangerousCall_RuleConfidence(t *testing.T) {
+	for _, tc := range []struct {
+		declared string
+		want     Confidence
+	}{
+		{"", ConfidenceHigh}, // unset: unchanged behavior for every shipped rule
+		{"medium", ConfidenceMedium},
+		{"low", ConfidenceLow},
+		{"HIGH", ConfidenceHigh}, // normalized to the canonical lowercase constant
+	} {
+		prog := progWith("python", callInstAt("py:eval", 3))
+		rs := &rules.RuleSet{Rules: []rules.Rule{{
+			ID: "PY-DYN", Kind: "dangerous-call", Languages: []string{"python"},
+			Severity: rules.SeverityLow, Confidence: tc.declared,
+			Callees: rules.CalleesOf("py:eval"),
+		}}}
+		findings := ScanDangerousCalls(prog, rs)
+		if len(findings) != 1 {
+			t.Fatalf("confidence %q: expected 1 finding, got %d", tc.declared, len(findings))
+		}
+		if findings[0].Confidence != tc.want {
+			t.Errorf("confidence %q: got %q, want %q", tc.declared, findings[0].Confidence, tc.want)
+		}
+	}
+}
+
 // TestDangerousCall_LanguageScoped: a rule only fires for its declared language.
 func TestDangerousCall_LanguageScoped(t *testing.T) {
 	prog := progWith("python", callInstAt("go:crypto/md5.New", 1))

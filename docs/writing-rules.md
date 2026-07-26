@@ -82,6 +82,14 @@ rules:
 Without `const_arg` every call fires; with it, only calls whose constant string
 argument at `index` matches — `getInstance("MD5")`, not `("SHA-256")`.
 
+`severity` and `confidence` are independent dials here, and a heuristic
+call-site rule usually wants them set apart: severity alone gates CI (`-fail-on`,
+default `medium`), while confidence alone decides triage — the LLM reviewer only
+adjudicates findings at or below `medium`, so the High default excludes a rule
+from review. A rule that should be *reported and reviewable* without turning
+builds red — `py-dynamic-code-exec` is the shipped example — sets
+`severity: low` with `confidence: medium`.
+
 ## Dynamic guards (`when`)
 
 A sink or callee entry can be a `{sink|callee, when}` mapping instead of a bare
@@ -168,6 +176,7 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 | `extend` | both | One or more `$_fragment.yaml` refs merged into this rule. |
 | `languages` | both | Language tags (`[go]`, `[c, cpp]`, …). |
 | `severity` | both | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
+| `confidence` | dangerous-call | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
 | `cwe`, `message` | both | Reported metadata. |
 | `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
 | `request_object_sources` | taint | Sources whose value is an HTTP request *object* (e.g. `go:@net/http.Request`; also list in `sources`). Tags the flavor so the engine grants request-object provenance without a hardcoded name. |

@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# eval() of a fetched HTTP response body: not a compile-time constant, but not
+# reachable from a modeled taint source either — so ONLY the call-site rule
+# py-dynamic-code-exec fires here, never py-code-injection.
+findings:
+    - rule: py-dynamic-code-exec
+      min: 1
+      line: 19
+      sink: "py:eval"

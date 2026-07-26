@@ -7,14 +7,45 @@ rules:
     cwe: CWE-502
     message: >-
       Untrusted input is deserialized with an unsafe loader (pickle / yaml.load /
-      marshal), which allows arbitrary code execution. Use a safe format (JSON) or
-      a safe loader (e.g. yaml.safe_load) for untrusted data.
+      marshal / cloudpickle / dill / joblib / torch.load), which allows arbitrary
+      code execution. Use a safe format (JSON) or a safe loader (e.g.
+      yaml.safe_load) for untrusted data.
+    # HTTP request-accessor sources come from the shared fragment; the file-upload
+    # sources below are declared INLINE (extend is additive) so they seed only this
+    # rule -- an uploaded byte stream reaching a deserializer is a precise RCE,
+    # whereas tainting every file upload for every rule would over-approximate.
     extend: $_py-sources.yaml
+    sources:
+      # Flask/Werkzeug file uploads: request.files['f'] / request.files.get('f').
+      # FastAPI/Starlette UploadFile/File(...) params need no entry here -- they are
+      # already seeded as py:@http.param by the frontend's route-handler-param
+      # synthesis, which the shared fragment extends.
+      - "py:*request.files.get"
+      - "py:*request.files.__getitem__"
     sinks:
       - "py:*pickle.loads"
       - "py:*pickle.load"
       - "py:*yaml.load"
       - "py:*marshal.loads"
       - "py:*jsonpickle.decode"
+      # Modern deserializers with the same pickle-style code-execution risk. These
+      # are DATAFLOW sinks (this rule has no `kind:`), so they fire only when a
+      # modeled source's taint reaches them -- inert on the pervasive trusted-local
+      # `torch.load("model.pt")` / `joblib.load(path)` calls in ML code (that is why
+      # they must never become a call-site `dangerous-call`, which floods).
+      - "py:*cloudpickle.loads"
+      - "py:*cloudpickle.load"
+      - "py:*dill.loads"
+      - "py:*dill.load"
+      - "py:*joblib.load"
+      - "py:*torch.load"
     sanitizers: []
-    propagators: []
+    # `.read()` carries taint from its (already-tainted) receiver to its result:
+    # an uploaded file's bytes arrive as `upload.read()` / `request.files['f'].read()`
+    # / `UploadFile.read()`, and without this the taint dies at that read before it
+    # reaches the deserializer. `.read` is deliberately NOT a global default
+    # propagator (it is ubiquitous); scoping it to this rule means it only forwards
+    # taint a deserialization SOURCE already introduced toward a deserialization
+    # SINK, so it creates no findings on its own.
+    propagators:
+      - "py:*.read"

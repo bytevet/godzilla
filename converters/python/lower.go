@@ -693,6 +693,23 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Pos: posFromNode(fs.filename, n)}
 }
 
+// emitKwargMarker tags a constant keyword-argument value with the name it was
+// passed under, as a `builtin.kwarg(<name>, <value>)` intrinsic whose result
+// stands in for the value in the call's argument list. gIR carries positional
+// arguments only, so this is what lets a rule guard tell `shell=True` from
+// `check=True`. Callers wrap constants only, so the marker never hides taint.
+func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = "builtin.kwarg"
+	inst.Call = &ir.CallCommon{
+		Callee: "builtin.kwarg",
+		Args:   []*ir.Value{stringValue(name), v},
+	}
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
 func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
@@ -1012,9 +1029,15 @@ func (fs *funcState) lowerFor(s astNode) {
 // lowered sequentially into it — conservative) or to an after block, so taint a
 // source in the try body assigned reaches the handler via that predecessor edge
 // (and, through the after block, code following the try). `finally` runs on both
-// paths, so it is lowered into the after block. When the body always returns
-// there is no exception edge (rare; the handler's body-var reads are then
-// undefined — a minor recall gap, never a false positive).
+// paths, so it is lowered into the after block.
+//
+// A block that RETURNS still gets its outgoing edge: `try: return fast()` can
+// raise before it returns, and a `finally` runs on the returning path too. The
+// edge is what carries the bindings — a sealed block with zero predecessors
+// resolves every variable read to __undef (ssabuild), so skipping it would strip
+// the handler (and everything after the try) of names bound BEFORE the try, not
+// just of names bound inside its body: a silent, total taint loss on the very
+// common `try: return cached() except KeyError: <sink>(untrusted)` shape.
 func (fs *funcState) lowerTry(s astNode) {
 	fs.lowerBody(s.list("body"))
 	fs.lowerBody(s.list("orelse"))
@@ -1037,8 +1060,13 @@ func (fs *funcState) lowerTry(s astNode) {
 		// Exception edge: the body may branch into the handler, else fall through
 		// to the after block. The condition is opaque (both edges are traversed).
 		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+	} else {
+		// The body ends in a return/raise, so its only non-terminating successor is
+		// the handler (the raise-before-return path) — an unconditional edge, not a
+		// branch. `after` still gets its predecessor from the handler below.
+		fs.b.SetJump(bodyEnd, handlerB)
 	}
-	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
+	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) now known
 
 	fs.cur = handlerB
 	fs.terminated = false
@@ -1046,9 +1074,10 @@ func (fs *funcState) lowerTry(s astNode) {
 		fs.lowerBody(h.list("body"))
 	}
 	handlerTerm := fs.terminated
-	if !handlerTerm {
-		fs.b.SetJump(fs.cur, after)
-	}
+	// Unconditional for the same reason as the body edge: even when every handler
+	// returns, `finally` — lowered into the after block — runs on that path and
+	// must see the bindings the try/except made.
+	fs.b.SetJump(fs.cur, after)
 
 	fs.b.Seal(after)
 	fs.cur = after
@@ -1677,7 +1706,29 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		appendArg(a)
 	}
 	for _, kw := range n.list("keywords") {
-		appendArg(kw.node("value"))
+		// A keyword argument's NAME is otherwise lost: gIR carries positional args
+		// only, and a call site may pass keywords in any order, so `shell=True` and
+		// `check=True` lower identically. Tag a CONSTANT-valued keyword with a
+		// builtin.kwarg marker so a rule guard can read `.Name` and distinguish a
+		// dangerous configuration flag from an innocuous one. Only constants are
+		// wrapped: a constant carries no taint, so the marker can never hide a
+		// tainted value from the engine (`**kwargs` splats have no name and are
+		// left alone).
+		a := kw.node("value")
+		name := kw.str("arg")
+		// A `**kwargs` splat has no name, and an ast.* constructor's sequence value
+		// must still be SPREAD into element args (see appendArg) — wrapping it would
+		// hide the elements and drop taint into the constructor. Both keep the
+		// existing path.
+		if name == "" || (astCtor && a != nil && a.kind() == "Sequence") {
+			appendArg(a)
+			continue
+		}
+		v := fs.lowerExpr(a)
+		if v.GetConstant() != nil {
+			v = fs.emitKwargMarker(name, v, kw)
+		}
+		cc.Args = append(cc.Args, v)
 	}
 
 	inst := fs.newValueInst(n)

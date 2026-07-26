@@ -310,6 +310,13 @@ func validate(rs *rules.RuleSet) error {
 		if r.Severity.Rank() == 0 {
 			problems = append(problems, fmt.Sprintf("rule %q has missing or unrecognized severity %q (want info|low|medium|high|critical)", r.ID, r.Severity))
 		}
+		// A misspelled confidence would silently fall back to the default AND be
+		// invisible to the LLM reviewer (confidenceRank ranks an unknown value 0, so
+		// shouldReview never picks it up) — reject it at load, like an unrecognized
+		// severity, instead of shipping a rule that is quietly un-triageable.
+		if !rules.ValidConfidence(r.Confidence) {
+			problems = append(problems, fmt.Sprintf("rule %q has unrecognized confidence %q (want low|medium|high, or omit for the default)", r.ID, r.Confidence))
+		}
 		// A sink with a "#" injection-point spec that names no valid argument
 		// index silently widens to "all arguments" (a false-positive-prone
 		// footgun); reject the typo instead of quietly weakening the sink. A

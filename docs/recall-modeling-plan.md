@@ -61,9 +61,17 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
       `urllib.request`/`urllib3` and JS `axios`/`got`/`node-fetch`/`http(s).request`
       as CWE-918 sinks; ensure the request source reaches them. `urlHostControllable`
       already suppresses fixed-host FPs.
-- [ ] **R2 — Insecure-deserialization sources** (superset): model the non-HTTP
-      untrusted-artifact source (uploaded file / model registry) so a modeled
-      deserializer sink (`pickle.loads`/`yaml.load`/…) has taint to fire on.
+- [x] **R2 — Insecure-deserialization hardening** — DONE as FP-safe breadth, not a
+      campaign flip. Fix-commit analysis showed 3 of the 4 CWE-502 misses are
+      **mislabeled** (vllm = DoS, pyload = auth + file-write session-pickle, superset =
+      authorization/CWE-863) and the one real RCE (ray, `cloudpickle.loads` fed by
+      pyarrow's `__arrow_ext_deserialize__` C-boundary callback) needs ray-specific
+      frontend synthesis — out of scope. Landed the generalizable, dataflow-only part:
+      modern deserializer sinks (`cloudpickle`/`dill`/`joblib`/`torch.load`), inline
+      Flask file-upload sources (`request.files`), and a rule-scoped `.read` propagator
+      so `pickle.loads(upload.read())` flows. Never a `dangerous-call` (that was the
+      reverted flood). Verified FP-safe: campaign findings 153→153 with **zero** per-app
+      change (all ML apps flat), corpus FP=0/FN=0. See progress log.
 - [ ] **R3 — Per-framework request-source breadth**: FastAPI/Starlette `Request`,
       Django `request`, Express/Koa `ctx.request`, so flows originate for more apps.
 - [ ] **R4 — Framework-rendered XSS / open-redirect helpers**: template renderers,
@@ -85,4 +93,54 @@ designated-branch policy — which grows an already-large PR. Flag for the human
 
 (updated as items land — newest first)
 
+- **R2 (insecure-deserialization hardening) — LANDED (breadth, not a campaign flip).**
+  Two investigations (fix-commit shapes + current modeling) found R2 is largely a
+  labeling artifact: 3 of the 4 CWE-502 campaign misses are not deserialization taint
+  flows (vllm CVE-2026-55514 = assertion-crash DoS; pyload CVE-2026-35464 = auth +
+  file-write session-pickle; superset CVE-2023-40610 = authorization CWE-863), and the
+  lone real RCE (ray CVE-2026-41486) deserializes Parquet metadata through pyarrow's
+  `__arrow_ext_deserialize__` C-boundary callback with `cloudpickle.loads` — invisible to
+  the SSA, env-gated, ray-specific. So R2 flips **no** campaign CVE FP-safely. Landed the
+  generalizable hardening instead (`rulepacks/py-insecure-deserialization.yaml`): added
+  modern deserializer **sinks** (`cloudpickle.load(s)`, `dill.load(s)`, `joblib.load`,
+  `torch.load` — all dataflow, inert without a source, never `dangerous-call`), inline
+  Flask file-upload **sources** (`request.files.get`/`__getitem__`, scoped to this rule so
+  other rules are untouched; FastAPI `UploadFile` already seeds via `py:@http.param`), and
+  a rule-scoped `.read` **propagator** to carry `upload.read()` bytes across to the sink.
+  Three corpus samples (upload→pickle, request→cloudpickle, and a **safe** constant-path
+  `torch.load` control that stays silent) lock in both the fire and the anti-flood. Gate:
+  corpus FP=0/FN=0; campaign findings **153→153 with zero per-app change** (every ML app —
+  ray/vllm/mlflow/superset/langflow/label-studio/llama-index — byte-identical), so
+  `torch.load`/`joblib.load` did not need dropping. Recall unchanged 7/35. Out of scope
+  (documented): the ray pyarrow-callback source, the 3 non-CWE-502 CVEs, and the
+  `UploadFile.file.read()` field-hop + `base64/BytesIO`→`torch.load` chain.
+- **`json.dumps` XSS propagator — LANDED (breadth, not a campaign flip).** Investigated the
+  next four "source-works, class-doesn't-reach-fix-line" Python misses (llama-index SQLi &
+  code-injection, langflow code-injection, label-studio XSS) by reading each fix commit. None
+  is an R3-style rule-fixable flip: llama-index SQLi/code-injection are **source** gaps (LLM
+  query param; outbound HTTP-response/SSE body) whose only rule-level fixes are high-FP and
+  still wouldn't fire; langflow needs an **arg-value predicate** (`allow_dangerous_code=True`)
+  the rule model can't express; label-studio XSS dies **upstream** in lxml/dict taint the
+  straight-line frontend drops. The one clean, FP-safe gap found: `json.dumps`/`json.dump` was
+  not a py-xss propagator, so `HttpResponse(json.dumps(user))` (reflected-JSON XSS) lost taint.
+  Added them to `py-xss.yaml` + a `test/python/xss_json` corpus sample (fires only with the
+  propagator). FP-safe confirmed: campaign findings_total **flat 118→118**, recall unchanged at
+  6/27, corpus FP=0/FN=0. Landed on correctness merit; documented as breadth, not a metric flip.
+  **Conclusion: the rules-first recall lever is now exhausted for this campaign's residual
+  misses** — further gains need frontend/engine capabilities (dict/XML taint-through,
+  untrusted-artifact & response-body sources, arg-value predicates), each a larger change with
+  real FP surface, tracked under R1/R2 (#87/#88) rather than autonomous rule edits.
+- **R3 (path-traversal propagators) — LANDED.** Recall **5/27 → 6/27 (22.2%)** on the
+  py/js/ruby campaign. Root cause of the gradio misses was a **propagator gap**, not a
+  source/sink gap: the FastAPI path param source *is* seeded and the `open`/`FileResponse`
+  sink *is* modeled, but taint died at the ubiquitous `pathlib.Path(x)` / `os.path.normpath(x)`
+  normalization hop because Python — unlike Java (`Paths.get`/`Path.of`/`Path.resolve`) — had no
+  path-normalization propagators. Added them to `py-path-traversal.yaml` and `py-zip-slip.yaml`
+  (both share `_py-fs-sinks.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
+  `.expanduser`, `os.path.normpath`/`.abspath`/`.realpath`. Propagators forward existing taint
+  and create no findings on their own, so the FP blast radius is structurally zero — confirmed:
+  **CVE-2024-4941 gradio flips MISS→HIT** (`py-path-traversal` → `open` in `processing_utils.py`,
+  a fix-changed file, cross-function), **CVE-2026-28414 gradio MISS→CLASS-ONLY**, and **all 26
+  other targets are byte-identical** (findings_total 102→118, the +16 entirely inside gradio's
+  two vulnerable file-serving flows). Corpus FP=0/FN=0.
 - _pending_ — baseline re-measured; backlog to be refined from per-miss fix files.

@@ -10,7 +10,8 @@ rules:
       to a user-controlled URL.
     extend: $_py-sources.yaml
     sinks:
-      - "py:*redirect"
+      - sink: "py:*redirect"
+        when: 'not hostFixed()'
     sanitizers: []
     propagators: []
     # Django's standard open-redirect guard: a value checked by

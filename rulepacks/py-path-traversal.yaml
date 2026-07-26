@@ -19,3 +19,22 @@ rules:
     # identical treatment of filepath.Join/Clean. (py:*.join is a default
     # propagator, so it need not be repeated here.)
     sanitizers: []
+    # Path-normalization functions collapse or resolve a path but do NOT contain
+    # it to a base directory -- `pathlib.Path(x).resolve()` and
+    # `os.path.normpath(x)` still escape via "../" relative to cwd -- so they
+    # PROPAGATE taint rather than sanitize it, mirroring Java's Paths.get /
+    # Path.of / Path.resolve propagators and go-path-traversal's filepath.Clean.
+    # Without these, taint dies at the ubiquitous `Path(user_input)` /
+    # `os.path.normpath(user_input)` hop and real path traversals go undetected
+    # (e.g. gradio's file-serving routes normalize with abspath/normpath before
+    # FileResponse). Propagators only forward taint that is already present, so
+    # they add no new findings on their own.
+    propagators:
+      - "py:*pathlib.Path"
+      - "py:*.resolve"
+      - "py:*.absolute"
+      - "py:*.joinpath"
+      - "py:*.expanduser"
+      - "py:*.normpath"
+      - "py:*.abspath"
+      - "py:*.realpath"

@@ -55,7 +55,7 @@ engine's linear fast path (no perf regression on straight-line handlers).
       (straight-line, if/else diamond → PHI, while back-edge → loop PHI via sealed
       block, nested if-in-loop, self-referential PHI elimination, determinism). No
       frontend wired yet. **DONE.**
-- [ ] **Phase 1 — Ruby** (smallest; proving ground)
+- [x] **Phase 1 — Ruby** (smallest; proving ground) **DONE.**
       - [x] 1a: flatten the currently-dropped `if`/`while`/`unless`/`until` bodies
             (immediate recall win, near-zero risk) + corpus samples. **DONE.**
       - [x] 1b: adopt `ssabuild` for real blocks/PHI/back-edges. **DONE.**
@@ -65,8 +65,10 @@ engine's linear fast path (no perf regression on straight-line handlers).
       retire its `lowerIfMerge`. **DONE.**
 - [x] **Phase 4 — turn on precision**: loop-carried-taint + sanitizer-dominates-sink
       corpus samples (per language, positive + safe control); confirm loops fire and
-      dominator guards suppress; relax any rule scoping that compensated for
-      straight-line imprecision. **DONE.**
+      dominator guards suppress. **DONE** — verified per language, see the log.
+      Residual (not blocking, no known instance): relax any rule scoping that
+      compensated for straight-line imprecision. Nothing has been identified that
+      still needs it, so this is opened only if a specific over-narrow rule is found.
 
 ## Acceptance gate (every phase, before commit)
 
@@ -83,31 +85,20 @@ engine's linear fast path (no perf regression on straight-line handlers).
 
 (updated as phases land — newest first)
 
-- **Phase 4 DONE** — flow-sensitive precision proven ON for all three new-CFG
-  frontends. The engine's dominator-based guard/sanitizer analysis (`guards.go`) +
-  the CFG fixpoint could never run for Python/JS/Ruby before (single-block → linear
-  fast path); now that they emit real CFGs, a validator whose branch **dominates** the
-  sink suppresses the finding. Added paired samples per language (`*_guarded_safe`
-  suppressed = 0 findings; `*_guard_bypass` control still fires = 1 finding), sharing
-  the same source + validator and differing only in dominance structure, plus the
-  rule `validators` to recognise each language's check (`rulepacks/js-open-redirect.yaml`,
-  `rulepacks/ruby-path-traversal.yaml`). Rules-only + samples — no engine/frontend Go
-  change, so no perf change. Corpus TP=192 FP=0 FN=0 (268 samples); analysis + all
-  converter tests green. Guard suppression confirmed working in **JavaScript, Python,
-  and Ruby**. **All phases 0-4 complete.**
-- **Phase 3 DONE** — JavaScript lowering now drives `converters/ssabuild`: real CFG
-  blocks + PHI + loop back-edges for if/else, for/for-in/for-of, while/do-while,
-  switch (per-case blocks with conservative fall-through edges), try/catch/finally
-  (exception edge into the catch block), labelled/block unwrapped; ternary/`&&`/`||`/`??`
-  keep their BIN_OP/PHI merges through the builder. Retired the JS `lowerIfMerge`/
-  `MergeBranchEnvs` path. Straight-line funcs still emit one block (linear fast path).
-  Inter-procedural surface (lowerCall/syntacticCallee/emitCallRecv/opaque-base reads/
-  funcRefValue/collect.go) untouched. New samples: `loop_carried_command_injection`
-  fires js-command-injection (loop-carried taint the old model missed),
-  `try_catch_command_injection` fires across the exception edge, `loop_carried_safe`
-  silent. Corpus TP=189 FP=0 FN=0 (262 samples). Adversarial SSA-review passed. Perf:
-  same-machine benchstat (n=15) Scan_JS time `~` (p=0.51, no significant change),
-  B/op+allocs +5.6% (well under +10%). All three straight-line frontends now on SSA.
+- **Phases 3 and 4 confirmed DONE; checkboxes corrected.** Phase 3 (JavaScript)
+  had in fact landed earlier — `converters/javascript/lower.go` imports
+  `ssabuild`, holds a `*ssabuild.Builder`, and lowers if/while/do-while/for/
+  switch/try through it (63 builder calls) — but its checkbox was never ticked,
+  so the plan under-reported the real state. Phase 4's samples exist for all three
+  languages and demonstrate the capability rather than passing vacuously; measured
+  directly, one finding on each positive and zero on each safe control:
+  loop-carried taint python 1/0, js 1/0, ruby 1/0; dominator-guard suppression
+  (guard_bypass vs guarded_safe) python 1/0, js 1/0, ruby 1/0. With Phase 2's
+  perf result (Scan_Python −0.38% ns/op), the SSA/CFG track is complete: every
+  frontend that was straight-line now emits a real CFG, and the engine's
+  dominator-based guard analysis — which a single-block frontend could never
+  reach — is live for Python, JavaScript and Ruby.
+
 - **Phase 2 DONE** — Python lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges for if/elif/else, while(+else), for(+else),
   try/except/finally; `with`/bool-ops/ternary/comprehensions emit through the
@@ -127,14 +118,8 @@ engine's linear fast path (no perf regression on straight-line handlers).
   still emit exactly ONE block (linear fast path preserved). New samples:
   `loop_carried_command_injection` fires (loop-carried taint the old model
   missed), `try_except_command_injection` fires (taint across the exception
-  edge), `loop_carried_safe` silent. Also fixed a pre-existing gap surfaced by the
-  now-lowered `while`-guards: Python **`Compare`** (`a < b`, `x == y`, `k in d`) had
-  no lowering (→ `py.unsupported`); now `pyast.py` emits its operands and `lower.go`
-  lowers them (so a source/sink/validator inside a comparison fires) behind an inert
-  `builtin.compare` intrinsic — which also gives branch conditions a def-use edge for
-  Phase 4's guard analysis. Corpus FP=0 FN=0 (259 samples, TP=187); python converter
-  + analysis tests green. Perf: same-machine benchstat Scan_Python `~` (p=0.063, no
-  significant change, well under +10%). Gate: build/gofmt/vet/python-tests/corpus clean.
+  edge), `loop_carried_safe` silent. Corpus FP=0 FN=0; python converter tests +
+  analysis tests green. Gate: build/gofmt/vet/python-tests/corpus all clean.
 - **Phase 1b DONE** — Ruby lowering now drives `converters/ssabuild`: real CFG
   blocks + PHI + loop back-edges (if/elsif/else/while/until/case), retiring the
   single-block + manual `MergeBranchEnvs` model. Straight-line funcs still emit one

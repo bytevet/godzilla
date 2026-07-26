@@ -29,6 +29,41 @@ func TestArgVals(t *testing.T) {
 	}
 }
 
+// TestArgValsScalarConstants checks that a NON-string constant reaches a guard as
+// its literal text. constSkeleton reconstructs string text only, so without the
+// constScalar fallback a bool argument arrives empty and incomplete and a rule
+// could not tell `shell=True` (injectable) from `shell=False` (safe argv form) --
+// the distinction the command-injection guards depend on.
+func TestArgValsScalarConstants(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		val      *ir.Value
+		wantStr  string
+		wantType string
+	}{
+		{"true", boolV(true), "true", "bool"},
+		{"false", boolV(false), "false", "bool"},
+		{"int", intV(8080), "8080", "int"},
+	} {
+		got := argVals(callInst("s", "x:sink", tc.val).Call, nil)[0]
+		if got.String != tc.wantStr || !got.Complete || got.Type != tc.wantType {
+			t.Errorf("%s: argVals = %+v, want {String:%s Complete:true Type:%s}", tc.name, got, tc.wantStr, tc.wantType)
+		}
+	}
+}
+
+// TestConstSkeletonIgnoresScalars pins the deliberate SCOPE of the constScalar
+// fallback: it lives in the guard path (argVals) and must NOT leak into
+// constSkeleton, which also backs the SSRF host reconstruction. There a
+// non-string operand is not part of the URL text, and rendering one "complete"
+// could wrongly prove a fixed host and suppress a real CWE-918 finding.
+func TestConstSkeletonIgnoresScalars(t *testing.T) {
+	s, complete := constSkeleton(boolV(true), nil, map[string]bool{})
+	if complete || s != rules.DynMarker {
+		t.Errorf("constSkeleton(bool) = (%q, %v), want (%q, false) — scalars must stay guard-only", s, complete, rules.DynMarker)
+	}
+}
+
 // TestDynamicSinkGuard is the end-to-end taint-sink guard: a `when:` on a sink
 // fires only when the guard confirms against the call's argument values. The
 // same tainted exec sink fires with a "cmd:" prefix, and is suppressed with a

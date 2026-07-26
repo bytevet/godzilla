@@ -1,0 +1,45 @@
+# Dynamic code execution (Python): eval()/exec() on a value that is NOT a
+# compile-time constant. This is the CALL-SITE twin of py-code-injection: that
+# rule proves a modeled source reaches the sink, while this one fires whenever
+# the evaluated string is computed at runtime at all — catching the very common
+# shape where the untrusted value arrives from a channel Godzilla does not model
+# as a source (an HTTP response body, an LLM completion, a database row, a
+# user-supplied "custom component"). Where BOTH fire on the same call, the
+# richer dataflow finding wins (internal/scan dropCoLocatedDangerous).
+#
+# severity: low and confidence: medium are set independently and on purpose.
+# The CI gate keys on SEVERITY (-fail-on, default medium), so `low` keeps this
+# reported, written to the report and counted without turning a build red by
+# itself — right for evidence that amounts to "this argument is not constant",
+# which proves dynamic execution but not attacker control. A team that wants it
+# blocking sets -fail-on low. Triage keys on CONFIDENCE: the LLM reviewer only
+# adjudicates findings at or below medium, so High — the dangerous-call default
+# — would exclude the one rule that most wants an adjudicator.
+rules:
+  - id: py-dynamic-code-exec
+    kind: dangerous-call
+    languages: [python]
+    severity: low
+    confidence: medium
+    cwe: CWE-95
+    message: >-
+      eval()/exec() on a value that is not a compile-time constant: whatever this
+      string contains at runtime is executed as Python code. This is the shape of
+      llama-index CVE-2024-4181 (eval of a fetched HTTP/LLM response body) and of
+      langflow's custom-component exec. Dispatch on an allowlist instead of
+      evaluating a computed string; to parse a data literal use ast.literal_eval.
+    # Exact builtin names (no wildcard) so the SAFE ast.literal_eval — a distinct
+    # function that only parses literals — is never matched, mirroring
+    # py-code-injection. compile() is deliberately absent: it produces a code
+    # object without executing one, so the eval/exec that actually runs it is
+    # where the finding belongs, and including it would double-report every
+    # compile -> exec pair.
+    callees:
+      # `!arg[0].Complete` is true unless the WHOLE argument is a compile-time
+      # constant, so eval("{'a': 1}") stays silent while eval(resp.text) fires.
+      # A malformed (zero-argument) call makes the guard error out, and a guard
+      # error suppresses rather than fires — the intended fail-closed direction.
+      - callee: "py:eval"
+        when: "!arg[0].Complete"
+      - callee: "py:exec"
+        when: "!arg[0].Complete"

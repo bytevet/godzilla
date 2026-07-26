@@ -278,10 +278,49 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
+		// A keyword argument arrives wrapped in a name marker; unwrap it so the
+		// skeleton, completeness and type describe the VALUE while .Name carries
+		// the keyword it was passed under.
+		name, v := unwrapKwarg(v, defs)
 		s, complete := constSkeleton(v, defs, map[string]bool{})
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs)}
+		// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
+		// back as an empty, incomplete skeleton. Render it here — in the guard path
+		// only — so a guard can read a flag argument: `shell=True` is what separates
+		// an injectable subprocess call from a safe list-argv one, and without this
+		// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
+		// into constSkeleton/constStr: those also back the SSRF host reconstruction,
+		// where a non-string operand is not part of the URL text and making one
+		// "complete" could wrongly prove a fixed host and suppress a real finding.
+		if !complete {
+			if sc, ok := constScalar(v); ok {
+				s, complete = sc, true
+			}
+		}
+		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name}
 	}
 	return out
+}
+
+// constScalar renders a non-string constant (bool/int/float) as its literal text,
+// reporting false for anything else (including a string constant, which
+// constSkeleton already handles, and a nil/absent constant). Bools render as
+// "true"/"false" — the Go spelling, matching how every other engine-produced
+// string in a guard is lowercase — so a rule writes `arg[i].String == "true"`
+// regardless of whether the source language spelled it True, true, or TRUE.
+func constScalar(v *ir.Value) (string, bool) {
+	c := v.GetConstant()
+	if c == nil {
+		return "", false
+	}
+	switch k := c.Value.(type) {
+	case *ir.Constant_BoolVal:
+		return strconv.FormatBool(k.BoolVal), true
+	case *ir.Constant_IntVal:
+		return strconv.FormatInt(k.IntVal, 10), true
+	case *ir.Constant_FloatVal:
+		return strconv.FormatFloat(k.FloatVal, 'g', -1, 64), true
+	}
+	return "", false
 }
 
 // argType is an argument's best-effort static type for a guard's `.Type`: a
@@ -1284,7 +1323,12 @@ func analyzeFunc(
 				// guard of its own. Consequence: inside a dependency wrapper the
 				// guarded arg is a parameter (always <DYN>), so a guarded sink is
 				// never reported through a wrapper — documented in writing-rules.md.
-				if sinkGuard != nil && !sinkGuard.Eval(argVals(inst.Call, defs)) {
+				// hostFixed() is supplied as an engine FACT the guard cannot compute
+				// itself (it needs the injection-point args, the taint state and the
+				// def map). expr calls it only if the rule's expression mentions it,
+				// so an unrelated guard pays nothing for the URL reconstruction.
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
+					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break
 				}
 				// ENG-9: suppress when a validator guard on this flow's source
@@ -1294,26 +1338,27 @@ func analyzeFunc(
 				if guards.guarded(curBlock, pos, tainted) {
 					break
 				}
-				// SSRF (CWE-918): keep the finding only if the taint can reach the
-				// request URL's host. Taint confined to the path/query of a fixed
-				// host cannot redirect the request and is a false positive.
-				if rule.CWE != "CWE-918" || urlHostControllable(inj, tainted, defs) {
-					// Mark reported ONLY when a finding is actually emitted (ENG-8).
-					// Setting it before the CWE-918 check masked a real SSRF: a
-					// benign, host-fixed flow to this sink would set reported and
-					// suppress, blocking a later flow whose taint DOES reach the host
-					// (e.g. once an interprocedural summary taints the host segment).
-					// Leaving reported unset on suppression lets that real flow fire.
-					reported[inst] = true
-					steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
-					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
-					// Dependency sink wrapper: this finding is scoped out (the sink sits in
-					// a library), so if the tainted value entered through a string parameter,
-					// summarize it for the caller to report at its own site. User code
-					// reports in place and never summarizes.
-					if !funcReportable {
-						recordSinkParam(&res, fn, rule, seeds, pos, inst.Pos)
-					}
+				// SSRF/open-redirect host-fixedness is no longer decided here. It is a
+				// rule-layer policy now: the packs that want it declare
+				// `when: 'not hostFixed()'` on their sinks, and the engine only supplies
+				// the fact (see the sinkGuard call above). Branching on rule.CWE meant a
+				// custom SSRF rule tagged anything else silently lost the suppression, and
+				// open-redirect could not opt in at all.
+				// Mark reported ONLY when a finding is actually emitted (ENG-8).
+				// A suppressing guard breaks out ABOVE without setting this, which is
+				// what lets a later flow still fire: a benign host-fixed flow to this
+				// sink must not mark it reported and block a subsequent flow whose
+				// taint DOES reach the host (e.g. once an interprocedural summary
+				// taints the host segment).
+				reported[inst] = true
+				steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
+				res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
+				// Dependency sink wrapper: this finding is scoped out (the sink sits in
+				// a library), so if the tainted value entered through a string parameter,
+				// summarize it for the caller to report at its own site. User code
+				// reports in place and never summarizes.
+				if !funcReportable {
+					recordSinkParam(&res, fn, rule, seeds, pos, inst.Pos)
 				}
 			}
 		case isProp:

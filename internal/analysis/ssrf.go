@@ -1,7 +1,6 @@
 package analysis
 
 import (
-	"regexp"
 	"strings"
 
 	"godzilla/internal/rules"
@@ -26,20 +25,47 @@ import (
 // reads this marker instead of matching any language's format-callee name.
 const formatIntrinsic = "builtin.format"
 
-// hostFixedRe matches a constant prefix that already pins a complete
-// scheme://authority followed by a path/query/fragment separator — i.e. the
-// authority is fully specified by the constant, so any following taint lands in
-// the path or query. Examples that match: "https://example.com/", "http://h:8080?".
-// Examples that do NOT: "https://" (no host yet), "https://example.com" (taint
-// could extend the host), "//host/" (no scheme).
-var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\\]`)
-
 // identityIntrinsic is the language-neutral marker a frontend sets on a
 // string-valued conversion that forwards its operand's text unchanged
 // (to_string/as_str/clone/into/deref and the format! result wrappers). The
 // engine follows Args[0] one hop deeper to find the URL construction, without
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
+
+// kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
+// argument's NAME available to rule guards: Args[0] is the name (a string
+// constant), Args[1] the value it wraps. gIR's CallCommon carries only positional
+// args, and a call site may pass keywords in any order, so without this marker
+// `shell=True` is indistinguishable from `check=True` once lowered. Modeling it
+// as an intrinsic keeps the frozen gIR schema untouched.
+//
+// Frontends wrap only CONSTANT values, so the marker never hides taint: it is
+// deliberately absent from intrinsicPropagators, and everything that reads an
+// argument's constant unwraps it first (see unwrapKwarg).
+const kwargIntrinsic = "builtin.kwarg"
+
+// unwrapKwarg resolves v through a kwargIntrinsic marker, returning the keyword
+// name and the value it wraps. For anything else it returns ("", v), so callers
+// can apply it unconditionally. defs may be nil, in which case a marker cannot be
+// resolved and v is returned unchanged.
+func unwrapKwarg(v *ir.Value, defs map[string]*ir.Instruction) (string, *ir.Value) {
+	if v == nil || defs == nil {
+		return "", v
+	}
+	def, ok := defs[v.GetRegName()]
+	if !ok || def.GetIntrinsic() != kwargIntrinsic || def.Call == nil {
+		return "", v
+	}
+	args := def.Call.GetArgs()
+	if len(args) != 2 {
+		return "", v
+	}
+	name, ok := constStr(args[0])
+	if !ok {
+		return "", v
+	}
+	return name, args[1]
+}
 
 // urlHostControllable reports whether any tainted injection-point argument can
 // influence the request URL's host. Returns true (keep the SSRF finding) unless
@@ -49,100 +75,17 @@ func urlHostControllable(injectable []*ir.Value, tainted taintState, defs map[st
 		if _, ok := isTainted(tainted, v); !ok {
 			continue
 		}
-		prefix, recovered := urlConstPrefix(v, defs, map[string]bool{})
-		if recovered && hostFixedRe.MatchString(prefix) {
+		// The skeleton's text before its first DynMarker IS the constant prefix, so
+		// one reconstruction answers this -- no separate prefix walk. An opaque or
+		// unrecoverable construction reconstructs to DynMarker alone, leaving an
+		// empty prefix that cannot match, so it stays controllable and keeps firing.
+		skeleton, _ := constSkeleton(v, defs, map[string]bool{})
+		if rules.ArgHostFixed(rules.Arg{String: skeleton}) {
 			continue // this tainted value lands only in the path/query — safe
 		}
 		return true // taint can reach the host (or the construction is opaque)
 	}
 	return false
-}
-
-// urlConstPrefix returns the constant text that precedes the first tainted/dynamic
-// segment of the URL value v, and whether the construction was recognized well
-// enough to trust that prefix. A concatenation/format whose leading segments are
-// constant yields (thePrefix, true); an opaque construction (e.g. Java `+`, or
-// a direct source value) yields ("", false).
-func urlConstPrefix(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
-	def, ok := resolveDef(v, defs, seen)
-	if !ok {
-		return "", false
-	}
-
-	switch {
-	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
-		// String concatenation (Go/Python/JS `+`, Python f-strings, JS template
-		// literals). The leading constant run is the fixed prefix.
-		text, _ := leadingConst(v, defs, seen)
-		return text, true
-
-	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_REM:
-		// Python `"tmpl" % value` — operand 0 is the template.
-		ops := def.GetOperands()
-		if len(ops) >= 1 {
-			if tmpl, isConst := constStr(ops[0]); isConst {
-				return prefixBeforePlaceholder(tmpl), true
-			}
-		}
-		return "", false
-
-	case def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE:
-		args := def.Call.GetArgs()
-		switch {
-		case def.GetIntrinsic() == formatIntrinsic:
-			// A printf-style formatter the frontend tagged: Args[0] is the literal
-			// template, the interpolated values follow. The fixed prefix is the
-			// template text before its first placeholder.
-			if len(args) >= 1 {
-				if tmpl, isConst := constStr(args[0]); isConst {
-					return prefixBeforePlaceholder(tmpl), true
-				}
-			}
-			return "", false
-		case def.GetIntrinsic() == identityIntrinsic && len(args) >= 1:
-			return urlConstPrefix(args[0], defs, seen)
-		}
-		return "", false
-
-	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:
-		if ops := def.GetOperands(); len(ops) >= 1 {
-			return urlConstPrefix(ops[0], defs, seen)
-		}
-		return "", false
-	}
-	return "", false
-}
-
-// leadingConst returns the longest run of constant text at the START of the value
-// v's string construction, and whether the ENTIRE construction is constant
-// (complete). It flattens BIN_OP_ADD concatenation trees (every language lowers
-// `+` string concatenation to BIN_OP_ADD, Rust included) and follows passthrough
-// conversions, stopping at the first non-constant leaf.
-func leadingConst(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (text string, complete bool) {
-	if s, isConst := constStr(v); isConst {
-		return s, true
-	}
-	def, ok := resolveDef(v, defs, seen)
-	if !ok {
-		return "", false
-	}
-	next := markSeen(seen, v)
-
-	switch {
-	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
-		return leadingConstSeq(def.GetOperands(), defs, next)
-	case (def.Op == ir.OpCode_OP_CODE_CALL || def.Op == ir.OpCode_OP_CODE_INVOKE):
-		if def.GetIntrinsic() == identityIntrinsic {
-			if args := def.Call.GetArgs(); len(args) >= 1 {
-				return leadingConst(args[0], defs, next)
-			}
-		}
-	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:
-		if ops := def.GetOperands(); len(ops) >= 1 {
-			return leadingConst(ops[0], defs, next)
-		}
-	}
-	return "", false
 }
 
 // constSkeleton reconstructs v's string construction as a skeleton for a dynamic
@@ -189,6 +132,14 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				return constSkeleton(args[0], defs, next)
 			}
+		case def.GetIntrinsic() == kwargIntrinsic:
+			// A named-argument marker is pure annotation: reconstruct the value it
+			// wraps, so wrapping a keyword argument never makes a string it
+			// contributes to look dynamic (which would, in the SSRF host analysis,
+			// lose a constant run).
+			if args := def.Call.GetArgs(); len(args) == 2 {
+				return constSkeleton(args[1], defs, next)
+			}
 		}
 	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:
 		if ops := def.GetOperands(); len(ops) >= 1 {
@@ -196,21 +147,6 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 		}
 	}
 	return rules.DynMarker, false
-}
-
-// leadingConstSeq concatenates the leading constant text across an ordered list of
-// operands (left to right), stopping at the first operand that is not wholly
-// constant.
-func leadingConstSeq(operands []*ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
-	var b strings.Builder
-	for _, op := range operands {
-		t, c := leadingConst(op, defs, seen)
-		b.WriteString(t)
-		if !c {
-			return b.String(), false
-		}
-	}
-	return b.String(), true
 }
 
 // resolveDef returns the instruction defining v's register, or (nil,false) for a
@@ -293,27 +229,4 @@ func templateSkeleton(tmpl string) string {
 
 func isVerbLetter(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-}
-
-// prefixBeforePlaceholder returns the literal text of a format template that
-// precedes its first interpolation point — a printf verb (`%s`, `%v`, … but not
-// the escaped `%%`) or a brace placeholder (`{`, but not the escaped `{{`).
-func prefixBeforePlaceholder(tmpl string) string {
-	for i := 0; i < len(tmpl); i++ {
-		switch tmpl[i] {
-		case '%':
-			if i+1 < len(tmpl) && tmpl[i+1] == '%' {
-				i++ // escaped %%
-				continue
-			}
-			return tmpl[:i]
-		case '{':
-			if i+1 < len(tmpl) && tmpl[i+1] == '{' {
-				i++ // escaped {{
-				continue
-			}
-			return tmpl[:i]
-		}
-	}
-	return tmpl
 }

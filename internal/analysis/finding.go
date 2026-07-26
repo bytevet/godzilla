@@ -7,6 +7,7 @@ package analysis
 
 import (
 	"fmt"
+	"strings"
 
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -24,6 +25,26 @@ const (
 	ConfidenceMedium Confidence = "medium"
 	ConfidenceLow    Confidence = "low"
 )
+
+// ParseConfidence maps a rule's declared `confidence:` spelling onto a
+// Confidence, falling back to def for the empty (unset) string and for anything
+// unrecognized — the loader already rejects a typo (rules.ValidConfidence), so a
+// bad value here means a programmatically-built rule, and defaulting is safer
+// than reporting a finding at a confidence nothing downstream understands. It
+// deliberately returns only the canonical lowercase constants: internal/llm
+// ranks any other string 0 and then never reviews the finding, which would look
+// fine in the HTML report while being permanently un-triageable.
+func ParseConfidence(s string, def Confidence) Confidence {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case string(ConfidenceLow):
+		return ConfidenceLow
+	case string(ConfidenceMedium):
+		return ConfidenceMedium
+	case string(ConfidenceHigh):
+		return ConfidenceHigh
+	}
+	return def
+}
 
 // Finding is a single reported vulnerability: a tainted value from some
 // Source reaching a Sink without passing through a Sanitizer.

@@ -49,13 +49,41 @@ func (s Severity) Rank() int {
 	}
 }
 
+// ValidConfidence reports whether s is a spelling a rule may declare in its
+// `confidence:` field: empty (unset, meaning "use the default") or one of
+// low|medium|high, case- and space-insensitively. It is only a SPELLING check:
+// package rules cannot name analysis.Confidence (internal/analysis imports
+// internal/rules, so the reverse would be an import cycle), so the string ->
+// Confidence conversion lives in analysis.ParseConfidence and the loader uses
+// this predicate to reject a typo at load time.
+func ValidConfidence(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
 // Rule is a single taint rule loaded from YAML.
 type Rule struct {
 	ID        string   `yaml:"id"`
 	Languages []string `yaml:"languages"` // empty => applies to all languages
 	Severity  Severity `yaml:"severity"`
-	CWE       string   `yaml:"cwe"`
-	Message   string   `yaml:"message"`
+
+	// Confidence optionally overrides the confidence a dangerous-call finding is
+	// reported with. Empty means High — the call-site-deterministic default every
+	// shipped dangerous-call rule was written against, so an unset field changes no
+	// existing rule. Set it to "medium" for a heuristic call-site rule whose matches
+	// are real but want a human/LLM look: confidence is what makes a finding
+	// TRIAGEABLE (internal/llm.Filter reviews everything at or below its threshold,
+	// analysis.ConfidenceMedium by default), while severity alone decides the CI
+	// gate (-fail-on), so the two dials are set independently. Ignored by dataflow
+	// rules, whose confidence is derived from the flow itself (intra-procedural
+	// High, cross-function Medium).
+	Confidence string `yaml:"confidence"`
+
+	CWE     string `yaml:"cwe"`
+	Message string `yaml:"message"`
 
 	// Extend names one or more `_`-prefixed fragment files (e.g.
 	// "$_go-common.yaml") whose pattern-list fields are merged into this rule at
