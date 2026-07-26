@@ -46,10 +46,34 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		return nil
 	}
 
+	// Resolve the language filter ONCE per language rather than per (call site ×
+	// rule). AppliesTo is a slice scan with a case-insensitive compare, and it was
+	// running on the innermost loop of the whole pass; a program has a handful of
+	// languages, so memoizing the filtered slice makes it a single map lookup per
+	// function instead.
+	byLang := map[string][]compiled{}
+	forLang := func(lang string) []compiled {
+		if ds, ok := byLang[lang]; ok {
+			return ds
+		}
+		var ds []compiled
+		for _, d := range dcs {
+			if d.rule.AppliesTo(lang) {
+				ds = append(ds, d)
+			}
+		}
+		byLang[lang] = ds
+		return ds
+	}
+
 	var findings []Finding
 	seen := map[string]bool{}
 	for mod, fn := range funcs(prog) {
 		lang := mod.GetLanguage()
+		langDcs := forLang(lang)
+		if len(langDcs) == 0 {
+			continue // no dangerous-call rule targets this module's language
+		}
 		// Built on first use and then shared by every rule's guard below. A
 		// dangerous-call argument is usually a literal, but it may be a keyword
 		// marker (builtin.kwarg) or a constant folded through a register, and
@@ -69,39 +93,34 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			if inst.Call == nil {
 				continue
 			}
-			{
-				callee := inst.Call.GetCallee()
-				for _, d := range dcs {
-					if !d.rule.AppliesTo(lang) {
-						continue // cheap language gate before the glob walk
-					}
-					guard, matched := d.rule.MatchDangerousCallee(callee)
-					if !matched || !constArgMatches(d.rule, d.re, inst.Call, getDefs) {
-						continue
-					}
-					// Dynamic callee guard (`when:`): suppress unless it confirms against
-					// the call's reconstructed argument values (required-confirmation).
-					if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
-						continue
-					}
-					key := d.rule.ID + "@" + posKey(inst.GetPos())
-					if seen[key] {
-						continue
-					}
-					seen[key] = true
-					findings = append(findings, Finding{
-						RuleID:     d.rule.ID,
-						Severity:   d.rule.Severity,
-						Confidence: d.conf,
-						CWE:        d.rule.CWE,
-						Message:    d.rule.Message,
-						Language:   lang,
-						Function:   fn.GetCanonicalName(),
-						Package:    fn.GetPackageName(),
-						SinkPos:    inst.GetPos(),
-						SinkCallee: callee,
-					})
+			callee := inst.Call.GetCallee()
+			for _, d := range langDcs {
+				guard, matched := d.rule.MatchDangerousCallee(callee)
+				if !matched || !constArgMatches(d.rule, d.re, inst.Call, getDefs) {
+					continue
 				}
+				// Dynamic callee guard (`when:`): suppress unless it confirms against
+				// the call's reconstructed argument values (required-confirmation).
+				if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
+					continue
+				}
+				key := d.rule.ID + "@" + posKey(inst.GetPos())
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				findings = append(findings, Finding{
+					RuleID:     d.rule.ID,
+					Severity:   d.rule.Severity,
+					Confidence: d.conf,
+					CWE:        d.rule.CWE,
+					Message:    d.rule.Message,
+					Language:   lang,
+					Function:   fn.GetCanonicalName(),
+					Package:    fn.GetPackageName(),
+					SinkPos:    inst.GetPos(),
+					SinkCallee: callee,
+				})
 			}
 		}
 	}

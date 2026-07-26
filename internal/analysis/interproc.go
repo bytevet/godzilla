@@ -700,13 +700,26 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	reported := map[*ir.Instruction]bool{}
 	var findings []Finding
 
+	// The rule is fixed for this whole pass, so decide per LANGUAGE once instead of
+	// re-running AppliesTo (a slice scan with a case-insensitive compare) on every
+	// enqueue — which happens once per function seeded and again per call edge.
+	langOK := map[string]bool{}
+	ruleAppliesToLang := func(lang string) bool {
+		ok, seen := langOK[lang]
+		if !seen {
+			ok = rule.AppliesTo(lang)
+			langOK[lang] = ok
+		}
+		return ok
+	}
+
 	queued := map[string]bool{}
 	var queue []string
 	enqueue := func(name string) {
 		if byKey[name] == nil {
 			return
 		}
-		if mod := modByKey[name]; mod == nil || !rule.AppliesTo(mod.Language) {
+		if mod := modByKey[name]; mod == nil || !ruleAppliesToLang(mod.Language) {
 			return
 		}
 		if !queued[name] {
