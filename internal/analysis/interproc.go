@@ -279,9 +279,44 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
 		s, complete := constSkeleton(v, defs, map[string]bool{})
+		// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
+		// back as an empty, incomplete skeleton. Render it here — in the guard path
+		// only — so a guard can read a flag argument: `shell=True` is what separates
+		// an injectable subprocess call from a safe list-argv one, and without this
+		// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
+		// into constSkeleton/constStr: those also back the SSRF host reconstruction,
+		// where a non-string operand is not part of the URL text and making one
+		// "complete" could wrongly prove a fixed host and suppress a real finding.
+		if !complete {
+			if sc, ok := constScalar(v); ok {
+				s, complete = sc, true
+			}
+		}
 		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs)}
 	}
 	return out
+}
+
+// constScalar renders a non-string constant (bool/int/float) as its literal text,
+// reporting false for anything else (including a string constant, which
+// constSkeleton already handles, and a nil/absent constant). Bools render as
+// "true"/"false" — the Go spelling, matching how every other engine-produced
+// string in a guard is lowercase — so a rule writes `arg[i].String == "true"`
+// regardless of whether the source language spelled it True, true, or TRUE.
+func constScalar(v *ir.Value) (string, bool) {
+	c := v.GetConstant()
+	if c == nil {
+		return "", false
+	}
+	switch k := c.Value.(type) {
+	case *ir.Constant_BoolVal:
+		return strconv.FormatBool(k.BoolVal), true
+	case *ir.Constant_IntVal:
+		return strconv.FormatInt(k.IntVal, 10), true
+	case *ir.Constant_FloatVal:
+		return strconv.FormatFloat(k.FloatVal, 'g', -1, 64), true
+	}
+	return "", false
 }
 
 // argType is an argument's best-effort static type for a guard's `.Type`: a

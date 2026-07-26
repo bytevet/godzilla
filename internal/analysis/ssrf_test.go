@@ -16,6 +16,16 @@ func cstV(s string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
 }
 
+// boolV / intV build non-string constants, which reach a guard as literal text
+// via constScalar (constSkeleton is string-only by design).
+func boolV(b bool) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_BoolVal{BoolVal: b}}}}
+}
+
+func intV(n int64) *ir.Value {
+	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_IntVal{IntVal: n}}}}
+}
+
 func binOp(name string, kind ir.BinOpKind, ops ...*ir.Value) *ir.Instruction {
 	return &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: kind, Operands: ops}
 }
