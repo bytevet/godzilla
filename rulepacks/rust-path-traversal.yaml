@@ -14,7 +14,7 @@ rules:
       filesystem path without validation, which may allow path traversal
       (reading or writing files outside the intended directory). Canonicalize the
       path and confirm it stays within an allowed base directory.
-    extend: $_rust-sources.yaml
+    extend: [$_rust-sources.yaml, $_rust-propagators.yaml]
     sinks:
       - "rust:*fs::read_to_string#0"
       - "rust:*fs::read#0"
@@ -27,38 +27,11 @@ rules:
       - "rust:*File::create#0"
       - "rust:*OpenOptions::open#1"
     sanitizers: []
-    # Path-specific propagators, kept inline (differs from _rust-propagators.yaml).
+    # Path-specific propagators, on top of the shared core set in
+    # _rust-propagators.yaml: Path/PathBuf construction and conversion, which no
+    # other Rust rule needs. (The core set's join/concat/splitn/bytes/to_vec are
+    # deliberately NOT taken here — see _rust-propagators-extra.yaml.)
     propagators:
-      - "rust:*unwrap"
-      - "rust:*unwrap_or"
-      - "rust:*unwrap_or_default"
-      - "rust:*expect"
-      - "rust:*as_ref"
       - "rust:*as_path"
-      - "rust:*as_bytes"
-      - "rust:*clone"
-      - "rust:*deref"
-      - "rust:*into"
-      - "rust:*push_str"
       - "rust:*Path::join"
       - "rust:*PathBuf::from"
-      - "rust:*collect"
-      - "rust:*index"
-      - "rust:*get"
-      - "rust:*nth"
-      - "rust:*first"
-      - "rust:*last"
-      - "rust:*iter"
-      - "rust:*next"
-      - "rust:*map"
-      - "rust:*chars"
-      - "rust:*split"
-      - "rust:*lines"
-      - "rust:*from_utf8"
-      - "rust:*from_utf8_lossy"
-      - "rust:*String::from"
-      - "rust:format"
-      - "rust:*must_use"
-      - "rust:*new_display"
-      - "rust:*new_debug"
-      - "rust:*Arguments::new"

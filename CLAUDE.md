@@ -138,9 +138,11 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
 - Python, JS, and Ruby name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
   These three straight-line frontends share their common scaffolding rather than re-implementing it:
-  `walkignore.CollectSources` (the pruned directory walk → sorted file list), `proc.WriteEmbeddedScript`
-  (materialize the embedded interpreter helper into a temp file), `internal/chunks.Run` (concurrent per-file
-  lowering), and `converters/lowerutil.MergeBranchEnvs` (the flattened if/else PHI-merge, shared by Python and JS).
+  `walkignore.CollectTarget` / `CollectSources` (resolve the scan target, then the pruned directory walk →
+  sorted file list) and `walkignore.ModuleName` (the shared scan-root-relative module-name contract),
+  `proc.WriteEmbeddedScript` (materialize the embedded interpreter helper into a temp file),
+  `internal/chunks.Run` (concurrent per-file lowering), and `converters/ssabuild` (the real-CFG builder with
+  on-demand PHI insertion, which retired the old flattened if/else env-merge helper).
 
 **Analysis (`internal/analysis/`).**
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic

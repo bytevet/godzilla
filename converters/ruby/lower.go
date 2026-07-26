@@ -716,8 +716,8 @@ func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 // arm is lowered in its own block and jumps to a fresh merge block; the merge is
 // sealed once both arm-ends are its known predecessors, so any variable rebound
 // on one or both arms reconciles automatically via an on-demand ReadVariable PHI
-// (retiring the manual lowerutil.MergeBranchEnvs path). `if`, `unless`, and
-// `elsif` share the layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
+// (retiring the manual env-merge path). `if`, `unless`, and `elsif` share the
+// layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
 // the polarity of `unless` is immaterial to taint (both arms are reachable), so
 // it is lowered like `if`. A nested `elsif` recurses into the else-block, so an
 // arbitrarily long chain becomes nested diamonds.
@@ -793,33 +793,32 @@ func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
 	return nil
 }
 
-// lowerWhile lowers `while`/`until cond; body; end` into a REAL loop CFG:
-// header/body/exit blocks. The current block jumps to the header; the header
-// lowers the condition and branches (body, exit); the body is lowered and jumps
-// BACK to the header (the back-edge). The header is left UNSEALED while the body
-// is built, so a loop variable read in the condition or body parks an incomplete
-// PHI that is filled when the header is sealed after the back-edge is wired —
-// this is what gives loop-carried taint: a value written in the body and read at
-// the top of the next iteration flows through the header PHI (which the old
-// single-block lowering could not model). `until` differs only in condition
-// polarity, immaterial to taint. The header PHI over [pre-loop, back-edge]
-// carries taint into and out of the loop.
-func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
+// lowerLoopCFG builds the REAL loop CFG shared by `while`/`until` and their
+// statement-modifier forms: header/body/exit blocks. The current block jumps to
+// the header; the header lowers cond and branches (body, exit); lowerBody fills
+// the body, which jumps BACK to the header (the back-edge). The header is left
+// UNSEALED while the body is built, so a loop variable read in the condition or
+// body parks an incomplete PHI that is filled when the header is sealed after
+// the back-edge is wired — this is what gives loop-carried taint: a value
+// written in the body and read at the top of the next iteration flows through
+// the header PHI (which the old single-block lowering could not model). The
+// header PHI over [pre-loop, back-edge] carries taint into and out of the loop.
+// The seal ORDER matters and is why both loop forms share this function rather
+// than each open-coding it.
+func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value {
 	header := fs.b.NewBlock()
 	body := fs.b.NewBlock()
 	exit := fs.b.NewBlock()
 
 	fs.b.SetJump(fs.cur, header) // enter the loop
 	fs.cur = header
-	cond := fs.lowerExpr(at(n, 1)) // condition, lowered in the (unsealed) header
-	fs.b.SetIf(header, cond, body, exit)
+	c := fs.lowerExpr(cond) // condition, lowered in the (unsealed) header
+	fs.b.SetIf(header, c, body, exit)
 
 	fs.b.Seal(body) // body's sole predecessor (header) is known
 	fs.cur = body
 	fs.terminated = false
-	if bstmts, ok := asList(at(n, 2)); ok {
-		fs.lowerStmtSeqLast(bstmts)
-	}
+	lowerBody()
 	if !fs.terminated { // a body that always returns has no back-edge
 		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
 	}
@@ -829,6 +828,16 @@ func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
 	fs.cur = exit
 	fs.terminated = false
 	return constString("")
+}
+
+// lowerWhile lowers `while`/`until cond; body; end` into the shared loop CFG.
+// `until` differs only in condition polarity, immaterial to taint.
+func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
+	return fs.lowerLoopCFG(at(n, 1), func() {
+		if bstmts, ok := asList(at(n, 2)); ok {
+			fs.lowerStmtSeqLast(bstmts)
+		}
+	})
 }
 
 // lowerCondMod lowers the statement-modifier conditionals `stmt if cond` and
@@ -865,28 +874,9 @@ func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
 // modeled (a pre-test loop; `stmt until cond` on a non-begin statement is
 // pre-test in Ruby, and treating it so is conservative for taint).
 func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	cond := fs.lowerExpr(at(n, 1))
-	fs.b.SetIf(header, cond, body, exit)
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerStmt(at(n, 2)) // loop body statement
-	if !fs.terminated {    // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header)
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
-	return constString("")
+	return fs.lowerLoopCFG(at(n, 1), func() {
+		fs.lowerStmt(at(n, 2)) // loop body statement
+	})
 }
 
 // lowerBacktick lowers a backtick command literal “ `cmd #{x}` “ (and %x{}) —

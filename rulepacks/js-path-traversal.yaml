@@ -15,14 +15,13 @@ rules:
       it stays within an allowed base directory before use.
     extend: $_js-sources.yaml
     # `*fs.readFile*` also matches the "Sync"/promises variants
-    # (fs.readFileSync, fs.promises.readFile); `*fs.createReadStream` covers
-    # streamed reads; broad `*.sendFile` (not `*res.sendFile`) so a chained
-    # response like res.status(200).sendFile(p) -- which lowers to callee
-    # "js:<dynamic>.sendFile" -- is still caught, mirroring js-xss's broad
-    # `js:*.send`.
+    # (fs.readFileSync, fs.promises.readFile); streamed reads are covered by the
+    # receiver-agnostic `*.createReadStream` below; broad `*.sendFile` (not
+    # `*res.sendFile`) so a chained response like res.status(200).sendFile(p) --
+    # which lowers to callee "js:<dynamic>.sendFile" -- is still caught,
+    # mirroring js-xss's broad `js:*.send`.
     sinks:
       - "js:*fs.readFile*"
-      - "js:*fs.createReadStream"
       - "js:*.sendFile"
       # File reads are not always on the literal `fs` module: a static-file
       # server often reads through an injected filesystem abstraction (memfs,
@@ -41,10 +40,11 @@ rules:
     # propagators, not sanitizers.
     sanitizers:
       - "js:*path.basename"
+    # (path.normalize needs no entry: `js:*.normalize` is a built-in default
+    # propagator, ORed into every rule's propagator check.)
     propagators:
       - "js:*path.join"
       - "js:*path.resolve"
-      - "js:*path.normalize"
       # URL/query decoding of an already-tainted value returns an equally
       # tainted value (they decode `%2e%2e` -> `..`, if anything WIDENING the
       # traversal surface), so they carry taint from arg to result. Modeled as

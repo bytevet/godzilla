@@ -16,7 +16,7 @@ rules:
       std::process command, which may allow OS command injection. Validate or
       allow-list the program and arguments instead of passing user-controlled
       data to a shell.
-    extend: [$_rust-sources.yaml, $_rust-propagators.yaml]
+    extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml]
     sinks:
       - "rust:*Command::new#0"
       - "rust:*Command::arg#1"

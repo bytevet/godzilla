@@ -425,9 +425,15 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 	// for a "js:@mod:<thisModule>" marker in some other file.
 	defaultExport := collectDefaultExport(prog.Body, localFuncs, c.nameOf)
 
+	mctx := &moduleCtx{
+		filename: filename, moduleName: moduleName, fset: fset, nameOf: c.nameOf,
+		localFuncs: localFuncs, moduleAliases: moduleAliases,
+		relativeDefaults: relativeDefaults, handlers: c.handlers,
+	}
+
 	var functions []*ir.Function
 	for _, pf := range c.order {
-		functions = append(functions, lowerFunction(pf, filename, moduleName, fset, c.nameOf, localFuncs, moduleAliases, relativeDefaults, c.handlers))
+		functions = append(functions, lowerFunction(mctx, pf))
 	}
 
 	moduleFn := &ir.Function{
@@ -437,10 +443,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		CanonicalName: "js:" + moduleName + ".<module>",
 		Synthetic:     true,
 	}
-	fs := newFuncState(filename, fset, c.nameOf, localFuncs)
-	fs.moduleName = moduleName
-	fs.moduleAliases = moduleAliases
-	fs.relativeDefaults = relativeDefaults
+	fs := mctx.newFuncState()
 	fs.lowerBody(prog.Body)
 	moduleFn.Blocks = fs.b.Finish()
 

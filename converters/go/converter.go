@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -33,6 +34,14 @@ type Converter struct {
 	// comparisons and per callee reference. Per-converter and private, exactly
 	// like typeCache.
 	fnNames map[*ssa.Function]string
+
+	// baseNames is a read-only view of the main converter's fnNames, shared with
+	// workers — the same contract as baseTypes: it is fully built by lowerModules'
+	// package loop (via the sort comparator and addPackageMembers) before any
+	// worker starts, and never written afterwards, so concurrent reads are
+	// race-free. Without it every worker re-rendered the names the parent had
+	// already memoized.
+	baseNames map[*ssa.Function]string
 
 	// valueCache interns the *ir.Value operand wrappers per function (cleared at
 	// the top of convertFunction): the same ssa.Value is typically referenced by
@@ -76,9 +85,13 @@ func NewConverter() *Converter {
 	}
 }
 
-// fnString returns f.String(), memoized per converter.
+// fnString returns f.String(), memoized per converter and backed by the parent
+// converter's already-built names on a worker (baseNames, read-only).
 func (c *Converter) fnString(f *ssa.Function) string {
 	if s, ok := c.fnNames[f]; ok {
+		return s
+	}
+	if s, ok := c.baseNames[f]; ok {
 		return s
 	}
 	s := f.String()
@@ -184,6 +197,12 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 			add(fn)
 		}
 	}
+	// Recycled operand buffer: Operands APPENDS into the slice it is given, so a
+	// fresh nil per instruction allocates once for every instruction in the whole
+	// reachable dependency closure. Nothing retains rands or its elements beyond
+	// the loop body below, so one buffer serves the entire traversal (the same
+	// recycling x/tools itself does).
+	var rands []*ssa.Value
 	for len(queue) > 0 {
 		fn := queue[len(queue)-1]
 		queue = queue[:len(queue)-1]
@@ -201,7 +220,7 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 				}
 				// Any function VALUE referenced here (MakeClosure.Fn, a
 				// func-typed argument, a method value) can later be called.
-				rands := instr.Operands(nil)
+				rands = instr.Operands(rands[:0])
 				for _, op := range rands {
 					if op == nil {
 						continue
@@ -450,14 +469,16 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 }
 
 // worker returns a lightweight Converter that shares this converter's read-only
-// setup (fset, route handlers) but has its own typeCache, so it can
-// lower functions concurrently without locking or racing on the shared cache.
+// setup (fset, route tables, base types and base names) but has its own
+// typeCache/fnNames, so it can lower functions concurrently without locking or
+// racing on the shared caches.
 // targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
 // on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
 	w := NewConverter() // shares NewConverter's per-converter cache initialization
 	w.fset = c.fset
 	w.baseTypes = c.typeCache
+	w.baseNames = c.fnNames
 	w.routeHandlers = c.routeHandlers
 	w.routeFormParams = c.routeFormParams
 	return w
@@ -631,7 +652,14 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		}
 		irBlock := irFunc.Blocks[bi]
 		if len(sb.Instrs) != len(irBlock.Instrs) {
-			continue // defensive: never seen, but don't misalign if it ever happens
+			// The IR block no longer aligns 1:1 with the SSA block, so index-matching
+			// would misplace the source. This is NOT rare: part (1) prepends parameter
+			// sources to the entry block, so block 0 is skipped here whenever this
+			// function got a param seed — an entry-block *http.Request field read then
+			// gets no second synthetic source (its request param/context is already
+			// seeded above). Any other mismatch would be a lowering bug; skipping is the
+			// safe response either way.
+			continue
 		}
 		// Fast path: most blocks read no inbound *http.Request, so the rebuilt slice
 		// would be value-identical to the original. Skip the allocation for them.
@@ -1094,7 +1122,7 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 // control-flow instructions (IF/JUMP/PHI) use it to name their target and
 // predecessor blocks.
 func blockName(b *ssa.BasicBlock) string {
-	return fmt.Sprintf("b%d", b.Index)
+	return "b" + strconv.Itoa(b.Index)
 }
 
 func (c *Converter) convertValue(v ssa.Value) *ir.Value {

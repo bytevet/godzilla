@@ -11,6 +11,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,6 +114,18 @@ type Rule struct {
 	// for "go:...Query#0" only arg 0 is an injection point and a bound-parameter
 	// query `db.Query("... = ?", taintedParam)` is correctly NOT flagged.
 	Sinks []Sink `yaml:"sinks"`
+
+	// When is the rule's DEFAULT dynamic guard: a sink (or dangerous-call callee)
+	// that declares no `when:` of its own inherits this one. A guard like
+	// `not hostFixed()` is rule POLICY — it says what this whole rule means — but
+	// the schema previously had nowhere to put it except on every single sink, so
+	// a pack repeated the identical expression a dozen times and a sink added
+	// later silently opted out of it. Declaring it once here makes the default
+	// explicit and un-forgettable. An entry's own `when:` always wins, so
+	// `when: 'true'` on one sink is the per-sink opt-out. Inheritance is applied
+	// where the guard is resolved (effectiveWhen), so a sink merged in from a
+	// fragment inherits it too.
+	When string `yaml:"when"`
 
 	Propagators []string `yaml:"propagators"` // callees that pass taint arg->result (e.g. fmt.Sprintf)
 
@@ -270,10 +283,21 @@ func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
 	}
 	for _, c := range r.Callees {
 		if MatchGlob(c.Pattern, callee) {
-			return uncompiledGuard(c.When), true
+			return uncompiledGuard(r.effectiveWhen(c.When)), true
 		}
 	}
 	return nil, false
+}
+
+// effectiveWhen resolves an entry's guard expression against the rule's default:
+// the entry's own `when:` if it has one, else the rule-level When. The single
+// place inheritance is applied — Compile and both uncompiled fallback paths call
+// it, so a sink cannot be guarded on one path and unguarded on the other.
+func (r *Rule) effectiveWhen(when string) string {
+	if strings.TrimSpace(when) != "" {
+		return when
+	}
+	return r.When
 }
 
 // uncompiledGuard is the guard for a match found on the uncompiled fallback path
@@ -311,6 +335,10 @@ type ruleMatchers struct {
 	propagators []*compiledGlob
 	validators  []*compiledGlob
 	callees     []compiledCallee
+
+	// constArg is ConstArg.Matches compiled once (nil when the rule declares no
+	// const_arg, or when its regexp was invalid — see ConstArgRe).
+	constArg *regexp.Regexp
 }
 
 // compiledSink pairs a sink's shape-matcher with its parsed injection-point
@@ -343,21 +371,58 @@ func (r *Rule) Compile() error {
 	var errs []error
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
-		guard, err := CompileGuard(s.When) // DenyGuard on error: fail closed
+		guard, err := CompileGuard(r.effectiveWhen(s.When)) // DenyGuard on error: fail closed
 		if err != nil {
 			errs = append(errs, fmt.Errorf("sink %q: %w", s.Pattern, err))
 		}
 		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx, guard: guard})
 	}
 	for _, c := range r.Callees {
-		guard, err := CompileGuard(c.When)
+		guard, err := CompileGuard(r.effectiveWhen(c.When))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("callee %q: %w", c.Pattern, err))
 		}
 		m.callees = append(m.callees, compiledCallee{g: classifyGlob(c.Pattern), guard: guard})
 	}
+	if r.ConstArg != nil && r.ConstArg.Matches != "" {
+		re, err := regexp.Compile(r.ConstArg.Matches)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("const_arg.matches %q: %w", r.ConstArg.Matches, err))
+		}
+		m.constArg = re // nil on error: a const_arg declared but invalid can never match
+	}
 	r.matchers = m
 	return errors.Join(errs...)
+}
+
+// ConstArgRe returns the rule's compiled const_arg.matches regexp, or nil when
+// the rule declares no const_arg, was never compiled, or its regexp is invalid.
+// A rule that declares a const_arg it cannot compile must never fire, so callers
+// treat "ConstArg != nil but ConstArgRe() == nil" as "matches nothing".
+func (r *Rule) ConstArgRe() *regexp.Regexp {
+	if r.matchers == nil {
+		return nil
+	}
+	return r.matchers.constArg
+}
+
+// GlobSet is a set of canonical-name globs precompiled to shape-matchers, for a
+// caller that matches the same list against many subjects but does not own a
+// Rule (e.g. the engine's request-object host scan, which walks every
+// instruction of every lowered dependency function). Matching through MatchAny
+// instead would pay a mutexed globCache lookup per (subject × pattern).
+type GlobSet struct{ gs []*compiledGlob }
+
+// NewGlobSet precompiles patterns into a GlobSet.
+func NewGlobSet(patterns []string) *GlobSet { return &GlobSet{gs: classifyAll(patterns)} }
+
+// Match reports whether s matches any pattern in the set. A nil or empty set
+// matches nothing, exactly like MatchAny over an empty list.
+func (g *GlobSet) Match(s string) bool {
+	if g == nil {
+		return false
+	}
+	return matchAnyCompiled(g.gs, s)
 }
 
 func classifyAll(patterns []string) []*compiledGlob {
@@ -407,7 +472,7 @@ func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
 		if MatchGlob(pattern, callee) {
-			return idx, uncompiledGuard(s.When), true
+			return idx, uncompiledGuard(r.effectiveWhen(s.When)), true
 		}
 	}
 	return nil, nil, false

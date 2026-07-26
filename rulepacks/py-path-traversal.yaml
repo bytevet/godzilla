@@ -11,30 +11,17 @@ rules:
       Untrusted input flows into a filesystem path without being cleaned or
       validated, which may allow path traversal (e.g. "../" sequences) to
       read or write files outside the intended directory.
-    # Filesystem sinks come from the shared fragment (also used by py-zip-slip).
-    extend: [$_py-sources.yaml, $_py-fs-sinks.yaml]
+    # Filesystem sinks and the path-normalization propagators come from the
+    # shared fragment (also used by py-zip-slip).
+    extend: [$_py-sources.yaml, $_py-fs.yaml]
     # os.path.join does NOT contain input to a base directory ("/data" +
     # "../../etc" joins to "/data/../../etc", which still escapes "/data"),
     # so it is a propagator, not a sanitizer -- mirroring go-path-traversal's
     # identical treatment of filepath.Join/Clean. (py:*.join is a default
     # propagator, so it need not be repeated here.)
     sanitizers: []
-    # Path-normalization functions collapse or resolve a path but do NOT contain
-    # it to a base directory -- `pathlib.Path(x).resolve()` and
-    # `os.path.normpath(x)` still escape via "../" relative to cwd -- so they
-    # PROPAGATE taint rather than sanitize it, mirroring Java's Paths.get /
-    # Path.of / Path.resolve propagators and go-path-traversal's filepath.Clean.
-    # Without these, taint dies at the ubiquitous `Path(user_input)` /
+    # The path-normalization propagators come from _py-fs.yaml. Without them,
+    # taint dies at the ubiquitous `Path(user_input)` /
     # `os.path.normpath(user_input)` hop and real path traversals go undetected
     # (e.g. gradio's file-serving routes normalize with abspath/normpath before
-    # FileResponse). Propagators only forward taint that is already present, so
-    # they add no new findings on their own.
-    propagators:
-      - "py:*pathlib.Path"
-      - "py:*.resolve"
-      - "py:*.absolute"
-      - "py:*.joinpath"
-      - "py:*.expanduser"
-      - "py:*.normpath"
-      - "py:*.abspath"
-      - "py:*.realpath"
+    # FileResponse).

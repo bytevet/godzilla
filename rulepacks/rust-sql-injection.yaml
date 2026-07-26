@@ -16,7 +16,7 @@ rules:
       a SQL query string instead of a bound parameter, which may allow SQL
       injection. Use parameterized queries (bind values with `?`/`$1`) rather
       than formatting user input into the query text.
-    extend: [$_rust-sources.yaml, $_rust-propagators.yaml]
+    extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml]
     sinks:
       # rusqlite: conn.execute(sql, params) / query_row(sql, params, f) /
       # prepare(sql) — the SQL string is operand 1 (receiver at 0).

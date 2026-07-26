@@ -47,15 +47,8 @@ func collectRequireAliases(body []ast.Statement) map[string]string {
 			if member != "" {
 				continue
 			}
-			for _, p := range t.Properties {
-				switch prop := p.(type) {
-				case *ast.PropertyShort:
-					aliases[string(prop.Name.Name)] = mod + "." + string(prop.Name.Name)
-				case *ast.PropertyKeyed:
-					if id, ok := prop.Value.(*ast.Identifier); ok {
-						aliases[string(id.Name)] = mod + "." + propertyKeyName(prop.Key)
-					}
-				}
+			for _, b := range objectPatternBindings(t) {
+				aliases[b.Local] = mod + "." + b.Key
 			}
 		}
 	}
@@ -156,6 +149,12 @@ func calleeTrailingName(e ast.Expression) string {
 // jsFamilyExts are the module extensions stripped when resolving a relative
 // require specifier to a scan-root-relative module name (matching moduleNameFor,
 // which strips the source file's own extension).
+//
+// Deliberately NOT IsJSFamily: this is matched CASE-SENSITIVELY against a
+// specifier written in source (`require('./util.js')`), whereas IsJSFamily
+// lowercases a filesystem path. Routing it through IsJSFamily would make
+// `./util.JS` resolve to a different module than it does today. It must be
+// extended by hand alongside needsTransform.
 var jsFamilyExts = map[string]bool{
 	".js": true, ".mjs": true, ".cjs": true,
 	".ts": true, ".tsx": true, ".jsx": true,

@@ -10,9 +10,13 @@ rules:
       instead of redirecting to a user-controlled URL.
     extend: $_go-common.yaml
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
+    # Default guard for every sink below (a sink may override with its own
+    # `when:`): hostFixed() is an engine-supplied FACT about how the tainted URL
+    # string was built -- a constant scheme://host prefix ahead of the taint means
+    # the attacker controls only the path/query and cannot choose the host.
+    when: 'not hostFixed()'
     sinks:
-      - sink: "go:*net/http.Redirect#2"
-        when: 'not hostFixed()'
+      - "go:*net/http.Redirect#2"
     sanitizers:
       - "go:*url.QueryEscape"
       - "go:*url.PathEscape"

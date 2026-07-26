@@ -329,17 +329,17 @@ type frontend struct {
 // uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
 var languageFrontends = []frontend{
 	{"go", goConvert, func(p string) bool { return strings.HasSuffix(p, ".go") }},
-	{"python", noDepConvert(func(p string) (*ir.Program, error) { return py_converter.NewConverter().ConvertFile(p) }),
+	{"python", noDepConvert(py_converter.NewConverter),
 		func(p string) bool { return strings.HasSuffix(p, ".py") }},
-	{"javascript", noDepConvert(func(p string) (*ir.Program, error) { return js_converter.NewConverter().ConvertFile(p) }),
+	{"javascript", noDepConvert(js_converter.NewConverter),
 		js_converter.IsJSFamily},
-	{"java", noDepConvert(func(p string) (*ir.Program, error) { return java_converter.NewConverter().ConvertFile(p) }),
+	{"java", noDepConvert(java_converter.NewConverter),
 		func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
-	{"cpp", noDepConvert(func(p string) (*ir.Program, error) { return cpp_converter.NewConverter().ConvertFile(p) }),
+	{"cpp", noDepConvert(cpp_converter.NewConverter),
 		isCppFile},
-	{"rust", noDepConvert(func(p string) (*ir.Program, error) { return rust_converter.NewConverter().ConvertFile(p) }),
+	{"rust", noDepConvert(rust_converter.NewConverter),
 		func(p string) bool { return strings.HasSuffix(p, ".rs") }},
-	{"ruby", noDepConvert(func(p string) (*ir.Program, error) { return ruby_converter.NewConverter().ConvertFile(p) }),
+	{"ruby", noDepConvert(ruby_converter.NewConverter),
 		func(p string) bool { return strings.HasSuffix(p, ".rb") }},
 }
 
@@ -351,28 +351,39 @@ func goConvert(p string) (*ir.Program, map[string]bool, error) {
 	return prog, c.TargetPackages(), err
 }
 
+// fileConverter is the shape every non-dep-lowering frontend's converter shares:
+// lower one path to a program. It exists so noDepConvert can be written once
+// against all of them instead of per-frontend wrapper closures.
+type fileConverter interface {
+	ConvertFile(string) (*ir.Program, error)
+}
+
 // noDepConvert adapts a frontend that does not lower dependency bodies (every
 // frontend except Go) to the frontend.convert signature — it has no dependency
-// findings to scope, so it returns a nil target-package set.
-func noDepConvert(conv func(string) (*ir.Program, error)) func(string) (*ir.Program, map[string]bool, error) {
+// findings to scope, so it returns a nil target-package set. newC is the
+// frontend's NewConverter, called per conversion so each scan gets a fresh
+// converter.
+func noDepConvert[T fileConverter](newC func() T) func(string) (*ir.Program, map[string]bool, error) {
 	return func(p string) (*ir.Program, map[string]bool, error) {
-		prog, err := conv(p)
+		prog, err := newC().ConvertFile(p)
 		return prog, nil, err
 	}
 }
 
-// scopeFindings drops Go findings whose sink function lives in a lowered
-// dependency package (not user code). Dependencies are lowered so taint flows
-// THROUGH them, but a sink reached inside a library is noise, not an actionable
-// finding. Non-Go findings, and Go findings with no recorded package, are kept.
-// A no-op when targetGoPkgs is empty (nothing was dep-lowered).
-func scopeFindings(findings []analysis.Finding, targetGoPkgs map[string]bool) []analysis.Finding {
-	if len(targetGoPkgs) == 0 {
+// scopeFindings drops findings whose sink function lives in a lowered dependency
+// package (not user code). Dependencies are lowered so taint flows THROUGH them,
+// but a sink reached inside a library is noise, not an actionable finding. Only
+// a dep-lowering frontend's language can produce such a finding (depLoweringLangs
+// — the same fact that decides which modules seedScope holds back), so findings
+// from every other language, and those with no recorded package, are kept.
+// A no-op when targetPkgs is empty (nothing was dep-lowered).
+func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []analysis.Finding {
+	if len(targetPkgs) == 0 {
 		return findings
 	}
 	kept := findings[:0]
 	for _, f := range findings {
-		if f.Language == "go" && f.Package != "" && !targetGoPkgs[f.Package] {
+		if depLoweringLangs[f.Language] && f.Package != "" && !targetPkgs[f.Package] {
 			continue
 		}
 		kept = append(kept, f)

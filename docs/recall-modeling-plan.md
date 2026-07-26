@@ -136,7 +136,7 @@ designated-branch policy — which grows an already-large PR. Flag for the human
   sink *is* modeled, but taint died at the ubiquitous `pathlib.Path(x)` / `os.path.normpath(x)`
   normalization hop because Python — unlike Java (`Paths.get`/`Path.of`/`Path.resolve`) — had no
   path-normalization propagators. Added them to `py-path-traversal.yaml` and `py-zip-slip.yaml`
-  (both share `_py-fs-sinks.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
+  (both share `_py-fs.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
   `.expanduser`, `os.path.normpath`/`.abspath`/`.realpath`. Propagators forward existing taint
   and create no findings on their own, so the FP blast radius is structurally zero — confirmed:
   **CVE-2024-4941 gradio flips MISS→HIT** (`py-path-traversal` → `open` in `processing_utils.py`,

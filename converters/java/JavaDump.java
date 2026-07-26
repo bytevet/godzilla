@@ -21,19 +21,31 @@ import javax.tools.*;
 public class JavaDump {
     public static void main(String[] args) throws Exception {
         List<byte[]> classes = new ArrayList<>();
-        Path tmp = Files.createTempDirectory("gjdump");
         List<String> sources = new ArrayList<>();
         for (String a : args) collect(Path.of(a), sources, classes);
+        // The javac output directory is created only when there is something to
+        // compile (a pure-.class scan needs none) and deleted once the classes have
+        // been read into memory — otherwise every scan left an orphan /tmp/gjdumpNNNN.
         if (!sources.isEmpty()) {
-            JavaCompiler c = ToolProvider.getSystemJavaCompiler();
-            List<String> opts = new ArrayList<>(List.of("-d", tmp.toString(), "-proc:none", "-g"));
-            opts.addAll(sources);
-            // Best-effort: unresolved classpath deps make javac emit no .class; those
-            // sources are simply skipped (scan compiled artifacts for full fidelity).
-            c.run(null, null, OutputStream.nullOutputStream(), opts.toArray(new String[0]));
-            try (var w = Files.walk(tmp)) {
-                for (Path p : (Iterable<Path>) w.filter(x -> x.toString().endsWith(".class"))::iterator)
-                    classes.add(Files.readAllBytes(p));
+            Path tmp = Files.createTempDirectory("gjdump");
+            try {
+                JavaCompiler c = ToolProvider.getSystemJavaCompiler();
+                List<String> opts = new ArrayList<>(List.of("-d", tmp.toString(), "-proc:none", "-g"));
+                opts.addAll(sources);
+                // Best-effort: unresolved classpath deps make javac emit no .class; those
+                // sources are simply skipped (scan compiled artifacts for full fidelity).
+                c.run(null, null, OutputStream.nullOutputStream(), opts.toArray(new String[0]));
+                try (var w = Files.walk(tmp)) {
+                    for (Path p : (Iterable<Path>) w.filter(x -> x.toString().endsWith(".class"))::iterator)
+                        classes.add(Files.readAllBytes(p));
+                }
+            } finally {
+                // Best-effort cleanup: a failed delete must never turn a working scan
+                // into a frontend error, so nothing here may throw out of main.
+                try (var w = Files.walk(tmp)) {
+                    for (Path p : (Iterable<Path>) w.sorted(Comparator.reverseOrder())::iterator)
+                        Files.deleteIfExists(p);
+                } catch (IOException ignored) { }
             }
         }
         StringBuilder sb = new StringBuilder();

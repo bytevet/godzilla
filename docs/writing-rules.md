@@ -139,6 +139,31 @@ A guard is evaluated in the frame where the sink appears. So if a dependency
 the argument there is always `"<DYN>"` — the guard can't confirm, and the sink is
 not reported through the wrapper. Guard sinks that user code calls directly.
 
+### A rule-level default `when`
+
+When a guard expresses what the *whole rule* means rather than something about
+one sink, put it at the rule level: every sink (and dangerous-call callee) that
+declares no `when` of its own inherits it — including sinks merged in from a
+fragment, so a sink added later cannot silently opt out. The shipped SSRF and
+open-redirect packs use this for `not hostFixed()`, which is a statement about
+the rule, not about any particular HTTP client:
+
+```yaml
+- id: js-ssrf
+  when: 'not hostFixed()'      # default for every sink below
+  sinks:
+    - "js:*http.get"
+    - "js:*axios*"
+    - sink: "js:*fetch"
+      when: 'true'             # this one opts out
+```
+
+An entry's own `when` always wins, so `when: 'true'` is the per-sink opt-out.
+`hostFixed()` is an engine-supplied FACT about how the tainted URL string was
+built (a constant `scheme://host` prefix ahead of the taint means the attacker
+controls only the path/query) — the rule decides what to do with it, the engine
+does not decide for the rule.
+
 ## Fragments (`extend`)
 
 Packs for a language often share pattern lists — the same request **sources**,
@@ -179,6 +204,7 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 | `confidence` | dangerous-call | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
 | `cwe`, `message` | both | Reported metadata. |
 | `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
+| `when` | both | Rule-level default dynamic guard, inherited by every sink/callee that declares none of its own (fragment-merged entries included). An entry's own `when` wins; `when: 'true'` opts out. |
 | `request_object_sources` | taint | Sources whose value is an HTTP request *object* (e.g. `go:@net/http.Request`; also list in `sources`). Tags the flavor so the engine grants request-object provenance without a hardcoded name. |
 | `callees` | dangerous-call | Globs whose call site is itself the finding. |
 | `const_arg` | dangerous-call | Optional `{index, matches}` constant-argument condition. |

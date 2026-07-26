@@ -1,0 +1,15 @@
+# The Rust propagators taken by the SQLi / command-injection / SSRF rules but
+# NOT by rust-path-traversal. They were never applied to the path rule (the two
+# lists were maintained as separate copies), and this fragment records that
+# difference explicitly instead of hiding it in 30 duplicated lines.
+#
+# Whether rust-path-traversal SHOULD take them is an open question — a path
+# built via `parts.join("/")` or `Path::new(&bytes.to_vec())` would then be
+# tracked — but adding them changes which findings are produced, so it needs a
+# corpus run of its own and is deliberately not done here.
+propagators:
+  - "rust:*join"
+  - "rust:*concat"
+  - "rust:*splitn"
+  - "rust:*bytes"
+  - "rust:*to_vec"

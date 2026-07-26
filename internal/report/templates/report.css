@@ -4,7 +4,7 @@
    embedded into the binary and inlined into the single output HTML document; it
    contains no finding data. */
 
-:root {
+:root, :root[data-theme="light"] {
   --bg: #f5f7f8;
   --panel: #ffffff;
   --line: #dde4e6;
@@ -62,24 +62,6 @@
   --sev-medium: #d99433;
   --sev-low: #4bb3e6;
   --sev-info: #7d8a90;
-}
-:root[data-theme="light"] {
-  --bg: #f5f7f8;
-  --panel: #ffffff;
-  --line: #dde4e6;
-  --ink: #0f1a1e;
-  --soft: #5c6b70;
-  --accent: #0e7c86;
-  --accent-ink: #0a5b62;
-  --ok: #187a49;
-  --warn: #9a5a08;
-  --crit: #bb352b;
-  --mute: #6b7686;
-  --sev-critical: #a01d13;
-  --sev-high: #bb352b;
-  --sev-medium: #9a5a08;
-  --sev-low: #0e6f9c;
-  --sev-info: #6b7686;
 }
 
 * { box-sizing: border-box; }

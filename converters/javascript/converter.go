@@ -110,7 +110,6 @@ package js_converter
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/dop251/goja/file"
@@ -135,42 +134,22 @@ func NewConverter() *Converter {
 // converted recursively, one gIR Module per file, skipping any
 // "node_modules" directory).
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	if info.IsDir() {
-		files, err = walkignore.CollectSources(abs, IsJSFamily)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		files = []string{abs}
-	}
-
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no JavaScript files found under %s", abs)
-	}
-
 	// Module names are the file path relative to the scan root, so same-named
 	// functions in different files get distinct canonical names instead of
-	// colliding in the analyzer. Single-file mode: root is the file's directory,
-	// so the module name stays the bare filename.
-	root := abs
-	if !info.IsDir() {
-		root = filepath.Dir(abs)
+	// colliding in the analyzer. For a single file the root is its own
+	// directory, so its module name stays the bare filename (see
+	// walkignore.CollectTarget).
+	root, files, isDir, err := walkignore.CollectTarget(path, IsJSFamily)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no JavaScript files found under %s", root)
 	}
 
 	// Single-file mode (path pointed directly at a .js file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
-	if !info.IsDir() {
+	if !isDir {
 		mod, defaultExport, err := c.convertJSFile(files[0], moduleNameFor(root, files[0]))
 		if err != nil {
 			return nil, err
@@ -222,7 +201,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("js_converter: no JavaScript files under %s converted successfully (%d file(s) failed): %s",
-			abs, len(convertErrs), strings.Join(convertErrs, "; "))
+			root, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 
 	resolveJSCrossModuleCalls(prog, defaultExports)
@@ -335,9 +314,5 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 // root is the file's own directory (single-file scans) this is just the bare
 // filename.
 func moduleNameFor(root, file string) string {
-	rel, err := filepath.Rel(root, file)
-	if err != nil {
-		rel = filepath.Base(file)
-	}
-	return filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
+	return walkignore.ModuleName(root, file)
 }

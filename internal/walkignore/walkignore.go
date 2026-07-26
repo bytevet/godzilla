@@ -10,6 +10,7 @@ package walkignore
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +46,53 @@ func CollectSources(root string, match func(path string) bool) ([]string, error)
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// CollectTarget resolves a scan target — a single source file or a directory —
+// into the module ROOT and the list of files to lower. The three
+// straight-line frontends (Python, JS, Ruby) all begin this way and differ only
+// in the file predicate, so the rule that matters lives here once: for a
+// directory the root IS the directory, while for a SINGLE FILE the root is the
+// file's own directory, which keeps its module name the bare filename (see
+// ModuleName). isDir is returned because each frontend still branches on it —
+// a single-file scan surfaces a parse error immediately, a directory batch does
+// not let one bad file abort the rest.
+func CollectTarget(path string, match func(p string) bool) (root string, files []string, isDir bool, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", nil, false, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if info.IsDir() {
+		files, err = CollectSources(abs, match)
+		if err != nil {
+			return "", nil, true, err
+		}
+		return abs, files, true, nil
+	}
+	return filepath.Dir(abs), []string{abs}, false, nil
+}
+
+// ModuleName derives a module name unique to file: its path relative to the
+// scan root, extension stripped, slash-normalized (e.g. "ssrf/app"). When root
+// is the file's own directory (a single-file scan) this is just the bare
+// filename.
+//
+// This shape is a CROSS-FRONTEND CONTRACT: Python, JS and Ruby all name modules
+// this way so that same-named functions in different files get distinct
+// canonical names instead of colliding in the analyzer, and each frontend's
+// cross-module call resolution (resolveCrossModuleCalls) reconstructs a callee's
+// module from an import specifier the same way. Keep the three in lockstep by
+// calling this rather than re-deriving it.
+func ModuleName(root, file string) string {
+	rel, err := filepath.Rel(root, file)
+	if err != nil {
+		rel = filepath.Base(file)
+	}
+	return filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
 }
 
 // skipDirs are directory base names pruned from every source walk.
