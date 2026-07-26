@@ -986,9 +986,9 @@ func analyzeFunc(
 	guards := buildGuardIndex(fn, rule, defs)
 	var curBlock int32
 
-	// linearFn marks a single-basic-block function — the straight-line-lowered
-	// Python/JS/Ruby/Java bodies, which carry NO CFG, so the dominance-based guard
-	// index above can never fire for them. In one linear block, program order IS
+	// linearFn marks a branch-free function, in ANY language — the majority of
+	// bodies even now that every frontend emits a real CFG. In one linear block the
+	// dominance-based guard index above cannot add anything, because program order IS
 	// dominance: a validator applied to a value before that value is returned
 	// guards the return just as a dominating branch would. validated records the
 	// registers a rule validator has been applied to, consulted only in the linear
@@ -1397,10 +1397,8 @@ func analyzeFunc(
 				// guard of its own. Consequence: inside a dependency wrapper the
 				// guarded arg is a parameter (always <DYN>), so a guarded sink is
 				// never reported through a wrapper — documented in writing-rules.md.
-				// hostFixed() is supplied as an engine FACT the guard cannot compute
-				// itself (it needs the injection-point args, the taint state and the
-				// def map). expr calls it only if the rule's expression mentions it,
-				// so an unrelated guard pays nothing for the URL reconstruction.
+				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
+				// it only if the rule mentions it, so an unrelated guard pays nothing.
 				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
 					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break

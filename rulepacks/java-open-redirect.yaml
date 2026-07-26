@@ -10,7 +10,6 @@ rules:
       open redirect. Validate the target against an allowlist of known
       hosts/paths, or only permit relative paths, instead of redirecting to a
       user-controlled URL.
-    # Sources: the shared request surface plus the process environment.
     extend: $_java-sources.yaml
     # The redirect target URL is logical arg 0.
     # Default guard for every sink below (a sink may override with its own

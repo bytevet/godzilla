@@ -9,7 +9,6 @@ rules:
       Untrusted input flows into a JDBC query built by string concatenation,
       which may allow SQL injection. Use a PreparedStatement with bound "?"
       parameters instead of concatenating user input into the query string.
-    # Sources: the shared request surface plus the process environment.
     extend: $_java-sources.yaml
     # The query string is the first (receiver-excluded) argument; a
     # PreparedStatement's bound parameters (set via setString/setInt) are not

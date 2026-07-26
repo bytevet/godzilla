@@ -80,7 +80,7 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   field reads off it are tainted (fixes the field-access-source gap) and, with the engine's request-object
   rule, framework accessors (`c.Query()`) are covered even for an unmodeled framework.
 - `converters/python/` — shells out to `python3` (`converters/python/pyast.py`, embedded) to get an `ast`
-  JSON dump, then lowers it. Straight-line env-based lowering (documented limitations in the package doc).
+  JSON dump, then lowers it to a real CFG via `converters/ssabuild` (residual limits in the package doc).
 - `converters/javascript/` — pure-Go parse via `github.com/dop251/goja`, then lowers. Member-read chains
   off an opaque base (`req.query`) become a synthetic source CALL so taint seeds correctly; chained calls
   (`axios.get(u).then(cb)`) lower the inner call via `lowerNestedCallees`. **TypeScript/JSX/ESM**
@@ -128,7 +128,7 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   body`, actix `*HttpRequest::query_string|headers`) — with env/args as a secondary CLI/CGI source.
 - `converters/ruby/` — analyzes Ruby via the stdlib **Ripper**. An embedded helper (`rbdump.rb`, run
   via `ruby`) parses `.rb` and prints Ripper's S-expression AST as JSON; `lower.go` lowers that tree
-  (straight-line, like Python/JS). Ripper ships with every MRI Ruby, so only a `ruby` on `PATH` is
+  (real CFG via `converters/ssabuild`, like Python/JS). Ripper ships with every MRI Ruby, so only a `ruby` on `PATH` is
   needed — pure Go, in the default binary. Canonical names `ruby:<module>.<method>`; sources model an
   untrusted HTTP request (Rails/Sinatra `params`), and backtick/`%x` shell literals are a command sink.
 - `converters/cpp/` + `converters/llvm/` — C/C++ via **LLVM IR** (clang `-O1 -g -emit-llvm`), lowered
@@ -137,7 +137,7 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   path too but moved to the pure-Go MIR frontend above.)
 - Python, JS, and Ruby name modules by their **path relative to the scan root** (`moduleNameFor`), so
   same-named functions in different files get distinct canonical names instead of colliding in the analyzer.
-  These three straight-line frontends share their common scaffolding rather than re-implementing it:
+  These three frontends share their common scaffolding rather than re-implementing it:
   `walkignore.CollectTarget` / `CollectSources` (resolve the scan target, then the pruned directory walk →
   sorted file list) and `walkignore.ModuleName` (the shared scan-root-relative module-name contract),
   `proc.WriteEmbeddedScript` (materialize the embedded interpreter helper into a temp file),
@@ -175,11 +175,13 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   the value as a `?` placeholder, they do not concatenate it), which would flood findings; (b) a function that is
   **itself a modeled sink** (gorm `db.Raw`) does not summarize, so its direct call site fires once instead of
   double-reporting.
-- `ssrf.go` — **CWE-918 false-positive reduction (`urlHostControllable`)**, language-agnostic and free of any
-  language callee-name matching. When an SSRF sink fires, it reconstructs how the tainted URL string was built
-  and **suppresses the finding when a constant `scheme://host/…` prefix (`hostFixedRe`) precedes the first
-  tainted segment** — i.e. the taint is confined to the path/query of a fixed host and cannot redirect the
-  request. The construction shapes it understands come from **neutral IR the frontends emit**, not engine-side
+- `ssrf.go` — supplies the **`hostFixed()` FACT** behind CWE-918/601 false-positive reduction
+  (`urlHostControllable`), language-agnostic and free of any language callee-name matching. It reconstructs
+  how the tainted URL string was built and reports whether a constant `scheme://host/…` prefix precedes the
+  first tainted segment — i.e. the taint is confined to the path/query of a fixed host and cannot redirect the
+  request. The engine no longer decides suppression and no longer branches on CWE: rules opt in with
+  `when: 'not hostFixed()'` (a rule-level default in the SSRF/open-redirect packs), and the regexp lives with
+  the guard in `internal/rules/guard.go`. The construction shapes it understands come from **neutral IR the frontends emit**, not engine-side
   name lists: `BIN_OP_ADD` concatenation (every language's `+`, Rust included), Python `%` (`BIN_OP_REM`), and
   two frontend-set intrinsic markers — **`builtin.format`** (a printf-style formatter: Go `fmt.Sprint*`, Java
   `String.format`/`valueOf`, Rust `fmt::Arguments::new` — template in `Args[0]`; for Rust `format!` the packed
@@ -215,9 +217,9 @@ the **top-level `rulepacks/`** directory, embedded into the binary by `rulepacks
   `ObjectInputStream`/`XMLDecoder`/SnakeYAML/XStream).
 - **Rust** — command injection (`std::process::Command`), path traversal (`std::fs`), SQL injection
   (rusqlite/sqlx/diesel), SSRF (reqwest/ureq), XSS (CWE-79), open redirect (CWE-601).
-- **Ruby** — SQL injection (CWE-89: ActiveRecord `execute`/`exec_query`/`find_by_sql`/raw `where`) and
+- **Ruby** — SQL injection (CWE-89: ActiveRecord `execute`/`exec_query`/`find_by_sql`/raw `where`),
   command injection (CWE-78: `system`/`exec`/`spawn`/`IO.popen`/`Open3`, plus backtick/`%x` literals;
-  `Shellwords.escape` sanitizes).
+  `Shellwords.escape` sanitizes), plus path traversal, SSRF, XSS and open redirect.
 - **C / C++** (`c*:` globs match both `c:` and `cpp:`) — command injection, path traversal, format string
   (CWE-134), SQL injection (CWE-89), buffer overflow (unsafe `gets`/`strcpy`-family, CWE-242/120).
 - **Weak crypto / dangerous APIs** (`kind: dangerous-call`, non-dataflow call-site match — no taint) —

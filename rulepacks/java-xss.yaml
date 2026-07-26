@@ -12,7 +12,6 @@ rules:
       (e.g. Spring HtmlUtils.htmlEscape, OWASP Encoder.forHtml, or Apache
       StringEscapeUtils.escapeHtml4) or render through a template engine that
       auto-escapes by context.
-    # Sources: the shared request surface plus the process environment.
     extend: $_java-sources.yaml
     # The tainted string is the value written; it is logical arg 0 of the
     # response writer/stream call.

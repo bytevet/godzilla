@@ -18,8 +18,8 @@ import (
 // out-pointer indirection), so a straight-line value-forwarding pass recovers
 // clean SSA. See converter.go for how the MIR text is produced.
 //
-// The lowering flattens control flow into one block (like the Python/JS
-// frontends): it walks a function's basic blocks in order and forwards each
+// The lowering flattens control flow into one block (unlike the Python/JS/Ruby
+// frontends, which build a real CFG): it walks a function's basic blocks in order and forwards each
 // MIR local to its current gIR value. That is exact for the straight-line
 // source→sink handler shape that matters for taint.
 

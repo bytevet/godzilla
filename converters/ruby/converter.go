@@ -9,8 +9,8 @@
 // `ruby` on PATH is required; ConvertFile returns a clear error if it is absent.
 //
 // Scope (deliberately narrow, taint-focused — like the Python frontend's
-// documented limits): straight-line env-based lowering with no real CFG (one
-// basic block per method/def, branch bodies flattened in source order). Covered
+// documented limits): a real CFG via converters/ssabuild (if/elsif/while/until/
+// case lower to blocks with PHI joins; a branch-free method stays one block). Covered
 // expressions: literals, string interpolation, `+` concatenation, local
 // variable reads/assignments, method/command calls (with and without a
 // receiver), and index reads. The web request surface lowers to a synthetic

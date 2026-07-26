@@ -89,11 +89,8 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 						if !matched || !constArgMatches(d.rule, d.re, inst.Call, getDefs) {
 							continue
 						}
-						// Dynamic callee guard (`when:`): suppress unless it confirms
-						// against the call's argument values, reconstructed through the
-						// function's def map so a keyword marker resolves to its name and
-						// a register-held constant to its text.
-						// Built lazily: no reconstruction for the common unguarded rule.
+						// Dynamic callee guard (`when:`): suppress unless it confirms against
+						// the call's reconstructed argument values (required-confirmation).
 						if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
 							continue
 						}

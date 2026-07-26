@@ -183,7 +183,7 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
   functions incl. closures via `ssautil.AllFunctions`, since vulnerable code often
   lives in `http.HandleFunc` closures. Emits `go:` names.
 - **Python** (`converters/python/`) — shells out to `python3` for an `ast` JSON
-  dump, then lowers it (straight-line). Emits `py:` names; requires `python3`.
+  dump, then lowers it to a real CFG (`ssabuild`). Emits `py:` names; requires `python3`.
 - **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
   lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node) before
   parsing, with source maps remapping positions back. `.vue`/`.svelte` SFCs are also
@@ -201,7 +201,7 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
   `cargo` so framework deps resolve. Emits `rust:<normalized-path>`.
 - **Ruby** (`converters/ruby/`) — an embedded helper (`rbdump.rb`, run via `ruby`)
   parses with the stdlib **Ripper** and emits its S-expression AST as JSON;
-  `lower.go` lowers that tree (straight-line). Ripper ships with every MRI Ruby.
+  `lower.go` lowers that tree to a real CFG (`ssabuild`). Ripper ships with every MRI Ruby.
   Emits `ruby:` names.
 - **C / C++** (`converters/cpp/` + shared `converters/llvm/`) — clang compiles each
   unit to **LLVM IR** (`-O1 -g`), parsed via libLLVM and lowered. This is the
@@ -233,11 +233,11 @@ detected across the languages that have samples.
 |---|---|
 | gIR (small core + intrinsics, SSA, canonical FQNs) | ✅ `proto/`, `pkg/ir/v1/` |
 | Go frontend (x/tools SSA; funcs + methods + closures) | ✅ |
-| Python frontend (`python3` `ast` → gIR) | ✅ straight-line lowering; requires `python3` |
-| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild; Vue/Svelte SFCs) | ✅ straight-line lowering |
+| Python frontend (`python3` `ast` → gIR) | ✅ real CFG+SSA lowering (`ssabuild`); requires `python3` |
+| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild; Vue/Svelte SFCs) | ✅ real CFG+SSA lowering (`ssabuild`) |
 | Java frontend (JVM bytecode → gIR) | ✅ `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ |
 | Rust frontend (rustc MIR → gIR) | ✅ value-forwarding over MIR; pure Go, default binary; needs `rustc` |
-| Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + straight-line lowering; pure Go, default binary; needs `ruby` |
+| Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + real CFG+SSA lowering (`ssabuild`); pure Go, default binary; needs `ruby` |
 | C/C++ frontend (LLVM IR → gIR) | ✅ **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
 | Rule engine (YAML, FQN globs, built-in packs) | ✅ taint + dangerous-call kinds across Go/Python/JS/Java/Rust/Ruby/C·C++ (see the [detection matrix](README.md#supported-languages--detections)) |
 | Inter-procedural taint (call graph + summaries) | ✅ intra = High, cross-function = Medium confidence |
@@ -249,13 +249,15 @@ detected across the languages that have samples.
 
 ### Known limitations
 
-- **Straight-line Python/JS lowering.** Control flow is flattened into one
-  conceptual iteration. Taint flows through the common expression forms (f-strings /
+- **Residual lowering approximations (Python/JS/Ruby).** These frontends build a
+  real CFG via `converters/ssabuild`, so branches, loops and their PHI joins are
+  modeled; what is still approximated is exceptions (merged into one untyped
+  handler block) and `break`/`continue` (dropped). Taint flows through the common expression forms (f-strings /
   template literals, `or`/`and`, ternary, walrus, destructuring/unpacking, optional
   chaining, `await`, tainted-iterable loop variables, comprehensions) and class-based
-  handlers with cross-method calls (`self.method(x)` / `this.method(x)`). The main
-  gap is taint carried across methods via **instance attributes** (`self.attr` /
-  `this.attr`). This maximizes recall for the common web-handler shape at the cost of
+  handlers with cross-method calls (`self.method(x)` / `this.method(x)`), and across
+  **instance attributes** for Python and Ruby (`self.attr` / `@ivar`); JS
+  `this.attr` remains a gap. This maximizes recall for the common web-handler shape at the cost of
   path precision — consistent with the recall-first design.
 - **Context-insensitive dispatch (CHA).** An `INVOKE` names the abstract method, so
   taint transfer resolves it to every concrete method of that name and flows into

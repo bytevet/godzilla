@@ -49,7 +49,7 @@ flowchart LR
   severity-gated **exit code**.
 - **Optional LLM review.** A pluggable, off-by-default stage sends low-confidence
   findings to Claude to trim false positives; it fails open.
-- **Single self-contained binary.** Go/JS/Ruby parsing is pure Go; Python, Java,
+- **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
 ## Install
@@ -143,10 +143,10 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Insecure deserialization | — | ✅ | — | ✅ | — | — |
 | Code injection (`eval`) | — | ✅ | ✅ | — | — | — |
 | Weak crypto | ✅ | — | — | ✅ | — | — |
@@ -203,10 +203,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and rationale.
 
 Godzilla is functional and covered by tests, but deliberately scoped:
 
-- **Python/JS lowering is straight-line** — control flow is flattened into one
-  conceptual pass. Taint still flows through common expression forms and
-  class-based handlers; the main gap is taint carried across methods via instance
-  attributes (`self.attr` / `this.attr`).
+- **Residual lowering approximations.** Python, JS and Ruby build a real CFG
+  (`converters/ssabuild`), so branches, loops and their PHI joins are modeled.
+  What is still approximated: exceptions merge into one untyped handler block,
+  and `break`/`continue` are dropped — see each frontend's package doc. Taint
+  across instance attributes ships for Python and Ruby; JS `this.attr` remains.
 - **Taint is inter-procedural but context-insensitive.** Interface/dynamic
   dispatch is threaded via class-hierarchy analysis (an over-approximation).
 - **SSRF is host-aware** — a finding is suppressed, conservatively, when the taint
