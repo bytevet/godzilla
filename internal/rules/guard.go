@@ -23,6 +23,13 @@ type Arg struct {
 	String   string
 	Complete bool
 	Type     string
+	// Name is the keyword/named-argument name this argument was passed under
+	// ("shell" for `subprocess.run(cmd, shell=True)`), or "" for a positional
+	// argument or a language/frontend that does not record names. Without it a
+	// guard can only see that SOME boolean argument is true, which cannot
+	// distinguish the dangerous `shell=True` from an innocuous `check=True` —
+	// so a config-flag rule matches on `.Name` together with `.String`.
+	Name string
 }
 
 // Guard is a compiled `when:` expression that decides whether a dynamic sink or

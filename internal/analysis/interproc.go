@@ -278,6 +278,10 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
+		// A keyword argument arrives wrapped in a name marker; unwrap it so the
+		// skeleton, completeness and type describe the VALUE while .Name carries
+		// the keyword it was passed under.
+		name, v := unwrapKwarg(v, defs)
 		s, complete := constSkeleton(v, defs, map[string]bool{})
 		// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
 		// back as an empty, incomplete skeleton. Render it here — in the guard path
@@ -292,7 +296,7 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 				s, complete = sc, true
 			}
 		}
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs)}
+		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name}
 	}
 	return out
 }

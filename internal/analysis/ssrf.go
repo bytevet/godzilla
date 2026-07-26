@@ -41,6 +41,41 @@ var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
 
+// kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
+// argument's NAME available to rule guards: Args[0] is the name (a string
+// constant), Args[1] the value it wraps. gIR's CallCommon carries only positional
+// args, and a call site may pass keywords in any order, so without this marker
+// `shell=True` is indistinguishable from `check=True` once lowered. Modeling it
+// as an intrinsic keeps the frozen gIR schema untouched.
+//
+// Frontends wrap only CONSTANT values, so the marker never hides taint: it is
+// deliberately absent from intrinsicPropagators, and everything that reads an
+// argument's constant unwraps it first (see unwrapKwarg).
+const kwargIntrinsic = "builtin.kwarg"
+
+// unwrapKwarg resolves v through a kwargIntrinsic marker, returning the keyword
+// name and the value it wraps. For anything else it returns ("", v), so callers
+// can apply it unconditionally. defs may be nil, in which case a marker cannot be
+// resolved and v is returned unchanged.
+func unwrapKwarg(v *ir.Value, defs map[string]*ir.Instruction) (string, *ir.Value) {
+	if v == nil || defs == nil {
+		return "", v
+	}
+	def, ok := defs[v.GetRegName()]
+	if !ok || def.GetIntrinsic() != kwargIntrinsic || def.Call == nil {
+		return "", v
+	}
+	args := def.Call.GetArgs()
+	if len(args) != 2 {
+		return "", v
+	}
+	name, ok := constStr(args[0])
+	if !ok {
+		return "", v
+	}
+	return name, args[1]
+}
+
 // urlHostControllable reports whether any tainted injection-point argument can
 // influence the request URL's host. Returns true (keep the SSRF finding) unless
 // EVERY tainted argument is provably confined to the path/query of a fixed host.
@@ -188,6 +223,14 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 		case def.GetIntrinsic() == identityIntrinsic:
 			if args := def.Call.GetArgs(); len(args) >= 1 {
 				return constSkeleton(args[0], defs, next)
+			}
+		case def.GetIntrinsic() == kwargIntrinsic:
+			// A named-argument marker is pure annotation: reconstruct the value it
+			// wraps, so wrapping a keyword argument never makes a string it
+			// contributes to look dynamic (which would, in the SSRF host analysis,
+			// lose a constant run).
+			if args := def.Call.GetArgs(); len(args) == 2 {
+				return constSkeleton(args[1], defs, next)
 			}
 		}
 	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:

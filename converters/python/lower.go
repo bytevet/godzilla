@@ -693,6 +693,23 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Pos: posFromNode(fs.filename, n)}
 }
 
+// emitKwargMarker tags a constant keyword-argument value with the name it was
+// passed under, as a `builtin.kwarg(<name>, <value>)` intrinsic whose result
+// stands in for the value in the call's argument list. gIR carries positional
+// arguments only, so this is what lets a rule guard tell `shell=True` from
+// `check=True`. Callers wrap constants only, so the marker never hides taint.
+func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = "builtin.kwarg"
+	inst.Call = &ir.CallCommon{
+		Callee: "builtin.kwarg",
+		Args:   []*ir.Value{stringValue(name), v},
+	}
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
 func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
@@ -1677,7 +1694,29 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		appendArg(a)
 	}
 	for _, kw := range n.list("keywords") {
-		appendArg(kw.node("value"))
+		// A keyword argument's NAME is otherwise lost: gIR carries positional args
+		// only, and a call site may pass keywords in any order, so `shell=True` and
+		// `check=True` lower identically. Tag a CONSTANT-valued keyword with a
+		// builtin.kwarg marker so a rule guard can read `.Name` and distinguish a
+		// dangerous configuration flag from an innocuous one. Only constants are
+		// wrapped: a constant carries no taint, so the marker can never hide a
+		// tainted value from the engine (`**kwargs` splats have no name and are
+		// left alone).
+		a := kw.node("value")
+		name := kw.str("arg")
+		// A `**kwargs` splat has no name, and an ast.* constructor's sequence value
+		// must still be SPREAD into element args (see appendArg) — wrapping it would
+		// hide the elements and drop taint into the constructor. Both keep the
+		// existing path.
+		if name == "" || (astCtor && a != nil && a.kind() == "Sequence") {
+			appendArg(a)
+			continue
+		}
+		v := fs.lowerExpr(a)
+		if v.GetConstant() != nil {
+			v = fs.emitKwargMarker(name, v, kw)
+		}
+		cc.Args = append(cc.Args, v)
 	}
 
 	inst := fs.newValueInst(n)

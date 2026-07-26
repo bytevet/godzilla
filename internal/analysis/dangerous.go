@@ -63,6 +63,12 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			if fn == nil {
 				continue
 			}
+			// Built once per function and shared by every rule's guard below. A
+			// dangerous-call argument is usually a literal, but it may be a keyword
+			// marker (builtin.kwarg) or a constant folded through a register, and
+			// neither resolves without the def map — a guard reading `.Name` to tell
+			// `shell=True` from `check=True` would otherwise never see a name.
+			defs := buildDefs(fn)
 			for _, blk := range fn.Blocks {
 				if blk == nil {
 					continue
@@ -77,14 +83,15 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 							continue // cheap language gate before the glob walk
 						}
 						guard, matched := d.rule.MatchDangerousCallee(callee)
-						if !matched || !constArgMatches(d.rule, d.re, inst.Call) {
+						if !matched || !constArgMatches(d.rule, d.re, inst.Call, defs) {
 							continue
 						}
 						// Dynamic callee guard (`when:`): suppress unless it confirms
-						// against the call's constant argument values (nil defs — a
-						// dangerous-call arg is a literal, resolved by constStr alone).
+						// against the call's argument values, reconstructed through the
+						// function's def map so a keyword marker resolves to its name and
+						// a register-held constant to its text.
 						// Built lazily: no reconstruction for the common unguarded rule.
-						if guard != nil && !guard.Eval(argVals(inst.Call, nil)) {
+						if guard != nil && !guard.Eval(argVals(inst.Call, defs)) {
 							continue
 						}
 						key := d.rule.ID + "@" + posKey(inst.GetPos())
@@ -117,7 +124,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 // matches. With one, the constant string at the logical index must match the
 // regexp; a non-constant or out-of-range argument does not match (the rule
 // author asked for a specific literal).
-func constArgMatches(rule *rules.Rule, re *regexp.Regexp, cc *ir.CallCommon) bool {
+func constArgMatches(rule *rules.Rule, re *regexp.Regexp, cc *ir.CallCommon, defs map[string]*ir.Instruction) bool {
 	if rule.ConstArg == nil {
 		return true
 	}
@@ -129,5 +136,8 @@ func constArgMatches(rule *rules.Rule, re *regexp.Regexp, cc *ir.CallCommon) boo
 	if idx < 0 || idx >= len(la) {
 		return false
 	}
-	return re.MatchString(la[idx].GetConstant().GetStringVal())
+	// Unwrap a keyword marker so a const_arg still reads the VALUE a named
+	// argument carries (Cipher.getInstance(algorithm="DES")).
+	_, v := unwrapKwarg(la[idx], defs)
+	return re.MatchString(v.GetConstant().GetStringVal())
 }
