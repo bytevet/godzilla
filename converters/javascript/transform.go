@@ -17,12 +17,13 @@ import (
 // template compiles to synthetic JS calls — see sfc.go). It is the single source
 // of truth for the extension set — the converter's own directory walk and
 // internal/scan's dispatch/detection table both call it.
+//
+// It is DERIVED from the two extension predicates that actually decide how a
+// file is read — isSFC and needsTransform — plus plain .js, so adding an
+// extension to either automatically extends the set the frontend collects
+// instead of leaving a third list to forget.
 func IsJSFamily(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vue", ".svelte":
-		return true
-	}
-	return false
+	return isSFC(path) || needsTransform(path) || strings.ToLower(filepath.Ext(path)) == ".js"
 }
 
 // isSFC reports whether path is a component single-file format (Vue/Svelte) that

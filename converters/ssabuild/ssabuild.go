@@ -58,7 +58,6 @@
 package ssabuild
 
 import (
-	"fmt"
 	"sort"
 	"strconv"
 
@@ -84,6 +83,13 @@ type blockData struct {
 	body []*ir.Instruction
 
 	phis []*phi // PHIs living at the head of this block, in creation order
+
+	// Per-block SSA-construction state (Braun et al.). BlockID is a dense index
+	// into Builder.blocks, so this state belongs on the block itself rather than
+	// in three parallel maps keyed by id.
+	defs       map[string]*ir.Value // current definition of each variable in this block
+	sealed     bool                 // every predecessor of this block is known
+	incomplete map[string]*phi      // PHIs parked while unsealed, by variable
 }
 
 type termKind int
@@ -118,12 +124,6 @@ func (p *phi) value() *ir.Value {
 type Builder struct {
 	blocks []*blockData
 
-	// currentDef[block][name] = value current in that block.
-	currentDef map[BlockID]map[string]*ir.Value
-	sealed     map[BlockID]bool
-	// incompletePhis[block][name] = the incomplete PHI parked for that variable.
-	incompletePhis map[BlockID]map[string]*phi
-
 	// replacements maps a removed PHI's register name to the value it collapsed
 	// to; resolve() follows these chains so no reference to a removed PHI ever
 	// reaches the output.
@@ -137,20 +137,21 @@ type Builder struct {
 // the entry block (and every other block).
 func NewBuilder() *Builder {
 	return &Builder{
-		currentDef:     map[BlockID]map[string]*ir.Value{},
-		sealed:         map[BlockID]bool{},
-		incompletePhis: map[BlockID]map[string]*phi{},
-		replacements:   map[string]*ir.Value{},
-		phiByName:      map[string]*phi{},
+		replacements: map[string]*ir.Value{},
+		phiByName:    map[string]*phi{},
 	}
 }
 
 // NewBlock allocates a fresh, unsealed basic block and returns its id.
 func (b *Builder) NewBlock() BlockID {
 	id := BlockID(len(b.blocks))
-	b.blocks = append(b.blocks, &blockData{id: id})
-	b.currentDef[id] = map[string]*ir.Value{}
-	b.incompletePhis[id] = map[string]*phi{}
+	// defs/incomplete are allocated eagerly rather than lazily: WriteVariable and
+	// readVariableRecursive write them directly, and a write to a nil map panics.
+	b.blocks = append(b.blocks, &blockData{
+		id:         id,
+		defs:       map[string]*ir.Value{},
+		incomplete: map[string]*phi{},
+	})
 	return id
 }
 
@@ -195,32 +196,33 @@ func (b *Builder) addEdge(from, to BlockID) {
 
 // WriteVariable records value as the current definition of name in block.
 func (b *Builder) WriteVariable(name string, block BlockID, value *ir.Value) {
-	b.currentDef[block][name] = value
+	b.blocks[block].defs[name] = value
 }
 
 // ReadVariable returns the value current for name in block, inserting PHIs on
 // demand (and eliminating any that turn out trivial) so the result is the
 // correct SSA value reaching that block.
 func (b *Builder) ReadVariable(name string, block BlockID) *ir.Value {
-	if v, ok := b.currentDef[block][name]; ok {
+	if v, ok := b.blocks[block].defs[name]; ok {
 		return b.resolve(v)
 	}
 	return b.readVariableRecursive(name, block)
 }
 
 func (b *Builder) readVariableRecursive(name string, block BlockID) *ir.Value {
+	bd := b.blocks[block]
 	var val *ir.Value
 	switch {
-	case !b.sealed[block]:
+	case !bd.sealed:
 		// Predecessors not yet all known: park an incomplete PHI.
 		p := b.newPhi(name, block)
-		b.incompletePhis[block][name] = p
+		bd.incomplete[name] = p
 		val = p.value()
-	case len(b.blocks[block].preds) == 0:
+	case len(bd.preds) == 0:
 		// Sealed entry with no def: variable is undefined on this path.
 		val = undefValue()
-	case len(b.blocks[block].preds) == 1:
-		val = b.ReadVariable(name, b.blocks[block].preds[0])
+	case len(bd.preds) == 1:
+		val = b.ReadVariable(name, bd.preds[0])
 	default:
 		p := b.newPhi(name, block)
 		// Record before adding operands to break read cycles (loops).
@@ -234,11 +236,12 @@ func (b *Builder) readVariableRecursive(name string, block BlockID) *ir.Value {
 // Seal marks a block: all of its predecessors are now known. Any incomplete
 // PHIs are given their operands and simplified. Idempotent.
 func (b *Builder) Seal(block BlockID) {
-	if b.sealed[block] {
+	bd := b.blocks[block]
+	if bd.sealed {
 		return
 	}
 	// Deterministic order over the parked variables.
-	pending := b.incompletePhis[block]
+	pending := bd.incomplete
 	names := make([]string, 0, len(pending))
 	for name := range pending {
 		names = append(names, name)
@@ -247,8 +250,10 @@ func (b *Builder) Seal(block BlockID) {
 	for _, name := range names {
 		b.addPhiOperands(pending[name])
 	}
-	b.incompletePhis[block] = map[string]*phi{}
-	b.sealed[block] = true
+	// Only readVariableRecursive's !sealed branch writes incomplete, so once the
+	// block is sealed nothing can park another PHI here.
+	bd.incomplete = nil
+	bd.sealed = true
 }
 
 // Finish materializes the SSA CFG as []*ir.BasicBlock, in id order, with all
@@ -458,8 +463,11 @@ func undefValue() *ir.Value {
 	return regValue("__undef")
 }
 
+// blockLabel is the gIR label for a block ("b<index>"), naming a PHI's
+// predecessor and a terminator's targets. The format matches the Go frontend's
+// blockName, so every frontend's blocks are labelled identically.
 func blockLabel(id BlockID) string {
-	return fmt.Sprintf("b%d", int(id))
+	return "b" + strconv.Itoa(int(id))
 }
 
 // valEq reports whether two operand values are the same SSA value: same

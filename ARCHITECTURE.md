@@ -22,22 +22,17 @@ false-positive backstop.
 
 ## Design principles
 
-- **gIR is the contract.** A single language-neutral SSA IR sits between frontends
-  and analysis; no pass ever branches on source language, only on gIR structure and
-  canonical symbol names. Getting the IR right first avoids reworking every frontend
-  and pass later.
-- **Small core + tagged intrinsics.** The opcode set stays tiny and universal;
-  every language-specific construct is an `INTRINSIC` carrying a canonical name that
-  rules and analysis interpret. No opcode is added for a single language.
-- **SSA is mandatory.** Frontends emit SSA with explicit `PHI` nodes; def-use
-  chains make taint and dataflow dramatically simpler and faster.
-- **Canonical FQN + globs.** Every symbol has a stable `lang:module/path.Type.member`
-  name, so one rule shape matches equivalent APIs across languages.
-- **Inter-procedural taint.** The target vuln classes are source→sink flows that
-  cross function boundaries; the engine follows them via per-function summaries.
-- **In-process, single binary.** Frontends run in-process for fast startup and
-  trivial CI deployment, shelling out to a language toolchain only where unavoidable
-  (Python/Java/Rust/Ruby).
+The sections below describe each component; these are the commitments that shaped
+all of them.
+
+- **gIR is the contract.** No pass ever branches on source language — only on gIR
+  structure and canonical symbol names. Getting the IR right first avoids reworking
+  every frontend and pass later, which is also why it is now frozen.
+- **SSA is mandatory,** because def-use chains make taint dramatically simpler and
+  faster. A frontend whose source is not already SSA constructs it during lowering
+  (`converters/ssabuild`).
+- **In-process, single binary,** for fast startup and trivial CI deployment,
+  shelling out to a language toolchain only where unavoidable.
 - **Recall first, precision backstop.** Lowering favors catching the common
   web-handler vulnerability shape; a confidence score plus the optional LLM reviewer
   trim the residual false positives.
@@ -93,12 +88,6 @@ semantics in rules, so common propagators (concatenation, formatting) are handle
 uniformly. The core stays neutral while every language construct has a home — no
 opcode per language feature.
 
-### SSA is mandatory
-
-Every frontend emits SSA: unique value definitions and explicit `PHI` nodes at
-control-flow joins. Frontends whose source is not already SSA run SSA construction
-during lowering.
-
 ### Canonical symbol naming
 
 Every function, method, and global carries a stable canonical FQN so rules match
@@ -150,12 +139,13 @@ Inter-procedural taint tracking (`internal/analysis/`):
 
 Analysis cost is scoped **demand-driven**: `Engine.ScopeSeed` seeds only user
 functions, so a lowered dependency function is analyzed only when taint reaches it
-(see the Go frontend's dependency lowering). A regex-based **secrets scanner**
-(`ScanSecrets`, CWE-798) runs alongside taint over gIR string constants.
+(see the Go frontend's dependency lowering). The **secrets scanner**
+(`ScanSecrets`, CWE-798) runs alongside taint, applying the `kind: secret` rules'
+regexps to gIR string constants and to config files no frontend parses.
 
 ## Rule engine
 
-YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
+YAML rules matched against canonical symbols (`internal/rules/`), in three kinds:
 
 - **Taint rules** (default) — a source→sink dataflow spec with
   sanitizers/validators/propagators. A sink may pin its injection-point argument
@@ -164,13 +154,19 @@ YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
   match: any call to a banned/weak API (optionally gated on a constant argument) is a
   finding. Backs the weak-crypto packs (weak hash/cipher CWE-327, insecure
   `math/rand` CWE-338).
+- **Secret rules** (`kind: secret`) — no call at all: a regexp over string
+  constants and config-file lines, backing the CWE-798 pack. Keeping these as
+  rules rather than a Go table means a project can add its own credential format
+  through `--rules`, and `rules list|lint|test` covers them like anything else.
 
-Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
-not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
-`rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
-Shared source/sink/sanitizer/propagator lists live in `_`-prefixed **fragments**
-that a pack pulls in with `extend:`, so a language's request sources (and any other
-list two packs share) are defined once, not per pack.
+Built-in packs live in `rulepacks/` and are embedded into the binary; `--rules`
+merges user rules on top. Shared source/sink/sanitizer/propagator lists live in
+`_`-prefixed **fragments** that a pack pulls in with `extend:`, so a language's
+request sources are defined once, not per pack. One fragment,
+`_default-propagators.yaml`, is applied to every rule by the loader instead of
+being named in `extend:` — the taint-preserving stdlib transforms
+(`strings.TrimSpace`, `str.strip`, `String.trim`) that no rule should have to
+restate.
 Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends
@@ -183,7 +179,7 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
   functions incl. closures via `ssautil.AllFunctions`, since vulnerable code often
   lives in `http.HandleFunc` closures. Emits `go:` names.
 - **Python** (`converters/python/`) — shells out to `python3` for an `ast` JSON
-  dump, then lowers it (straight-line). Emits `py:` names; requires `python3`.
+  dump, then lowers it to a real CFG (`ssabuild`). Emits `py:` names; requires `python3`.
 - **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
   lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node) before
   parsing, with source maps remapping positions back. `.vue`/`.svelte` SFCs are also
@@ -201,7 +197,7 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
   `cargo` so framework deps resolve. Emits `rust:<normalized-path>`.
 - **Ruby** (`converters/ruby/`) — an embedded helper (`rbdump.rb`, run via `ruby`)
   parses with the stdlib **Ripper** and emits its S-expression AST as JSON;
-  `lower.go` lowers that tree (straight-line). Ripper ships with every MRI Ruby.
+  `lower.go` lowers that tree to a real CFG (`ssabuild`). Ripper ships with every MRI Ruby.
   Emits `ruby:` names.
 - **C / C++** (`converters/cpp/` + shared `converters/llvm/`) — clang compiles each
   unit to **LLVM IR** (`-O1 -g`), parsed via libLLVM and lowered. This is the
@@ -226,36 +222,34 @@ same-named functions in different files get distinct canonical names.
 
 ## Implementation status
 
-Every component below is implemented and tested end-to-end; every vuln class is
-detected across the languages that have samples.
+Every component described above — gIR, all seven frontends, the rule engine,
+inter-procedural taint, secrets scanning, the report, and the LLM reviewer — is
+implemented and tested end-to-end, and every vuln class is detected across the
+languages that have samples (see the
+[detection matrix](README.md#supported-languages--detections)). Two components are
+deliberately approximate rather than complete:
 
 | Component | Status |
 |---|---|
-| gIR (small core + intrinsics, SSA, canonical FQNs) | ✅ `proto/`, `pkg/ir/v1/` |
-| Go frontend (x/tools SSA; funcs + methods + closures) | ✅ |
-| Python frontend (`python3` `ast` → gIR) | ✅ straight-line lowering; requires `python3` |
-| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild; Vue/Svelte SFCs) | ✅ straight-line lowering |
-| Java frontend (JVM bytecode → gIR) | ✅ `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ |
-| Rust frontend (rustc MIR → gIR) | ✅ value-forwarding over MIR; pure Go, default binary; needs `rustc` |
-| Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + straight-line lowering; pure Go, default binary; needs `ruby` |
-| C/C++ frontend (LLVM IR → gIR) | ✅ **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
-| Rule engine (YAML, FQN globs, built-in packs) | ✅ taint + dangerous-call kinds across Go/Python/JS/Java/Rust/Ruby/C·C++ (see the [detection matrix](README.md#supported-languages--detections)) |
-| Inter-procedural taint (call graph + summaries) | ✅ intra = High, cross-function = Medium confidence |
-| Analysis scoping | ✅ demand-driven: `Engine.ScopeSeed` seeds only user functions, so a lowered dependency is analyzed only when taint reaches it |
 | Pointer analysis | ⚠️ approximated (CHA + value-flow); a full demand-driven points-to is a future precision upgrade |
-| Secrets scanning | ✅ regex over gIR string constants (CWE-798) |
-| Report (HTML / JSON / SARIF) + exit-code gating | ✅ |
-| LLM reviewer (pluggable) | ✅ Anthropic-backed, confidence-gated, fail-open; off by default |
+| Python / JS / Ruby lowering | ⚠️ real CFG + SSA, but exceptions and `break`/`continue` stay approximate (below) |
+
+Two are not in the default binary or need a toolchain: the **C/C++** frontend is
+an opt-in cgo build (`-tags "llvm byollvm"` + libLLVM; the default ships a stub),
+and Python, Ruby, Java and Rust need `python3` / `ruby` / a JDK 24+ / `rustc` on
+`PATH`, degrading to a coverage warning when absent.
 
 ### Known limitations
 
-- **Straight-line Python/JS lowering.** Control flow is flattened into one
-  conceptual iteration. Taint flows through the common expression forms (f-strings /
+- **Residual lowering approximations (Python/JS/Ruby).** These frontends build a
+  real CFG via `converters/ssabuild`, so branches, loops and their PHI joins are
+  modeled; what is still approximated is exceptions (merged into one untyped
+  handler block) and `break`/`continue` (dropped). Taint flows through the common expression forms (f-strings /
   template literals, `or`/`and`, ternary, walrus, destructuring/unpacking, optional
   chaining, `await`, tainted-iterable loop variables, comprehensions) and class-based
-  handlers with cross-method calls (`self.method(x)` / `this.method(x)`). The main
-  gap is taint carried across methods via **instance attributes** (`self.attr` /
-  `this.attr`). This maximizes recall for the common web-handler shape at the cost of
+  handlers with cross-method calls (`self.method(x)` / `this.method(x)`), and across
+  **instance attributes** for Python and Ruby (`self.attr` / `@ivar`); JS
+  `this.attr` remains a gap. This maximizes recall for the common web-handler shape at the cost of
   path precision — consistent with the recall-first design.
 - **Context-insensitive dispatch (CHA).** An `INVOKE` names the abstract method, so
   taint transfer resolves it to every concrete method of that name and flows into

@@ -8,8 +8,8 @@ import (
 	"godzilla/internal/rules"
 )
 
-func cmdiRuleSet(id string) *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
+func cmdiRuleSet(t testing.TB, id string) *rules.RuleSet {
+	return &rules.RuleSet{DefaultPropagators: shippedDefaultPropagators(t), Rules: []rules.Rule{{
 		ID:        id,
 		Languages: []string{"go"},
 		Severity:  rules.SeverityCritical,
@@ -32,7 +32,7 @@ func analyzeGo(t *testing.T, path string, rs *rules.RuleSet) []Finding {
 // TestFieldSensitivity_CleanFieldNotFlagged is the ENG-3 guard: tainting struct
 // field A must not taint a read of the clean field B.
 func TestFieldSensitivity_CleanFieldNotFlagged(t *testing.T) {
-	findings := analyzeGo(t, "../../test/go/field_sensitive/main.go", cmdiRuleSet("GO-CMDI-FS"))
+	findings := analyzeGo(t, "../../test/go/field_sensitive/main.go", cmdiRuleSet(t, "GO-CMDI-FS"))
 	for _, f := range findings {
 		if f.RuleID == "GO-CMDI-FS" {
 			t.Fatalf("field-insensitive FP: a clean field read was flagged (source %v -> sink %v)", f.SourcePos, f.SinkPos)
@@ -52,7 +52,7 @@ func TestFieldSensitivity_TaintedFieldStillFlagged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert sql_injection: %v", err)
 	}
-	rs := &rules.RuleSet{Rules: []rules.Rule{{
+	rs := &rules.RuleSet{DefaultPropagators: shippedDefaultPropagators(t), Rules: []rules.Rule{{
 		ID:        "GO-SQLI-FS",
 		Languages: []string{"go"},
 		Severity:  rules.SeverityHigh,

@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"godzilla/internal/buildpolicy"
+	"godzilla/internal/chunks"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -67,14 +68,35 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// analysis needs, warning loudly on format drift rather than silently
 	// producing zero findings.
 	warnIfMIRDrifted()
+
+	// One `rustc --emit=mir` process per file, run concurrently (bounded by
+	// GOMAXPROCS via chunks.Run) — the same shape the Python and Ruby frontends
+	// use for their interpreter invocations. Each emitMIR writes to its own temp
+	// output, so the compiles are independent. Results land at fixed indices, so
+	// prog.Modules keeps the sorted file order regardless of completion order.
+	type fileResult struct {
+		mod *ir.Module
+		err error
+	}
+	results := make([]fileResult, len(files))
+	chunks.Run(len(files), func(start, end int) {
+		for i := start; i < end; i++ {
+			mir, err := emitMIR(files[i])
+			if err != nil {
+				results[i].err = err
+				continue
+			}
+			results[i].mod = lowerMIR(mir, files[i])
+		}
+	})
+
 	prog := &ir.Program{Mode: "mir"}
-	for _, f := range files {
-		mir, err := emitMIR(f)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, err)
+	for i, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", files[i], r.err)
 			continue
 		}
-		prog.Modules = append(prog.Modules, lowerMIR(mir, f))
+		prog.Modules = append(prog.Modules, r.mod)
 	}
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("no Rust source compiled under %s", path)
@@ -91,16 +113,7 @@ func collect(path string) ([]string, error) {
 		return []string{path}, nil
 	}
 	var out []string
-	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(path, func(p string, d fs.DirEntry) error {
 		if strings.EqualFold(filepath.Ext(p), ".rs") {
 			if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
 				return nil

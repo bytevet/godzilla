@@ -13,79 +13,67 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
-// secretCWE is CWE-798: Use of Hard-coded Credentials.
-const secretCWE = "CWE-798"
-
-// secretPattern is a high-signal detector for a hardcoded credential. Patterns
-// are deliberately specific (fixed prefixes / structural markers) rather than
-// entropy-based, to keep the signal/noise ratio high for a CI gate.
-type secretPattern struct {
-	id       string
-	re       *regexp.Regexp
-	severity rules.Severity
-	message  string
+// secretDetector is one compiled `kind: secret` rule. Collected once per scan so
+// the per-constant loop does not re-filter the whole rule set, and so a rule
+// whose regexp failed to compile is dropped up front rather than silently
+// matching nothing on every string.
+type secretDetector struct {
+	rule *rules.Rule
+	re   *regexp.Regexp
 }
 
-var secretPatterns = []secretPattern{
-	{"secret-private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`), rules.SeverityCritical, "Hardcoded private key"},
-	{"secret-aws-access-key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), rules.SeverityHigh, "Hardcoded AWS access key ID"},
-	{"secret-gcp-api-key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35}\b`), rules.SeverityHigh, "Hardcoded Google API key"},
-	{"secret-slack-token", regexp.MustCompile(`\bxox[baprs]-[0-9A-Za-z-]{10,48}\b`), rules.SeverityHigh, "Hardcoded Slack token"},
-	{"secret-slack-webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/[A-Za-z0-9/_+-]{20,}`), rules.SeverityHigh, "Hardcoded Slack webhook URL"},
-	{"secret-github-token", regexp.MustCompile(`\bgh[pousr]_[0-9A-Za-z]{36}\b`), rules.SeverityHigh, "Hardcoded GitHub token"},
-	{"secret-gitlab-pat", regexp.MustCompile(`\bglpat-[0-9A-Za-z_-]{20}\b`), rules.SeverityHigh, "Hardcoded GitLab personal access token"},
-	{"secret-jwt", regexp.MustCompile(`\beyJ[0-9A-Za-z_-]{10,}\.eyJ[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{10,}\b`), rules.SeverityMedium, "Hardcoded JSON Web Token"},
-	{"secret-stripe-key", regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{24,}\b`), rules.SeverityHigh, "Hardcoded Stripe live secret key"},
-	{"secret-openai-anthropic-key", regexp.MustCompile(`\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b`), rules.SeverityHigh, "Hardcoded OpenAI/Anthropic-style API key"},
-	{"secret-npm-token", regexp.MustCompile(`\bnpm_[0-9A-Za-z]{36}\b`), rules.SeverityHigh, "Hardcoded npm access token"},
-	{"secret-sendgrid-key", regexp.MustCompile(`\bSG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}\b`), rules.SeverityHigh, "Hardcoded SendGrid API key"},
-	{"secret-square-token", regexp.MustCompile(`\bsq0(?:atp|csp)-[0-9A-Za-z_-]{22,43}\b`), rules.SeverityHigh, "Hardcoded Square access token"},
-	{"secret-db-connection", regexp.MustCompile(`\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqps?)://[^\s:@/]+:[^\s:@/]{3,}@`), rules.SeverityHigh, "Hardcoded database credentials in connection URL"},
+// secretDetectorsOf returns the compiled secret rules in rs. Call rs.Compile
+// first; a rule that declares `matches` it could not compile is skipped (the
+// loader already reported it).
+func secretDetectorsOf(rs *rules.RuleSet) []secretDetector {
+	if rs == nil {
+		return nil
+	}
+	var ds []secretDetector
+	for i := range rs.Rules {
+		r := &rs.Rules[i]
+		if !r.IsSecret() {
+			continue
+		}
+		if re := r.MatchesRe(); re != nil {
+			ds = append(ds, secretDetector{rule: r, re: re})
+		}
+	}
+	return ds
 }
 
 // ScanSecrets walks a gIR program for hardcoded secrets embedded in string
-// constants. This is a non-dataflow, pattern-based analysis (distinct from the
-// taint engine) and complements it in the same Finding stream.
-func ScanSecrets(prog *ir.Program) []Finding {
+// constants, using rs's `kind: secret` rules. This is a non-dataflow,
+// pattern-based analysis (distinct from the taint engine) and complements it in
+// the same Finding stream.
+func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 	var findings []Finding
-	if prog == nil {
+	dets := secretDetectorsOf(rs)
+	if prog == nil || len(dets) == 0 {
 		return findings
 	}
 
-	seen := map[string]bool{} // dedupe by patternID@position
+	seen := map[string]bool{} // dedupe by ruleID@position
 	for _, mod := range prog.Modules {
 		if mod == nil {
 			continue
 		}
-		lang := mod.GetLanguage()
-
 		for _, g := range mod.Globals {
 			if g == nil {
 				continue
 			}
-			scanConstant(g.GetInitValue(), g.GetPos(), lang, "", seen, &findings)
+			scanConstant(g.GetInitValue(), g.GetPos(), mod.GetLanguage(), "", dets, seen, &findings)
 		}
-
-		for _, fn := range mod.Functions {
-			if fn == nil {
-				continue
+	}
+	for mod, fn := range funcs(prog) {
+		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
+		for inst := range instrs(fn) {
+			for _, op := range inst.GetOperands() {
+				scanConstant(op.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
 			}
-			for _, blk := range fn.Blocks {
-				if blk == nil {
-					continue
-				}
-				for _, inst := range blk.Instrs {
-					if inst == nil {
-						continue
-					}
-					for _, op := range inst.GetOperands() {
-						scanConstant(op.GetConstant(), inst.GetPos(), lang, fn.GetCanonicalName(), seen, &findings)
-					}
-					if inst.Call != nil {
-						for _, a := range inst.Call.GetArgs() {
-							scanConstant(a.GetConstant(), inst.GetPos(), lang, fn.GetCanonicalName(), seen, &findings)
-						}
-					}
+			if inst.Call != nil {
+				for _, a := range inst.Call.GetArgs() {
+					scanConstant(a.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
 				}
 			}
 		}
@@ -93,38 +81,37 @@ func ScanSecrets(prog *ir.Program) []Finding {
 	return findings
 }
 
-func scanConstant(c *ir.Constant, pos *ir.Position, lang, fn string, seen map[string]bool, findings *[]Finding) {
+func scanConstant(c *ir.Constant, pos *ir.Position, lang, fn string, dets []secretDetector, seen map[string]bool, findings *[]Finding) {
 	if c == nil {
 		return
 	}
-	scanText(c.GetStringVal(), pos, lang, fn, seen, findings)
+	scanText(c.GetStringVal(), pos, lang, fn, dets, seen, findings)
 }
 
-// scanText runs every secret pattern over a single string (a gIR constant or a
-// line of a config file) and appends a Finding for each match, deduped by
-// pattern id and position.
-func scanText(s string, pos *ir.Position, lang, fn string, seen map[string]bool, findings *[]Finding) {
-	if s == "" {
+// scanText runs every secret detector over a single string (a gIR constant or a
+// line of a config file) and appends a Finding for each match, deduped by rule
+// id and position. lang is "" for a config file, which has no language; a rule
+// that declares `languages:` is then skipped, since it asked to be scoped to
+// one.
+func scanText(s string, pos *ir.Position, lang, fn string, dets []secretDetector, seen map[string]bool, findings *[]Finding) {
+	if s == "" || secretPathExcluded(pos.GetFilename()) {
 		return
 	}
-	if secretPathExcluded(pos.GetFilename()) {
-		return
-	}
-	for _, p := range secretPatterns {
-		if !p.re.MatchString(s) {
+	for _, d := range dets {
+		if !d.rule.AppliesTo(lang) || !d.re.MatchString(s) {
 			continue
 		}
-		key := p.id + "@" + posKey(pos)
+		key := d.rule.ID + "@" + posKey(pos)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		*findings = append(*findings, Finding{
-			RuleID:     p.id,
-			Severity:   p.severity,
-			Confidence: ConfidenceHigh,
-			CWE:        secretCWE,
-			Message:    p.message,
+			RuleID:     d.rule.ID,
+			Severity:   d.rule.Severity,
+			Confidence: ParseConfidence(d.rule.Confidence, ConfidenceHigh),
+			CWE:        d.rule.CWE,
+			Message:    d.rule.Message,
 			Language:   lang,
 			Function:   fn,
 			SourcePos:  pos,
@@ -146,8 +133,12 @@ const secretFileMaxBytes = 5 << 20 // 5 MiB
 // files handled by a frontend are skipped here (their string literals are
 // already covered by ScanSecrets) to avoid double-reporting. root may be a file
 // or a directory; a non-existent path yields no findings.
-func ScanSecretsInFiles(root string) []Finding {
+func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 	var findings []Finding
+	dets := secretDetectorsOf(rs)
+	if len(dets) == 0 {
+		return findings
+	}
 	seen := map[string]bool{}
 	scanFile := func(path string) {
 		if secretPathExcluded(path) {
@@ -163,7 +154,7 @@ func ScanSecretsInFiles(root string) []Finding {
 		}
 		for i, line := range strings.Split(string(data), "\n") {
 			pos := &ir.Position{Filename: path, Line: int32(i + 1), Column: 1}
-			scanText(line, pos, "", "", seen, &findings)
+			scanText(line, pos, "", "", dets, seen, &findings)
 		}
 	}
 
@@ -178,16 +169,7 @@ func ScanSecretsInFiles(root string) []Finding {
 		return findings
 	}
 
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
 		if isScannableConfigFile(path) {
 			scanFile(path)
 		}

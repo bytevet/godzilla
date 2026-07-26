@@ -134,3 +134,25 @@ func TestLoad(t *testing.T) {
 		t.Errorf("config not parsed as expected: %+v (from %s)", c, p)
 	}
 }
+
+// TestApplyRules_KeepsDefaultPropagators pins that rebuilding the rule set does
+// not drop the set-wide default propagators. They are RuleSet-level data, so a
+// config that merely disables one rule would otherwise strip the
+// taint-preserving stdlib transforms from every remaining rule — a silent mass
+// false-negative that no corpus sample with an explicit propagator would catch.
+func TestApplyRules_KeepsDefaultPropagators(t *testing.T) {
+	in := &rules.RuleSet{
+		Rules:              []rules.Rule{{ID: "keep"}, {ID: "drop"}},
+		DefaultPropagators: []string{"go:*strings.TrimSpace"},
+	}
+	cfg := &Config{}
+	cfg.Rules.Disable = []string{"drop"}
+
+	out := cfg.ApplyRules(in)
+	if len(out.Rules) != 1 || out.Rules[0].ID != "keep" {
+		t.Fatalf("expected only the kept rule, got %+v", out.Rules)
+	}
+	if len(out.DefaultPropagators) != 1 || out.DefaultPropagators[0] != "go:*strings.TrimSpace" {
+		t.Errorf("DefaultPropagators lost across ApplyRules: %v", out.DefaultPropagators)
+	}
+}

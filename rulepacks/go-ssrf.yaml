@@ -11,15 +11,12 @@ rules:
       hosts. Validate the destination against an allow-list before making
       the request.
     extend: $_go-common.yaml
+    when: 'not hostFixed()'
     sinks:
-      - sink: "go:*net/http.Get"
-        when: 'not hostFixed()'
-      - sink: "go:*net/http.Post"
-        when: 'not hostFixed()'
-      - sink: "go:*net/http*.Client*.Do"
-        when: 'not hostFixed()'
-      - sink: "go:*net/http.NewRequest*"
-        when: 'not hostFixed()'
+      - "go:*net/http.Get"
+      - "go:*net/http.Post"
+      - "go:*net/http*.Client*.Do"
+      - "go:*net/http.NewRequest*"
     # No sanitizer neutralizes tainted input for a request URL; the fix is
     # allow-listing the destination host, not escaping.
     sanitizers: []

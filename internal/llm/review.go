@@ -104,11 +104,12 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 		cc  string
 	}
 	var jobs []job
+	cache := lineCache{}
 	for i := range out {
 		if !shouldReview(out[i].Confidence, reviewUpTo) {
 			continue
 		}
-		cc := codeContextFor(out[i])
+		cc := codeContextFor(cache, out[i])
 		if strings.TrimSpace(cc) == "" {
 			stats.LowContext++ // never adjudicate (or drop) blind
 			continue
@@ -336,7 +337,7 @@ func parseVerdict(text string) (Verdict, error) {
 // back to snippets at the sink and source. Best-effort: any file-read error is
 // skipped rather than failing the review; a fully empty context makes Filter
 // keep the finding unreviewed.
-func codeContextFor(f analysis.Finding) string {
+func codeContextFor(cache lineCache, f analysis.Finding) string {
 	var b strings.Builder
 	if len(f.Steps) >= 2 {
 		seen := map[string]bool{}
@@ -346,7 +347,7 @@ func codeContextFor(f analysis.Finding) string {
 				continue
 			}
 			seen[key] = true
-			if snip := snippet(p, 2); snip != "" {
+			if snip := snippet(cache, p, 2); snip != "" {
 				label := "step"
 				switch i {
 				case 0:
@@ -362,12 +363,12 @@ func codeContextFor(f analysis.Finding) string {
 			return b.String()
 		}
 	}
-	if snip := snippet(f.SinkPos, 3); snip != "" {
+	if snip := snippet(cache, f.SinkPos, 3); snip != "" {
 		b.WriteString("-- sink --\n")
 		b.WriteString(snip)
 	}
 	if f.SourcePos != nil && (f.SinkPos == nil || f.SourcePos.GetFilename() != f.SinkPos.GetFilename() || f.SourcePos.GetLine() != f.SinkPos.GetLine()) {
-		if snip := snippet(f.SourcePos, 3); snip != "" {
+		if snip := snippet(cache, f.SourcePos, 3); snip != "" {
 			b.WriteString("-- source --\n")
 			b.WriteString(snip)
 		}
@@ -375,18 +376,41 @@ func codeContextFor(f analysis.Finding) string {
 	return b.String()
 }
 
+// lineCache memoizes source-file line reads for one review pass. A finding's
+// taint path visits many positions in the same file, and a pass builds context
+// for every reviewable finding, so without this the same file is read and split
+// once per hop. Pass-scoped (not package-global) so a later scan of a changed
+// file never sees stale contents — the same shape report.snippetCache and
+// triage.readLines already use.
+type lineCache map[string][]string
+
+// lines returns filename's contents split into lines, reading it at most once.
+// A nil entry records "unreadable": do not retry it for every later hop.
+func (c lineCache) lines(filename string) ([]string, bool) {
+	if lines, ok := c[filename]; ok {
+		return lines, lines != nil
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		c[filename] = nil
+		return nil, false
+	}
+	lines := strings.Split(string(data), "\n")
+	c[filename] = lines
+	return lines, true
+}
+
 // snippet returns up to ctx lines on either side of p's line, each prefixed with
 // its 1-based line number and the pointed-at line marked with ">". Returns "" on
 // any read error or invalid position.
-func snippet(p *ir.Position, ctx int) string {
+func snippet(cache lineCache, p *ir.Position, ctx int) string {
 	if p == nil || p.GetFilename() == "" || p.GetLine() <= 0 {
 		return ""
 	}
-	data, err := os.ReadFile(p.GetFilename())
-	if err != nil {
+	lines, ok := cache.lines(p.GetFilename())
+	if !ok {
 		return ""
 	}
-	lines := strings.Split(string(data), "\n")
 	target := int(p.GetLine())
 	lo := max(target-ctx, 1)
 	hi := min(target+ctx, len(lines))

@@ -17,9 +17,11 @@ Each file's document is a single JSON object:
 or, when that file failed to parse/read, {"error": "<message>"}.
 
 Batch mode (--batch): one JSON document per line, in argv order, always exit
-0 — a per-file failure is that file's own {"error": ...} line. Single-file
-mode (no flag): historical behavior — the bare document on stdout and exit 1
-on failure.
+0 — a per-file failure is that file's own {"error": ...} line. The Go frontend
+ALWAYS passes --batch (converter.go's convertPythonChunk), including for a
+single-file scan, so a per-file error always arrives as that file's {"error"}
+document. Single-file mode (no flag) exists only for running this script by
+hand: the bare document on stdout and exit 1 on failure.
 
 Every statement/expression node is a JSON object with a "kind" field and a
 "pos": {"line": <1-based>, "col": <1-based>} field (Python's col_offset is
@@ -37,11 +39,19 @@ Statement kinds
   AugAssign     {target: expr, op: BinOpStr, value: expr}
   ExprStmt      {value: expr}
   Return        {value: expr | null}
-  If            {body: [stmt, ...], orelse: [stmt, ...]}      (test omitted)
-  For / While   {body: [stmt, ...], orelse: [stmt, ...]}      (test omitted)
-  With          {body: [stmt, ...]}
+  If            {test: expr, body: [stmt, ...], orelse: [stmt, ...]}
+  For           {target: expr, iter: expr, body: [stmt, ...], orelse: [stmt, ...]}
+  While         {test: expr, body: [stmt, ...], orelse: [stmt, ...]}
+  With          {items: [{context: expr, vars: expr | null}, ...],
+                  body: [stmt, ...]}
   Try           {body, handlers: [{body}], orelse, finalbody}
-  Pass / Import / ImportFrom / Global / Nonlocal / Break / Continue /
+                  (a handler carries only its body — no exception type/name)
+  Import        {names: [{name: str, asname: str | null}, ...]}
+  ImportFrom    {module: str | null, level: int,
+                  names: [{name: str, asname: str | null}, ...]}
+                  (both are lowered as no-op statements, but their names drive
+                   the frontend's import-alias resolution)
+  Pass / Global / Nonlocal / Break / Continue /
   Raise / Assert / Delete   {}   (no-ops; dropped by the converter)
   Unknown       {note: "<ast class name>"}   (anything else)
 
@@ -59,8 +69,18 @@ Expression kinds
   UnaryOp         {op: "NOT"|"NEG"|"POS"|"BIT_NOT", operand: expr}
   JoinedStr       {values: [expr, ...]}     (f-string parts)
   FormattedValue  {value: expr}             (an f-string {expr} slot)
-  Unknown         {note: "<ast class name>"} (BoolOp, Compare, List, Tuple,
-                    Dict, Set, Lambda, comprehensions, Starred, etc.)
+  BoolOp          {values: [expr, ...]}     (a or b / a and b)
+  Compare         {left: expr, comparators: [expr, ...]}  (ops omitted)
+  IfExp           {test: expr, body: expr, orelse: expr}  (ternary)
+  NamedExpr       {target: expr, value: expr}             (walrus :=)
+  Comprehension   {elt: expr, generators: [{target, iter, ifs: [expr, ...]}, ...]}
+                    (a DictComp emits {key, value} instead of {elt})
+  Await           {value: expr}
+  Sequence        {elts: [expr, ...]}
+                    (List/Tuple/Set literals, a flattened Dict literal, and —
+                     as an assignment TARGET — tuple/list unpacking)
+  Starred         {value: expr}             (*rest)
+  Unknown         {note: "<ast class name>"} (Lambda and anything else)
 """
 import ast
 import json
@@ -460,8 +480,9 @@ def main():
         print(json.dumps({"error": "usage: pyast.py [--batch] <file.py> [more files...]"}))
         sys.exit(1)
 
-    # Single-file mode: historical behavior — the JSON (or {"error": ...}) on
-    # stdout, exit 1 on failure, so a direct single-file scan fails loudly.
+    # Single-file mode (manual invocation only — the Go frontend always passes
+    # --batch): the JSON (or {"error": ...}) on stdout, exit 1 on failure, so
+    # running this script by hand fails loudly.
     out = parse_one(sys.argv[1])
     print(json.dumps(out))
     sys.exit(1 if "error" in out else 0)

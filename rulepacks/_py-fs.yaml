@@ -1,0 +1,26 @@
+# Shared Python filesystem sinks and path-normalization propagators, pulled into
+# py-path-traversal and py-zip-slip via `extend: $_py-fs.yaml`: both treat the
+# same filesystem-write/serve primitives as the point at which a traversal takes
+# effect, and both must carry taint through the same normalization hops.
+# (os.path.join does NOT contain the path — py:*.join is a default propagator,
+# not a sanitizer.)
+sinks:
+  - "py:*open"         # builtin open(), io.open, codecs.open, ...
+  - "py:os.remove"
+  - "py:*send_file"    # Flask file serving
+  - "py:*FileResponse" # Starlette/FastAPI, also RangedFileResponse
+# Path-normalization functions collapse or resolve a path but do NOT contain it
+# to a base directory -- `pathlib.Path(x).resolve()` and `os.path.normpath(x)`
+# still escape via "../" relative to cwd -- so they PROPAGATE taint rather than
+# sanitize it, mirroring Java's Paths.get / Path.of / Path.resolve propagators
+# and go-path-traversal's filepath.Clean. Propagators only forward taint that is
+# already present, so they add no new findings on their own.
+propagators:
+  - "py:*pathlib.Path"
+  - "py:*.resolve"
+  - "py:*.absolute"
+  - "py:*.joinpath"
+  - "py:*.expanduser"
+  - "py:*.normpath"
+  - "py:*.abspath"
+  - "py:*.realpath"

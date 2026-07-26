@@ -1,116 +1,73 @@
-// Package js_converter lowers JavaScript source into gIR so the taint engine
-// in internal/analysis can analyze it, mirroring the public shape of
-// converters/go and converters/python (NewConverter / Converter.ConvertFile)
-// and, more specifically, the structural design of converters/python: parse
-// with a language-native parser, then lower the AST to gIR with an
-// env-based, per-function lowering pass (see lower.go).
+// Package js_converter lowers JavaScript source into gIR for the taint engine
+// in internal/analysis, following converters/python's structure: parse with a
+// language-native parser, then lower the AST per function (lower.go).
 //
-// Parsing is done with github.com/dop251/goja's pure-Go ECMAScript
-// parser/AST (github.com/dop251/goja/parser, .../ast, .../file) -- no cgo, no
-// Node.js, no npm, no external process. goja's AST nodes expose source
-// positions as file.Idx values, resolved to line/column via a file.FileSet
-// (see posForIdx in lower.go), which is why every gIR Instruction/Function
-// produced here carries a Pos.
+// Parsing uses github.com/dop251/goja's pure-Go ECMAScript parser -- no cgo, no
+// Node.js, no external process. Its file.Idx positions resolve to line/column
+// through a file.FileSet (posForIdx), which is how every emitted
+// Instruction/Function gets its Pos.
 //
 // # Lowering model
 //
-// Every JS function (function declaration, function expression, or arrow
-// function) becomes its own ir.Function whose body is a REAL CFG — blocks +
-// preds/succs + on-demand PHI — built by converters/ssabuild (Braun et al.),
-// exactly the shape converters/go and converters/python emit. if/else lowers to
-// a diamond (cond block -> then/else -> merge, PHI-merged); for/for-in/for-of/
-// while/do-while lower to header/body/exit loops with a body->header back-edge,
-// so loop-carried taint (a value accumulated across iterations) flows through
-// the header PHI; switch lowers to a decision cascade with conservative
-// case-to-case fall-through edges (break is not modeled precisely — a
-// may-analysis); try/catch/finally adds a conservative exception edge from the
-// try body into the catch block. A function with NO branches still emits exactly
-// ONE block, so straight-line handlers keep the engine's linear fast path.
-//
-// Top-level statements in a file that are not function declarations are
-// collected into one synthetic "<module>" ir.Function per file, the JS
-// analogue of converters/python's module-init function.
+// Every function (declaration, expression, or arrow) becomes its own ir.Function
+// with a real CFG -- blocks, preds/succs, on-demand PHI -- built by
+// converters/ssabuild. if/else lowers to a PHI-merged diamond; the loop forms
+// lower to header/body/exit with a back-edge, so loop-carried taint flows
+// through the header PHI; switch becomes a decision cascade with conservative
+// case-to-case fall-through; try/catch adds a conservative exception edge. A
+// branch-free function still emits exactly one block, keeping the engine's
+// linear fast path. Top-level non-function statements collect into one synthetic
+// "<module>" function per file.
 //
 // # The "opaque object" source heuristic
 //
-// A plain property read like `req.query.name` is not a call in JavaScript,
-// but Godzilla's taint engine (internal/analysis) only ever introduces fresh
-// taint at an OP_CODE_CALL/OP_CODE_INVOKE instruction whose CallCommon.Callee
-// matches a rule's source glob (see taint.go/interproc.go, which this package
-// must not modify). To make member-read-based sources like Express's
-// `req.query`/`req.params`/`req.body` detectable without touching the
-// engine, the FIRST property access off an "opaque" base -- a free/global
-// identifier (e.g. `child_process`, `os`), or a function parameter (e.g. a
-// route handler's `req`), since in both cases the value's origin is outside
-// this function's own straight-line computation -- is lowered as an
-// OP_CODE_CALL with a purely syntactic callee ("js:" + base + "." + field),
-// exactly as if it were a getter call. Every subsequent hop in the same
-// member-access chain (e.g. the trailing `.name` in `req.query.name`) is a
-// normal OP_CODE_FIELD/OP_CODE_INDEX with the previous hop's register as
-// operand 0, so taint set on the root hop propagates through the rest of the
-// chain via the engine's existing FIELD/INDEX taint-propagation rule. See
-// funcState.emitRootPropertyRead and funcState.isOpaqueBase in lower.go.
+// The engine only introduces fresh taint at a CALL/INVOKE whose Callee matches a
+// rule's source glob, but Express-style sources (`req.query.name`) are property
+// reads, not calls. So the FIRST property access off an *opaque* base -- a
+// free/global identifier or a function parameter, whose value originates outside
+// this function -- is lowered as a CALL with the syntactic callee
+// "js:<base>.<field>", as if it were a getter. Later hops in the chain are
+// ordinary FIELD/INDEX instructions, so the engine's existing FIELD/INDEX
+// propagation carries taint through the rest. See emitRootPropertyRead and
+// isOpaqueBase in lower.go.
 //
-// Actual call expressions (`a.b.c(args)`, `f(args)`) always lower to
-// OP_CODE_CALL with a purely syntactic dotted Callee built from the call's
-// callee expression (Identifier/DotExpression/string-keyed BracketExpression
-// chains only; anything else collapses to "<dynamic>"), mirroring
-// converters/python's dottedName: the callee name reflects source syntax,
-// not a value resolved through the environment. When the callee expression
-// itself is or contains another call -- a chained call like
-// `axios.get(url).then(cb)` or `foo(x).bar(y)` -- that inner call is lowered
-// to its own OP_CODE_CALL first (funcState.lowerNestedCallees in lower.go),
-// so its callee/args/taint are visible to the engine even though the outer
-// call's own syntactic name still collapses that sub-path to "<dynamic>"
-// (e.g. "<dynamic>.then"/"<dynamic>.bar").
+// Real call expressions lower to CALL with a syntactic dotted Callee built from
+// the callee expression (Identifier/DotExpression/string-keyed Bracket chains;
+// anything else is "<dynamic>") -- the name reflects source syntax, never a
+// value resolved through the environment. A chained call
+// (`axios.get(url).then(cb)`) has its inner call lowered first by
+// lowerNestedCallees, so the inner callee and args stay visible even though the
+// outer name collapses to "<dynamic>.then".
 //
 // # Known limitations
 //
-//   - break/continue are not modeled precisely: a switch case conservatively
-//     falls through to the next case, and a labelled loop is lowered as its
-//     underlying loop (the label is ignored). This is a conservative
-//     may-analysis (it can only over-approximate reachable taint).
-//   - Closures are not modeled: each function's variable environment starts
-//     empty (plus its own parameters), so a reference to an enclosing
-//     function's or module's local variable always falls back to a
-//     GlobalName value, exactly like converters/python's Name fallback. This
-//     is why a locally `require()`d module (e.g. `const cp =
-//     require('child_process')` at module scope) is still resolved
-//     correctly when referenced by name in an unrelated function: callee
-//     names are built purely syntactically (see above) and never depend on
-//     environment/closure resolution.
-//   - Classes are modeled at the method level: collectClass (wired into
-//     collectStmt for ClassDeclaration and collectExpr for ClassLiteral) lowers
-//     each class method as its own function named "<Class>.<method>", so
-//     class-based handlers are analyzed. Only non-method class-body statements
-//     (fields/static initializers) remain unmodeled. Function declarations,
-//     function expressions, and arrow functions also become ir.Function values.
-//   - Destructuring (ObjectPattern/ArrayPattern) binding targets and
-//     parameters are not modeled: a destructured declaration's initializer
-//     is still lowered (for its side effects / taint discovery) but the
-//     bindings it would introduce are dropped.
-//   - Promises/async/await/generators are not specially modeled: `await x`
-//     and `yield x` lower to `x` itself (the wrapping is a no-op for taint
-//     purposes).
-//   - Container literals (array/object) collapse every element/property
-//     value's taint into one OP_CODE_PHI-merged register rather than
-//     tracking per-index/per-key taint.
-//   - Logical `&&`/`||`/`??` are approximated as the bitwise BIN_OP_AND /
-//     BIN_OP_OR / BIN_OP_OR kinds (there is no logical-op counterpart in
-//     gIR's BinOpKind); this is safe for taint propagation (either operand
-//     tainted still taints the result) but loses short-circuit semantics.
-//   - Only function literals reachable from a statement's top-level
-//     expression tree are discovered as separate functions (call arguments,
-//     variable initializers, assignment right-hand sides, array/object
-//     literal elements, etc. -- see the collector in lower.go). This covers
-//     idiomatic patterns like `app.get(url, function(req, res) {...})` and
-//     `const f = () => {...}`, but not more exotic placements.
+// All are conservative (they can only over-approximate reachable taint):
+//
+//   - break/continue are imprecise: a switch case falls through to the next, and
+//     a labelled loop is lowered as its underlying loop.
+//   - Closures are not modeled -- each function's environment starts with only
+//     its parameters, so an enclosing scope's local falls back to a GlobalName.
+//     A module-scope `require()` still resolves, because callee names are purely
+//     syntactic and never consult the environment.
+//   - Classes are modeled per method ("<Class>.<method>", via collectClass);
+//     only non-method class-body statements (fields, static initializers) are
+//     unmodeled.
+//   - Destructuring targets and parameters are dropped, though the initializer
+//     is still lowered for its side effects and taint.
+//   - `await x` / `yield x` lower to `x`; the wrapping is a no-op for taint.
+//   - Array/object literals collapse every element's taint into one PHI-merged
+//     register rather than tracking it per index/key.
+//   - Logical `&&`/`||`/`??` reuse the bitwise BIN_OP kinds (gIR has no logical
+//     counterpart), losing short-circuit semantics but not taint.
+//   - Only function literals reachable from a statement's top-level expression
+//     tree are discovered (see the collector in lower.go) -- enough for
+//     `app.get(url, function(req, res){...})` and `const f = () => {...}`, but
+//     not more exotic placements.
 package js_converter
 
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/dop251/goja/file"
@@ -135,42 +92,22 @@ func NewConverter() *Converter {
 // converted recursively, one gIR Module per file, skipping any
 // "node_modules" directory).
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	if info.IsDir() {
-		files, err = walkignore.CollectSources(abs, IsJSFamily)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		files = []string{abs}
-	}
-
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no JavaScript files found under %s", abs)
-	}
-
 	// Module names are the file path relative to the scan root, so same-named
 	// functions in different files get distinct canonical names instead of
-	// colliding in the analyzer. Single-file mode: root is the file's directory,
-	// so the module name stays the bare filename.
-	root := abs
-	if !info.IsDir() {
-		root = filepath.Dir(abs)
+	// colliding in the analyzer. For a single file the root is its own
+	// directory, so its module name stays the bare filename (see
+	// walkignore.CollectTarget).
+	root, files, isDir, err := walkignore.CollectTarget(path, IsJSFamily)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no JavaScript files found under %s", root)
 	}
 
 	// Single-file mode (path pointed directly at a .js file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
-	if !info.IsDir() {
+	if !isDir {
 		mod, defaultExport, err := c.convertJSFile(files[0], moduleNameFor(root, files[0]))
 		if err != nil {
 			return nil, err
@@ -222,7 +159,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("js_converter: no JavaScript files under %s converted successfully (%d file(s) failed): %s",
-			abs, len(convertErrs), strings.Join(convertErrs, "; "))
+			root, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 
 	resolveJSCrossModuleCalls(prog, defaultExports)
@@ -335,9 +272,5 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 // root is the file's own directory (single-file scans) this is just the bare
 // filename.
 func moduleNameFor(root, file string) string {
-	rel, err := filepath.Rel(root, file)
-	if err != nil {
-		rel = filepath.Base(file)
-	}
-	return filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
+	return walkignore.ModuleName(root, file)
 }

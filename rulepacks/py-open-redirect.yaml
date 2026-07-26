@@ -9,9 +9,9 @@ rules:
       redirect. Validate the target against an allowlist instead of redirecting
       to a user-controlled URL.
     extend: $_py-sources.yaml
+    when: 'not hostFixed()'
     sinks:
-      - sink: "py:*redirect"
-        when: 'not hostFixed()'
+      - "py:*redirect"
     sanitizers: []
     propagators: []
     # Django's standard open-redirect guard: a value checked by

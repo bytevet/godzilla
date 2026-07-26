@@ -67,10 +67,6 @@ func taintedSet(names ...string) map[string]*ir.Position {
 	return m
 }
 
-// --- hostFixedRe: does the constant prefix pin a complete scheme://host/… ? ---
-
-// --- prefixBeforePlaceholder: literal text before the first interpolation ----
-
 // --- constStr: reads a string constant, stripping Go's surrounding quotes -----
 
 func TestConstStr(t *testing.T) {

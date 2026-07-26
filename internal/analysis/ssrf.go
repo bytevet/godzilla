@@ -15,8 +15,9 @@ import (
 // the destination host is fixed and the request cannot be redirected to an
 // attacker-chosen host. urlHostControllable reconstructs how the tainted URL
 // string was built (concatenation or a format string) and reports whether the
-// taint can reach the host. It is deliberately conservative: it returns false
-// (suppress the finding) only when it can PROVE the host is a constant prefix;
+// taint can reach the host. It is deliberately conservative: it reports the host
+// as fixed only when it can PROVE it is a constant prefix; the decision to
+// suppress is the RULE's, via `when: 'not hostFixed()'` (see rules.EvalHostFixed);
 // otherwise true (keep the finding), so no real SSRF is dropped.
 
 // formatIntrinsic is the language-neutral marker a frontend sets on a
@@ -90,9 +91,8 @@ func urlHostControllable(injectable []*ir.Value, tainted taintState, defs map[st
 
 // constSkeleton reconstructs v's string construction as a skeleton for a dynamic
 // guard: constant runs verbatim, rules.DynMarker for each dynamic (non-constant)
-// run. It returns the skeleton and whether the WHOLE value is constant. Unlike
-// leadingConst it does not stop at the first dynamic leaf — it emits a marker and
-// continues — so a guard can inspect constant pieces anywhere in the argument.
+// run. It returns the skeleton and whether the WHOLE value is constant. It does
+// not stop at the first dynamic leaf — it emits a marker and continues — so a guard can inspect constant pieces anywhere in the argument.
 func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
 	if s, ok := constStr(v); ok {
 		return s, true

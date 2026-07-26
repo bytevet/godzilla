@@ -11,13 +11,11 @@ rules:
       open redirect to an attacker-controlled site. Validate the destination
       against an allow-list of paths/hosts before redirecting.
     extend: $_rust-web-sources.yaml
+    when: 'not hostFixed()'
     sinks:
-      - sink: "rust:*Redirect::to"
-        when: 'not hostFixed()'
-      - sink: "rust:*Redirect::temporary"
-        when: 'not hostFixed()'
-      - sink: "rust:*Redirect::permanent"
-        when: 'not hostFixed()'
+      - "rust:*Redirect::to"
+      - "rust:*Redirect::temporary"
+      - "rust:*Redirect::permanent"
     sanitizers: []
     propagators:
       - "rust:format"

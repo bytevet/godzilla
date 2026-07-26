@@ -237,24 +237,50 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 	return regValue(inst.Name)
 }
 
+// moduleCtx bundles the file-scoped state every function lowered from one JS
+// module needs. It exists so lowerFunction takes one context instead of nine
+// positional parameters, and — more importantly — so the module-scoped funcState
+// fields are primed in exactly ONE place (newFuncState below); the <module>
+// function and each real function used to prime them separately, with nothing
+// keeping the two lists in sync.
+type moduleCtx struct {
+	filename         string
+	moduleName       string
+	fset             *file.FileSet
+	nameOf           map[ast.Node]string
+	localFuncs       map[string]string
+	moduleAliases    map[string]string
+	relativeDefaults map[string]string
+	handlers         map[ast.Node]bool
+}
+
+// newFuncState creates a funcState for a function in this module, priming the
+// module-scoped fields. isHandler is NOT set here: it is per-function and the
+// synthetic <module> function is never a handler.
+func (m *moduleCtx) newFuncState() *funcState {
+	fs := newFuncState(m.filename, m.fset, m.nameOf, m.localFuncs)
+	fs.moduleName = m.moduleName
+	fs.moduleAliases = m.moduleAliases
+	fs.relativeDefaults = m.relativeDefaults
+	return fs
+}
+
 // lowerFunction lowers one collected function (declaration, function
 // expression, or arrow function) into an ir.Function whose body is a REAL CFG
 // (blocks + preds/succs + on-demand PHI) built by an ssabuild.Builder. A
 // function with no branches still emits exactly ONE block (the engine's linear
 // fast path).
-func lowerFunction(pf pendingFunc, filename, moduleName string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string, moduleAliases, relativeDefaults map[string]string, handlers map[ast.Node]bool) *ir.Function {
+func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
+	filename, fset := m.filename, m.fset
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
-		PackageName:   moduleName,
-		CanonicalName: "js:" + moduleName + "." + pf.qualname,
+		PackageName:   m.moduleName,
+		CanonicalName: "js:" + m.moduleName + "." + pf.qualname,
 	}
 
-	fs := newFuncState(filename, fset, nameOf, localFuncs)
-	fs.moduleName = moduleName
-	fs.moduleAliases = moduleAliases
-	fs.relativeDefaults = relativeDefaults
-	fs.isHandler = handlers[pf.node]
+	fs := m.newFuncState()
+	fs.isHandler = m.handlers[pf.node]
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -332,26 +358,11 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 // or computed pattern is skipped (a documented limitation), mirroring how the
 // positional-parameter path leaves unhandled patterns as opaque _argN slots.
 func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
-	for _, p := range pat.Properties {
-		var key, local string
-		switch prop := p.(type) {
-		case *ast.PropertyShort:
-			key = string(prop.Name.Name)
-			local = key
-		case *ast.PropertyKeyed:
-			// `{ query: q }` -> field `query`, local `q`; only a plain identifier
-			// binding target is modeled (a nested/computed pattern is skipped).
-			if v, ok := prop.Value.(*ast.Identifier); ok {
-				key = propertyKeyName(prop.Key)
-				local = string(v.Name)
-			}
-		default:
+	for _, b := range objectPatternBindings(pat) {
+		if b.Key == "" || b.Local == "" {
 			continue
 		}
-		if key == "" || local == "" {
-			continue
-		}
-		fs.write(local, fs.emitRootPropertyRead("req", key, pat.Idx0()))
+		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, pat.Idx0()))
 	}
 }
 
@@ -387,15 +398,23 @@ func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 		return g, true
 	}
 	if r := v.GetRegName(); r != "" && fs.paramRegs[r] {
-		// A route handler's request parameter (any name) canonicalizes to `req` so
-		// property reads off it (`rq.query` -> "js:req.query") match the
-		// request-source globs, which are keyed on the conventional names (COV-11).
-		if r == fs.reqParam && !reqConventionNames[r] {
-			return "req", true
-		}
-		return r, true
+		return fs.canonRoot(r), true
 	}
 	return "", false
+}
+
+// canonRoot canonicalizes a PARAMETER name used as an opaque member-read root.
+// A route handler's request parameter (any name) canonicalizes to `req` so
+// property reads off it (`rq.query` -> "js:req.query") match the request-source
+// globs, which are keyed on the conventional names (COV-11). Shared by
+// isOpaqueBase and opaqueRootFor's AST fallback: the two must agree, or a
+// request read inside a loop is named differently from the same read outside it
+// and its taint is silently dropped.
+func (fs *funcState) canonRoot(name string) string {
+	if name == fs.reqParam && !reqConventionNames[name] {
+		return "req"
+	}
+	return name
 }
 
 // opaqueRootFor classifies the base of a member read (`base.field` / `base[i]`)
@@ -421,10 +440,7 @@ func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bo
 	}
 	name := string(id.Name)
 	if fs.paramRegs[name] {
-		if name == fs.reqParam && !reqConventionNames[name] {
-			return "req", true
-		}
-		return name, true
+		return fs.canonRoot(name), true
 	}
 	if !fs.assigned[name] {
 		return name, true // a free/global identifier
@@ -494,9 +510,9 @@ func (fs *funcState) lowerBody(stmts []ast.Statement) {
 // own block and jumps to a fresh merge block; the merge is sealed once both
 // arm-ends are its known predecessors, so any variable rebound on one or both
 // arms reconciles automatically via an on-demand ReadVariable PHI (retiring the
-// manual lowerutil.MergeBranchEnvs path — including the ubiquitous "default if
-// empty" idiom `if (!x) x = "d"`, whose pre-branch tainted value is now kept by
-// the merge PHI). An `else if` is an IfStatement in the parent's Alternate, so
+// manual env-merge path — including the ubiquitous "default if empty" idiom
+// `if (!x) x = "d"`, whose pre-branch tainted value is now kept by the merge
+// PHI). An `else if` is an IfStatement in the parent's Alternate, so
 // an arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
 func (fs *funcState) lowerIf(v *ast.IfStatement) {
 	cond := fs.lowerExpr(v.Test) // condition (also lowers any embedded source/sink)
@@ -919,15 +935,8 @@ func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.E
 		}
 		fs.write(localName, fs.emitFieldRead(base, field, op.LeftBrace))
 	}
-	for _, p := range op.Properties {
-		switch prop := p.(type) {
-		case *ast.PropertyShort:
-			bindField(string(prop.Name.Name), string(prop.Name.Name))
-		case *ast.PropertyKeyed:
-			if id, ok := prop.Value.(*ast.Identifier); ok {
-				bindField(string(id.Name), propertyKeyName(prop.Key))
-			}
-		}
+	for _, b := range objectPatternBindings(op) {
+		bindField(b.Local, b.Key)
 	}
 	// `const { ...rest } = init`: the rest object carries the initializer's taint.
 	if id, ok := op.Rest.(*ast.Identifier); ok {
@@ -953,6 +962,37 @@ func (fs *funcState) lowerArrayPatternBinding(ap *ast.ArrayPattern, init ast.Exp
 	if id, ok := ap.Rest.(*ast.Identifier); ok {
 		fs.write(string(id.Name), base)
 	}
+}
+
+// patBinding is one name an object-destructuring pattern binds: the LOCAL name
+// introduced, and the KEY (source field) it reads. Key is "" for a computed key
+// propertyKeyName cannot resolve statically — each caller decides what to do
+// with that, since they differ (bind nothing, vs. keep an empty field name).
+type patBinding struct{ Local, Key string }
+
+// objectPatternBindings returns the bindings an object pattern introduces, for
+// the three places that walk one: a handler's destructured request parameter, a
+// destructuring variable declaration, and `const {a, b} = require('m')`. Only
+// plain shorthand (`{query}`) and keyed-with-identifier-target (`{query: q}`)
+// properties are modeled — a nested or otherwise non-identifier binding target
+// yields no entry, the documented limitation all three shared before this was
+// factored out (and drifted on). op.Rest is deliberately NOT handled here: each
+// caller binds it differently.
+func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
+	var out []patBinding
+	for _, p := range op.Properties {
+		switch prop := p.(type) {
+		case *ast.PropertyShort:
+			out = append(out, patBinding{Local: string(prop.Name.Name), Key: string(prop.Name.Name)})
+		case *ast.PropertyKeyed:
+			// `{ query: q }` -> field `query`, local `q`; only a plain identifier
+			// binding target is modeled (a nested/computed pattern is skipped).
+			if id, ok := prop.Value.(*ast.Identifier); ok {
+				out = append(out, patBinding{Local: string(id.Name), Key: propertyKeyName(prop.Key)})
+			}
+		}
+	}
+	return out
 }
 
 // propertyKeyName extracts the static field name of a destructuring property

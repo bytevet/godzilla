@@ -9,8 +9,8 @@
 // `ruby` on PATH is required; ConvertFile returns a clear error if it is absent.
 //
 // Scope (deliberately narrow, taint-focused — like the Python frontend's
-// documented limits): straight-line env-based lowering with no real CFG (one
-// basic block per method/def, branch bodies flattened in source order). Covered
+// documented limits): a real CFG via converters/ssabuild (if/elsif/while/until/
+// case lower to blocks with PHI joins; a branch-free method stays one block). Covered
 // expressions: literals, string interpolation, `+` concatenation, local
 // variable reads/assignments, method/command calls (with and without a
 // receiver), and index reads. The web request surface lowers to a synthetic
@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"godzilla/internal/chunks"
@@ -53,26 +52,17 @@ func NewConverter() *Converter { return &Converter{} }
 // .rb file or a directory (all *.rb files under it are converted recursively,
 // one gIR Module per file). Requires `ruby` on PATH.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	abs, err := filepath.Abs(path)
+	// Module names are the file path relative to the scan root, so same-named
+	// functions in different files get distinct canonical names instead of
+	// colliding in the analyzer. For a single file the root is its own
+	// directory, so its module name stays the bare filename (see
+	// walkignore.CollectTarget).
+	root, files, isDir, err := walkignore.CollectTarget(path, func(p string) bool { return strings.HasSuffix(p, ".rb") })
 	if err != nil {
 		return nil, err
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	if info.IsDir() {
-		files, err = walkignore.CollectSources(abs, func(p string) bool { return strings.HasSuffix(p, ".rb") })
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		files = []string{abs}
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no Ruby files found under %s", abs)
+		return nil, fmt.Errorf("no Ruby files found under %s", root)
 	}
 
 	rubyExe, err := exec.LookPath("ruby")
@@ -85,9 +75,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 	defer cleanup()
 
-	if !info.IsDir() {
+	if !isDir {
 		results := make([]rbFileResult, 1)
-		c.convertRubyChunk(rubyExe, scriptPath, filepath.Dir(abs), files, results)
+		c.convertRubyChunk(rubyExe, scriptPath, root, files, results)
 		if results[0].err != nil {
 			return nil, results[0].err
 		}
@@ -99,7 +89,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// per chunk, run concurrently — so interpreter startup is paid per chunk,
 	// not per file. Results land at fixed indices, keeping module order the
 	// sorted file order.
-	root := abs
 	results := make([]rbFileResult, len(files))
 	chunks.Run(len(files), func(start, end int) {
 		c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])
@@ -117,7 +106,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("ruby_converter: no Ruby files under %s converted successfully (%d failed): %s",
-			abs, len(convertErrs), strings.Join(convertErrs, "; "))
+			root, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 	return prog, nil
 }
@@ -178,9 +167,5 @@ func writeHelperScript() (string, func(), error) {
 // moduleNameFor derives a module name unique to the file: its path relative to
 // the scan root, extension stripped, slash-normalized.
 func moduleNameFor(root, file string) string {
-	rel, err := filepath.Rel(root, file)
-	if err != nil {
-		rel = filepath.Base(file)
-	}
-	return filepath.ToSlash(strings.TrimSuffix(rel, ".rb"))
+	return walkignore.ModuleName(root, file)
 }

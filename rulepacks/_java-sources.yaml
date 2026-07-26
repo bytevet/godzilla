@@ -1,6 +1,10 @@
-# Shared Java request sources: servlet accessors + Spring/JAX-RS parameter
-# annotations. Pulled into the java-*.yaml rules with `extend: $_java-sources.yaml`.
+# Shared Java sources: the HTTP request surface (servlet accessors + Spring/JAX-RS
+# parameter annotations) plus the process environment. Pulled into the java-*.yaml
+# dataflow rules with `extend: $_java-sources.yaml`.
 sources:
+  # A NON-request source: the process environment, a CLI/CGI-flavoured input,
+  # deliberately distinct from the HTTP request surface below.
+  - "java:*System.getenv"
   - "java:*HttpServletRequest.getParameter"
   - "java:*HttpServletRequest.getParameterValues"
   - "java:*HttpServletRequest.getHeader"

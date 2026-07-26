@@ -26,7 +26,8 @@ code.
 
 ## Rule kinds
 
-Two kinds. (Hardcoded **secrets** are a separate regex scanner, not a YAML rule.)
+Three kinds, selected by `kind:` — a source→sink dataflow rule (the default), a
+call-site check, and a pattern-over-constants check.
 
 ### Taint rules (default)
 
@@ -90,6 +91,29 @@ from review. A rule that should be *reported and reviewable* without turning
 builds red — `py-dynamic-code-exec` is the shipped example — sets
 `severity: low` with `confidence: medium`.
 
+### Secret rules
+
+Not a call at all: `matches` is a regexp run over every string **constant** in
+the lowered IR *and* over the lines of textual config files the frontends never
+parse (`.env`, compose, Dockerfile, CI YAML), so one rule catches a credential
+wherever it was written. See `rulepacks/secrets.yaml`.
+
+```yaml
+rules:
+  - id: secret-acme-token
+    kind: secret
+    severity: high
+    cwe: CWE-798
+    message: Hardcoded ACME API token
+    matches: '\bacme_[0-9A-Za-z]{32}\b'
+```
+
+Keep the regexp **specific** — a fixed vendor prefix or a structural marker.
+Entropy-style detectors find more real secrets but produce the kind of noise that
+gets a CI gate switched off. Omit `languages:` unless you mean to scope the rule
+to one language's IR constants; config files have no language and are skipped by
+a rule that declares any.
+
 ## Dynamic guards (`when`)
 
 A sink or callee entry can be a `{sink|callee, when}` mapping instead of a bare
@@ -116,6 +140,18 @@ callees:                                  # dangerous-call
   `arg[0].String startsWith 'cmd:'` is true.
 - `.Complete` — the whole argument is a compile-time constant.
 - `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, or `""` if unknown.
+- `.Name` — the keyword the argument was passed under (`"shell"` for
+  `subprocess.run(cmd, shell=True)`), or `""` for a positional argument or a
+  frontend that does not record names (currently Python only). Without it a guard
+  can only see that *some* boolean argument is true, which cannot tell the
+  dangerous `shell=True` from an innocuous `check=True`.
+
+A keyword can appear at any position, so match it by iterating rather than by
+index — this is how the security-config rules are written:
+
+```yaml
+    when: 'any(arg, .Name == "verify" && .String == "false")'
+```
 
 Write the condition with expr's native operators/builtins — `startsWith`,
 `endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined
@@ -138,6 +174,43 @@ A guard is evaluated in the frame where the sink appears. So if a dependency
 *wrapper* forwards to a guarded sink (`func Run(c string) { exec.Command(c) }`),
 the argument there is always `"<DYN>"` — the guard can't confirm, and the sink is
 not reported through the wrapper. Guard sinks that user code calls directly.
+
+### A rule-level default `when`
+
+When a guard expresses what the *whole rule* means rather than something about
+one sink, put it at the rule level: every sink (and dangerous-call callee) that
+declares no `when` of its own inherits it — including sinks merged in from a
+fragment, so a sink added later cannot silently opt out. The shipped SSRF and
+open-redirect packs use this for `not hostFixed()`, which is a statement about
+the rule, not about any particular HTTP client:
+
+```yaml
+- id: js-ssrf
+  when: 'not hostFixed()'      # default for every sink below
+  sinks:
+    - "js:*http.get"
+    - "js:*axios*"
+    - sink: "js:*fetch"
+      when: 'true'             # this one opts out
+```
+
+An entry's own `when` always wins, so `when: 'true'` is the per-sink opt-out.
+`hostFixed()` is an engine-supplied FACT about how the tainted URL string was
+built (a constant `scheme://host` prefix ahead of the taint means the attacker
+controls only the path/query) — the rule decides what to do with it, the engine
+does not decide for the rule.
+
+It takes an optional argument. Prefer the **zero-arg** `hostFixed()`: it reuses
+the sink's own `#idx` pinning, so it cannot drift out of sync with it. The URL is
+not always argument 0 (`py:*requests.request#1` pins `#1`) and some sinks take a
+request *object* rather than a URL string (`net/http` `Client.Do`), so restating
+the index — `hostFixed(arg[0])` — risks checking the HTTP method instead of the
+URL. The explicit form exists for rules that want the check spelled out or need a
+non-injection argument; `hostFixed(a, b)` requires all of them to be host-fixed.
+
+In a `dangerous-call` guard there is no taint state, so `hostFixed()` reports
+not-host-fixed and the entry fires. `not hostFixed()` is therefore a no-op there —
+fail open, never silently suppress.
 
 ## Fragments (`extend`)
 
@@ -172,19 +245,29 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 
 | Field | Kind | Meaning |
 |---|---|---|
-| `id` | both | Unique id; validation rejects an empty or duplicate id. |
-| `extend` | both | One or more `$_fragment.yaml` refs merged into this rule. |
-| `languages` | both | Language tags (`[go]`, `[c, cpp]`, …). |
-| `severity` | both | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
-| `confidence` | dangerous-call | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
-| `cwe`, `message` | both | Reported metadata. |
+| `id` | all | Unique id; validation rejects an empty or duplicate id. |
+| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule. |
+| `languages` | all | Language tags (`[go]`, `[c, cpp]`, …). |
+| `severity` | all | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
+| `confidence` | dangerous-call, secret | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
+| `cwe`, `message` | all | Reported metadata. |
 | `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
+| `when` | both | Rule-level default dynamic guard, inherited by every sink/callee that declares none of its own (fragment-merged entries included). An entry's own `when` wins; `when: 'true'` opts out. |
 | `request_object_sources` | taint | Sources whose value is an HTTP request *object* (e.g. `go:@net/http.Request`; also list in `sources`). Tags the flavor so the engine grants request-object provenance without a hardcoded name. |
 | `callees` | dangerous-call | Globs whose call site is itself the finding. |
 | `const_arg` | dangerous-call | Optional `{index, matches}` constant-argument condition. |
+| `matches` | secret | The detector regexp, run over IR string constants and config-file lines. |
 
 ## Testing a rule
 
 Add a vulnerable sample under `test/<lang>/<case>/` with an `expected.yaml`, plus
-a `*_safe` control where precision matters. `go test ./test/corpus/` asserts both.
-See [test/README.md](../test/README.md).
+a `*_safe` control where precision matters.
+
+```bash
+godzilla rules lint rulepacks/*.yaml   # schema, globs, guards, #idx specs
+godzilla rules test test/python/       # run samples against their expected.yaml
+```
+
+Both work against the built binary, so authoring a rule needs neither a repo
+clone nor `go test`. In CI the same samples are asserted by
+`go test ./test/corpus/`. See [test/README.md](../test/README.md).

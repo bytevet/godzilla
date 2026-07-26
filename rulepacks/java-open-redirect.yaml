@@ -10,15 +10,11 @@ rules:
       open redirect. Validate the target against an allowlist of known
       hosts/paths, or only permit relative paths, instead of redirecting to a
       user-controlled URL.
-    # Sources: the shared request surface plus the process environment, both from
-    # fragments (env first so getenv keeps its position in the merged list).
-    extend: [$_java-env-source.yaml, $_java-sources.yaml]
+    extend: $_java-sources.yaml
     # The redirect target URL is logical arg 0.
+    when: 'not hostFixed()'
     sinks:
-      - sink: "java:*HttpServletResponse.sendRedirect#0"
-        when: 'not hostFixed()'
-      - sink: "java:*RedirectView.<init>#0"
-        when: 'not hostFixed()'
-      - sink: "java:*RedirectView.setUrl#0"
-        when: 'not hostFixed()'
+      - "java:*HttpServletResponse.sendRedirect#0"
+      - "java:*RedirectView.<init>#0"
+      - "java:*RedirectView.setUrl#0"
     sanitizers: []

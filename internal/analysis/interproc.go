@@ -32,22 +32,14 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	byKey := map[string]*ir.Function{}
 	modByKey := map[string]*ir.Module{}
 	local := 0
-	for _, mod := range prog.Modules {
-		if mod == nil {
-			continue
+	for mod, fn := range funcs(prog) {
+		key := fn.CanonicalName
+		if key == "" {
+			key = fmt.Sprintf("__local%d", local)
+			local++
 		}
-		for _, fn := range mod.Functions {
-			if fn == nil {
-				continue
-			}
-			key := fn.CanonicalName
-			if key == "" {
-				key = fmt.Sprintf("__local%d", local)
-				local++
-			}
-			byKey[key] = fn
-			modByKey[key] = mod
-		}
+		byKey[key] = fn
+		modByKey[key] = mod
 	}
 
 	// Class-hierarchy index for interface dynamic dispatch, built ONCE and shared
@@ -73,6 +65,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable:     e.reportable,
 		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
+		fnIdx:          make(map[*ir.Function]fnIndex, len(byKey)),
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -83,6 +76,31 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// goroutine) avoids a data race on the shared matcher cache.
 	_ = e.rs.Compile() // guard-compile errors are already reported by the loader at load
 
+	// Languages actually present in this program. A rule that declares languages
+	// and matches none of them can produce nothing: enqueue rejects every function
+	// whose module language fails AppliesTo, so its worklist stays empty and it
+	// returns nil. Skipping its goroutine outright keeps a multi-language rule pack
+	// from spawning (and scheduling) dozens of no-op analyses on a single-language
+	// scan. A rule with no declared languages applies everywhere and is never
+	// skipped.
+	progLangs := map[string]bool{}
+	for _, mod := range prog.Modules {
+		if mod != nil {
+			progLangs[mod.GetLanguage()] = true
+		}
+	}
+	ruleApplies := func(r *rules.Rule) bool {
+		if len(r.Languages) == 0 {
+			return true
+		}
+		for lang := range progLangs {
+			if r.AppliesTo(lang) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Each rule's analysis is independent — it reads the shared, immutable call
 	// graph / function index and writes only its own local state — so run the
 	// rules concurrently (bounded by GOMAXPROCS). Results are collected per rule
@@ -91,6 +109,9 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	for i := range e.rs.Rules {
+		if !ruleApplies(&e.rs.Rules[i]) {
+			continue // results[i] stays nil, exactly what an empty worklist returns
+		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -430,52 +451,86 @@ type sharedIndex struct {
 	// demand-driven — a source that never runs produces no taint. Built once,
 	// rule-independent (the union of all rules' request_object_sources).
 	reqSourceHosts map[string]bool
+
+	// fnIdx memoizes the per-function structural indexes, filled lazily on first
+	// use and guarded because the per-rule analyses run concurrently. A plain
+	// pre-sized map under an RWMutex, and entries stored BY VALUE: sync.Map cost
+	// an interface box plus an entry allocation per function, and a *fnIndex cost
+	// one more — together ~2.4 allocations per function that a single-rule scan
+	// has nothing to amortize them against. Copying the struct is free (two map
+	// headers), and safe because an entry is immutable once built.
+	fnIdxMu sync.RWMutex
+	fnIdx   map[*ir.Function]fnIndex
 }
 
-// buildReqSourceHosts returns the set of DEPENDENCY function keys that both
-// (a) contain a request-object source (the union of every rule's
-// request_object_sources globs) and (b) are DIRECTLY CALLED by user (reportable)
-// code. Such a function — e.g. beego's `Controller.Input`, which reads
-// `c.Ctx.Request` internally — generates request taint but takes no tainted
-// argument, so the demand-driven dependency scope never enqueues it; seeding it
-// lets its request taint escape to the user code that called it. Seeding
-// (analyzing the body) rather than tainting the call result unconditionally is
-// what keeps a SAFE accessor that reads the request but returns a constant from
-// being a false positive: its body has no tainted return, so nothing propagates.
+// fnIndex holds the per-function structural indexes derived ONLY from the
+// function's (immutable) body: the SSA def map and the non-escaping-alloc set.
+// analyzeFunc runs once per (function × rule × worklist visit), so building
+// these there multiplied an O(instructions) walk and two map allocations by the
+// rule count — the very rebuild-per-rule cost sharedIndex exists to remove for
+// the program-wide indexes.
 //
-// The DIRECT-CALL bound keeps this cheap and correct. A framework reads
-// *http.Request in many internal functions, but the ones that matter are the
-// accessor methods the app actually invokes (`c.Input()`, `c.Query()`). Crucially
-// it EXCLUDES a framework's request-pipeline entry like gin's ServeHTTP: that also
-// carries a request source, but user code never CALLS it (it calls user code via
-// an indirect dispatch), and seeding it made the worklist analyze a framework's
-// whole request pipeline — a large dep-heavy blow-up — for taint no user sink can
-// reach. Consulted ONLY under a reportable scope (with no scope every function is
-// already seeded), so the whole-program walk is skipped otherwise.
+// INVARIANT: an entry is immutable once constructed and is shared read-only
+// across the parallel per-rule goroutines (buildDefs is the only writer of defs;
+// nonEscaping is only ever read). This is what makes copying the struct out of
+// the memo safe — the copy shares both maps. A future consumer that wants to
+// mutate either map must clone it first.
+type fnIndex struct {
+	defs        map[string]*ir.Instruction
+	nonEscaping map[string]bool
+}
+
+// fnIndexFor returns fn's memoized structural index. Deliberately LAZY rather
+// than a pre-pass over byKey: under the demand-driven dependency scope most
+// dependency functions are never analyzed, so building eagerly would bound
+// neither time nor retained memory by what the scan actually touches.
+func (s *sharedIndex) fnIndexFor(fn *ir.Function) fnIndex {
+	s.fnIdxMu.RLock()
+	fx, ok := s.fnIdx[fn]
+	s.fnIdxMu.RUnlock()
+	if ok {
+		return fx
+	}
+	defs := buildDefs(fn)
+	fx = fnIndex{defs: defs, nonEscaping: nonEscapingAllocs(fn, defs)}
+	s.fnIdxMu.Lock()
+	if prev, ok := s.fnIdx[fn]; ok {
+		fx = prev // another goroutine won the race; keep the single shared copy
+	} else {
+		s.fnIdx[fn] = fx
+	}
+	s.fnIdxMu.Unlock()
+	return fx
+}
+
+// buildReqSourceHosts returns the DEPENDENCY functions that host a request
+// source and should be seeded anyway. Such a function — beego's
+// `Controller.Input`, which reads `c.Ctx.Request` internally — generates request
+// taint but takes no tainted argument, so the demand-driven dependency scope
+// never enqueues it. Seeding its BODY (rather than tainting its call result
+// outright) is what keeps a safe accessor that reads the request and returns a
+// constant from becoming a false positive: nothing propagates out of it.
+//
+// The two tiers below differ in how far they may be seeded. Consulted only under
+// a reportable scope, since without one every function is seeded already.
 func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.Module, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
 	if len(reportable) == 0 {
 		return nil
 	}
-	// Two tiers of source, seeded under different bounds:
+	//   reqObjGlobs — request_object_sources: the synthetic *http.Request. The
+	//     frontend also plants it on a framework's request-pipeline ENTRY (gin's
+	//     ServeHTTP), which user code never calls directly, and seeding that
+	//     pushed taint through the framework's whole pipeline — a dep-heavy
+	//     blow-up. So these are seeded only on a DIRECT call from user code.
 	//
-	//   reqObjGlobs — request_object_sources: the synthetic *http.Request, which
-	//     the frontend also plants on a framework's request-pipeline ENTRY (gin's
-	//     ServeHTTP receives the request too). Seeding such an entry makes the
-	//     worklist push request taint through the whole framework pipeline — a
-	//     dep-heavy blow-up — so these are seeded ONLY when user code calls the
-	//     host DIRECTLY (an app calls `c.Input()`, never the pipeline entry).
+	//   srcGlobs — ordinary framework accessors (gin `c.Query`, echo `c.Param`).
+	//     A host CALLS one and yields a bounded string; the pipeline entry does
+	//     not. Seeded at ANY depth, which closes the nested-wrapper case (user →
+	//     svc.Fetch → requtil.ReadQuery → c.Query): the innermost host fires the
+	//     source and caller-re-enqueue carries the taint up the chain.
 	//
-	//   srcGlobs — ordinary sources (framework accessors: gin `c.Query`, echo
-	//     `c.Param`, …). A function hosting one of these CALLS the accessor and
-	//     yields a bounded string result; the pipeline entry does not call them.
-	//     So these are seeded at ANY depth, no direct-call bound — that closes the
-	//     nested-wrapper case (user → svc.Fetch → requtil.ReadQuery → c.Query):
-	//     seeding the innermost host fires the source, and the engine's
-	//     caller-re-enqueue then carries the return taint up the wrapper chain.
-	//
-	// @net/http.Request appears in BOTH lists (it is declared as a plain source
-	// too), so it is removed from srcGlobs below to keep it gated — otherwise the
-	// pipeline entry would be ungated and the blow-up would return.
+	// @net/http.Request is declared as a plain source too, so it is removed from
+	// srcGlobs below — otherwise the pipeline entry would be ungated again.
 	reqObjSet := map[string]bool{}
 	var reqObjGlobs, srcGlobs []string
 	seen := map[string]bool{}
@@ -498,6 +553,11 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 	if len(reqObjGlobs) == 0 && len(srcGlobs) == 0 {
 		return nil
 	}
+	// Precompile both lists: the scan below matches them against EVERY call
+	// instruction of every lowered dependency function, and MatchAny would pay a
+	// mutexed glob-cache lookup per (instruction × pattern).
+	srcSet := rules.NewGlobSet(srcGlobs)
+	reqObjSetGlobs := rules.NewGlobSet(reqObjGlobs)
 	// Callees invoked DIRECTLY by user code (by canonical name — byKey is keyed on
 	// it), the gate for the request-object tier.
 	userCallees := map[string]bool{}
@@ -541,13 +601,13 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 					continue
 				}
 				// Ordinary framework-accessor source: seed at any depth.
-				if rules.MatchAny(srcGlobs, callee) {
+				if srcSet.Match(callee) {
 					hosts[key] = true
 					break scan
 				}
 				// Request-object source: seed only if user code calls this host
 				// directly (excludes the framework's pipeline entry).
-				if userCalled && rules.MatchAny(reqObjGlobs, callee) {
+				if userCalled && reqObjSetGlobs.Match(callee) {
 					hosts[key] = true
 					break scan
 				}
@@ -680,7 +740,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// caller to report instead (taintsParamSink). An empty scope makes every
 		// function reportable, matching the "seed everything" mode above.
 		funcReportable := len(idx.reportable) == 0 || idx.reportable[mod.Name]
-		res := analyzeFunc(idx, mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
+		res := analyzeFunc(idx.fnIndexFor(fn), mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -884,7 +944,7 @@ func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds p
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
 func analyzeFunc(
-	idx *sharedIndex,
+	fx fnIndex,
 	mod *ir.Module,
 	fn *ir.Function,
 	rule *rules.Rule,
@@ -906,8 +966,9 @@ func analyzeFunc(
 	// so the transfer closures below (which capture this variable) always operate
 	// on the right per-block facts.
 	tainted := map[string]*ir.Position{}
-	defs := buildDefs(fn)
-	nonEscaping := nonEscapingAllocs(fn, defs)
+	// Both are read-only views onto the shared per-function memo (see fnIndex).
+	defs := fx.defs
+	nonEscaping := fx.nonEscaping
 
 	// Guard/barrier index (ENG-9), built once and only for a rule that declares
 	// validators (nil otherwise, so the common path pays nothing). curBlock tracks
@@ -916,9 +977,9 @@ func analyzeFunc(
 	guards := buildGuardIndex(fn, rule, defs)
 	var curBlock int32
 
-	// linearFn marks a single-basic-block function — the straight-line-lowered
-	// Python/JS/Ruby/Java bodies, which carry NO CFG, so the dominance-based guard
-	// index above can never fire for them. In one linear block, program order IS
+	// linearFn marks a branch-free function, in ANY language — the majority of
+	// bodies even now that every frontend emits a real CFG. In one linear block the
+	// dominance-based guard index above cannot add anything, because program order IS
 	// dominance: a validator applied to a value before that value is returned
 	// guards the return just as a dominating branch would. validated records the
 	// registers a rule validator has been applied to, consulted only in the linear
@@ -1222,12 +1283,13 @@ func analyzeFunc(
 		var isSink, isSan, isSrc, isProp bool
 		if !indirect {
 			// Classify the callee once. These globs are the engine's hottest per-(call
-			// × rule) work; the switch below and the request-object method-sugar gate
-			// both consult the same predicates, so compute them a single time.
+			// × rule) work; the four-way switch below and the builtin.append
+			// byte/rune-slice gate just under it both consult these predicates, so
+			// compute them a single time.
 			sinkArgs, sinkGuard, isSink = rule.MatchSink(callee)
 			isSan = rule.IsSanitizer(callee)
 			isSrc = rule.IsSource(callee)
-			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+			isProp = rule.IsPropagator(callee)
 			// The Go `append` builtin propagates taint ONLY when its result is a
 			// byte/rune slice — i.e. character-level string reconstruction (the
 			// make([]byte); append(data, s[i]); string(data) idiom of a non-sanitizing
@@ -1255,35 +1317,12 @@ func analyzeFunc(
 			}
 		}
 
-		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
-		// receiver (Call.Value) to param 0, then each explicit arg shifted by one.
-		// Shared by the lowered-method branch and the CHA dynamic-dispatch loop
-		// below, which resolve different targets but seed them identically.
-		seedInvokeArgs := func(target string) {
-			if p, ok := isTaintedArg(tainted, inst.Call.GetValue()); ok {
-				addEffect(target, 0, p)
-			}
-			for j, a := range args {
-				if p, ok := isTaintedArg(tainted, a); ok {
-					addEffect(target, j+1, p)
-				}
-				recordFuncArg(target, j+1, a)
-			}
-		}
-		// pullReturnTaint taints this call's result register from target's return
-		// summary; taint entered via a callee return crossed a function boundary,
-		// so any finding it feeds must be Medium (interprocOrigins).
-		pullReturnTaint := func(target string) {
-			if ro := returnTaint[target]; ro != nil && inst.Name != "" {
-				markTainted(tainted, inst.Name, ro)
-				interprocOrigins[ro] = true
-			}
-		}
 		// eachArgParam calls fn(paramIdx, arg) for each argument, mapped to the
 		// callee's LOGICAL parameter index: an INVOKE's receiver (Call.Value) is
 		// param 0 and its explicit args shift by one; a direct call's args align.
-		// Shared by the out-parameter-fill and sink-wrapper consumers below, which
-		// both need this receiver-offset mapping (easy to get off by one when inlined).
+		// Shared by seedInvokeArgs and by the out-parameter-fill and sink-wrapper
+		// consumers below, which all need this receiver-offset mapping (easy to
+		// get off by one when inlined).
 		eachArgParam := func(fn func(paramIdx int, a *ir.Value)) {
 			if inst.Call.GetIsInvoke() {
 				fn(0, inst.Call.GetValue())
@@ -1294,6 +1333,30 @@ func analyzeFunc(
 				for j, a := range args {
 					fn(j, a)
 				}
+			}
+		}
+		// seedInvokeArgs seeds target's params from an INVOKE's operands, reusing
+		// eachArgParam's invoke branch rather than repeating its receiver shift.
+		// Shared by the lowered-method branch and the CHA dispatch loop below, which
+		// resolve different targets but seed them identically. Both call sites are
+		// under IsInvoke, so `pi > 0` is exactly "not the receiver".
+		seedInvokeArgs := func(target string) {
+			eachArgParam(func(pi int, a *ir.Value) {
+				if p, ok := isTaintedArg(tainted, a); ok {
+					addEffect(target, pi, p)
+				}
+				if pi > 0 {
+					recordFuncArg(target, pi, a)
+				}
+			})
+		}
+		// pullReturnTaint taints this call's result register from target's return
+		// summary; taint entered via a callee return crossed a function boundary,
+		// so any finding it feeds must be Medium (interprocOrigins).
+		pullReturnTaint := func(target string) {
+			if ro := returnTaint[target]; ro != nil && inst.Name != "" {
+				markTainted(tainted, inst.Name, ro)
+				interprocOrigins[ro] = true
 			}
 		}
 
@@ -1323,10 +1386,8 @@ func analyzeFunc(
 				// guard of its own. Consequence: inside a dependency wrapper the
 				// guarded arg is a parameter (always <DYN>), so a guarded sink is
 				// never reported through a wrapper — documented in writing-rules.md.
-				// hostFixed() is supplied as an engine FACT the guard cannot compute
-				// itself (it needs the injection-point args, the taint state and the
-				// def map). expr calls it only if the rule's expression mentions it,
-				// so an unrelated guard pays nothing for the URL reconstruction.
+				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
+				// it only if the rule mentions it, so an unrelated guard pays nothing.
 				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
 					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break

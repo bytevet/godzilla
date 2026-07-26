@@ -15,23 +15,25 @@
 // returns a clear error if python3 is not on PATH.
 //
 // Known limitations (see also the doc comment on lowerBody):
-//   - No real control-flow graph: every function lowers to a single straight
-//     -line basic block. if/for/while/with/try bodies are flattened into that
-//     one block in source order, branch conditions are dropped, and loops
-//     execute (conceptually) once. This trades path precision for recall,
-//     which is the right tradeoff for a taint scanner focused on straight
-//     -line handler code, but it can merge mutually exclusive branches and
-//     will not model loop-carried taint beyond one iteration.
+//   - A real control-flow graph IS built, via converters/ssabuild: if/while/for/
+//     try get their own basic blocks, and PHIs are inserted on demand (Braun et
+//     al.) at the joins. A branch-free body still lowers to exactly one block,
+//     which keeps the engine's linear fast path. What remains approximate is
+//     exceptions and loop exits: lowerTry models a raise as ONE opaque edge from
+//     the try body into a single merged handler block, with no exception typing
+//     (every `except` clause's body is lowered into that one block), and `break`
+//     /`continue` are dropped rather than re-routed, so a loop's exit edges are
+//     the fall-through ones only.
 //   - Classes are only partially modeled: methods (`def` inside a `class`)
 //     become functions named "<Class>.<method>", but other class-body
 //     statements (class attributes, nested classes, decorators) are ignored.
 //   - Expression coverage covers calls, attribute/subscript reads, binary/unary
 //     and boolean operators, comprehensions, container literals, unpacking
 //     assignment, walrus (`:=`), `await`, f-strings, str.format, constants, and
-//     names. Lambdas, comparison operators, and decorators are not specifically
-//     modeled; unhandled expression/statement kinds become an
-//     OP_CODE_INTRINSIC "py.unsupported" node (expressions) or are silently
-//     dropped (statements), rather than aborting conversion.
+//     names. Lambdas and decorators are not specifically modeled; unhandled
+//     expression/statement kinds become an OP_CODE_INTRINSIC "py.unsupported"
+//     node (expressions) or are silently dropped (statements), rather than
+//     aborting conversion.
 package py_converter
 
 import (
@@ -41,7 +43,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"godzilla/internal/chunks"
@@ -65,28 +66,17 @@ func NewConverter() *Converter {
 // single .py file or a directory (all *.py files under it are converted
 // recursively, one gIR Module per file). Requires python3 on PATH.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	abs, err := filepath.Abs(path)
+	// Module names are the file path relative to the scan root, so that
+	// same-named functions in different files (every sample is app.py) get
+	// distinct canonical names instead of colliding in the analyzer. For a
+	// single file the root is its own directory, so its module name stays the
+	// bare filename (see walkignore.CollectTarget).
+	root, files, isDir, err := walkignore.CollectTarget(path, func(p string) bool { return strings.HasSuffix(p, ".py") })
 	if err != nil {
 		return nil, err
 	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, err
-	}
-
-	var files []string
-	if info.IsDir() {
-		files, err = walkignore.CollectSources(abs, func(p string) bool { return strings.HasSuffix(p, ".py") })
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		files = []string{abs}
-	}
-
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no Python files found under %s", abs)
+		return nil, fmt.Errorf("no Python files found under %s", root)
 	}
 
 	pythonExe, err := exec.LookPath("python3")
@@ -100,19 +90,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	}
 	defer cleanup()
 
-	// Module names are the file path relative to the scan root, so that
-	// same-named functions in different files (every sample is app.py) get
-	// distinct canonical names instead of colliding in the analyzer.
-	// Single-file mode: root is the file's directory, so the module name stays
-	// the bare filename.
-	root := abs
-	if !info.IsDir() {
-		root = filepath.Dir(abs)
-	}
-
 	// Single-file mode (path pointed directly at a .py file): a parse/read
 	// failure is the caller's only signal, so surface it immediately.
-	if !info.IsDir() {
+	if !isDir {
 		results := make([]pyFileResult, 1)
 		c.convertPythonChunk(pythonExe, scriptPath, root, files, results)
 		if results[0].err != nil {
@@ -153,7 +133,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	if len(prog.Modules) == 0 {
 		return nil, fmt.Errorf("py_converter: no Python files under %s converted successfully (%d file(s) failed): %s",
-			abs, len(convertErrs), strings.Join(convertErrs, "; "))
+			root, len(convertErrs), strings.Join(convertErrs, "; "))
 	}
 
 	resolveCrossModuleCalls(prog)
@@ -342,11 +322,7 @@ func writeHelperScript() (string, func(), error) {
 // root is the file's own directory (single-file scans) this is just the bare
 // filename.
 func moduleNameFor(root, file string) string {
-	rel, err := filepath.Rel(root, file)
-	if err != nil {
-		rel = filepath.Base(file)
-	}
-	name := filepath.ToSlash(strings.TrimSuffix(rel, ".py"))
+	name := walkignore.ModuleName(root, file)
 	// A package's `pkg/__init__.py` IS the module `pkg` in Python; drop the
 	// implicit __init__ component so an import of `pkg` (callee "py:pkg.f")
 	// resolves to its function's canonical name (see resolveCrossModuleCalls).

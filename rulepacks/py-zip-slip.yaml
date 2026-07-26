@@ -16,7 +16,7 @@ rules:
     # Filesystem sinks come from the shared fragment (also used by
     # py-path-traversal): the entry name reaching any of them is the moment the
     # traversal takes effect.
-    extend: $_py-fs-sinks.yaml
+    extend: $_py-fs.yaml
     sources:
       # Archive entry enumerators: zipfile.ZipFile.namelist/infolist and
       # tarfile.TarFile.getnames/getmembers. The returned names (or the .name/
@@ -32,28 +32,17 @@ rules:
       # secure_filename strips directory separators and "../", collapsing the
       # entry to a safe basename -- the documented Flask/Werkzeug mitigation.
       - "py:*secure_filename"
-      # NOT a sanitizer but an EXCLUSION, which the sanitizer list is the only
-      # lever for: a source glob cannot negate, and the engine classifies a callee
-      # sanitizer-before-source. inspect.getmembers() is Python's introspection
-      # API -- it enumerates a live object's attributes, never archive entries --
-      # and collides with the receiver-wildcarded tarfile glob above. Left
-      # unexcluded it reports HIGH-severity, CI-blocking zip-slip false positives
-      # in any plugin loader or pydoc-shaped module that writes what it inspects.
+      # Not a sanitizer but an EXCLUSION: inspect.getmembers() enumerates a live
+      # object's attributes, never archive entries, but collides with the
+      # receiver-wildcarded tarfile glob above and floods any plugin loader with
+      # CI-blocking false positives. The sanitizer list is the only negation
+      # lever -- a source glob cannot negate, and a callee is classified
+      # sanitizer-before-source.
       - "py:inspect.getmembers"
     # os.path.join does NOT contain the name to a base directory (a leading
     # "../" still escapes), so it forwards taint rather than clearing it --
     # mirroring py-path-traversal's identical treatment.
-    # Path-normalization functions collapse or resolve a path but do NOT contain
-    # it to a base directory, so they PROPAGATE taint rather than sanitize it --
-    # the same set py-path-traversal models (both share _py-fs-sinks.yaml), so an
-    # entry name normalized with `os.path.normpath` / `pathlib.Path(...).resolve`
-    # before extraction still carries taint to the write sink.
-    propagators:
-      - "py:*pathlib.Path"
-      - "py:*.resolve"
-      - "py:*.absolute"
-      - "py:*.joinpath"
-      - "py:*.expanduser"
-      - "py:*.normpath"
-      - "py:*.abspath"
-      - "py:*.realpath"
+    # The path-normalization propagators come from _py-fs.yaml (shared with
+    # py-path-traversal), so an archive entry name normalized with
+    # `os.path.normpath` / `pathlib.Path(...).resolve` before extraction still
+    # carries taint to the write sink.

@@ -10,9 +10,9 @@ rules:
       instead of redirecting to a user-controlled URL.
     extend: $_go-common.yaml
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
+    when: 'not hostFixed()'
     sinks:
-      - sink: "go:*net/http.Redirect#2"
-        when: 'not hostFixed()'
+      - "go:*net/http.Redirect#2"
     sanitizers:
       - "go:*url.QueryEscape"
       - "go:*url.PathEscape"

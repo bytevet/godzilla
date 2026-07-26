@@ -1,8 +1,3 @@
-// Package analysis implements Godzilla's taint analysis engine, which walks
-// gIR programs and reports Findings for source-to-sink dataflows described by
-// a rules.RuleSet. It performs inter-procedural taint tracking (taint flows
-// across function-call boundaries via a call graph + function summaries) and
-// assigns each finding a Confidence.
 package analysis
 
 import (

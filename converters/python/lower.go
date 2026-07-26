@@ -9,6 +9,31 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
+// modCtx bundles the file-scoped facts every lowered function in a module needs:
+// the source filename (for positions), the module name (for canonical names) and
+// the three module-level name tables (top-level defs, import aliases, imported
+// names). It is built once in convertModule and threaded into convertModuleInit
+// and convertFunction, which previously took them as five positional parameters
+// each and then repeated the same field-copy block.
+type modCtx struct {
+	filename   string
+	moduleName string
+	localFuncs map[string]bool
+	aliases    map[string]string
+	imported   map[string]bool
+}
+
+// newFuncState creates a funcState for a function in this module. The single
+// place the module-scoped fields are set.
+func (m *modCtx) newFuncState() *funcState {
+	fs := newFuncState(m.filename)
+	fs.moduleName = m.moduleName
+	fs.localFuncs = m.localFuncs
+	fs.aliases = m.aliases
+	fs.importedNames = m.imported
+	return fs
+}
+
 // convertModule turns one parsed Python file (root = the {"kind":"Module", ...}
 // node from pyast.py) into a gIR Module. Every `def` (including nested defs
 // and methods) becomes its own ir.Function; module-level statements that are
@@ -41,6 +66,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
 	imported := collectImportedNames(root.list("body"))
+	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported}
 
 	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
 	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
@@ -59,7 +85,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 			switch s.kind() {
 			case "FunctionDef":
 				srcParams := routeHandlerParams(s, inHandlerClass)
-				fn := convertFunction(s, filename, moduleName, qualPrefix, localFuncs, aliases, imported, srcParams, inHandlerClass, inClass)
+				fn := convertFunction(ctx, s, qualPrefix, srcParams, inHandlerClass, inClass)
 				functions = append(functions, fn)
 				// A nested def inside a handler/method is not itself a verb method of
 				// the class, so its handler-class and method context reset.
@@ -106,7 +132,7 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 		}
 	}
 
-	moduleFn := convertModuleInit(root, filename, moduleName, localFuncs, aliases, imported)
+	moduleFn := convertModuleInit(ctx, root)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
 
 	return mod
@@ -116,38 +142,35 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 // (skipping nested def/class bodies, which become their own functions) into a
 // synthetic entry-point function, analogous to converters/go treating
 // package-level init code as part of the SSA program.
-func convertModuleInit(root astNode, filename, moduleName string, localFuncs map[string]bool, aliases map[string]string, imported map[string]bool) *ir.Function {
+func convertModuleInit(ctx *modCtx, root astNode) *ir.Function {
 	fn := &ir.Function{
-		Name:          moduleName + ".<module>",
+		Name:          ctx.moduleName + ".<module>",
 		ObjectName:    "<module>",
-		PackageName:   moduleName,
-		CanonicalName: "py:" + moduleName + ".<module>",
+		PackageName:   ctx.moduleName,
+		CanonicalName: "py:" + ctx.moduleName + ".<module>",
 		Synthetic:     true,
 	}
-	fs := newFuncState(filename)
-	fs.moduleName = moduleName
-	fs.localFuncs = localFuncs
-	fs.aliases = aliases
-	fs.importedNames = imported
+	fs := ctx.newFuncState()
 	fs.lowerBody(root.list("body"))
 	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
-// convertFunction lowers a single `def` (module-level, nested, or method)
-// into an ir.Function containing one straight-line basic block. srcParams names
-// this function's route-handler parameters (see routeHandlerParams): each is an
-// untrusted taint source and is seeded with a synthetic source CALL below.
-func convertFunction(node astNode, filename, moduleName, qualPrefix string, localFuncs map[string]bool, aliases map[string]string, imported map[string]bool, srcParams []string, inHandlerClass, isMethod bool) *ir.Function {
+// convertFunction lowers a single `def` (module-level, nested, or method) into
+// an ir.Function whose blocks are built by the ssabuild Builder (a branch-free
+// body yields exactly one block). srcParams names this function's route-handler
+// parameters (see routeHandlerParams): each is an untrusted taint source and is
+// seeded with a synthetic source CALL below.
+func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []string, inHandlerClass, isMethod bool) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
 
 	fn := &ir.Function{
 		Name:          qualname,
 		ObjectName:    name,
-		PackageName:   moduleName,
-		CanonicalName: "py:" + moduleName + "." + qualname,
-		Pos:           posFromNode(filename, node),
+		PackageName:   ctx.moduleName,
+		CanonicalName: "py:" + ctx.moduleName + "." + qualname,
+		Pos:           posFromNode(ctx.filename, node),
 	}
 	// Tag a real method (def directly in a class body) with its bare name so the
 	// engine can resolve a cross-object call `obj.method(x)` to it via CHA.
@@ -155,11 +178,7 @@ func convertFunction(node astNode, filename, moduleName, qualPrefix string, loca
 		fn.MethodName = name
 	}
 
-	fs := newFuncState(filename)
-	fs.moduleName = moduleName
-	fs.localFuncs = localFuncs
-	fs.aliases = aliases
-	fs.importedNames = imported
+	fs := ctx.newFuncState()
 	fs.inHandlerClass = inHandlerClass
 	params := node.strList("params")
 	for _, p := range params {
@@ -375,21 +394,28 @@ func handlerClasses(classBases map[string][]string, targetBases map[string]bool)
 	return result
 }
 
-// emitParamSource emits a synthetic source CALL (routeParamSource) whose result
-// register carries taint, for a route-handler parameter param. The param value
-// is passed as the call's sole argument for readability; the engine seeds taint
-// on the call RESULT (which convertFunction rebinds to the param name).
-func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
+// emitRouteSource emits the synthetic source CALL every route-handler taint
+// origin is built from: a CALL to the canonical @http.param name whose RESULT
+// register the engine seeds. Defined once here; the wrappers below are its only
+// producers.
+func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Value) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Comment = "route-param-source:" + param
+	inst.Comment = comment
 	inst.Call = &ir.CallCommon{
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: routeParamSource}},
 		Callee: routeParamSource,
-		Args:   []*ir.Value{regValue(param)},
+		Args:   args,
 	}
 	fs.emit(inst)
 	return regValue(inst.Name)
+}
+
+// emitParamSource is emitRouteSource for a route-handler parameter. The param
+// is passed as the call's sole argument for readability only; taint lands on the
+// call RESULT, which convertFunction rebinds to the param name.
+func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
+	return fs.emitRouteSource(n, "route-param-source:"+param, regValue(param))
 }
 
 // emitHandlerSource emits a synthetic source CALL (routeParamSource) for a
@@ -398,15 +424,7 @@ func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
 // canonical name is the same @http.param glob every Python taint rulepack already
 // treats as a source, so no rule change is needed beyond the accessor's own sink.
 func (fs *funcState) emitHandlerSource(n astNode, label string) *ir.Value {
-	inst := fs.newValueInst(n)
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Comment = "handler-request-source:" + label
-	inst.Call = &ir.CallCommon{
-		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: routeParamSource}},
-		Callee: routeParamSource,
-	}
-	fs.emit(inst)
-	return regValue(inst.Name)
+	return fs.emitRouteSource(n, "handler-request-source:"+label)
 }
 
 // Tornado request accessors reached via `self` inside a handler-class method.
@@ -787,12 +805,20 @@ func (fs *funcState) lowerIterTarget(n astNode) {
 	}
 }
 
-// lookupName resolves a bare Name reference through the current environment,
-// falling back to a GlobalName reference for an unbound name (module global,
-// builtin, or imported symbol) -- the same rule the "Name" case of lowerExpr
-// applies, factored out here so the Subscript case (see isOpaqueBase) can
-// classify a chain's root without emitting anything: a Name lookup has no
-// side effects.
+// lookupName resolves a bare Name reference through the Builder, falling back to
+// a GlobalName reference for an unbound name (module global, builtin, or
+// imported symbol) -- the same rule the "Name" case of lowerExpr applies,
+// factored out here so the Subscript case (see isOpaqueBase) can classify a
+// chain's root before deciding what to emit.
+//
+// It is NOT side-effect free: an assigned name goes through
+// ssabuild.ReadVariable, which memoises the result into the block's currentDef
+// and, in an unsealed or multi-predecessor block, may park or populate a PHI.
+// That is nonetheless safe for the speculative classification probe, for two
+// reasons: (1) the memoised value is exactly what the subsequent real read in
+// lowerExpr returns, so probing cannot change the lowering; and (2) a PHI
+// register is never in paramRegs, so a probe that materialises one can only
+// classify the root as NON-opaque -- it can never invent an opaque base.
 func (fs *funcState) lookupName(id string) *ir.Value {
 	if fs.assigned[id] {
 		return fs.read(id)
@@ -900,9 +926,9 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 // block and jumps to a fresh merge block; the merge is sealed once both arm-ends
 // are its known predecessors, so any variable rebound on one or both arms
 // reconciles automatically via an on-demand ReadVariable PHI (retiring the manual
-// lowerutil.MergeBranchEnvs path — including the ubiquitous "default if empty"
-// idiom `if not x: x = "d"`, whose pre-branch tainted value is now kept by the
-// merge PHI). Python's `elif` is an `If` node in the parent's `orelse`, so an
+// env-merge path — including the ubiquitous "default if empty" idiom
+// `if not x: x = "d"`, whose pre-branch tainted value is now kept by the merge
+// PHI). Python's `elif` is an `If` node in the parent's `orelse`, so an
 // arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
 func (fs *funcState) lowerIf(s astNode) {
 	// Lower the condition for its side effects and as the branch value: a source
@@ -1085,8 +1111,8 @@ func (fs *funcState) lowerTry(s astNode) {
 	fs.lowerBody(finalbody) // finally runs on both the normal and handler paths
 }
 
-// lowerStmt lowers one leaf statement (i.e. not a control-flow compound;
-// those are flattened by lowerBody).
+// lowerStmt lowers one leaf statement; control-flow compounds get their own
+// basic blocks in lowerBody.
 func (fs *funcState) lowerStmt(s astNode) {
 	switch s.kind() {
 	case "Assign":
@@ -1137,8 +1163,10 @@ func (fs *funcState) lowerStmt(s astNode) {
 // variable" mapping). An Attribute/Subscript target (obj.attr = v / arr[i] =
 // v) emits a STORE with the base object as the address operand, matching how
 // converters/go lowers ssa.Store; this is what lets a tainted value written
-// into a container mark that container tainted. Tuple/List (unpacking)
-// targets are a documented limitation: silently dropped.
+// into a container mark that container tainted. A Tuple/List (unpacking) target
+// binds EACH element to the whole RHS value — element taint == container taint,
+// mirroring for-loop targets and conservative for recall — and nested unpacking
+// recurses; any other target shape is still dropped.
 func (fs *funcState) assign(target astNode, val *ir.Value) {
 	switch target.kind() {
 	case "Name":

@@ -170,16 +170,7 @@ func indexJavaSources(root string) map[string]string {
 	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
 		base = filepath.Dir(root)
 	}
-	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return fs.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(base, func(p string, d fs.DirEntry) error {
 		if strings.HasSuffix(d.Name(), ".java") {
 			if _, seen := idx[d.Name()]; !seen {
 				idx[d.Name()] = p

@@ -9,9 +9,9 @@ rules:
       open redirect. Validate the target against an allowlist instead of
       redirecting to a user-controlled URL.
     extend: $_js-sources.yaml
+    when: 'not hostFixed()'
     sinks:
-      - sink: "js:*.redirect"
-        when: 'not hostFixed()'
+      - "js:*.redirect"
     sanitizers:
       - "js:encodeURIComponent"
     propagators: []

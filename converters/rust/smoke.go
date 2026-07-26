@@ -58,10 +58,7 @@ func verifyMIRShape(prog *ir.Program) bool {
 	return false
 }
 
-var (
-	smokeOnce sync.Once
-	smokeOK   bool
-)
+var smokeOnce sync.Once
 
 // warnIfMIRDrifted runs the smoke check once per process and, if the installed
 // rustc's MIR no longer lowers to the expected shapes, prints a prominent
@@ -73,24 +70,20 @@ func warnIfMIRDrifted() {
 	smokeOnce.Do(func() {
 		tmp, err := os.CreateTemp("", "godzilla-rust-smoke-*.rs")
 		if err != nil {
-			smokeOK = true // can't check; don't cry wolf
-			return
+			return // can't check; don't cry wolf
 		}
 		defer func() { _ = os.Remove(tmp.Name()) }()
 		if _, err := tmp.WriteString(smokeSnippet); err != nil {
-			smokeOK = true
 			return
 		}
 		_ = tmp.Close()
 
 		mir, err := emitMIR(tmp.Name())
 		if err != nil {
-			smokeOK = true // compile failed (no/old rustc) — surfaced elsewhere
-			return
+			return // compile failed (no/old rustc) — surfaced elsewhere
 		}
 		prog := &ir.Program{Mode: "mir", Modules: []*ir.Module{lowerMIR(mir, tmp.Name())}}
-		smokeOK = verifyMIRShape(prog)
-		if !smokeOK {
+		if !verifyMIRShape(prog) {
 			fmt.Fprintf(os.Stderr, "warning: rust: this rustc's MIR did not lower to the expected shapes — "+
 				"the MIR text format may have changed and Rust findings could be silently incomplete; "+
 				"please report the rustc version (rustc --version).\n")

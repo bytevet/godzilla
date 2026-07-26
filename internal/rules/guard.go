@@ -138,11 +138,8 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 	if g.prog == nil {
 		return false // DenyGuard
 	}
-	// Zero-arg defers to the engine (the sink's pinned injection points, tainted
-	// only); an explicit hostFixed(arg[i], ...) is answered from the skeletons and
-	// needs no engine state, so it works in any guard context. Several arguments
-	// must ALL be host-fixed, matching the zero-arg "every tainted injection point"
-	// reading.
+	// Zero-arg defers to the engine fact (see EvalHostFixed); explicit args are
+	// answered from the skeletons alone and must ALL be host-fixed.
 	fn := func(as ...Arg) bool {
 		if len(as) == 0 {
 			if hostFixed == nil {

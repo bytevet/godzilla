@@ -14,9 +14,7 @@ rules:
       outside the intended directory. Validate the input against an allow-list
       and canonicalize the resolved path (e.g. Path.normalize + verify it stays
       under a fixed base directory) before opening it.
-    # Sources: the shared request surface plus the process environment, both from
-    # fragments (env first so getenv keeps its position in the merged list).
-    extend: [$_java-env-source.yaml, $_java-sources.yaml]
+    extend: $_java-sources.yaml
     sinks:
       # Stream/reader/writer constructors take the path as (receiver-excluded)
       # argument 0; a File is constructed from any of its path components.

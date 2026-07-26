@@ -54,6 +54,14 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
 4. Gate (the four checks above).
 5. Commit; re-run the campaign; record the recall delta.
 
+> **Status: the rules-first lever is largely exhausted.** The progress log below
+> records the finding that supersedes this plan's premise: the residual campaign
+> misses need frontend/engine capabilities (dict/XML taint-through,
+> untrusted-artifact and response-body sources), not YAML edits. R1/R4/R5 are kept
+> for the shape of the problem, but each needs a capability first — do not read
+> them as ready-to-implement rule work. R2 and the config-flag rules that followed
+> it are done.
+
 ## Prioritized backlog (evidence-based; refined from the fresh baseline)
 
 - [ ] **R1 — SSRF framework HTTP-client sinks** (biggest cluster: langflow,
@@ -72,7 +80,8 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
       so `pickle.loads(upload.read())` flows. Never a `dangerous-call` (that was the
       reverted flood). Verified FP-safe: campaign findings 153→153 with **zero** per-app
       change (all ML apps flat), corpus FP=0/FN=0. See progress log.
-- [ ] **R3 — Per-framework request-source breadth**: FastAPI/Starlette `Request`,
+- [ ] **R6 — Per-framework request-source breadth** (renumbered: the "R3" in the
+      progress log is the path-traversal propagator work, a different item): FastAPI/Starlette `Request`,
       Django `request`, Express/Koa `ctx.request`, so flows originate for more apps.
 - [ ] **R4 — Framework-rendered XSS / open-redirect helpers**: template renderers,
       `redirect()`/`sendRedirect` framework wrappers.
@@ -81,13 +90,6 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
 
 Each Rn is one gated increment; re-measure recall after each. Order may shift once
 the fresh baseline's per-miss fix files are analysed.
-
-## Branch / sequencing note
-
-This track stacks onto `claude/project-overview-wblehh` (PR #25), which is currently
-**merge-ready and green**. Cleanest is to **merge PR #25 first**, then run this track
-as a fresh follow-up PR from `main`. Absent that, it stacks on #25 per the
-designated-branch policy — which grows an already-large PR. Flag for the human.
 
 ## Progress log
 
@@ -136,7 +138,7 @@ designated-branch policy — which grows an already-large PR. Flag for the human
   sink *is* modeled, but taint died at the ubiquitous `pathlib.Path(x)` / `os.path.normpath(x)`
   normalization hop because Python — unlike Java (`Paths.get`/`Path.of`/`Path.resolve`) — had no
   path-normalization propagators. Added them to `py-path-traversal.yaml` and `py-zip-slip.yaml`
-  (both share `_py-fs-sinks.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
+  (both share `_py-fs.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
   `.expanduser`, `os.path.normpath`/`.abspath`/`.realpath`. Propagators forward existing taint
   and create no findings on their own, so the FP blast radius is structurally zero — confirmed:
   **CVE-2024-4941 gradio flips MISS→HIT** (`py-path-traversal` → `open` in `processing_utils.py`,

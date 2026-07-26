@@ -21,7 +21,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -49,6 +48,9 @@ func LoadFile(path string) (*rules.RuleSet, error) {
 	}
 	if err := checkDuplicateIDs(rs); err != nil {
 		return nil, fmt.Errorf("loader: %s: %w", path, err)
+	}
+	if f := frags[defaultPropagatorsFragment]; f != nil {
+		rs.DefaultPropagators = f.Propagators
 	}
 	return rs, nil
 }
@@ -99,11 +101,20 @@ func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, erro
 		}
 		out.Rules = append(out.Rules, rs.Rules...)
 	}
+	if f := frags[defaultPropagatorsFragment]; f != nil {
+		out.DefaultPropagators = f.Propagators
+	}
 	if err := checkDuplicateIDs(out); err != nil {
 		return nil, fmt.Errorf("loader: %s: %w", what, err)
 	}
 	return out, nil
 }
+
+// defaultPropagatorsFragment is the one fragment no rule names in `extend:`: the
+// loader applies its propagators to EVERY rule (RuleSet.DefaultPropagators).
+// Making each pack extend it would restate the same list in all 60-odd packs —
+// exactly the boilerplate the rule-level `when:` default removed elsewhere.
+const defaultPropagatorsFragment = "_default-propagators.yaml"
 
 // LoadDefault returns Godzilla's built-in rules merged with the user-supplied
 // rule file at userPath, if any (userPath == "" means "no user rules"). User
@@ -125,7 +136,20 @@ func LoadDefault(userPath string) (*rules.RuleSet, error) {
 
 	return &rules.RuleSet{
 		Rules: slices.Concat(builtin.Rules, user.Rules),
+		// User rules add to the built-ins rather than replacing them, so the
+		// set-wide propagators must survive the merge. A user directory that ships
+		// its own _default-propagators.yaml has already overridden them in
+		// LoadFile's fragment set.
+		DefaultPropagators: firstNonEmpty(user.DefaultPropagators, builtin.DefaultPropagators),
 	}, nil
+}
+
+// firstNonEmpty returns a if it has elements, else b.
+func firstNonEmpty(a, b []string) []string {
+	if len(a) > 0 {
+		return a
+	}
+	return b
 }
 
 // parse unmarshals YAML rule data, expands fragment references, and validates
@@ -223,52 +247,55 @@ func mergeUniq[T comparable](base, own []T) []T {
 	return out
 }
 
-// builtinFragments reads the embedded `_`-prefixed fragment files.
-func builtinFragments() (fragmentSet, error) {
-	entries, err := rulepacks.Builtin.ReadDir(".")
+// readFragments adds every `_`-prefixed fragment file directly under fsys's root
+// to into. what labels fsys in wrapped errors. Shared by builtinFragments (the
+// embedded rulepacks FS) and fragmentsFor (a user rules directory), which differ
+// only in the filesystem — like loadRules for the rulepacks themselves.
+func readFragments(fsys fs.FS, what string, into fragmentSet) error {
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		return nil, fmt.Errorf("loader: read embedded builtin rules: %w", err)
+		return fmt.Errorf("loader: read %s: %w", what, err)
 	}
-	frags := fragmentSet{}
 	for _, entry := range entries {
 		if entry.IsDir() || !isFragment(entry.Name()) {
 			continue
 		}
-		data, err := rulepacks.Builtin.ReadFile(entry.Name())
+		data, err := fs.ReadFile(fsys, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("loader: read embedded fragment %s: %w", entry.Name(), err)
+			return fmt.Errorf("loader: read fragment %s: %w", entry.Name(), err)
 		}
-		if err := frags.add(entry.Name(), data); err != nil {
-			return nil, err
+		if err := into.add(entry.Name(), data); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// builtinFragments reads the embedded `_`-prefixed fragment files.
+func builtinFragments() (fragmentSet, error) {
+	frags := fragmentSet{}
+	if err := readFragments(rulepacks.Builtin, "embedded builtin rules", frags); err != nil {
+		return nil, err
 	}
 	return frags, nil
 }
 
 // fragmentsFor returns the builtin fragments extended with any fragment files
 // directly under dir (a user rules directory may add its own or override a
-// builtin of the same name). A missing/unreadable dir contributes nothing.
+// builtin of the same name). A missing/unreadable dir contributes nothing —
+// only the DIRECTORY read is forgiven; a fragment file that exists but cannot be
+// read or parsed is still an error.
 func fragmentsFor(dir string) (fragmentSet, error) {
 	frags, err := builtinFragments()
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if _, err := os.ReadDir(dir); err != nil {
 		return frags, nil // no user fragments
 	}
 	frags = maps.Clone(frags)
-	for _, entry := range entries {
-		if entry.IsDir() || !isFragment(entry.Name()) {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("loader: read fragment %s: %w", entry.Name(), err)
-		}
-		if err := frags.add(entry.Name(), data); err != nil {
-			return nil, err
-		}
+	if err := readFragments(os.DirFS(dir), dir, frags); err != nil {
+		return nil, err
 	}
 	return frags, nil
 }
@@ -328,22 +355,23 @@ func validate(rs *rules.RuleSet) error {
 			}
 		}
 		// Compile the rule here (idempotent, so the engine's later Compile is a
-		// no-op): this compiles its dynamic `when:` guards exactly once per run and
-		// surfaces any guard error at load instead of letting it reach a scan.
+		// no-op): this compiles its dynamic `when:` guards and its const_arg regexp
+		// exactly once per run and surfaces any error at load instead of letting it
+		// reach a scan. A const_arg declared but uncompilable would otherwise leave
+		// a rule that can never match, silently.
 		if err := rs.Rules[i].Compile(); err != nil {
-			problems = append(problems, fmt.Sprintf("rule %q has an invalid when: %v", r.ID, err))
+			problems = append(problems, fmt.Sprintf("rule %q failed to compile: %v", r.ID, err))
 		}
 		// A dangerous-call rule (COV-4) is defined by its callees; without any it
-		// can never fire, and its const_arg regexp must compile.
-		if r.IsDangerousCall() {
-			if len(r.Callees) == 0 {
-				problems = append(problems, fmt.Sprintf("rule %q is kind: dangerous-call but declares no callees", r.ID))
-			}
-			if r.ConstArg != nil && r.ConstArg.Matches != "" {
-				if _, err := regexp.Compile(r.ConstArg.Matches); err != nil {
-					problems = append(problems, fmt.Sprintf("rule %q has an invalid const_arg.matches regexp %q: %v", r.ID, r.ConstArg.Matches, err))
-				}
-			}
+		// can never fire.
+		if r.IsDangerousCall() && len(r.Callees) == 0 {
+			problems = append(problems, fmt.Sprintf("rule %q is kind: dangerous-call but declares no callees", r.ID))
+		}
+		// A secret rule is defined by its `matches` regexp, and Compile above has
+		// already surfaced an uncompilable one. Without a regexp it silently scans
+		// nothing, which looks like "no secrets in this repo".
+		if r.IsSecret() && strings.TrimSpace(r.Matches) == "" {
+			problems = append(problems, fmt.Sprintf("rule %q is kind: secret but declares no matches regexp", r.ID))
 		}
 	}
 	if len(problems) > 0 {

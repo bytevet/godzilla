@@ -11,6 +11,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -114,14 +115,37 @@ type Rule struct {
 	// query `db.Query("... = ?", taintedParam)` is correctly NOT flagged.
 	Sinks []Sink `yaml:"sinks"`
 
+	// When is the rule's DEFAULT dynamic guard: a sink (or dangerous-call callee)
+	// that declares no `when:` of its own inherits this one. A guard like
+	// `not hostFixed()` is rule POLICY — it says what this whole rule means — but
+	// the schema previously had nowhere to put it except on every single sink, so
+	// a pack repeated the identical expression a dozen times and a sink added
+	// later silently opted out of it. Declaring it once here makes the default
+	// explicit and un-forgettable. An entry's own `when:` always wins, so
+	// `when: 'true'` on one sink is the per-sink opt-out. Inheritance is applied
+	// where the guard is resolved (effectiveWhen), so a sink merged in from a
+	// fragment inherits it too.
+	When string `yaml:"when"`
+
 	Propagators []string `yaml:"propagators"` // callees that pass taint arg->result (e.g. fmt.Sprintf)
 
-	// Kind selects the rule's evaluation model. "" (or "taint") is the default
-	// source->sink dataflow rule. "dangerous-call" (COV-4) is a non-dataflow,
-	// call-site-syntactic check: any call to a Callee glob is a finding, optionally
-	// gated on a constant string argument — for zero-noise categories like weak
-	// crypto, weak ciphers, and insecure randomness that need no taint tracking.
+	// Kind selects the rule's evaluation model:
+	//   ""/"taint"        the default source->sink dataflow rule.
+	//   "dangerous-call"  a non-dataflow, call-site-syntactic check: any call to a
+	//                     Callee glob is a finding, optionally gated on a constant
+	//                     string argument — for zero-noise categories like weak
+	//                     crypto and insecure randomness that need no taint.
+	//   "secret"          a non-dataflow, non-call check: Matches is run over every
+	//                     string CONSTANT in the IR and over the lines of textual
+	//                     config files, so a credential is caught wherever it is
+	//                     written. No callee is involved at all.
 	Kind string `yaml:"kind"`
+
+	// Matches is a kind: secret rule's detector — a Go regexp run against string
+	// constants and config-file lines. Deliberately specific (a fixed prefix or a
+	// structural marker) rather than entropy-based, since a CI gate cannot afford
+	// the noise. Ignored by other kinds; see MatchesRe.
+	Matches string `yaml:"matches"`
 
 	// Callees are the dangerous-call patterns for a kind: dangerous-call rule —
 	// each a bare glob string or a `{callee, when}` mapping adding a guard (see Callee).
@@ -141,6 +165,17 @@ type Rule struct {
 	// and leaves the value unchanged; it neutralizes the finding by controlling
 	// which path reaches the sink. Matched by canonical-FQN glob, like sinks.
 	Validators []string `yaml:"validators"`
+
+	// defaultProps is RuleSet.DefaultPropagators compiled ONCE for the whole set
+	// and shared by reference, handed down by RuleSet.Compile so a rule answers
+	// IsPropagator on its own and the engine never has to know defaults exist.
+	// Unexported and not from YAML; a Rule compiled outside a RuleSet has none.
+	//
+	// Deliberately NOT inside matchers: the loader compiles each rule during
+	// validate(), before the set-wide list is known, and Rule.Compile is
+	// idempotent — folding this into matchers would make it silently depend on
+	// that ordering. Kept on the Rule, it can be installed at any point.
+	defaultProps []*compiledGlob
 
 	// matchers holds the pattern lists precompiled to shape-matchers (built by
 	// Compile). Unexported and not from YAML; nil until compiled, when the
@@ -237,6 +272,12 @@ type ConstArg struct {
 // RuleSet is a collection of rules, matching the top-level YAML document shape.
 type RuleSet struct {
 	Rules []Rule `yaml:"rules"`
+
+	// DefaultPropagators are taint-preserving library transforms that apply to
+	// EVERY rule on top of its own Propagators. The loader fills this from the
+	// `_default-propagators.yaml` fragment; Compile hands it to each rule, so the
+	// engine never has to know defaults exist. Not from this document's YAML.
+	DefaultPropagators []string `yaml:"-"`
 }
 
 // Compile precompiles every rule's patterns (see Rule.Compile). Call it once,
@@ -246,7 +287,10 @@ type RuleSet struct {
 // Idempotent.
 func (rs *RuleSet) Compile() error {
 	var errs []error
+	// Compiled once for the whole set and shared by reference with every rule.
+	defaults := classifyAll(rs.DefaultPropagators)
 	for i := range rs.Rules {
+		rs.Rules[i].defaultProps = defaults
 		if err := rs.Rules[i].Compile(); err != nil {
 			errs = append(errs, fmt.Errorf("rule %q: %w", rs.Rules[i].ID, err))
 		}
@@ -270,10 +314,21 @@ func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
 	}
 	for _, c := range r.Callees {
 		if MatchGlob(c.Pattern, callee) {
-			return uncompiledGuard(c.When), true
+			return uncompiledGuard(r.effectiveWhen(c.When)), true
 		}
 	}
 	return nil, false
+}
+
+// effectiveWhen resolves an entry's guard expression against the rule's default:
+// the entry's own `when:` if it has one, else the rule-level When. The single
+// place inheritance is applied — Compile and both uncompiled fallback paths call
+// it, so a sink cannot be guarded on one path and unguarded on the other.
+func (r *Rule) effectiveWhen(when string) string {
+	if strings.TrimSpace(when) != "" {
+		return when
+	}
+	return r.When
 }
 
 // uncompiledGuard is the guard for a match found on the uncompiled fallback path
@@ -311,6 +366,12 @@ type ruleMatchers struct {
 	propagators []*compiledGlob
 	validators  []*compiledGlob
 	callees     []compiledCallee
+
+	// constArg is ConstArg.Matches compiled once (nil when the rule declares no
+	// const_arg, or when its regexp was invalid — see ConstArgRe). matches is
+	// Rule.Matches compiled once, on the same terms (see MatchesRe).
+	constArg *regexp.Regexp
+	matches  *regexp.Regexp
 }
 
 // compiledSink pairs a sink's shape-matcher with its parsed injection-point
@@ -343,21 +404,80 @@ func (r *Rule) Compile() error {
 	var errs []error
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
-		guard, err := CompileGuard(s.When) // DenyGuard on error: fail closed
+		guard, err := CompileGuard(r.effectiveWhen(s.When)) // DenyGuard on error: fail closed
 		if err != nil {
 			errs = append(errs, fmt.Errorf("sink %q: %w", s.Pattern, err))
 		}
 		m.sinks = append(m.sinks, compiledSink{g: classifyGlob(pattern), args: idx, guard: guard})
 	}
 	for _, c := range r.Callees {
-		guard, err := CompileGuard(c.When)
+		guard, err := CompileGuard(r.effectiveWhen(c.When))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("callee %q: %w", c.Pattern, err))
 		}
 		m.callees = append(m.callees, compiledCallee{g: classifyGlob(c.Pattern), guard: guard})
 	}
+	if r.ConstArg != nil && r.ConstArg.Matches != "" {
+		re, err := regexp.Compile(r.ConstArg.Matches)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("const_arg.matches %q: %w", r.ConstArg.Matches, err))
+		}
+		m.constArg = re // nil on error: a const_arg declared but invalid can never match
+	}
+	if r.Matches != "" {
+		re, err := regexp.Compile(r.Matches)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("matches %q: %w", r.Matches, err))
+		}
+		m.matches = re // nil on error, so an invalid detector matches nothing
+	}
 	r.matchers = m
 	return errors.Join(errs...)
+}
+
+// ConstArgRe returns the rule's compiled const_arg.matches regexp, or nil when
+// the rule declares no const_arg, was never compiled, or its regexp is invalid.
+// A rule that declares a const_arg it cannot compile must never fire, so callers
+// treat "ConstArg != nil but ConstArgRe() == nil" as "matches nothing".
+func (r *Rule) ConstArgRe() *regexp.Regexp {
+	if r.matchers == nil {
+		return nil
+	}
+	return r.matchers.constArg
+}
+
+// IsSecret reports whether the rule is a non-dataflow, pattern-over-constants
+// rule (kind: secret).
+func (r *Rule) IsSecret() bool { return strings.EqualFold(r.Kind, "secret") }
+
+// MatchesRe returns the rule's compiled `matches` regexp, or nil when it
+// declares none, was never compiled, or its regexp was invalid. As with
+// ConstArgRe, a declared-but-uncompilable detector must never fire, so nil means
+// "matches nothing".
+func (r *Rule) MatchesRe() *regexp.Regexp {
+	if r.matchers == nil {
+		return nil
+	}
+	return r.matchers.matches
+}
+
+// GlobSet is a set of canonical-name globs precompiled to shape-matchers, for a
+// caller that matches the same list against many subjects but does not own a
+// Rule (e.g. the engine's request-object host scan, which walks every
+// instruction of every lowered dependency function). Matching through MatchAny
+// instead would pay a mutexed globCache lookup per (subject × pattern).
+type GlobSet struct{ gs []*compiledGlob }
+
+// NewGlobSet precompiles patterns into a GlobSet.
+func NewGlobSet(patterns []string) *GlobSet { return &GlobSet{gs: classifyAll(patterns)} }
+
+// Match reports whether s matches any pattern in the set. A nil or empty set
+// matches nothing, exactly like MatchAny over an empty list.
+func (g *GlobSet) Match(s string) bool {
+	if g == nil {
+		return false
+	}
+	return matchAnyCompiled(g.gs, s)
 }
 
 func classifyAll(patterns []string) []*compiledGlob {
@@ -407,7 +527,7 @@ func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	for _, s := range r.Sinks {
 		pattern, idx := parseSink(s.Pattern)
 		if MatchGlob(pattern, callee) {
-			return idx, uncompiledGuard(s.When), true
+			return idx, uncompiledGuard(r.effectiveWhen(s.When)), true
 		}
 	}
 	return nil, nil, false
@@ -464,10 +584,12 @@ func (r *Rule) IsSanitizer(callee string) bool {
 	return MatchAny(r.Sanitizers, callee)
 }
 
-// IsPropagator reports whether callee matches any of the rule's propagator patterns.
+// IsPropagator reports whether callee matches one of the rule's propagator
+// patterns or one of the set-wide defaults (see RuleSet.DefaultPropagators).
 func (r *Rule) IsPropagator(callee string) bool {
 	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.propagators, callee)
+		return matchAnyCompiled(r.matchers.propagators, callee) ||
+			matchAnyCompiled(r.defaultProps, callee)
 	}
 	return MatchAny(r.Propagators, callee)
 }

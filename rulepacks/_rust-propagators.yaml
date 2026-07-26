@@ -1,6 +1,9 @@
-# Shared Rust string/Option/Result/iterator propagators. Pulled into rust SQLi/
-# command/ssrf with `extend: [$_rust-sources.yaml, $_rust-propagators.yaml]`.
-# (rust-path-traversal keeps its own path-specific propagators instead.)
+# Shared Rust string/Option/Result/iterator propagators — the CORE set common to
+# ALL FOUR Rust dataflow rules (SQLi, command injection, SSRF, path traversal),
+# pulled in with `extend: [$_rust-sources.yaml, $_rust-propagators.yaml]`.
+# The five entries the path rule deliberately does NOT take live in
+# _rust-propagators-extra.yaml; rust-path-traversal adds its own path-specific
+# entries inline instead.
 propagators:
   - "rust:*unwrap"
   - "rust:*unwrap_or"
@@ -12,8 +15,6 @@ propagators:
   - "rust:*deref"
   - "rust:*into"
   - "rust:*collect"
-  - "rust:*join"
-  - "rust:*concat"
   - "rust:*push_str"
   - "rust:*index"
   - "rust:*get"
@@ -25,10 +26,7 @@ propagators:
   - "rust:*map"
   - "rust:*chars"
   - "rust:*split"
-  - "rust:*splitn"
   - "rust:*lines"
-  - "rust:*bytes"
-  - "rust:*to_vec"
   - "rust:*from_utf8"
   - "rust:*from_utf8_lossy"
   - "rust:*String::from"

@@ -174,3 +174,65 @@ func BenchmarkMatchGlob(b *testing.B) {
 		}
 	}
 }
+
+// TestRuleLevelWhenInherited: a rule-level `when:` is the DEFAULT guard for
+// every sink/callee that declares none of its own, an entry's own `when:` wins,
+// and both the compiled and the uncompiled matching paths agree — a sink that is
+// guarded on one path and unguarded on the other would fire unguarded wherever
+// Compile had not been called.
+func TestRuleLevelWhenInherited(t *testing.T) {
+	newRule := func() *Rule {
+		return &Rule{
+			ID:   "r",
+			When: "arg[0].String startsWith 'x'",
+			Sinks: []Sink{
+				{Pattern: "go:pkg.Inherits"},
+				{Pattern: "go:pkg.OptsOut", When: "true"},
+			},
+			Callees: []Callee{{Pattern: "go:pkg.Callee"}},
+		}
+	}
+
+	// Uncompiled fallback: an inherited guard must DENY (it cannot be evaluated
+	// there), exactly as an entry's own guard does.
+	r := newRule()
+	if _, g, ok := r.MatchSink("go:pkg.Inherits"); !ok || g != DenyGuard {
+		t.Errorf("uncompiled inherited sink guard = %v (ok=%v), want DenyGuard", g, ok)
+	}
+	if g, ok := r.MatchDangerousCallee("go:pkg.Callee"); !ok || g != DenyGuard {
+		t.Errorf("uncompiled inherited callee guard = %v (ok=%v), want DenyGuard", g, ok)
+	}
+
+	// Compiled path: the inherited guard is the rule's expression; the opted-out
+	// sink gets its own.
+	r = newRule()
+	if err := r.Compile(); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	_, g, ok := r.MatchSink("go:pkg.Inherits")
+	if !ok || g == nil {
+		t.Fatalf("compiled inherited sink: ok=%v guard=%v, want a guard", ok, g)
+	}
+	if g.Eval([]Arg{{String: "xyz"}}) != true || g.Eval([]Arg{{String: "abc"}}) != false {
+		t.Errorf("inherited guard did not evaluate the rule-level expression")
+	}
+	_, g, ok = r.MatchSink("go:pkg.OptsOut")
+	if !ok || g == nil {
+		t.Fatalf("compiled opted-out sink: ok=%v guard=%v", ok, g)
+	}
+	if !g.Eval([]Arg{{String: "abc"}}) {
+		t.Errorf("a sink's own `when: true` must win over the rule-level default")
+	}
+
+	// A rule with no rule-level When leaves a bare sink unguarded, as before.
+	plain := &Rule{ID: "p", Sinks: []Sink{{Pattern: "go:pkg.Bare"}}}
+	if _, g, ok := plain.MatchSink("go:pkg.Bare"); !ok || g != nil {
+		t.Errorf("bare sink of an unguarded rule: guard=%v, want nil", g)
+	}
+	if err := plain.Compile(); err != nil {
+		t.Fatal(err)
+	}
+	if _, g, ok := plain.MatchSink("go:pkg.Bare"); !ok || g != nil {
+		t.Errorf("compiled bare sink of an unguarded rule: guard=%v, want nil", g)
+	}
+}

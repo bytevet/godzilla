@@ -187,6 +187,12 @@ type ruleRow struct {
 	CWE      string
 	Count    int
 	SevClass string // chip/text class of this rule's worst observed severity
+
+	// sevRank is that same worst severity's rank, kept for the sort below.
+	// Unexported: html/template never reads unexported fields, so it stays out
+	// of the rendered output while sparing the comparator a class-string ->
+	// rank decode of a value we already had.
+	sevRank int
 }
 
 // ruleRows tallies findings per rule, ordered by count desc, then worst
@@ -196,7 +202,7 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 	type agg struct {
 		cwe     string
 		count   int
-		bestSev int
+		bestSev rules.Severity
 	}
 	byRule := map[string]*agg{}
 	for _, f := range findings {
@@ -206,8 +212,8 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 			byRule[f.RuleID] = a
 		}
 		a.count++
-		if r := normalizeSeverity(f.Severity).Rank(); r > a.bestSev {
-			a.bestSev = r
+		if s := normalizeSeverity(f.Severity); s.Rank() > a.bestSev.Rank() {
+			a.bestSev = s
 		}
 		if a.cwe == "" {
 			a.cwe = f.CWE
@@ -219,7 +225,8 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 			RuleID:   id,
 			CWE:      a.cwe,
 			Count:    a.count,
-			SevClass: severityClass(rules.Severity(rankSeverity(a.bestSev))),
+			SevClass: severityClass(a.bestSev),
+			sevRank:  a.bestSev.Rank(),
 		})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -228,45 +235,12 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 		}
 		// Tie-break by worst severity (so rule ids also appear in severity
 		// order), then rule id for determinism.
-		si, sj := sevRankOfClass(rows[i].SevClass), sevRankOfClass(rows[j].SevClass)
-		if si != sj {
-			return si > sj
+		if rows[i].sevRank != rows[j].sevRank {
+			return rows[i].sevRank > rows[j].sevRank
 		}
 		return rows[i].RuleID < rows[j].RuleID
 	})
 	return rows
-}
-
-// rankSeverity maps a 1..5 rank back to its severity string.
-func rankSeverity(rank int) string {
-	switch rank {
-	case 5:
-		return string(rules.SeverityCritical)
-	case 4:
-		return string(rules.SeverityHigh)
-	case 3:
-		return string(rules.SeverityMedium)
-	case 2:
-		return string(rules.SeverityLow)
-	default:
-		return string(rules.SeverityInfo)
-	}
-}
-
-// sevRankOfClass returns the severity rank encoded by a "sev-*" css class.
-func sevRankOfClass(class string) int {
-	switch class {
-	case "sev-critical":
-		return 5
-	case "sev-high":
-		return 4
-	case "sev-medium":
-		return 3
-	case "sev-low":
-		return 2
-	default:
-		return 1
-	}
 }
 
 // findingView is the per-finding data made available to the template; it
@@ -286,7 +260,6 @@ type findingView struct {
 	Function          string
 	SinkCallee        string
 	SinkLocation      string
-	SourceLocation    string
 	Flow              []flowStep
 	HasFlow           bool
 	FlowEndpointsOnly bool
@@ -325,7 +298,6 @@ func newFindingView(cache snippetCache, root string, f analysis.Finding) finding
 		Function:          f.Function,
 		SinkCallee:        f.SinkCallee,
 		SinkLocation:      displayPos(root, f.SinkPos),
-		SourceLocation:    displayPos(root, f.SourcePos),
 		Flow:              flow,
 		HasFlow:           len(flow) > 0,
 		FlowEndpointsOnly: endpointsOnly,
@@ -535,8 +507,7 @@ func (c snippetCache) lines(filename string) ([]string, bool) {
 // codeSnippet holds a small window of source lines around a finding position,
 // for best-effort inline display in the report.
 type codeSnippet struct {
-	Filename string
-	Lines    []snippetLine
+	Lines []snippetLine
 }
 
 type snippetLine struct {
@@ -614,7 +585,7 @@ func buildSnippet(cache snippetCache, pos *ir.Position) *codeSnippet {
 		}
 		lines = append(lines, line)
 	}
-	return &codeSnippet{Filename: filename, Lines: lines}
+	return &codeSnippet{Lines: lines}
 }
 
 // reportTemplate is the full HTML document template, parsed from the embedded

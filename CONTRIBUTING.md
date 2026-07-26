@@ -51,20 +51,18 @@ dangerous-call kinds). Add a vulnerable sample under `test/<lang>/` with an
 [test/README.md](test/README.md)), and ideally a safe variant that stays clean.
 
 **Add a language frontend.** Mirror `converters/python` or `converters/javascript`:
-parse, then lower to gIR with stable `<lang>:` canonical names. Emit
-`OP_CODE_INTRINSIC` (with a canonical intrinsic name) for language-specific
-constructs rather than adding new opcodes.
+parse, then lower to gIR with stable `<lang>:` canonical names.
 
 **Change the gIR schema — a last resort.** gIR is the frozen contract every
 frontend emits and the single engine consumes, so a schema change ripples across
-all of them. First try to model the construct as an `OP_CODE_INTRINSIC` (with a
-canonical name), a YAML rule, or frontend lowering. If a change is truly
-unavoidable, edit `proto/*.proto` first (it is authoritative), then
-`go generate ./...` — never hand-edit `pkg/ir/v1/*.pb.go`.
+all of them. Model the construct as an `OP_CODE_INTRINSIC` with a canonical name,
+a YAML rule, or frontend lowering first — never add an opcode for a
+language-specific construct. If a change is truly unavoidable, edit
+`proto/*.proto` (it is authoritative), then `go generate ./...` — never hand-edit
+`pkg/ir/v1/*.pb.go`.
 
 ## Conventions
 
-- Keep the gIR core small; model language-isms as intrinsics.
 - Every instruction/function/global must populate its source `Pos` — it drives
   reporting.
 - Never add sample dependencies to the root `go.mod`; samples are isolated modules.

@@ -29,9 +29,9 @@ type methodState struct {
 }
 
 // convertMethod simulates the JVM operand stack over a method's bytecode to
-// recover SSA-style values, emitting one straight-line gIR basic block. Control
-// flow is flattened (like the Python/JS frontends), which is sufficient for the
-// common source→sink handler shape.
+// recover SSA-style values. Control flow is lowered block-by-block over the
+// reconstructed CFG, merging the stack and locals at each join with PHI (see
+// run); a branch-free method yields a single block.
 func convertMethod(className string, m dumpMethod, filename string) *ir.Function {
 	s := &methodState{filename: filename, className: className, locals: map[int]*ir.Value{}}
 
