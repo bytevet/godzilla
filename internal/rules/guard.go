@@ -52,10 +52,32 @@ type Guard struct {
 // false-positive the guard exists to prevent). Fail closed, never open.
 var DenyGuard = &Guard{}
 
-// guardEnv is the evaluation environment: `arg[i]` is the i-th logical argument.
+// guardEnv is the evaluation environment: `arg[i]` is the i-th logical argument,
+// and `hostFixed()` answers whether every tainted injection-point argument is
+// confined to the path/query of a constant scheme://host.
 type guardEnv struct {
-	Arg []Arg `expr:"arg"`
+	Arg       []Arg       `expr:"arg"`
+	HostFixed func() bool `expr:"hostFixed"`
 }
+
+// EvalHostFixed is the engine-supplied fact behind the `hostFixed()` guard
+// builtin. It is a FACT the guard layer cannot compute for itself: deciding it
+// needs the call's injection-point arguments, the current taint state, and the IR
+// def map. Supplying it as a function keeps the *policy* -- whether a rule should
+// suppress on it -- in the rule's `when:` expression, instead of the engine
+// branching on a rule's CWE string.
+//
+// It is deliberately zero-arg rather than hostFixed(arg[i]): the URL is not always
+// argument 0 (requests.request pins #1) and some sinks take a request OBJECT
+// rather than a URL string (net/http Client.Do), so making the rule author restate
+// the index would silently misfire. Zero-arg reuses the sink's own #idx pinning.
+type EvalHostFixed func() bool
+
+// alwaysControllable is the default when no engine fact is supplied (e.g. a
+// dangerous-call guard, which has no taint state). It reports NOT host-fixed, so
+// `not hostFixed()` holds and the entry fires -- failing open, never silently
+// suppressing.
+func alwaysControllable() bool { return false }
 
 // CompileGuard parses, type-checks, and compiles a `when:` expression. It returns
 // an error for a syntax error, an unknown name, a non-boolean result, or an
@@ -76,14 +98,21 @@ func CompileGuard(src string) (*Guard, error) {
 // Eval reports whether the guard holds for the call's arguments. A nil guard
 // (no `when:`) always fires; DenyGuard never does; a run error (e.g. an
 // out-of-range arg index) is unconfirmed -> false (suppress).
-func (g *Guard) Eval(args []Arg) bool {
+func (g *Guard) Eval(args []Arg) bool { return g.EvalWith(args, nil) }
+
+// EvalWith is Eval with the engine's optional facts supplied. hostFixed may be
+// nil, in which case the guard sees a not-host-fixed answer (fail open).
+func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 	if g == nil {
 		return true
 	}
 	if g.prog == nil {
 		return false // DenyGuard
 	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args})
+	if hostFixed == nil {
+		hostFixed = alwaysControllable
+	}
+	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: hostFixed})
 	if err != nil {
 		return false
 	}

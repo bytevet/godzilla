@@ -1323,7 +1323,12 @@ func analyzeFunc(
 				// guard of its own. Consequence: inside a dependency wrapper the
 				// guarded arg is a parameter (always <DYN>), so a guarded sink is
 				// never reported through a wrapper — documented in writing-rules.md.
-				if sinkGuard != nil && !sinkGuard.Eval(argVals(inst.Call, defs)) {
+				// hostFixed() is supplied as an engine FACT the guard cannot compute
+				// itself (it needs the injection-point args, the taint state and the
+				// def map). expr calls it only if the rule's expression mentions it,
+				// so an unrelated guard pays nothing for the URL reconstruction.
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
+					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break
 				}
 				// ENG-9: suppress when a validator guard on this flow's source
