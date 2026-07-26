@@ -58,35 +58,22 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		if mod == nil {
 			continue
 		}
-		lang := mod.GetLanguage()
-
 		for _, g := range mod.Globals {
 			if g == nil {
 				continue
 			}
-			scanConstant(g.GetInitValue(), g.GetPos(), lang, "", dets, seen, &findings)
+			scanConstant(g.GetInitValue(), g.GetPos(), mod.GetLanguage(), "", dets, seen, &findings)
 		}
-
-		for _, fn := range mod.Functions {
-			if fn == nil {
-				continue
+	}
+	for mod, fn := range funcs(prog) {
+		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
+		for inst := range instrs(fn) {
+			for _, op := range inst.GetOperands() {
+				scanConstant(op.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
 			}
-			for _, blk := range fn.Blocks {
-				if blk == nil {
-					continue
-				}
-				for _, inst := range blk.Instrs {
-					if inst == nil {
-						continue
-					}
-					for _, op := range inst.GetOperands() {
-						scanConstant(op.GetConstant(), inst.GetPos(), lang, fn.GetCanonicalName(), dets, seen, &findings)
-					}
-					if inst.Call != nil {
-						for _, a := range inst.Call.GetArgs() {
-							scanConstant(a.GetConstant(), inst.GetPos(), lang, fn.GetCanonicalName(), dets, seen, &findings)
-						}
-					}
+			if inst.Call != nil {
+				for _, a := range inst.Call.GetArgs() {
+					scanConstant(a.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
 				}
 			}
 		}
@@ -182,16 +169,7 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 		return findings
 	}
 
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
 		if isScannableConfigFile(path) {
 			scanFile(path)
 		}

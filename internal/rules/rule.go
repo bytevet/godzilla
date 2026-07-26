@@ -166,18 +166,16 @@ type Rule struct {
 	// which path reaches the sink. Matched by canonical-FQN glob, like sinks.
 	Validators []string `yaml:"validators"`
 
-	// defaultPropagators is RuleSet.DefaultPropagators and defaultProps is that
-	// list compiled ONCE for the whole set — both handed down by RuleSet.Compile,
-	// so a rule answers IsPropagator on its own and the engine never has to know
-	// defaults exist. Unexported and not from YAML; a Rule compiled outside a
-	// RuleSet simply has none.
+	// defaultProps is RuleSet.DefaultPropagators compiled ONCE for the whole set
+	// and shared by reference, handed down by RuleSet.Compile so a rule answers
+	// IsPropagator on its own and the engine never has to know defaults exist.
+	// Unexported and not from YAML; a Rule compiled outside a RuleSet has none.
 	//
 	// Deliberately NOT inside matchers: the loader compiles each rule during
 	// validate(), before the set-wide list is known, and Rule.Compile is
-	// idempotent — folding these into matchers would make them silently depend on
-	// that ordering. Kept on the Rule, they can be installed at any point.
-	defaultPropagators []string
-	defaultProps       []*compiledGlob
+	// idempotent — folding this into matchers would make it silently depend on
+	// that ordering. Kept on the Rule, it can be installed at any point.
+	defaultProps []*compiledGlob
 
 	// matchers holds the pattern lists precompiled to shape-matchers (built by
 	// Compile). Unexported and not from YAML; nil until compiled, when the
@@ -292,7 +290,6 @@ func (rs *RuleSet) Compile() error {
 	// Compiled once for the whole set and shared by reference with every rule.
 	defaults := classifyAll(rs.DefaultPropagators)
 	for i := range rs.Rules {
-		rs.Rules[i].defaultPropagators = rs.DefaultPropagators
 		rs.Rules[i].defaultProps = defaults
 		if err := rs.Rules[i].Compile(); err != nil {
 			errs = append(errs, fmt.Errorf("rule %q: %w", rs.Rules[i].ID, err))
@@ -594,7 +591,7 @@ func (r *Rule) IsPropagator(callee string) bool {
 		return matchAnyCompiled(r.matchers.propagators, callee) ||
 			matchAnyCompiled(r.defaultProps, callee)
 	}
-	return MatchAny(r.Propagators, callee) || MatchAny(r.defaultPropagators, callee)
+	return MatchAny(r.Propagators, callee)
 }
 
 // IsValidator reports whether callee matches any of the rule's validator (guard)

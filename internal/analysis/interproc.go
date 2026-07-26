@@ -32,22 +32,14 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	byKey := map[string]*ir.Function{}
 	modByKey := map[string]*ir.Module{}
 	local := 0
-	for _, mod := range prog.Modules {
-		if mod == nil {
-			continue
+	for mod, fn := range funcs(prog) {
+		key := fn.CanonicalName
+		if key == "" {
+			key = fmt.Sprintf("__local%d", local)
+			local++
 		}
-		for _, fn := range mod.Functions {
-			if fn == nil {
-				continue
-			}
-			key := fn.CanonicalName
-			if key == "" {
-				key = fmt.Sprintf("__local%d", local)
-				local++
-			}
-			byKey[key] = fn
-			modByKey[key] = mod
-		}
+		byKey[key] = fn
+		modByKey[key] = mod
 	}
 
 	// Class-hierarchy index for interface dynamic dispatch, built ONCE and shared

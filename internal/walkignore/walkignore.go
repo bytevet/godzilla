@@ -16,11 +16,39 @@ import (
 	"strings"
 )
 
+// Files walks root and calls fn for every FILE, pruning the directories SkipDir
+// names. A walk error on an entry skips it rather than aborting, since a scan
+// should not die on one unreadable path. fn's return value goes back to
+// filepath.WalkDir, so it may return fs.SkipDir or fs.SkipAll to steer the walk.
+//
+// This is the directory-walk primitive every caller wanted: the prune policy is
+// applied in ONE place, so teaching SkipDir about a new vendor directory reaches
+// the frontends, the config-file secret scan, language detection and the LLM
+// reviewer's grep at once, instead of five copies drifting apart.
+func Files(root string, fn func(path string, d fs.DirEntry) error) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if SkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		return fn(p, d)
+	})
+}
+
 // CollectSources walks root and returns the sorted list of files for which
 // match(path) is true, applying the shared prune policy: skip ignored directories
-// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig). A
-// walk error aborts. Shared by the interpreted-language frontends (Python, JS,
-// Ruby), whose directory walks differ only in the file predicate.
+// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig).
+// Shared by the interpreted-language frontends (Python, JS, Ruby), whose
+// directory walks differ only in the file predicate.
+//
+// Deliberately does NOT use Files: a walk error ABORTS here. A frontend that
+// could not read its own source tree must fail rather than silently report on a
+// subset, which is what Result.Coverage and -strict are built on.
 func CollectSources(root string, match func(path string) bool) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {

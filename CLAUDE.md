@@ -109,6 +109,8 @@ this is a file map.
   inert to taint propagation. Emitting either from a frontend is what opts that language into the reduction.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
   (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
+- `walk.go` — the `funcs`/`instrs` gIR iterators the once-per-scan passes share instead of each
+  re-writing the nil-guarded module→function→block→instruction nest.
 - `secrets.go` — `ScanSecrets`: applies the `kind: secret` rules' regexps to gIR string constants and to
   config files no frontend parses (CWE-798). The patterns are data in `rulepacks/secrets.yaml`, not Go.
 - `finding.go` — the `Finding` type shared across the pipeline.
@@ -130,8 +132,10 @@ language is the [detection matrix](README.md#supported-languages--detections); a
 **Report & LLM (`internal/report/`, `internal/llm/`).** `WriteHTML` renders a self-contained, auto-escaped
 report with code snippets; `WriteJSON` and `WriteSARIF` (2.1.0, severity→level) feed tooling and GitHub
 code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
-semantics, prompt builder, verdict parser); `anthropic.go` is the SDK adapter (default `claude-haiku-4-5`,
-override with `GODZILLA_LLM_MODEL`).
+semantics, prompt builder, verdict parser); `anthropic.go` and `openai.go` are the backends (default
+`claude-haiku-4-5`; `GODZILLA_LLM_MODEL` overrides the model,
+`GODZILLA_LLM_PROVIDER=openai` + `GODZILLA_LLM_BASE_URL` selects an
+OpenAI-compatible endpoint, e.g. a local model).
 
 **CLI (`cmd/godzilla/`).** `main.go` parses flags and sets the severity-gated exit code; `rules.go` adds
 `rules list|lint|test`. The per-extension frontend dispatch, module merge, engine + dangerous-call +

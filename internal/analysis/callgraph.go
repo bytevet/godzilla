@@ -58,17 +58,12 @@ func BuildCallGraph(prog *ir.Program) *CallGraph {
 	}
 
 	var allFuncs []*ir.Function
-	for _, mod := range prog.Modules {
-		if mod == nil {
+	for _, fn := range funcs(prog) {
+		if fn.CanonicalName == "" {
 			continue
 		}
-		for _, fn := range mod.Functions {
-			if fn == nil || fn.CanonicalName == "" {
-				continue
-			}
-			g.Funcs[fn.CanonicalName] = fn
-			allFuncs = append(allFuncs, fn)
-		}
+		g.Funcs[fn.CanonicalName] = fn
+		allFuncs = append(allFuncs, fn)
 	}
 
 	// CHA index: bare method/function name -> known functions exposing it.
@@ -85,21 +80,16 @@ func BuildCallGraph(prog *ir.Program) *CallGraph {
 
 	for _, fn := range allFuncs {
 		caller := fn.CanonicalName
-		for _, blk := range fn.Blocks {
-			if blk == nil {
+		for inst := range instrs(fn) {
+			if inst.Call == nil {
 				continue
 			}
-			for _, inst := range blk.Instrs {
-				if inst == nil || inst.Call == nil {
-					continue
-				}
-				switch inst.Op {
-				case ir.OpCode_OP_CODE_CALL, ir.OpCode_OP_CODE_INVOKE, ir.OpCode_OP_CODE_INTRINSIC:
-				default:
-					continue
-				}
-				resolveCall(g, caller, inst.Call, methodIndex, edgeSets)
+			switch inst.Op {
+			case ir.OpCode_OP_CODE_CALL, ir.OpCode_OP_CODE_INVOKE, ir.OpCode_OP_CODE_INTRINSIC:
+			default:
+				continue
 			}
+			resolveCall(g, caller, inst.Call, methodIndex, edgeSets)
 		}
 	}
 

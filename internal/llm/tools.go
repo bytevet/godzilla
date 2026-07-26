@@ -172,18 +172,9 @@ func (tb *FileToolBox) Grep(pattern string, maxHits int) (string, error) {
 	}
 	var b strings.Builder
 	hits := 0
-	walkErr := filepath.WalkDir(tb.root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := walkignore.Files(tb.root, func(path string, d fs.DirEntry) error {
 		if hits >= maxHits {
 			return fs.SkipAll
-		}
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return fs.SkipDir
-			}
-			return nil
 		}
 		if walkignore.SkipFile(d.Name()) {
 			return nil

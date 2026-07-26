@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -416,16 +415,7 @@ func isCppFile(path string) bool {
 // relevant frontends.
 func detectLanguages(dir string) map[string]bool {
 	present := map[string]bool{}
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(dir, func(p string, d fs.DirEntry) error {
 		for _, fe := range languageFrontends {
 			if fe.matches(p) {
 				present[fe.name] = true

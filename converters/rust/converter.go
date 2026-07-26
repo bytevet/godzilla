@@ -113,16 +113,7 @@ func collect(path string) ([]string, error) {
 		return []string{path}, nil
 	}
 	var out []string
-	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if walkignore.SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	_ = walkignore.Files(path, func(p string, d fs.DirEntry) error {
 		if strings.EqualFold(filepath.Ext(p), ".rs") {
 			if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
 				return nil

@@ -48,70 +48,59 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 
 	var findings []Finding
 	seen := map[string]bool{}
-	for _, mod := range prog.Modules {
-		if mod == nil {
-			continue
-		}
+	for mod, fn := range funcs(prog) {
 		lang := mod.GetLanguage()
-		for _, fn := range mod.Functions {
-			if fn == nil {
+		// Built on first use and then shared by every rule's guard below. A
+		// dangerous-call argument is usually a literal, but it may be a keyword
+		// marker (builtin.kwarg) or a constant folded through a register, and
+		// neither resolves without the def map — a guard reading `.Name` to tell
+		// `shell=True` from `check=True` would otherwise never see a name.
+		// Lazy because the overwhelming majority of functions in a scan (the whole
+		// lowered dependency closure included) contain no call a dangerous-call
+		// rule matches, and only a const_arg or a `when:` guard ever needs the map.
+		var defs map[string]*ir.Instruction
+		getDefs := func() map[string]*ir.Instruction {
+			if defs == nil {
+				defs = buildDefs(fn)
+			}
+			return defs
+		}
+		for inst := range instrs(fn) {
+			if inst.Call == nil {
 				continue
 			}
-			// Built on first use and then shared by every rule's guard below. A
-			// dangerous-call argument is usually a literal, but it may be a keyword
-			// marker (builtin.kwarg) or a constant folded through a register, and
-			// neither resolves without the def map — a guard reading `.Name` to tell
-			// `shell=True` from `check=True` would otherwise never see a name.
-			// Lazy because the overwhelming majority of functions in a scan (the whole
-			// lowered dependency closure included) contain no call a dangerous-call
-			// rule matches, and only a const_arg or a `when:` guard ever needs the map.
-			var defs map[string]*ir.Instruction
-			getDefs := func() map[string]*ir.Instruction {
-				if defs == nil {
-					defs = buildDefs(fn)
-				}
-				return defs
-			}
-			for _, blk := range fn.Blocks {
-				if blk == nil {
-					continue
-				}
-				for _, inst := range blk.Instrs {
-					if inst == nil || inst.Call == nil {
+			{
+				callee := inst.Call.GetCallee()
+				for _, d := range dcs {
+					if !d.rule.AppliesTo(lang) {
+						continue // cheap language gate before the glob walk
+					}
+					guard, matched := d.rule.MatchDangerousCallee(callee)
+					if !matched || !constArgMatches(d.rule, d.re, inst.Call, getDefs) {
 						continue
 					}
-					callee := inst.Call.GetCallee()
-					for _, d := range dcs {
-						if !d.rule.AppliesTo(lang) {
-							continue // cheap language gate before the glob walk
-						}
-						guard, matched := d.rule.MatchDangerousCallee(callee)
-						if !matched || !constArgMatches(d.rule, d.re, inst.Call, getDefs) {
-							continue
-						}
-						// Dynamic callee guard (`when:`): suppress unless it confirms against
-						// the call's reconstructed argument values (required-confirmation).
-						if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
-							continue
-						}
-						key := d.rule.ID + "@" + posKey(inst.GetPos())
-						if seen[key] {
-							continue
-						}
-						seen[key] = true
-						findings = append(findings, Finding{
-							RuleID:     d.rule.ID,
-							Severity:   d.rule.Severity,
-							Confidence: d.conf,
-							CWE:        d.rule.CWE,
-							Message:    d.rule.Message,
-							Language:   lang,
-							Function:   fn.GetCanonicalName(),
-							Package:    fn.GetPackageName(),
-							SinkPos:    inst.GetPos(),
-							SinkCallee: callee,
-						})
+					// Dynamic callee guard (`when:`): suppress unless it confirms against
+					// the call's reconstructed argument values (required-confirmation).
+					if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
+						continue
 					}
+					key := d.rule.ID + "@" + posKey(inst.GetPos())
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					findings = append(findings, Finding{
+						RuleID:     d.rule.ID,
+						Severity:   d.rule.Severity,
+						Confidence: d.conf,
+						CWE:        d.rule.CWE,
+						Message:    d.rule.Message,
+						Language:   lang,
+						Function:   fn.GetCanonicalName(),
+						Package:    fn.GetPackageName(),
+						SinkPos:    inst.GetPos(),
+						SinkCallee: callee,
+					})
 				}
 			}
 		}
