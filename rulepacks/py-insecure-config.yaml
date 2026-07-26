@@ -1,0 +1,91 @@
+# Insecure security-configuration flags: a call that is safe by default is made
+# dangerous by an explicit keyword argument. These are CONFIGURATION defects, not
+# dataflow -- there is no untrusted input to trace, the flag itself is the defect
+# -- so they are `kind: dangerous-call` rules gated on the keyword's name AND
+# value (see rules.Arg.Name, which the Python frontend supplies via the
+# builtin.kwarg marker). Without matching on `.Name` these could not be written at
+# all: `verify=False` would be indistinguishable from any other false keyword.
+#
+# All four ship severity: low + confidence: medium on purpose. The CI gate keys on
+# SEVERITY (-fail-on, default medium), so `low` keeps a config finding advisory
+# rather than build-breaking; the LLM reviewer triages on CONFIDENCE, and `medium`
+# puts them in its adjudication range. A hardcoded-High call-site rule is what
+# flooded a project and had to be reverted once already.
+rules:
+  - id: py-insecure-tls-verify
+    languages: [python]
+    kind: dangerous-call
+    severity: low
+    confidence: medium
+    cwe: CWE-295
+    message: >-
+      TLS certificate verification is disabled (verify=False), so the connection
+      is trivially machine-in-the-middled: any certificate is accepted, including
+      an attacker's. Remove verify=False; if a private CA is in use, point the
+      client at its bundle instead.
+    callees:
+      - callee: "py:*requests.*"
+        when: 'any(arg, .Name == "verify" && .String == "false")'
+      - callee: "py:*httpx.*"
+        when: 'any(arg, .Name == "verify" && .String == "false")'
+      - callee: "py:*aiohttp.*"
+        when: 'any(arg, .Name == "verify" && .String == "false")'
+      # A Session/client instance call (s.get(...)) lowers to an opaque receiver,
+      # so the callee cannot be anchored to the library. The guard carries the
+      # precision here: `verify` named False is a TLS switch in every client
+      # library that accepts it, so a wildcard receiver adds reach, not noise.
+      - callee: "py:*.request"
+        when: 'any(arg, .Name == "verify" && .String == "false")'
+
+  - id: py-flask-debug-enabled
+    languages: [python]
+    kind: dangerous-call
+    severity: low
+    confidence: medium
+    cwe: CWE-489
+    message: >-
+      The development server is started with debug=True, which exposes the
+      Werkzeug interactive debugger. Anyone who can reach the app and trigger a
+      traceback gets an in-browser Python console -- remote code execution. Never
+      enable it outside local development.
+    callees:
+      - callee: "py:*.run"
+        when: 'any(arg, .Name == "debug" && .String == "true")'
+
+  - id: py-jinja-autoescape-off
+    languages: [python]
+    kind: dangerous-call
+    severity: low
+    confidence: medium
+    cwe: CWE-79
+    message: >-
+      The template environment is built with autoescape=False, so every rendered
+      variable is emitted as raw HTML and any untrusted value becomes stored or
+      reflected XSS. Enable autoescaping and mark the rare trusted fragment
+      explicitly instead.
+    callees:
+      - callee: "py:*Environment"
+        when: 'any(arg, .Name == "autoescape" && .String == "false")'
+
+  - id: py-langchain-dangerous-code
+    languages: [python]
+    kind: dangerous-call
+    severity: low
+    confidence: medium
+    cwe: CWE-94
+    message: >-
+      An agent is constructed with allow_dangerous_code=True, which lets the LLM
+      execute generated Python against the host. Prompt content is untrusted
+      input, so this is remote code execution by design (the langflow
+      CVE-2026-27966 shape). Keep the flag off, or sandbox the executor.
+    callees:
+      # The keyword is specific to langchain's opt-in for code-executing agents,
+      # so the guard is the discriminator and the receiver need not be anchored.
+      - callee: "py:*agent*"
+        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+      - callee: "py:*Agent*"
+        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+      - callee: "py:*Chain*"
+        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+      - callee: "py:*Tool*"
+        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'

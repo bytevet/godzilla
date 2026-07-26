@@ -1,0 +1,13 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# One config-flag finding per dangerous keyword. All are advisory (severity low,
+# confidence medium) so they report without breaking the default CI gate.
+findings:
+    - rule: py-insecure-tls-verify
+      min: 1
+    - rule: py-jinja-autoescape-off
+      min: 1
+    - rule: py-langchain-dangerous-code
+      min: 1
+    - rule: py-flask-debug-enabled
+      min: 1
