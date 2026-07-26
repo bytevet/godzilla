@@ -144,7 +144,9 @@ avoid changing it (see Conventions); reach for intrinsics, not new schema.**
   `internal/chunks.Run` (concurrent per-file lowering), and `converters/ssabuild` (the real-CFG builder with
   on-demand PHI insertion, which retired the old flattened if/else env-merge helper).
 
-**Analysis (`internal/analysis/`).**
+**Analysis (`internal/analysis/`).** The engine's design and its precision guards — and the failures that
+motivated them — are documented in the package itself (`internal/analysis/doc.go`, `go doc ./internal/analysis`);
+this is a file map.
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
   aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
   taint across **every** language — including Rust, whose frontend lowers `String + &str` (rustc's `Add::add`
@@ -235,9 +237,16 @@ dependency-free (interface, confidence-gated `Filter` with fail-open semantics, 
 parser); `anthropic.go` is the Anthropic-SDK adapter (default `claude-haiku-4-5`, override via
 `GODZILLA_LLM_MODEL`).
 
-**CLI (`cmd/godzilla/main.go`).** `scan` dispatches to frontends by extension (or runs all on a directory and
-merges modules), runs the engine + secrets scan, optionally LLM-reviews, prints findings, writes HTML, and
-sets a severity-gated exit code.
+**CLI (`cmd/godzilla/`).** `main.go` parses flags and sets a severity-gated exit code; `rules.go` adds
+`rules list|lint|test` (rule authoring without a repo clone — see `docs/writing-rules.md`). The actual
+per-extension frontend dispatch, module merge, engine + dangerous-call + secrets passes, and `scopeFindings`
+live in **`internal/scan`**, not in `main.go`.
+
+**Supporting packages.** `internal/scan` (orchestration, `Result.Coverage` — a frontend that failed to run is
+NOT a clean scan, which `-strict` turns into a non-zero exit), `internal/triage` (baseline +
+`godzilla:ignore`), `internal/config` (`.godzilla.yaml`), `internal/buildpolicy` (the `-allow-build` gate on
+running a scanned project's build tool), `internal/ruletest` (backs `rules test`), plus the shared frontend
+scaffolding: `internal/chunks`, `internal/proc`, `internal/walkignore`, `internal/memlimit`.
 
 ## Conventions
 

@@ -1,8 +1,13 @@
 # SSA/CFG lowering for the Python / JS / Ruby frontends
 
-## Goal
+> **Status: COMPLETE — all phases landed.** This is retained as the design
+> rationale and landing record, not as pending work. For what the frontends do
+> *today*, see `ARCHITECTURE.md` (Frontends) and each `converters/<lang>/`
+> package doc; for the SSA construction itself, `converters/ssabuild`.
 
-Replace the **straight-line, single-block, env-map** lowering in the Python,
+## Goal (as originally stated)
+
+Replaced the **straight-line, single-block, env-map** lowering in the Python,
 JavaScript, and Ruby frontends with real **CFG + SSA** emission, matching what the
 Go frontend already produces. The gIR schema and the taint engine already support
 full CFG+SSA (blocks, `preds`/`succs`, `OP_CODE_IF`/`JUMP`/`PHI`, a reverse-post-order

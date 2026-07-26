@@ -116,6 +116,18 @@ callees:                                  # dangerous-call
   `arg[0].String startsWith 'cmd:'` is true.
 - `.Complete` — the whole argument is a compile-time constant.
 - `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, or `""` if unknown.
+- `.Name` — the keyword the argument was passed under (`"shell"` for
+  `subprocess.run(cmd, shell=True)`), or `""` for a positional argument or a
+  frontend that does not record names (currently Python only). Without it a guard
+  can only see that *some* boolean argument is true, which cannot tell the
+  dangerous `shell=True` from an innocuous `check=True`.
+
+A keyword can appear at any position, so match it by iterating rather than by
+index — this is how the security-config rules are written:
+
+```yaml
+    when: 'any(arg, .Name == "verify" && .String == "false")'
+```
 
 Write the condition with expr's native operators/builtins — `startsWith`,
 `endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined
@@ -163,6 +175,18 @@ An entry's own `when` always wins, so `when: 'true'` is the per-sink opt-out.
 built (a constant `scheme://host` prefix ahead of the taint means the attacker
 controls only the path/query) — the rule decides what to do with it, the engine
 does not decide for the rule.
+
+It takes an optional argument. Prefer the **zero-arg** `hostFixed()`: it reuses
+the sink's own `#idx` pinning, so it cannot drift out of sync with it. The URL is
+not always argument 0 (`py:*requests.request#1` pins `#1`) and some sinks take a
+request *object* rather than a URL string (`net/http` `Client.Do`), so restating
+the index — `hostFixed(arg[0])` — risks checking the HTTP method instead of the
+URL. The explicit form exists for rules that want the check spelled out or need a
+non-injection argument; `hostFixed(a, b)` requires all of them to be host-fixed.
+
+In a `dangerous-call` guard there is no taint state, so `hostFixed()` reports
+not-host-fixed and the entry fires. `not hostFixed()` is therefore a no-op there —
+fail open, never silently suppress.
 
 ## Fragments (`extend`)
 
@@ -212,5 +236,13 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 ## Testing a rule
 
 Add a vulnerable sample under `test/<lang>/<case>/` with an `expected.yaml`, plus
-a `*_safe` control where precision matters. `go test ./test/corpus/` asserts both.
-See [test/README.md](../test/README.md).
+a `*_safe` control where precision matters.
+
+```bash
+godzilla rules lint rulepacks/*.yaml   # schema, globs, guards, #idx specs
+godzilla rules test test/python/       # run samples against their expected.yaml
+```
+
+Both work against the built binary, so authoring a rule needs neither a repo
+clone nor `go test`. In CI the same samples are asserted by
+`go test ./test/corpus/`. See [test/README.md](../test/README.md).
