@@ -23,13 +23,18 @@ func TestBuiltin(t *testing.T) {
 		if r.ID == "" {
 			t.Errorf("rule has empty ID: %+v", r)
 		}
-		// A dataflow (taint) rule is defined by its sinks; a dangerous-call rule
-		// (COV-4) is defined by its callees instead.
-		if r.IsDangerousCall() {
+		// Each kind is defined by a different field: a dataflow rule by its sinks,
+		// a dangerous-call rule (COV-4) by its callees, a secret rule by its regexp.
+		switch {
+		case r.IsDangerousCall():
 			if len(r.Callees) == 0 {
 				t.Errorf("dangerous-call rule %q has no callees", r.ID)
 			}
-		} else if len(r.Sinks) == 0 {
+		case r.IsSecret():
+			if r.Matches == "" {
+				t.Errorf("secret rule %q has no matches regexp", r.ID)
+			}
+		case len(r.Sinks) == 0:
 			t.Errorf("rule %q has no sinks", r.ID)
 		}
 		if r.ID == "go-sql-injection" {

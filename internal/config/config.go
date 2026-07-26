@@ -86,7 +86,14 @@ func (c *Config) ApplyRules(rs *rules.RuleSet) *rules.RuleSet {
 	for _, id := range c.Rules.Disable {
 		disabled[id] = true
 	}
-	out := &rules.RuleSet{Rules: make([]rules.Rule, 0, len(rs.Rules))}
+	// DefaultPropagators must survive the rebuild: they are set-wide data the
+	// loader read from _default-propagators.yaml, not a per-rule field, so a
+	// config that disables one rule would otherwise silently strip the
+	// taint-preserving transforms from ALL of them — a mass false-negative.
+	out := &rules.RuleSet{
+		Rules:              make([]rules.Rule, 0, len(rs.Rules)),
+		DefaultPropagators: rs.DefaultPropagators,
+	}
 	for _, r := range rs.Rules {
 		if disabled[r.ID] {
 			continue

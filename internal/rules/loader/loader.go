@@ -49,6 +49,9 @@ func LoadFile(path string) (*rules.RuleSet, error) {
 	if err := checkDuplicateIDs(rs); err != nil {
 		return nil, fmt.Errorf("loader: %s: %w", path, err)
 	}
+	if f := frags[defaultPropagatorsFragment]; f != nil {
+		rs.DefaultPropagators = f.Propagators
+	}
 	return rs, nil
 }
 
@@ -98,11 +101,20 @@ func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, erro
 		}
 		out.Rules = append(out.Rules, rs.Rules...)
 	}
+	if f := frags[defaultPropagatorsFragment]; f != nil {
+		out.DefaultPropagators = f.Propagators
+	}
 	if err := checkDuplicateIDs(out); err != nil {
 		return nil, fmt.Errorf("loader: %s: %w", what, err)
 	}
 	return out, nil
 }
+
+// defaultPropagatorsFragment is the one fragment no rule names in `extend:`: the
+// loader applies its propagators to EVERY rule (RuleSet.DefaultPropagators).
+// Making each pack extend it would restate the same list in all 60-odd packs —
+// exactly the boilerplate the rule-level `when:` default removed elsewhere.
+const defaultPropagatorsFragment = "_default-propagators.yaml"
 
 // LoadDefault returns Godzilla's built-in rules merged with the user-supplied
 // rule file at userPath, if any (userPath == "" means "no user rules"). User
@@ -124,7 +136,20 @@ func LoadDefault(userPath string) (*rules.RuleSet, error) {
 
 	return &rules.RuleSet{
 		Rules: slices.Concat(builtin.Rules, user.Rules),
+		// User rules add to the built-ins rather than replacing them, so the
+		// set-wide propagators must survive the merge. A user directory that ships
+		// its own _default-propagators.yaml has already overridden them in
+		// LoadFile's fragment set.
+		DefaultPropagators: firstNonEmpty(user.DefaultPropagators, builtin.DefaultPropagators),
 	}, nil
+}
+
+// firstNonEmpty returns a if it has elements, else b.
+func firstNonEmpty(a, b []string) []string {
+	if len(a) > 0 {
+		return a
+	}
+	return b
 }
 
 // parse unmarshals YAML rule data, expands fragment references, and validates
@@ -341,6 +366,12 @@ func validate(rs *rules.RuleSet) error {
 		// can never fire.
 		if r.IsDangerousCall() && len(r.Callees) == 0 {
 			problems = append(problems, fmt.Sprintf("rule %q is kind: dangerous-call but declares no callees", r.ID))
+		}
+		// A secret rule is defined by its `matches` regexp, and Compile above has
+		// already surfaced an uncompilable one. Without a regexp it silently scans
+		// nothing, which looks like "no secrets in this repo".
+		if r.IsSecret() && strings.TrimSpace(r.Matches) == "" {
+			problems = append(problems, fmt.Sprintf("rule %q is kind: secret but declares no matches regexp", r.ID))
 		}
 	}
 	if len(problems) > 0 {

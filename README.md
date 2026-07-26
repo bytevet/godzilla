@@ -145,8 +145,10 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | Code injection (`eval`) | — | ✅ | ✅ | — | — | — |
 | Weak crypto | ✅ | — | — | ✅ | — | — |
 
-> **Hardcoded secrets** (CWE-798) are detected in **all** languages by a regex
-> scan over gIR string constants, independent of the taint engine.
+> **Hardcoded secrets** (CWE-798) are detected in **all** languages by
+> `kind: secret` rules — regexps run over gIR string constants *and* over config
+> files no frontend parses (`.env`, compose, CI YAML), independent of the taint
+> engine. Add your own credential format with `--rules`.
 
 - **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
   single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is

@@ -139,12 +139,13 @@ Inter-procedural taint tracking (`internal/analysis/`):
 
 Analysis cost is scoped **demand-driven**: `Engine.ScopeSeed` seeds only user
 functions, so a lowered dependency function is analyzed only when taint reaches it
-(see the Go frontend's dependency lowering). A regex-based **secrets scanner**
-(`ScanSecrets`, CWE-798) runs alongside taint over gIR string constants.
+(see the Go frontend's dependency lowering). The **secrets scanner**
+(`ScanSecrets`, CWE-798) runs alongside taint, applying the `kind: secret` rules'
+regexps to gIR string constants and to config files no frontend parses.
 
 ## Rule engine
 
-YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
+YAML rules matched against canonical symbols (`internal/rules/`), in three kinds:
 
 - **Taint rules** (default) — a source→sink dataflow spec with
   sanitizers/validators/propagators. A sink may pin its injection-point argument
@@ -153,13 +154,19 @@ YAML rules matched against canonical symbols (`internal/rules/`), in two kinds:
   match: any call to a banned/weak API (optionally gated on a constant argument) is a
   finding. Backs the weak-crypto packs (weak hash/cipher CWE-327, insecure
   `math/rand` CWE-338).
+- **Secret rules** (`kind: secret`) — no call at all: a regexp over string
+  constants and config-file lines, backing the CWE-798 pack. Keeping these as
+  rules rather than a Go table means a project can add its own credential format
+  through `--rules`, and `rules list|lint|test` covers them like anything else.
 
-Hardcoded-secrets detection is a **separate scanner** (regex over string constants),
-not a YAML rule kind, so the dataflow engine stays focused. Built-in packs live in
-`rulepacks/` and are embedded into the binary; `--rules` merges user rules on top.
-Shared source/sink/sanitizer/propagator lists live in `_`-prefixed **fragments**
-that a pack pulls in with `extend:`, so a language's request sources (and any other
-list two packs share) are defined once, not per pack.
+Built-in packs live in `rulepacks/` and are embedded into the binary; `--rules`
+merges user rules on top. Shared source/sink/sanitizer/propagator lists live in
+`_`-prefixed **fragments** that a pack pulls in with `extend:`, so a language's
+request sources are defined once, not per pack. One fragment,
+`_default-propagators.yaml`, is applied to every rule by the loader instead of
+being named in `extend:` — the taint-preserving stdlib transforms
+(`strings.TrimSpace`, `str.strip`, `String.trim`) that no rule should have to
+restate.
 Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends

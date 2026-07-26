@@ -131,12 +131,12 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
 	// etc.) evaluated alongside the taint engine (COV-4).
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
-	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog) }()
+	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
 		// language frontend parses — the dominant hardcoded-secret vector.
 		wg.Add(1)
-		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath) }()
+		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath, rs) }()
 	}
 	wg.Wait()
 
@@ -201,7 +201,7 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	var findings []analysis.Finding
 	targetPkgs := map[string]bool{}
 	for _, p := range paths {
-		findings = append(findings, analysis.ScanSecretsInFiles(p)...)
+		findings = append(findings, analysis.ScanSecretsInFiles(p, rs)...)
 		info, err := os.Stat(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)

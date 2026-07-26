@@ -35,7 +35,7 @@ func TestScanSecretsInFiles_FindsConfigSecrets(t *testing.T) {
 	// source-literal secrets via gIR; scanning it again would double-report).
 	write("main.go", "package main\nconst k = \""+awsKey+"\"\n")
 
-	findings := ScanSecretsInFiles(dir)
+	findings := ScanSecretsInFiles(dir, builtinRuleSet(t))
 	got := map[string]int{}
 	for _, f := range findings {
 		got[f.RuleID]++
@@ -57,6 +57,7 @@ func TestScanSecretsInFiles_FindsConfigSecrets(t *testing.T) {
 }
 
 func TestSecretPatterns_VendorPrefixes(t *testing.T) {
+	dets := secretDets(t)
 	cases := []struct {
 		id  string
 		hit string
@@ -72,7 +73,7 @@ func TestSecretPatterns_VendorPrefixes(t *testing.T) {
 	for _, tc := range cases {
 		seen := map[string]bool{}
 		var findings []Finding
-		scanText(tc.hit, nil, "", "", seen, &findings)
+		scanText(tc.hit, nil, "", "", dets, seen, &findings)
 		hitIDs := map[string]bool{}
 		for _, f := range findings {
 			hitIDs[f.RuleID] = true
@@ -122,6 +123,7 @@ func TestSecretPathExcluded(t *testing.T) {
 }
 
 func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
+	dets := secretDets(t)
 	benign := []string{
 		"password = os.Getenv(\"DB_PASSWORD\")",
 		"api_key: ${API_KEY}",
@@ -132,7 +134,7 @@ func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
 	for _, line := range benign {
 		seen := map[string]bool{}
 		var findings []Finding
-		scanText(line, nil, "", "", seen, &findings)
+		scanText(line, nil, "", "", dets, seen, &findings)
 		if len(findings) != 0 {
 			t.Errorf("benign line should not fire a secret rule: %q -> %v", line, findings)
 		}

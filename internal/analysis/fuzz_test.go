@@ -9,9 +9,10 @@ func FuzzScanText(f *testing.F) {
 	f.Add("password = \"\"")
 	f.Add("postgres://u:p@h/db")
 	f.Add("")
+	dets := secretDets(f)
 	f.Fuzz(func(t *testing.T, s string) {
 		seen := map[string]bool{}
 		var out []Finding
-		scanText(s, nil, "", "", seen, &out)
+		scanText(s, nil, "", "", dets, seen, &out)
 	})
 }

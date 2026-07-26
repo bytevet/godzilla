@@ -42,7 +42,7 @@ func TestScanSecrets_Detects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings := ScanSecrets(progWithConstant(tc.value))
+			findings := ScanSecrets(progWithConstant(tc.value), builtinRuleSet(t))
 			var got *Finding
 			for i := range findings {
 				if findings[i].RuleID == tc.ruleID {
@@ -53,8 +53,8 @@ func TestScanSecrets_Detects(t *testing.T) {
 			if got == nil {
 				t.Fatalf("expected finding %s for %q, got %v", tc.ruleID, tc.value, findings)
 			}
-			if got.CWE != secretCWE {
-				t.Errorf("expected CWE %s, got %s", secretCWE, got.CWE)
+			if got.CWE != "CWE-798" {
+				t.Errorf("expected CWE-798, got %s", got.CWE)
 			}
 			if got.SinkPos == nil {
 				t.Error("expected a non-nil position")
@@ -65,7 +65,7 @@ func TestScanSecrets_Detects(t *testing.T) {
 
 func TestScanSecrets_NoFalsePositive(t *testing.T) {
 	// An ordinary string must not be flagged.
-	findings := ScanSecrets(progWithConstant("SELECT name FROM users WHERE id = ?"))
+	findings := ScanSecrets(progWithConstant("SELECT name FROM users WHERE id = ?"), builtinRuleSet(t))
 	if len(findings) != 0 {
 		t.Errorf("expected no findings for a benign string, got %v", findings)
 	}

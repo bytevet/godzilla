@@ -1281,7 +1281,7 @@ func analyzeFunc(
 			sinkArgs, sinkGuard, isSink = rule.MatchSink(callee)
 			isSan = rule.IsSanitizer(callee)
 			isSrc = rule.IsSource(callee)
-			isProp = rule.IsPropagator(callee) || rules.IsDefaultPropagator(callee)
+			isProp = rule.IsPropagator(callee)
 			// The Go `append` builtin propagates taint ONLY when its result is a
 			// byte/rune slice — i.e. character-level string reconstruction (the
 			// make([]byte); append(data, s[i]); string(data) idiom of a non-sanitizing

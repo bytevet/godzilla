@@ -26,7 +26,8 @@ code.
 
 ## Rule kinds
 
-Two kinds. (Hardcoded **secrets** are a separate regex scanner, not a YAML rule.)
+Three kinds, selected by `kind:` — a source→sink dataflow rule (the default), a
+call-site check, and a pattern-over-constants check.
 
 ### Taint rules (default)
 
@@ -89,6 +90,29 @@ adjudicates findings at or below `medium`, so the High default excludes a rule
 from review. A rule that should be *reported and reviewable* without turning
 builds red — `py-dynamic-code-exec` is the shipped example — sets
 `severity: low` with `confidence: medium`.
+
+### Secret rules
+
+Not a call at all: `matches` is a regexp run over every string **constant** in
+the lowered IR *and* over the lines of textual config files the frontends never
+parse (`.env`, compose, Dockerfile, CI YAML), so one rule catches a credential
+wherever it was written. See `rulepacks/secrets.yaml`.
+
+```yaml
+rules:
+  - id: secret-acme-token
+    kind: secret
+    severity: high
+    cwe: CWE-798
+    message: Hardcoded ACME API token
+    matches: '\bacme_[0-9A-Za-z]{32}\b'
+```
+
+Keep the regexp **specific** — a fixed vendor prefix or a structural marker.
+Entropy-style detectors find more real secrets but produce the kind of noise that
+gets a CI gate switched off. Omit `languages:` unless you mean to scope the rule
+to one language's IR constants; config files have no language and are skipped by
+a rule that declares any.
 
 ## Dynamic guards (`when`)
 
@@ -221,17 +245,18 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 
 | Field | Kind | Meaning |
 |---|---|---|
-| `id` | both | Unique id; validation rejects an empty or duplicate id. |
-| `extend` | both | One or more `$_fragment.yaml` refs merged into this rule. |
-| `languages` | both | Language tags (`[go]`, `[c, cpp]`, …). |
-| `severity` | both | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
-| `confidence` | dangerous-call | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
-| `cwe`, `message` | both | Reported metadata. |
+| `id` | all | Unique id; validation rejects an empty or duplicate id. |
+| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule. |
+| `languages` | all | Language tags (`[go]`, `[c, cpp]`, …). |
+| `severity` | all | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
+| `confidence` | dangerous-call, secret | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
+| `cwe`, `message` | all | Reported metadata. |
 | `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
 | `when` | both | Rule-level default dynamic guard, inherited by every sink/callee that declares none of its own (fragment-merged entries included). An entry's own `when` wins; `when: 'true'` opts out. |
 | `request_object_sources` | taint | Sources whose value is an HTTP request *object* (e.g. `go:@net/http.Request`; also list in `sources`). Tags the flavor so the engine grants request-object provenance without a hardcoded name. |
 | `callees` | dangerous-call | Globs whose call site is itself the finding. |
 | `const_arg` | dangerous-call | Optional `{index, matches}` constant-argument condition. |
+| `matches` | secret | The detector regexp, run over IR string constants and config-file lines. |
 
 ## Testing a rule
 

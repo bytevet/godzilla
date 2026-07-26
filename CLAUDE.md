@@ -97,9 +97,9 @@ this is a file map.
   taint across **every** language — including Rust, whose frontend lowers `String + &str` (rustc's `Add::add`
   call) to `BIN_OP_ADD` just like Go/JS/Python `+`, so the engine needs no Rust-callee special case.
 - `interproc.go` — `Engine.Analyze`, the inter-procedural worklist: cross-function summaries, the
-  framework-agnostic HTTP request sources (rule source globs + the net/http default propagators in
-  `internal/rules/propagators.go`, plus `buildReqSourceHosts` for a dependency that reads an `*http.Request`
-  field without exposing one in its signature), and the sink-parameter summary channel.
+  framework-agnostic HTTP request sources (rule source globs + the net/http entries in the
+  `_default-propagators.yaml` fragment, plus `buildReqSourceHosts` for a dependency that reads an
+  `*http.Request` field without exposing one in its signature), and the sink-parameter summary channel.
 - `ssrf.go` — supplies the **`hostFixed()` FACT** behind the CWE-918/601 false-positive reduction; rules opt
   in with `when: 'not hostFixed()'`. It reads only **neutral IR the frontends emit**, never callee names:
   `BIN_OP_ADD` concatenation (every language's `+`), Python `%` (`BIN_OP_REM`), and two frontend-set intrinsic
@@ -109,8 +109,8 @@ this is a file map.
   inert to taint propagation. Emitting either from a frontend is what opts that language into the reduction.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
   (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
-- `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
-  (CWE-798).
+- `secrets.go` — `ScanSecrets`: applies the `kind: secret` rules' regexps to gIR string constants and to
+  config files no frontend parses (CWE-798). The patterns are data in `rulepacks/secrets.yaml`, not Go.
 - `finding.go` — the `Finding` type shared across the pipeline.
 
 **Rules (`internal/rules/` + `rulepacks/`).** `rule.go` — the `Rule` model (sources/sinks/sanitizers/
@@ -120,7 +120,10 @@ that LOGICAL (receiver-excluded) argument fires, which is what stops `db.Query("
 being a false positive. A bare pattern means all args. `guard.go` — the `when:` expression DSL and the
 `hostFixed()` fact; a rule-level `when:` is the default every unguarded sink inherits. `loader/` — YAML
 loading; the built-in packs live in the top-level `rulepacks/`, embedded by `rulepacks/embed.go` and
-returned by `Builtin()`. `validate` rejects an empty ID or an unrecognized severity. Which classes ship per
+returned by `Builtin()`. `validate` rejects an empty ID or an unrecognized severity. Three `kind:`s —
+dataflow (default), `dangerous-call`, and `secret`. `_`-prefixed **fragments** are pulled in with
+`extend:`, except `_default-propagators.yaml`, which the loader applies to EVERY rule
+(`RuleSet.DefaultPropagators`); anything constructing a RuleSet from another must carry that field over. Which classes ship per
 language is the [detection matrix](README.md#supported-languages--detections); authoring reference is
 `docs/writing-rules.md`.
 
