@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/expr-lang/expr"
@@ -56,8 +57,31 @@ var DenyGuard = &Guard{}
 // and `hostFixed()` answers whether every tainted injection-point argument is
 // confined to the path/query of a constant scheme://host.
 type guardEnv struct {
-	Arg       []Arg       `expr:"arg"`
-	HostFixed func() bool `expr:"hostFixed"`
+	Arg []Arg `expr:"arg"`
+	// hostFixed() with no argument asks about the sink's own injection points;
+	// hostFixed(arg[i]) asks about one specific argument. See EvalHostFixed.
+	HostFixed func(...Arg) bool `expr:"hostFixed"`
+}
+
+// hostFixedRe matches a constant prefix that already pins a complete
+// scheme://authority followed by a path/query/fragment separator, so anything
+// after it lands in the path or query and cannot redirect the request.
+// "https://example.com/" matches; "https://" (no host yet) and
+// "https://example.com" (taint could extend the host) do not.
+var hostFixedRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/?#\\]+[/?#\\]`)
+
+// ArgHostFixed reports whether one argument's reconstructed value pins a constant
+// scheme://host before its first dynamic run. It reads the skeleton alone -- the
+// text up to DynMarker IS the constant prefix -- so the explicit hostFixed(arg[i])
+// form needs no engine state. An argument that is entirely dynamic reconstructs to
+// DynMarker, leaving an empty prefix that cannot match: unrecoverable constructions
+// stay "controllable" and keep firing.
+func ArgHostFixed(a Arg) bool {
+	s := a.String
+	if i := strings.Index(s, DynMarker); i >= 0 {
+		s = s[:i]
+	}
+	return hostFixedRe.MatchString(s)
 }
 
 // EvalHostFixed is the engine-supplied fact behind the `hostFixed()` guard
@@ -67,10 +91,15 @@ type guardEnv struct {
 // suppress on it -- in the rule's `when:` expression, instead of the engine
 // branching on a rule's CWE string.
 //
-// It is deliberately zero-arg rather than hostFixed(arg[i]): the URL is not always
-// argument 0 (requests.request pins #1) and some sinks take a request OBJECT
-// rather than a URL string (net/http Client.Do), so making the rule author restate
-// the index would silently misfire. Zero-arg reuses the sink's own #idx pinning.
+// This backs the ZERO-ARG form, which reuses the sink's own #idx pinning and is
+// the one to prefer: the URL is not always argument 0 (requests.request pins #1)
+// and some sinks take a request OBJECT rather than a URL string (net/http
+// Client.Do), so restating the index in the guard risks checking the wrong
+// argument -- the HTTP method instead of the URL -- if the two ever disagree.
+//
+// The explicit hostFixed(arg[i]) form (see ArgHostFixed) stays available for rules
+// that want the check spelled out or need an argument that is not an injection
+// point; it reads the skeleton directly and needs no engine state.
 type EvalHostFixed func() bool
 
 // alwaysControllable is the default when no engine fact is supplied (e.g. a
@@ -109,10 +138,26 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 	if g.prog == nil {
 		return false // DenyGuard
 	}
-	if hostFixed == nil {
-		hostFixed = alwaysControllable
+	// Zero-arg defers to the engine (the sink's pinned injection points, tainted
+	// only); an explicit hostFixed(arg[i], ...) is answered from the skeletons and
+	// needs no engine state, so it works in any guard context. Several arguments
+	// must ALL be host-fixed, matching the zero-arg "every tainted injection point"
+	// reading.
+	fn := func(as ...Arg) bool {
+		if len(as) == 0 {
+			if hostFixed == nil {
+				return alwaysControllable()
+			}
+			return hostFixed()
+		}
+		for _, a := range as {
+			if !ArgHostFixed(a) {
+				return false
+			}
+		}
+		return true
 	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: hostFixed})
+	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: fn})
 	if err != nil {
 		return false
 	}
