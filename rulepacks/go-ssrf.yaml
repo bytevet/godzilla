@@ -11,10 +11,6 @@ rules:
       hosts. Validate the destination against an allow-list before making
       the request.
     extend: $_go-common.yaml
-    # Default guard for every sink below (a sink may override with its own
-    # `when:`): hostFixed() is an engine-supplied FACT about how the tainted URL
-    # string was built -- a constant scheme://host prefix ahead of the taint means
-    # the attacker controls only the path/query and cannot choose the host.
     when: 'not hostFixed()'
     sinks:
       - "go:*net/http.Get"

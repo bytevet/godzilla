@@ -31,38 +31,23 @@ type CallGraph struct {
 	Edges map[string][]string
 }
 
-// BuildCallGraph walks every module/function in prog and builds a
-// whole-program CallGraph.
+// BuildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
+// INTRINSIC-with-a-Call instruction (the latter covers go.defer/go.goroutine).
 //
-// Instruction scan: for every OP_CODE_CALL, OP_CODE_INVOKE, and
-// OP_CODE_INTRINSIC instruction with a non-nil Call (INTRINSIC covers
-// go.defer/go.goroutine, which also carry a CallCommon), the callee is
-// resolved as follows:
+//   - A direct call (not IsInvoke, no MethodName) resolves through Call.Callee,
+//     adding one edge if we have gIR for that function and dropping it otherwise
+//     — calls into net/http, fmt and the rest of the unlowered stdlib.
 //
-//   - Direct call (Call.IsInvoke == false and Call.MethodName == ""):
-//     Call.Callee is a statically-known canonical function name. If it
-//     names a function we have gIR for, add a single edge to it; otherwise
-//     the call is dropped (e.g. calls into net/http, fmt, etc., which this
-//     converter does not lower).
+//   - Dynamic dispatch (IsInvoke, or MethodName set as a defensive fallback for
+//     IR that records a method call without the flag) resolves by Class
+//     Hierarchy Analysis: an edge to every known function whose bare name — its
+//     MethodName, else the tail of its CanonicalName after the final '.' —
+//     equals the call's method name. This over-approximates on purpose, linking
+//     types that share a method name without sharing an interface: for a
+//     caller-index primitive, never missing a real edge beats precision, and a
+//     points-to analysis is out of scope.
 //
-//   - Dynamic dispatch (Call.IsInvoke == true, OR -- as a defensive
-//     fallback for IR that records a method call without setting the
-//     IsInvoke flag -- Call.MethodName != ""): resolved via a Class
-//     Hierarchy Analysis (CHA) approximation. An edge is added to *every*
-//     known function whose bare method name equals the call's method name.
-//     A candidate function's bare method name is its MethodName field if
-//     set, otherwise the substring of its CanonicalName after the final
-//     '.' (so plain functions and methods are both eligible candidates).
-//     This intentionally over-approximates: it will add edges between types
-//     that both happen to implement a same-named method but never actually
-//     satisfy a common interface at the call site. That's a deliberate
-//     trade-off -- soundness (never missing a real edge) matters more than
-//     precision for a caller-index primitive, and a real points-to analysis
-//     is out of scope here.
-//
-// Everything else (Callee == "" and no method name, e.g. a call through an
-// unresolved/dynamic value the converter couldn't name) is silently
-// dropped.
+// A call naming neither (an unresolved dynamic value) is dropped.
 func BuildCallGraph(prog *ir.Program) *CallGraph {
 	g := &CallGraph{
 		Funcs: map[string]*ir.Function{},

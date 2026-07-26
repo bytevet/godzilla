@@ -1,20 +1,15 @@
-# Dynamic code execution (Python): eval()/exec() on a value that is NOT a
-# compile-time constant. This is the CALL-SITE twin of py-code-injection: that
-# rule proves a modeled source reaches the sink, while this one fires whenever
-# the evaluated string is computed at runtime at all — catching the very common
-# shape where the untrusted value arrives from a channel Godzilla does not model
-# as a source (an HTTP response body, an LLM completion, a database row, a
-# user-supplied "custom component"). Where BOTH fire on the same call, the
-# richer dataflow finding wins (internal/scan dropCoLocatedDangerous).
+# Dynamic code execution (Python): eval()/exec() on a non-constant value. The
+# call-site twin of py-code-injection, which needs a modeled source to reach the
+# sink — this fires whatever the value's origin, catching the common case where
+# it arrives from a channel Godzilla does not model (an HTTP response body, an
+# LLM completion, a database row). When both fire on one call the richer
+# dataflow finding wins (internal/scan dropCoLocatedDangerous).
 #
-# severity: low and confidence: medium are set independently and on purpose.
-# The CI gate keys on SEVERITY (-fail-on, default medium), so `low` keeps this
-# reported, written to the report and counted without turning a build red by
-# itself — right for evidence that amounts to "this argument is not constant",
-# which proves dynamic execution but not attacker control. A team that wants it
-# blocking sets -fail-on low. Triage keys on CONFIDENCE: the LLM reviewer only
-# adjudicates findings at or below medium, so High — the dangerous-call default
-# — would exclude the one rule that most wants an adjudicator.
+# `severity: low` keeps this reported without failing the default `-fail-on
+# medium` gate, since "this argument is not constant" proves dynamic execution
+# but not attacker control. `confidence: medium` overrides the dangerous-call
+# default of High so the LLM reviewer, which only adjudicates at or below
+# medium, actually sees it.
 rules:
   - id: py-dynamic-code-exec
     kind: dangerous-call

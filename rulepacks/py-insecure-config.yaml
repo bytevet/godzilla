@@ -1,16 +1,12 @@
-# Insecure security-configuration flags: a call that is safe by default is made
-# dangerous by an explicit keyword argument. These are CONFIGURATION defects, not
-# dataflow -- there is no untrusted input to trace, the flag itself is the defect
-# -- so they are `kind: dangerous-call` rules gated on the keyword's name AND
-# value (see rules.Arg.Name, which the Python frontend supplies via the
-# builtin.kwarg marker). Without matching on `.Name` these could not be written at
-# all: `verify=False` would be indistinguishable from any other false keyword.
+# Insecure security-configuration flags: a call that is safe by default made
+# dangerous by an explicit keyword argument. The flag itself is the defect, so
+# these are `kind: dangerous-call` rules gated on the keyword's name AND value --
+# without `.Name` (supplied by the Python frontend's builtin.kwarg marker)
+# `verify=False` would be indistinguishable from any other false keyword.
 #
-# All four ship severity: low + confidence: medium on purpose. The CI gate keys on
-# SEVERITY (-fail-on, default medium), so `low` keeps a config finding advisory
-# rather than build-breaking; the LLM reviewer triages on CONFIDENCE, and `medium`
-# puts them in its adjudication range. A hardcoded-High call-site rule is what
-# flooded a project and had to be reverted once already.
+# All ship severity: low + confidence: medium, keeping them advisory under the
+# default `-fail-on medium` gate and inside the LLM reviewer's adjudication
+# range. A hardcoded-High call-site rule flooded a project once already.
 rules:
   - id: py-insecure-tls-verify
     languages: [python]

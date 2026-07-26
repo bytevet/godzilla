@@ -16,10 +16,6 @@ rules:
       forgery (SSRF). Validate the URL against an allow-list of permitted hosts
       before requesting it.
     extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml]
-    # Default guard for every sink below (a sink may override with its own
-    # `when:`): hostFixed() is an engine-supplied FACT about how the tainted URL
-    # string was built -- a constant scheme://host prefix ahead of the taint means
-    # the attacker controls only the path/query and cannot choose the host.
     when: 'not hostFixed()'
     sinks:
       # reqwest / ureq free functions: get(url) / post(url) — URL at operand 0.

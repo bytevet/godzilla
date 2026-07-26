@@ -28,11 +28,9 @@ rules:
       - "py:*yaml.load"
       - "py:*marshal.loads"
       - "py:*jsonpickle.decode"
-      # Modern deserializers with the same pickle-style code-execution risk. These
-      # are DATAFLOW sinks (this rule has no `kind:`), so they fire only when a
-      # modeled source's taint reaches them -- inert on the pervasive trusted-local
-      # `torch.load("model.pt")` / `joblib.load(path)` calls in ML code (that is why
-      # they must never become a call-site `dangerous-call`, which floods).
+      # Modern deserializers with the same pickle-style risk. Keep these DATAFLOW
+      # sinks: as a `dangerous-call` they would fire on every trusted-local
+      # `torch.load("model.pt")` in ML code.
       - "py:*cloudpickle.loads"
       - "py:*cloudpickle.load"
       - "py:*dill.loads"
@@ -40,12 +38,9 @@ rules:
       - "py:*joblib.load"
       - "py:*torch.load"
     sanitizers: []
-    # `.read()` carries taint from its (already-tainted) receiver to its result:
-    # an uploaded file's bytes arrive as `upload.read()` / `request.files['f'].read()`
-    # / `UploadFile.read()`, and without this the taint dies at that read before it
-    # reaches the deserializer. `.read` is deliberately NOT a global default
-    # propagator (it is ubiquitous); scoping it to this rule means it only forwards
-    # taint a deserialization SOURCE already introduced toward a deserialization
-    # SINK, so it creates no findings on its own.
+    # An uploaded file's bytes arrive as `upload.read()`, so without this the taint
+    # dies before reaching the deserializer. `.read` is too ubiquitous to be a
+    # global default propagator; scoped to this rule it only carries a
+    # deserialization source toward a deserialization sink.
     propagators:
       - "py:*.read"

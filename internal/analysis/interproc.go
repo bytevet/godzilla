@@ -495,50 +495,34 @@ func (s *sharedIndex) fnIndexFor(fn *ir.Function) *fnIndex {
 	return actual.(*fnIndex)
 }
 
-// buildReqSourceHosts returns the set of DEPENDENCY function keys that both
-// (a) contain a request-object source (the union of every rule's
-// request_object_sources globs) and (b) are DIRECTLY CALLED by user (reportable)
-// code. Such a function — e.g. beego's `Controller.Input`, which reads
-// `c.Ctx.Request` internally — generates request taint but takes no tainted
-// argument, so the demand-driven dependency scope never enqueues it; seeding it
-// lets its request taint escape to the user code that called it. Seeding
-// (analyzing the body) rather than tainting the call result unconditionally is
-// what keeps a SAFE accessor that reads the request but returns a constant from
-// being a false positive: its body has no tainted return, so nothing propagates.
+// buildReqSourceHosts returns the DEPENDENCY functions that host a request
+// source and should be seeded anyway. Such a function — beego's
+// `Controller.Input`, which reads `c.Ctx.Request` internally — generates request
+// taint but takes no tainted argument, so the demand-driven dependency scope
+// never enqueues it. Seeding its BODY (rather than tainting its call result
+// outright) is what keeps a safe accessor that reads the request and returns a
+// constant from becoming a false positive: nothing propagates out of it.
 //
-// The DIRECT-CALL bound keeps this cheap and correct. A framework reads
-// *http.Request in many internal functions, but the ones that matter are the
-// accessor methods the app actually invokes (`c.Input()`, `c.Query()`). Crucially
-// it EXCLUDES a framework's request-pipeline entry like gin's ServeHTTP: that also
-// carries a request source, but user code never CALLS it (it calls user code via
-// an indirect dispatch), and seeding it made the worklist analyze a framework's
-// whole request pipeline — a large dep-heavy blow-up — for taint no user sink can
-// reach. Consulted ONLY under a reportable scope (with no scope every function is
-// already seeded), so the whole-program walk is skipped otherwise.
+// The two tiers below differ in how far they may be seeded. Consulted only under
+// a reportable scope, since without one every function is seeded already.
 func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.Module, rs *rules.RuleSet, reportable map[string]bool) map[string]bool {
 	if len(reportable) == 0 {
 		return nil
 	}
-	// Two tiers of source, seeded under different bounds:
+	//   reqObjGlobs — request_object_sources: the synthetic *http.Request. The
+	//     frontend also plants it on a framework's request-pipeline ENTRY (gin's
+	//     ServeHTTP), which user code never calls directly, and seeding that
+	//     pushed taint through the framework's whole pipeline — a dep-heavy
+	//     blow-up. So these are seeded only on a DIRECT call from user code.
 	//
-	//   reqObjGlobs — request_object_sources: the synthetic *http.Request, which
-	//     the frontend also plants on a framework's request-pipeline ENTRY (gin's
-	//     ServeHTTP receives the request too). Seeding such an entry makes the
-	//     worklist push request taint through the whole framework pipeline — a
-	//     dep-heavy blow-up — so these are seeded ONLY when user code calls the
-	//     host DIRECTLY (an app calls `c.Input()`, never the pipeline entry).
+	//   srcGlobs — ordinary framework accessors (gin `c.Query`, echo `c.Param`).
+	//     A host CALLS one and yields a bounded string; the pipeline entry does
+	//     not. Seeded at ANY depth, which closes the nested-wrapper case (user →
+	//     svc.Fetch → requtil.ReadQuery → c.Query): the innermost host fires the
+	//     source and caller-re-enqueue carries the taint up the chain.
 	//
-	//   srcGlobs — ordinary sources (framework accessors: gin `c.Query`, echo
-	//     `c.Param`, …). A function hosting one of these CALLS the accessor and
-	//     yields a bounded string result; the pipeline entry does not call them.
-	//     So these are seeded at ANY depth, no direct-call bound — that closes the
-	//     nested-wrapper case (user → svc.Fetch → requtil.ReadQuery → c.Query):
-	//     seeding the innermost host fires the source, and the engine's
-	//     caller-re-enqueue then carries the return taint up the wrapper chain.
-	//
-	// @net/http.Request appears in BOTH lists (it is declared as a plain source
-	// too), so it is removed from srcGlobs below to keep it gated — otherwise the
-	// pipeline entry would be ungated and the blow-up would return.
+	// @net/http.Request is declared as a plain source too, so it is removed from
+	// srcGlobs below — otherwise the pipeline entry would be ungated again.
 	reqObjSet := map[string]bool{}
 	var reqObjGlobs, srcGlobs []string
 	seen := map[string]bool{}

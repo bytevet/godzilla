@@ -17,10 +17,6 @@ rules:
     # `*axios*` and `*fetch` are broad so both a bare `fetch(url)`/`axios(url)`
     # call and a method call off either (`axios.get`, `window.fetch`) are
     # caught, mirroring js-command-injection's broad `js:*.exec`.
-    # Default guard for every sink below (a sink may override with its own
-    # `when:`): hostFixed() is an engine-supplied FACT about how the tainted URL
-    # string was built -- a constant scheme://host prefix ahead of the taint means
-    # the attacker controls only the path/query and cannot choose the host.
     when: 'not hostFixed()'
     sinks:
       - "js:*http.get"
