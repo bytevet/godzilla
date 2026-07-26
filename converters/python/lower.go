@@ -23,8 +23,8 @@ type modCtx struct {
 	imported   map[string]bool
 }
 
-// newFuncState creates a funcState for a function in this module, priming the
-// module-scoped fields. The single place those four fields are set.
+// newFuncState creates a funcState for a function in this module. The single
+// place the module-scoped fields are set.
 func (m *modCtx) newFuncState() *funcState {
 	fs := newFuncState(m.filename)
 	fs.moduleName = m.moduleName
@@ -394,12 +394,10 @@ func handlerClasses(classBases map[string][]string, targetBases map[string]bool)
 	return result
 }
 
-// emitRouteSource emits the synthetic source CALL (routeParamSource) that every
-// COV-11 route-handler taint origin is built from: a CALL to the canonical
-// @http.param name, tagged with comment, whose RESULT register the engine seeds.
-// Passing no args leaves Call.Args nil, which is exactly the shape a source with
-// nothing to name emits. The two wrappers below are the only producers of this
-// source, so its shape is defined once here.
+// emitRouteSource emits the synthetic source CALL every route-handler taint
+// origin is built from: a CALL to the canonical @http.param name whose RESULT
+// register the engine seeds. Defined once here; the wrappers below are its only
+// producers.
 func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Value) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
@@ -413,10 +411,9 @@ func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Valu
 	return regValue(inst.Name)
 }
 
-// emitParamSource emits a synthetic source CALL (routeParamSource) whose result
-// register carries taint, for a route-handler parameter param. The param value
-// is passed as the call's sole argument for readability; the engine seeds taint
-// on the call RESULT (which convertFunction rebinds to the param name).
+// emitParamSource is emitRouteSource for a route-handler parameter. The param
+// is passed as the call's sole argument for readability only; taint lands on the
+// call RESULT, which convertFunction rebinds to the param name.
 func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
 	return fs.emitRouteSource(n, "route-param-source:"+param, regValue(param))
 }
@@ -1114,8 +1111,8 @@ func (fs *funcState) lowerTry(s astNode) {
 	fs.lowerBody(finalbody) // finally runs on both the normal and handler paths
 }
 
-// lowerStmt lowers one leaf statement (i.e. not a control-flow compound —
-// those get their own basic blocks in lowerBody).
+// lowerStmt lowers one leaf statement; control-flow compounds get their own
+// basic blocks in lowerBody.
 func (fs *funcState) lowerStmt(s astNode) {
 	switch s.kind() {
 	case "Assign":

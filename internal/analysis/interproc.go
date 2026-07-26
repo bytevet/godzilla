@@ -481,11 +481,10 @@ type fnIndex struct {
 	nonEscaping map[string]bool
 }
 
-// fnIndexFor returns fn's memoized structural index, building it on first use.
-// Deliberately LAZY rather than a pre-pass over byKey: under the demand-driven
-// dependency scope most dependency functions are never analyzed, so building
-// eagerly would bound neither the time nor the retained memory by what the scan
-// actually touches.
+// fnIndexFor returns fn's memoized structural index. Deliberately LAZY rather
+// than a pre-pass over byKey: under the demand-driven dependency scope most
+// dependency functions are never analyzed, so building eagerly would bound
+// neither time nor retained memory by what the scan actually touches.
 func (s *sharedIndex) fnIndexFor(fn *ir.Function) *fnIndex {
 	if v, ok := s.fnIdx.Load(fn); ok {
 		return v.(*fnIndex)
@@ -1344,13 +1343,11 @@ func analyzeFunc(
 				}
 			}
 		}
-		// seedInvokeArgs maps an INVOKE call's operands onto target's params: the
-		// receiver (Call.Value) to param 0, then each explicit arg shifted by one —
-		// eachArgParam's invoke branch, which is why it is expressed in terms of it
-		// rather than repeating the shift. Shared by the lowered-method branch and
-		// the CHA dynamic-dispatch loop below, which resolve different targets but
-		// seed them identically. Both call sites are under `IsInvoke`, so `pi > 0`
-		// is exactly "not the receiver": no points-to fact is recorded for it.
+		// seedInvokeArgs seeds target's params from an INVOKE's operands, reusing
+		// eachArgParam's invoke branch rather than repeating its receiver shift.
+		// Shared by the lowered-method branch and the CHA dispatch loop below, which
+		// resolve different targets but seed them identically. Both call sites are
+		// under IsInvoke, so `pi > 0` is exactly "not the receiver".
 		seedInvokeArgs := func(target string) {
 			eachArgParam(func(pi int, a *ir.Value) {
 				if p, ok := isTaintedArg(tainted, a); ok {

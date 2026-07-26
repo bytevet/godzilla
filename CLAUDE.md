@@ -151,48 +151,17 @@ this is a file map.
   aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
   taint across **every** language — including Rust, whose frontend lowers `String + &str` (rustc's `Add::add`
   call) to `BIN_OP_ADD` just like Go/JS/Python `+`, so the engine needs no Rust-callee special case.
-- `interproc.go` — `Engine.Analyze`: **inter-procedural**, context-insensitive worklist. Taint flows across
-  calls via function summaries (tainted arg → callee param; taint-returning function → caller's call result).
-  Findings get a `Confidence`: intra-procedural = High, cross-function = Medium.
-  **Framework-agnostic HTTP request sources** are covered by two complementary, name-list-free mechanisms —
-  no engine-side per-framework special case. (1) A framework's own accessor is tainted at the **call site** by
-  a rule source glob (`gin:*Context.Query`, `echo:*Context.Param`, …): the accessor result is marked untrusted
-  without analysing the framework's request pipeline — a deliberate **performance** choice, since seeding the
-  framework context object itself would force taint through the whole lowered request machinery. (2) For an
-  **unmodeled** framework built on `net/http`, the net/http+net/url request accessors (`net/url.URL.Query`,
-  `net/url.Values.Get`, `net/http.Request.FormValue`/`Cookie`/`PathValue`/…, `net/http.Header.Get`) are
-  **default propagators** (`internal/rules/propagators.go`): they forward already-present request taint through
-  the framework's INTERNAL stdlib parsing, so any framework layered on net/http is covered at no FP cost.
-  A dependency function that internally reads an `*http.Request` field but exposes no request in its signature
-  (beego/macaron `Controller.Input`, registered via a non-routing verb) is seeded directly via `reqSourceHosts`
-  (`buildReqSourceHosts`, driven by the rules' `request_object_sources` tag — the synthetic `go:@net/http.Request`).
-  The **sink-side twin** of source wrappers is the **sink-parameter summary** (`funcResult.taintsParamSink`,
-  mirroring the out-parameter channel `taintsParamMemory`): when untrusted data flows into a *dependency* function
-  that internally reaches a sink (`func Run(cmd string){ exec.Command(cmd) }`), the dep-internal finding is scoped
-  out, so the engine summarizes it and the caller reports it at its own **user-code** call site (Medium
-  confidence). Summaries propagate up a chain of forwarding wrappers until they land in user code. Two precision
-  guards keep this from re-surfacing over-approximations `scopeFindings` used to mask: (a) a summary forms **only
-  for a string-typed parameter** — a raw string into a sink is a precise injection, whereas taint reaching a sink
-  through an `interface{}`/struct param is usually the reflective-ORM over-approximation (xorm `Find`/`Get` bind
-  the value as a `?` placeholder, they do not concatenate it), which would flood findings; (b) a function that is
-  **itself a modeled sink** (gorm `db.Raw`) does not summarize, so its direct call site fires once instead of
-  double-reporting.
-- `ssrf.go` — supplies the **`hostFixed()` FACT** behind CWE-918/601 false-positive reduction
-  (`urlHostControllable`), language-agnostic and free of any language callee-name matching. It reconstructs
-  how the tainted URL string was built and reports whether a constant `scheme://host/…` prefix precedes the
-  first tainted segment — i.e. the taint is confined to the path/query of a fixed host and cannot redirect the
-  request. The engine no longer decides suppression and no longer branches on CWE: rules opt in with
-  `when: 'not hostFixed()'` (a rule-level default in the SSRF/open-redirect packs), and the regexp lives with
-  the guard in `internal/rules/guard.go`. The construction shapes it understands come from **neutral IR the frontends emit**, not engine-side
-  name lists: `BIN_OP_ADD` concatenation (every language's `+`, Rust included), Python `%` (`BIN_OP_REM`), and
-  two frontend-set intrinsic markers — **`builtin.format`** (a printf-style formatter: Go `fmt.Sprint*`, Java
-  `String.format`/`valueOf`, Rust `fmt::Arguments::new` — template in `Args[0]`; for Rust `format!` the packed
-  `fmt::Arguments` byte-template is decoded to a `{}`-placeholder string, see `mir.go` `decodeFmtTemplate`) and
-  **`builtin.identity`** (a string conversion that forwards its operand: `to_string`/`as_str`/`clone`/… and the
-  `format!` result wrappers). Both markers are inert to taint propagation, so taint still flows via the rules.
-  Deliberately conservative: it suppresses only when the fixed host is *proven*; an opaque or unrecoverable
-  construction (e.g. **Java `+`**, whose `makeConcatWithConstants` recipe is dropped from gIR) keeps firing, so
-  no real SSRF is lost.
+- `interproc.go` — `Engine.Analyze`, the inter-procedural worklist: cross-function summaries, the
+  framework-agnostic HTTP request sources (rule source globs + the net/http default propagators in
+  `internal/rules/propagators.go`, plus `buildReqSourceHosts` for a dependency that reads an `*http.Request`
+  field without exposing one in its signature), and the sink-parameter summary channel.
+- `ssrf.go` — supplies the **`hostFixed()` FACT** behind the CWE-918/601 false-positive reduction; rules opt
+  in with `when: 'not hostFixed()'`. It reads only **neutral IR the frontends emit**, never callee names:
+  `BIN_OP_ADD` concatenation (every language's `+`), Python `%` (`BIN_OP_REM`), and two frontend-set intrinsic
+  markers — **`builtin.format`** (printf-style formatter, template in `Args[0]`: Go `fmt.Sprint*`, Java
+  `String.format`, Rust `fmt::Arguments::new`, whose packed byte-template `mir.go` `decodeFmtTemplate` decodes)
+  and **`builtin.identity`** (a forwarding string conversion: `to_string`/`as_str`/`clone`/…). Both markers are
+  inert to taint propagation. Emitting either from a frontend is what opts that language into the reduction.
 - `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
   (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
 - `secrets.go` — `ScanSecrets`: non-dataflow, regex-based hardcoded-secret detection over gIR string constants
