@@ -24,15 +24,10 @@ flowchart LR
     LLM -.-> OUT
 ```
 
-<sub>All seven languages lower to the same gIR; a single engine and rule set run over it.</sub>
-
 > Status: usable and tested, but young. See [Status & limitations](#status--limitations).
 
 ## Features
 
-- **Multi-language, one engine.** Go, Python, JavaScript (incl. Vue/Svelte SFCs),
-  Java, Rust, and Ruby (plus C/C++ in an opt-in cgo build) emit the same gIR; the
-  taint engine and rules are language-agnostic.
 - **Inter-procedural taint tracking.** Follows untrusted data across function
   calls (source → sanitizer → sink). Each finding carries a **confidence**: High
   intra-procedural, Medium cross-function.
@@ -40,10 +35,9 @@ flowchart LR
   are canonical-name globs. A sink can pin its injection-point argument
   (`"go:*database/sql*.Query#0"`), so a parameterized `db.Query("... = ?", x)` is
   **not** a false positive. See [docs/writing-rules.md](docs/writing-rules.md).
-- **Batteries included.** Built-in packs for SQL injection, command injection,
-  path traversal, SSRF, XSS, open redirect, insecure deserialization, and code
-  injection, plus non-dataflow checks for **weak crypto** and **hardcoded
-  secrets**.
+- **Batteries included.** Built-in packs for the classes in the
+  [detection matrix](#supported-languages--detections), plus non-dataflow checks
+  for **weak crypto** and **hardcoded secrets**.
 - **CI-friendly output.** Human-readable findings, a self-contained **HTML
   report**, **JSON** and **SARIF 2.1.0** (for GitHub code scanning), and a
   severity-gated **exit code**.
@@ -177,14 +171,7 @@ matched against canonical `<lang>:module.Type.member` names. Adding a detection 
 usually a few lines of YAML in [`rulepacks/`](rulepacks); pass your own with
 `--rules`. See the **[rule-authoring guide](docs/writing-rules.md)**.
 
-## How it works
-
-- **gIR** (`proto/` → `pkg/ir/v1/`) is a small language-neutral SSA core plus an
-  `INTRINSIC` escape hatch, with stable canonical names so rules join across languages.
-- **Frontends** (`converters/*`) lower each language to gIR.
-- **Analysis** (`internal/analysis/`) builds a call graph and runs inter-procedural
-  taint, plus the secrets scan.
-- **Rules**, **report**, **LLM reviewer**, and the **CLI** sit on top.
+## Where the code lives
 
 ```mermaid
 flowchart TD
@@ -197,25 +184,20 @@ flowchart TD
     REV --> REP
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and rationale.
+[ARCHITECTURE.md](ARCHITECTURE.md) has the design and the reasoning behind it.
 
 ## Status & limitations
 
-Godzilla is functional and covered by tests, but deliberately scoped:
+Godzilla is functional and covered by tests, but deliberately scoped. Taint is
+inter-procedural but **context-insensitive**, dynamic dispatch resolves by
+class-hierarchy analysis, and pointer analysis is approximated (value-flow + CHA)
+rather than a full points-to. Python, JS and Ruby build a real CFG, but
+exceptions and `break`/`continue` stay approximate. SSRF findings are suppressed
+only when the taint is confined to the path or query of a *proven* fixed host, so
+the reduction never costs a true positive.
 
-- **Residual lowering approximations.** Python, JS and Ruby build a real CFG
-  (`converters/ssabuild`), so branches, loops and their PHI joins are modeled.
-  What is still approximated: exceptions merge into one untyped handler block,
-  and `break`/`continue` are dropped — see each frontend's package doc. Taint
-  across instance attributes ships for Python and Ruby; JS `this.attr` remains.
-- **Taint is inter-procedural but context-insensitive.** Interface/dynamic
-  dispatch is threaded via class-hierarchy analysis (an over-approximation).
-- **SSRF is host-aware** — a finding is suppressed, conservatively, when the taint
-  only reaches the path/query of a *proven* fixed host (never a false negative).
-- **Pointer analysis is approximated** (value-flow + CHA), not full points-to.
-
-See the [implementation status](ARCHITECTURE.md#implementation-status) for the
-per-component detail.
+Details, and the per-component status table, are in
+[ARCHITECTURE.md](ARCHITECTURE.md#implementation-status).
 
 ## Quality gate
 

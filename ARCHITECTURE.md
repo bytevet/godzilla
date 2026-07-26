@@ -22,22 +22,17 @@ false-positive backstop.
 
 ## Design principles
 
-- **gIR is the contract.** A single language-neutral SSA IR sits between frontends
-  and analysis; no pass ever branches on source language, only on gIR structure and
-  canonical symbol names. Getting the IR right first avoids reworking every frontend
-  and pass later.
-- **Small core + tagged intrinsics.** The opcode set stays tiny and universal;
-  every language-specific construct is an `INTRINSIC` carrying a canonical name that
-  rules and analysis interpret. No opcode is added for a single language.
-- **SSA is mandatory.** Frontends emit SSA with explicit `PHI` nodes; def-use
-  chains make taint and dataflow dramatically simpler and faster.
-- **Canonical FQN + globs.** Every symbol has a stable `lang:module/path.Type.member`
-  name, so one rule shape matches equivalent APIs across languages.
-- **Inter-procedural taint.** The target vuln classes are source→sink flows that
-  cross function boundaries; the engine follows them via per-function summaries.
-- **In-process, single binary.** Frontends run in-process for fast startup and
-  trivial CI deployment, shelling out to a language toolchain only where unavoidable
-  (Python/Java/Rust/Ruby).
+The sections below describe each component; these are the commitments that shaped
+all of them.
+
+- **gIR is the contract.** No pass ever branches on source language — only on gIR
+  structure and canonical symbol names. Getting the IR right first avoids reworking
+  every frontend and pass later, which is also why it is now frozen.
+- **SSA is mandatory,** because def-use chains make taint dramatically simpler and
+  faster. A frontend whose source is not already SSA constructs it during lowering
+  (`converters/ssabuild`).
+- **In-process, single binary,** for fast startup and trivial CI deployment,
+  shelling out to a language toolchain only where unavoidable.
 - **Recall first, precision backstop.** Lowering favors catching the common
   web-handler vulnerability shape; a confidence score plus the optional LLM reviewer
   trim the residual false positives.
@@ -92,12 +87,6 @@ aggregate construction (`builtin.aggregate`). Intrinsics may declare default tai
 semantics in rules, so common propagators (concatenation, formatting) are handled
 uniformly. The core stays neutral while every language construct has a home — no
 opcode per language feature.
-
-### SSA is mandatory
-
-Every frontend emits SSA: unique value definitions and explicit `PHI` nodes at
-control-flow joins. Frontends whose source is not already SSA run SSA construction
-during lowering.
 
 ### Canonical symbol naming
 
@@ -226,26 +215,22 @@ same-named functions in different files get distinct canonical names.
 
 ## Implementation status
 
-Every component below is implemented and tested end-to-end; every vuln class is
-detected across the languages that have samples.
+Every component described above — gIR, all seven frontends, the rule engine,
+inter-procedural taint, secrets scanning, the report, and the LLM reviewer — is
+implemented and tested end-to-end, and every vuln class is detected across the
+languages that have samples (see the
+[detection matrix](README.md#supported-languages--detections)). Two components are
+deliberately approximate rather than complete:
 
 | Component | Status |
 |---|---|
-| gIR (small core + intrinsics, SSA, canonical FQNs) | ✅ `proto/`, `pkg/ir/v1/` |
-| Go frontend (x/tools SSA; funcs + methods + closures) | ✅ |
-| Python frontend (`python3` `ast` → gIR) | ✅ real CFG+SSA lowering (`ssabuild`); requires `python3` |
-| JavaScript frontend (goja → gIR; TS/JSX/ESM via esbuild; Vue/Svelte SFCs) | ✅ real CFG+SSA lowering (`ssabuild`) |
-| Java frontend (JVM bytecode → gIR) | ✅ `java.lang.classfile` dumper + operand-stack simulation; needs a JDK 24+ |
-| Rust frontend (rustc MIR → gIR) | ✅ value-forwarding over MIR; pure Go, default binary; needs `rustc` |
-| Ruby frontend (Ripper AST → gIR) | ✅ `rbdump.rb` dumper + real CFG+SSA lowering (`ssabuild`); pure Go, default binary; needs `ruby` |
-| C/C++ frontend (LLVM IR → gIR) | ✅ **opt-in cgo** (`-tags "llvm byollvm"` + libLLVM); default build ships a stub |
-| Rule engine (YAML, FQN globs, built-in packs) | ✅ taint + dangerous-call kinds across Go/Python/JS/Java/Rust/Ruby/C·C++ (see the [detection matrix](README.md#supported-languages--detections)) |
-| Inter-procedural taint (call graph + summaries) | ✅ intra = High, cross-function = Medium confidence |
-| Analysis scoping | ✅ demand-driven: `Engine.ScopeSeed` seeds only user functions, so a lowered dependency is analyzed only when taint reaches it |
 | Pointer analysis | ⚠️ approximated (CHA + value-flow); a full demand-driven points-to is a future precision upgrade |
-| Secrets scanning | ✅ regex over gIR string constants (CWE-798) |
-| Report (HTML / JSON / SARIF) + exit-code gating | ✅ |
-| LLM reviewer (pluggable) | ✅ Anthropic-backed, confidence-gated, fail-open; off by default |
+| Python / JS / Ruby lowering | ⚠️ real CFG + SSA, but exceptions and `break`/`continue` stay approximate (below) |
+
+Two are not in the default binary or need a toolchain: the **C/C++** frontend is
+an opt-in cgo build (`-tags "llvm byollvm"` + libLLVM; the default ships a stub),
+and Python, Ruby, Java and Rust need `python3` / `ruby` / a JDK 24+ / `rustc` on
+`PATH`, degrading to a coverage warning when absent.
 
 ### Known limitations
 
