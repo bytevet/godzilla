@@ -1029,9 +1029,15 @@ func (fs *funcState) lowerFor(s astNode) {
 // lowered sequentially into it — conservative) or to an after block, so taint a
 // source in the try body assigned reaches the handler via that predecessor edge
 // (and, through the after block, code following the try). `finally` runs on both
-// paths, so it is lowered into the after block. When the body always returns
-// there is no exception edge (rare; the handler's body-var reads are then
-// undefined — a minor recall gap, never a false positive).
+// paths, so it is lowered into the after block.
+//
+// A block that RETURNS still gets its outgoing edge: `try: return fast()` can
+// raise before it returns, and a `finally` runs on the returning path too. The
+// edge is what carries the bindings — a sealed block with zero predecessors
+// resolves every variable read to __undef (ssabuild), so skipping it would strip
+// the handler (and everything after the try) of names bound BEFORE the try, not
+// just of names bound inside its body: a silent, total taint loss on the very
+// common `try: return cached() except KeyError: <sink>(untrusted)` shape.
 func (fs *funcState) lowerTry(s astNode) {
 	fs.lowerBody(s.list("body"))
 	fs.lowerBody(s.list("orelse"))
@@ -1054,8 +1060,13 @@ func (fs *funcState) lowerTry(s astNode) {
 		// Exception edge: the body may branch into the handler, else fall through
 		// to the after block. The condition is opaque (both edges are traversed).
 		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+	} else {
+		// The body ends in a return/raise, so its only non-terminating successor is
+		// the handler (the raise-before-return path) — an unconditional edge, not a
+		// branch. `after` still gets its predecessor from the handler below.
+		fs.b.SetJump(bodyEnd, handlerB)
 	}
-	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
+	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) now known
 
 	fs.cur = handlerB
 	fs.terminated = false
@@ -1063,9 +1074,10 @@ func (fs *funcState) lowerTry(s astNode) {
 		fs.lowerBody(h.list("body"))
 	}
 	handlerTerm := fs.terminated
-	if !handlerTerm {
-		fs.b.SetJump(fs.cur, after)
-	}
+	// Unconditional for the same reason as the body edge: even when every handler
+	// returns, `finally` — lowered into the after block — runs on that path and
+	// must see the bindings the try/except made.
+	fs.b.SetJump(fs.cur, after)
 
 	fs.b.Seal(after)
 	fs.cur = after
