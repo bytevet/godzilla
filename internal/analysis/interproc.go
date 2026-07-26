@@ -73,6 +73,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable:     e.reportable,
 		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
+		fnIdx:          make(map[*ir.Function]fnIndex, len(byKey)),
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -459,10 +460,15 @@ type sharedIndex struct {
 	// rule-independent (the union of all rules' request_object_sources).
 	reqSourceHosts map[string]bool
 
-	// fnIdx memoizes the per-function structural indexes (*ir.Function ->
-	// *fnIndex), filled lazily on first use. sync.Map because the per-rule
-	// analyses run concurrently.
-	fnIdx sync.Map
+	// fnIdx memoizes the per-function structural indexes, filled lazily on first
+	// use and guarded because the per-rule analyses run concurrently. A plain
+	// pre-sized map under an RWMutex, and entries stored BY VALUE: sync.Map cost
+	// an interface box plus an entry allocation per function, and a *fnIndex cost
+	// one more — together ~2.4 allocations per function that a single-rule scan
+	// has nothing to amortize them against. Copying the struct is free (two map
+	// headers), and safe because an entry is immutable once built.
+	fnIdxMu sync.RWMutex
+	fnIdx   map[*ir.Function]fnIndex
 }
 
 // fnIndex holds the per-function structural indexes derived ONLY from the
@@ -474,8 +480,9 @@ type sharedIndex struct {
 //
 // INVARIANT: an entry is immutable once constructed and is shared read-only
 // across the parallel per-rule goroutines (buildDefs is the only writer of defs;
-// nonEscaping is only ever read). A future consumer that wants to mutate either
-// map must clone it first.
+// nonEscaping is only ever read). This is what makes copying the struct out of
+// the memo safe — the copy shares both maps. A future consumer that wants to
+// mutate either map must clone it first.
 type fnIndex struct {
 	defs        map[string]*ir.Instruction
 	nonEscaping map[string]bool
@@ -485,14 +492,23 @@ type fnIndex struct {
 // than a pre-pass over byKey: under the demand-driven dependency scope most
 // dependency functions are never analyzed, so building eagerly would bound
 // neither time nor retained memory by what the scan actually touches.
-func (s *sharedIndex) fnIndexFor(fn *ir.Function) *fnIndex {
-	if v, ok := s.fnIdx.Load(fn); ok {
-		return v.(*fnIndex)
+func (s *sharedIndex) fnIndexFor(fn *ir.Function) fnIndex {
+	s.fnIdxMu.RLock()
+	fx, ok := s.fnIdx[fn]
+	s.fnIdxMu.RUnlock()
+	if ok {
+		return fx
 	}
 	defs := buildDefs(fn)
-	fx := &fnIndex{defs: defs, nonEscaping: nonEscapingAllocs(fn, defs)}
-	actual, _ := s.fnIdx.LoadOrStore(fn, fx)
-	return actual.(*fnIndex)
+	fx = fnIndex{defs: defs, nonEscaping: nonEscapingAllocs(fn, defs)}
+	s.fnIdxMu.Lock()
+	if prev, ok := s.fnIdx[fn]; ok {
+		fx = prev // another goroutine won the race; keep the single shared copy
+	} else {
+		s.fnIdx[fn] = fx
+	}
+	s.fnIdxMu.Unlock()
+	return fx
 }
 
 // buildReqSourceHosts returns the DEPENDENCY functions that host a request
@@ -936,7 +952,7 @@ func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds p
 // tainted parameters, and reports the sinks it hits, whether it returns taint,
 // and the taint it passes to callees.
 func analyzeFunc(
-	fx *fnIndex,
+	fx fnIndex,
 	mod *ir.Module,
 	fn *ir.Function,
 	rule *rules.Rule,
