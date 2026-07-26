@@ -4,10 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
+	ir "godzilla/pkg/ir/v1"
 )
 
 // TestResultFailed checks the coverage predicate that drives the strict gate:
@@ -158,5 +161,33 @@ func TestScan_FindsSecretsInConfigFiles(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected scan.Scan to report the .env secret, got %d finding(s)", len(res.Findings))
+	}
+}
+
+// TestDropCoLocatedDangerous checks the call-site/dataflow dedup: a dangerous-call
+// finding is dropped only when the taint engine already reported the SAME call
+// (same position AND same callee), so a confirmed injection is reported once with
+// its richer dataflow evidence. Everything else survives — most importantly a
+// call-site finding with no dataflow twin, which is the entire point of a
+// dangerous-call rule.
+func TestDropCoLocatedDangerous(t *testing.T) {
+	at := func(line int32) *ir.Position { return &ir.Position{Filename: "app.py", Line: line, Column: 5} }
+	taint := []analysis.Finding{
+		{RuleID: "py-code-injection", SinkPos: at(14), SinkCallee: "py:eval"},
+		{RuleID: "py-code-injection", SinkPos: nil, SinkCallee: "py:exec"}, // position-less: keys nothing
+	}
+	danger := []analysis.Finding{
+		{RuleID: "dup", SinkPos: at(14), SinkCallee: "py:eval"},  // exact twin: dropped
+		{RuleID: "line", SinkPos: at(15), SinkCallee: "py:eval"}, // other line: kept
+		{RuleID: "nest", SinkPos: at(14), SinkCallee: "py:exec"}, // same line, different call: kept
+		{RuleID: "nopos", SinkPos: nil, SinkCallee: "py:exec"},   // no position: never deduped
+	}
+	var got []string
+	for _, f := range dropCoLocatedDangerous(danger, taint) {
+		got = append(got, f.RuleID)
+	}
+	want := []string{"line", "nest", "nopos"}
+	if !slices.Equal(got, want) {
+		t.Errorf("dropCoLocatedDangerous kept %v, want %v", got, want)
 	}
 }

@@ -4,3 +4,12 @@
 findings:
     - rule: py-code-injection
       min: 1
+    # The dataflow rule's sink is the compile() on line 9; the call-site rule
+    # py-dynamic-code-exec fires on the exec() on line 10 — a DIFFERENT call, so
+    # the co-located dedup (internal/scan dropCoLocatedDangerous) correctly does
+    # not apply. It is a true positive: this is exactly the langflow /
+    # CVE-2025-3248 "execute the user's own code object" shape.
+    - rule: py-dynamic-code-exec
+      min: 1
+      line: 10
+      sink: "py:exec"

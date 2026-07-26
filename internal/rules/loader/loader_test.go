@@ -141,6 +141,41 @@ func TestLoadFileRejectsBadSeverity(t *testing.T) {
 	}
 }
 
+// TestLoadFileRejectsBadConfidence locks in that a misspelled `confidence:` is
+// rejected at load time. Left to fall back silently it would be doubly invisible:
+// the finding reports at the default confidence, and the LLM reviewer ranks an
+// unknown value 0 and so never triages it. An omitted confidence is legal (it is
+// the default) and must still load.
+func TestLoadFileRejectsBadConfidence(t *testing.T) {
+	dir := t.TempDir()
+	for name, doc := range map[string]string{
+		"typo.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: mdeium\n    callees: [\"go:*Bad*\"]\n",
+		"rank.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: critical\n    callees: [\"go:*Bad*\"]\n",
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Errorf("LoadFile(%s): want error for bad confidence, got nil", name)
+		}
+	}
+
+	// An omitted confidence, and a well-spelled one, must both load cleanly.
+	for name, doc := range map[string]string{
+		"omitted.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    callees: [\"go:*Bad*\"]\n",
+		"medium.yaml":  "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: medium\n    callees: [\"go:*Bad*\"]\n",
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err != nil {
+			t.Errorf("LoadFile(%s): want no error, got %v", name, err)
+		}
+	}
+}
+
 // TestLoadFileRejectsMalformedSinkSpec locks in that a sink whose "#"
 // injection-point spec names no valid argument index is rejected at load time,
 // rather than silently widening to "all arguments" (which reintroduces the

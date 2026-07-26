@@ -12,8 +12,10 @@ import (
 // Callees glob is a finding, optionally gated on a constant string argument
 // (e.g. MessageDigest.getInstance("MD5")). This is a non-dataflow pass — no
 // taint tracking — for the zero-noise categories (weak crypto/ciphers, insecure
-// randomness) the taint engine cannot express. Findings are High confidence
-// (call-site-deterministic) and deduped per (rule, position).
+// randomness) the taint engine cannot express. Findings are High confidence BY
+// DEFAULT (call-site-deterministic); a rule that is heuristic rather than
+// deterministic may declare `confidence:` to lower that, which is what makes its
+// findings eligible for LLM triage. Findings are deduped per (rule, position).
 func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 	if prog == nil || rs == nil {
 		return nil
@@ -22,9 +24,12 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 	// Precompile the dangerous-call rules and their optional const-arg regexps.
 	// A rule with a const_arg whose regexp cannot compile is dropped (its intent
 	// is unknowable), rather than silently matching everything.
+	// The rule's declared confidence is resolved ONCE here rather than per finding,
+	// so the per-call-site loop stays free of string normalization.
 	type compiled struct {
 		rule *rules.Rule
 		re   *regexp.Regexp
+		conf Confidence
 	}
 	var dcs []compiled
 	for i := range rs.Rules {
@@ -33,7 +38,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			continue
 		}
 		_ = r.Compile() // precompile callee globs so the per-call match is lock-free
-		c := compiled{rule: r}
+		c := compiled{rule: r, conf: ParseConfidence(r.Confidence, ConfidenceHigh)}
 		if r.ConstArg != nil && r.ConstArg.Matches != "" {
 			re, err := regexp.Compile(r.ConstArg.Matches)
 			if err != nil {
@@ -90,7 +95,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 						findings = append(findings, Finding{
 							RuleID:     d.rule.ID,
 							Severity:   d.rule.Severity,
-							Confidence: ConfidenceHigh,
+							Confidence: d.conf,
 							CWE:        d.rule.CWE,
 							Message:    d.rule.Message,
 							Language:   lang,

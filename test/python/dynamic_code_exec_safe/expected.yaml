@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Safe variant: py-dynamic-code-exec's `!arg[0].Complete` guard must suppress a
+# fully constant eval(), and its exact-named callees must never match the safe
+# ast.literal_eval — false-positive guard for the whole safe population.
+findings: []
