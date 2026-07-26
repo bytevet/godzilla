@@ -69,52 +69,7 @@ func taintedSet(names ...string) map[string]*ir.Position {
 
 // --- hostFixedRe: does the constant prefix pin a complete scheme://host/… ? ---
 
-func TestHostFixedRe(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"https://example.com/", true},      // host + path separator
-		{"https://example.com/v1/", true},   // deeper path
-		{"http://h:8080/", true},            // port
-		{"http://h:8080?", true},            // query separator
-		{"https://example.com#frag", true},  // fragment separator
-		{"ftp://host/x", true},              // any scheme
-		{"https://", false},                 // scheme only, no host yet
-		{"https://example.com", false},      // no separator: taint could extend the host
-		{"https://example.com:8080", false}, // still inside the authority
-		{"//host/", false},                  // scheme-relative, no scheme
-		{"", false},                         // empty
-		{"/relative/path", false},           // path only
-		{"api.example.com/", false},         // no scheme
-		{"https://sub.", false},             // taint continues the authority
-	}
-	for _, c := range cases {
-		if got := hostFixedRe.MatchString(c.in); got != c.want {
-			t.Errorf("hostFixedRe(%q) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
-
 // --- prefixBeforePlaceholder: literal text before the first interpolation ----
-
-func TestPrefixBeforePlaceholder(t *testing.T) {
-	cases := []struct{ tmpl, want string }{
-		{"https://h/%s", "https://h/"},
-		{"https://h/v1/%d", "https://h/v1/"},
-		{"https://h/{}", "https://h/"},           // Rust/py brace placeholder
-		{"https://h/{0}", "https://h/"},          // indexed brace
-		{"https://h/static", "https://h/static"}, // no placeholder
-		{"https://%s.h/", "https://"},            // taint starts in the host
-		{"100%%-off://%s", "100%%-off://"},       // escaped %% is not a placeholder
-		{"a{{b}}://{x}", "a{{b}}://"},            // escaped {{ is not a placeholder
-	}
-	for _, c := range cases {
-		if got := prefixBeforePlaceholder(c.tmpl); got != c.want {
-			t.Errorf("prefixBeforePlaceholder(%q) = %q, want %q", c.tmpl, got, c.want)
-		}
-	}
-}
 
 // --- constStr: reads a string constant, stripping Go's surrounding quotes -----
 
@@ -242,44 +197,6 @@ func TestURLHostControllable(t *testing.T) {
 			got := urlHostControllable([]*ir.Value{regV("u")}, tt.tainted, tt.defs)
 			if got != tt.want {
 				t.Errorf("urlHostControllable = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-// urlConstPrefix reconstructs the fixed prefix and reports whether the build was
-// recognized well enough to trust it.
-func TestURLConstPrefix(t *testing.T) {
-	tests := []struct {
-		name          string
-		defs          map[string]*ir.Instruction
-		wantPrefix    string
-		wantRecovered bool
-	}{
-		{
-			name:          "concat",
-			defs:          defsOf(binOp("u", ir.BinOpKind_BIN_OP_ADD, cstV("https://h/v1/"), regV("t"))),
-			wantPrefix:    "https://h/v1/",
-			wantRecovered: true,
-		},
-		{
-			name:          "sprintf",
-			defs:          defsOf(fmtInst("u", "go:fmt.Sprintf", cstV("https://h/%s"), regV("t"))),
-			wantPrefix:    "https://h/",
-			wantRecovered: true,
-		},
-		{
-			name:          "opaque (no def)",
-			defs:          defsOf(),
-			wantPrefix:    "",
-			wantRecovered: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			prefix, recovered := urlConstPrefix(regV("u"), tt.defs, map[string]bool{})
-			if prefix != tt.wantPrefix || recovered != tt.wantRecovered {
-				t.Errorf("urlConstPrefix = %q,%v; want %q,%v", prefix, recovered, tt.wantPrefix, tt.wantRecovered)
 			}
 		})
 	}

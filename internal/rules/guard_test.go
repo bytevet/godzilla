@@ -104,3 +104,30 @@ func TestGuardFailsClosed(t *testing.T) {
 		t.Error("uncompiled guarded sink must deny, not fire unguarded")
 	}
 }
+
+// TestArgHostFixed pins the host-fixedness reading that SSRF and open-redirect
+// rules suppress on. It moved here with the regex when the check left the engine:
+// the prefix is the skeleton text before the first DynMarker, so a constant
+// scheme://host followed by a separator confines any later taint to the
+// path/query, while a bare scheme, a host that taint could still EXTEND, or a
+// wholly dynamic value must all stay controllable.
+func TestArgHostFixed(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"https://example.com/" + DynMarker, true},
+		{"http://h:8080?" + DynMarker, true},
+		{"https://example.com#" + DynMarker, true},
+		{"https://" + DynMarker, false},            // no host yet
+		{"https://example.com" + DynMarker, false}, // taint could extend the host
+		{"//host/" + DynMarker, false},             // no scheme
+		{DynMarker, false},                         // wholly dynamic / unrecoverable
+		{"", false},
+		{"https://example.com/static", true}, // fully constant
+	} {
+		if got := ArgHostFixed(Arg{String: c.in}); got != c.want {
+			t.Errorf("ArgHostFixed(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
