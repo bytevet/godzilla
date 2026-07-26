@@ -89,3 +89,29 @@ rules:
         when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
       - callee: "py:*Tool*"
         when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+
+  # CWE-502 rather than the flag rules above, but it belongs with them: the defect
+  # is the keyword, not a dataflow. The taint rule cannot reach this class at all --
+  # in ray's webdataset decoder the bytes come from iterating a function parameter
+  # (an archive shard), so there is no modeled source to seed even though
+  # torch.load IS a modeled sink. The flag makes it detectable with no source.
+  - id: py-torch-unsafe-load
+    languages: [python]
+    kind: dangerous-call
+    severity: low
+    confidence: medium
+    cwe: CWE-502
+    message: >-
+      torch.load(..., weights_only=False) unpickles arbitrary Python objects while
+      loading a checkpoint, so any checkpoint an attacker can influence -- a
+      downloaded model, a dataset shard, a user upload -- becomes remote code
+      execution. PyTorch made weights_only=True the default in 2.6 for exactly this
+      reason. Keep the default, or load untrusted checkpoints in a sandbox.
+    callees:
+      # Anchored on torch.load rather than matched on the keyword alone: PyTorch
+      # Lightning's trainer.save_checkpoint(..., weights_only=False) uses the SAME
+      # keyword to mean "save the whole model, not just weights", which is harmless.
+      # Matching the keyword without the callee would flag it (verified against
+      # ray's _lightning_utils.py, which this correctly leaves alone).
+      - callee: "py:*torch.load"
+        when: 'any(arg, .Name == "weights_only" && .String == "false")'
