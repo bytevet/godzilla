@@ -57,8 +57,12 @@ BENCH_PKGS=(./internal/scan/ ./internal/analysis/ ./internal/rules/)
 # the trailing GOMAXPROCS suffix and any sub-benchmark params): the engine
 # primitives plus every language's full-pipeline scan. A benchmark whose toolchain
 # is absent simply doesn't appear in the output and is skipped by the gate.
+#
+# Engine_InertRules is a guard rather than a speed target: it scales the number of
+# rules that CANNOT fire, so a change that starts evaluating them again shows up
+# here as a regression instead of quietly inflating every scan.
 KEY_BENCHMARKS=(
-	Engine_RuleScaling MatchGlob
+	Engine_RuleScaling Engine_InertRules MatchGlob
 	Scan_GoWithDeps Scan_GoSimple
 	Scan_Python Scan_JS Scan_Rust Scan_Java Scan_Ruby
 )
