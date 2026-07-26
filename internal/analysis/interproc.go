@@ -1338,26 +1338,27 @@ func analyzeFunc(
 				if guards.guarded(curBlock, pos, tainted) {
 					break
 				}
-				// SSRF (CWE-918): keep the finding only if the taint can reach the
-				// request URL's host. Taint confined to the path/query of a fixed
-				// host cannot redirect the request and is a false positive.
-				if rule.CWE != "CWE-918" || urlHostControllable(inj, tainted, defs) {
-					// Mark reported ONLY when a finding is actually emitted (ENG-8).
-					// Setting it before the CWE-918 check masked a real SSRF: a
-					// benign, host-fixed flow to this sink would set reported and
-					// suppress, blocking a later flow whose taint DOES reach the host
-					// (e.g. once an interprocedural summary taints the host segment).
-					// Leaving reported unset on suppression lets that real flow fire.
-					reported[inst] = true
-					steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
-					res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
-					// Dependency sink wrapper: this finding is scoped out (the sink sits in
-					// a library), so if the tainted value entered through a string parameter,
-					// summarize it for the caller to report at its own site. User code
-					// reports in place and never summarizes.
-					if !funcReportable {
-						recordSinkParam(&res, fn, rule, seeds, pos, inst.Pos)
-					}
+				// SSRF/open-redirect host-fixedness is no longer decided here. It is a
+				// rule-layer policy now: the packs that want it declare
+				// `when: 'not hostFixed()'` on their sinks, and the engine only supplies
+				// the fact (see the sinkGuard call above). Branching on rule.CWE meant a
+				// custom SSRF rule tagged anything else silently lost the suppression, and
+				// open-redirect could not opt in at all.
+				// Mark reported ONLY when a finding is actually emitted (ENG-8).
+				// A suppressing guard breaks out ABOVE without setting this, which is
+				// what lets a later flow still fire: a benign host-fixed flow to this
+				// sink must not mark it reported and block a subsequent flow whose
+				// taint DOES reach the host (e.g. once an interprocedural summary
+				// taints the host segment).
+				reported[inst] = true
+				steps := reconstructPath(defs, tainted, srcReg, pos, inst.Pos)
+				res.findings = append(res.findings, newTaintFinding(rule, mod, fn, pos, inst.Pos, callee, steps, confidenceFor(pos)))
+				// Dependency sink wrapper: this finding is scoped out (the sink sits in
+				// a library), so if the tainted value entered through a string parameter,
+				// summarize it for the caller to report at its own site. User code
+				// reports in place and never summarizes.
+				if !funcReportable {
+					recordSinkParam(&res, fn, rule, seeds, pos, inst.Pos)
 				}
 			}
 		case isProp:

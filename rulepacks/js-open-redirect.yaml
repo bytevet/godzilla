@@ -10,7 +10,8 @@ rules:
       redirecting to a user-controlled URL.
     extend: $_js-sources.yaml
     sinks:
-      - "js:*.redirect"
+      - sink: "js:*.redirect"
+        when: 'not hostFixed()'
     sanitizers:
       - "js:encodeURIComponent"
     propagators: []

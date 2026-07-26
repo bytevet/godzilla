@@ -15,7 +15,11 @@ func ssrfRule() *rules.RuleSet {
 		CWE:       "CWE-918",
 		Message:   "ssrf",
 		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     rules.SinksOf("go:*net/http.Get"),
+		// Host-fixedness is a RULE policy, not engine behaviour keyed on CWE-918,
+		// so this rule declares it the same way the shipped SSRF packs do. Without
+		// the guard the fixed-host request is reported, which is the correct new
+		// default: a rule that does not ask for the suppression does not get it.
+		Sinks: []rules.Sink{{Pattern: "go:*net/http.Get", When: "not hostFixed()"}},
 		Propagators: []string{
 			"go:fmt.Sprintf", "go:fmt.Sprint",
 		},

@@ -15,22 +15,36 @@ rules:
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
       # net/http (canonical const-path names are scoped by the frontend).
-      - "ruby:Net::HTTP.get"
-      - "ruby:Net::HTTP.post"
-      - "ruby:Net::HTTP.get_response"
-      - "ruby:Net::HTTP.start"
+      - sink: "ruby:Net::HTTP.get"
+        when: 'not hostFixed()'
+      - sink: "ruby:Net::HTTP.post"
+        when: 'not hostFixed()'
+      - sink: "ruby:Net::HTTP.get_response"
+        when: 'not hostFixed()'
+      - sink: "ruby:Net::HTTP.start"
+        when: 'not hostFixed()'
       # open-uri (URI.open / Kernel#open with an http(s) URL).
-      - "ruby:URI.open"
-      - "ruby:URI.parse"
-      - "ruby:open"
-      - "ruby:Kernel.open"
+      - sink: "ruby:URI.open"
+        when: 'not hostFixed()'
+      - sink: "ruby:URI.parse"
+        when: 'not hostFixed()'
+      - sink: "ruby:open"
+        when: 'not hostFixed()'
+      - sink: "ruby:Kernel.open"
+        when: 'not hostFixed()'
       # Popular HTTP client gems.
-      - "ruby:HTTParty.get"
-      - "ruby:HTTParty.post"
-      - "ruby:Faraday.get"
-      - "ruby:Faraday.post"
-      - "ruby:RestClient.get"
-      - "ruby:RestClient.post"
+      - sink: "ruby:HTTParty.get"
+        when: 'not hostFixed()'
+      - sink: "ruby:HTTParty.post"
+        when: 'not hostFixed()'
+      - sink: "ruby:Faraday.get"
+        when: 'not hostFixed()'
+      - sink: "ruby:Faraday.post"
+        when: 'not hostFixed()'
+      - sink: "ruby:RestClient.get"
+        when: 'not hostFixed()'
+      - sink: "ruby:RestClient.post"
+        when: 'not hostFixed()'
     # No built-in sanitizer neutralizes tainted input for a request URL; the fix
     # is allow-listing the destination host, not escaping.
     sanitizers: []

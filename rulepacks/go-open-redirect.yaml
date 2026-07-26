@@ -11,7 +11,8 @@ rules:
     extend: $_go-common.yaml
     # http.Redirect(w, r, url, code): the destination URL is logical arg 2.
     sinks:
-      - "go:*net/http.Redirect#2"
+      - sink: "go:*net/http.Redirect#2"
+        when: 'not hostFixed()'
     sanitizers:
       - "go:*url.QueryEscape"
       - "go:*url.PathEscape"

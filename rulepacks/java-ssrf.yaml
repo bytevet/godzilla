@@ -20,14 +20,24 @@ rules:
     extend: [$_java-env-source.yaml, $_java-sources.yaml]
     # The request URL/URI is logical arg 0 in each case (receiver excluded).
     sinks:
-      - "java:*java/net/URL.<init>#0"
-      - "java:*java/net/URI.create#0"
-      - "java:*RestTemplate.getForObject#0"
-      - "java:*RestTemplate.getForEntity#0"
-      - "java:*RestTemplate.exchange#0"
-      - "java:*RestTemplate.postForObject#0"
-      - "java:*WebClient*.uri#0"
-      - "java:*HttpGet.<init>#0"
-      - "java:*HttpPost.<init>#0"
-      - "java:*Request$Builder.url#0"
+      - sink: "java:*java/net/URL.<init>#0"
+        when: 'not hostFixed()'
+      - sink: "java:*java/net/URI.create#0"
+        when: 'not hostFixed()'
+      - sink: "java:*RestTemplate.getForObject#0"
+        when: 'not hostFixed()'
+      - sink: "java:*RestTemplate.getForEntity#0"
+        when: 'not hostFixed()'
+      - sink: "java:*RestTemplate.exchange#0"
+        when: 'not hostFixed()'
+      - sink: "java:*RestTemplate.postForObject#0"
+        when: 'not hostFixed()'
+      - sink: "java:*WebClient*.uri#0"
+        when: 'not hostFixed()'
+      - sink: "java:*HttpGet.<init>#0"
+        when: 'not hostFixed()'
+      - sink: "java:*HttpPost.<init>#0"
+        when: 'not hostFixed()'
+      - sink: "java:*Request$Builder.url#0"
+        when: 'not hostFixed()'
     sanitizers: []

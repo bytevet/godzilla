@@ -18,17 +18,28 @@ rules:
     extend: [$_rust-sources.yaml, $_rust-propagators.yaml]
     sinks:
       # reqwest / ureq free functions: get(url) / post(url) — URL at operand 0.
-      - "rust:*reqwest::get#0"
-      - "rust:*reqwest::blocking::get#0"
-      - "rust:*ureq::get#0"
-      - "rust:*ureq::post#0"
+      - sink: "rust:*reqwest::get#0"
+        when: 'not hostFixed()'
+      - sink: "rust:*reqwest::blocking::get#0"
+        when: 'not hostFixed()'
+      - sink: "rust:*ureq::get#0"
+        when: 'not hostFixed()'
+      - sink: "rust:*ureq::post#0"
+        when: 'not hostFixed()'
       # Client methods: client.get(url) etc. — URL at operand 1 (receiver at 0);
       # client.request(method, url) — URL at operand 2.
-      - "rust:*Client::get#1"
-      - "rust:*Client::post#1"
-      - "rust:*Client::head#1"
-      - "rust:*Client::put#1"
-      - "rust:*Client::patch#1"
-      - "rust:*Client::delete#1"
-      - "rust:*Client::request#2"
+      - sink: "rust:*Client::get#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::post#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::head#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::put#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::patch#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::delete#1"
+        when: 'not hostFixed()'
+      - sink: "rust:*Client::request#2"
+        when: 'not hostFixed()'
     sanitizers: []
