@@ -105,19 +105,46 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	//   - NO LANGUAGE IN COMMON with the program. enqueue rejects every function
 	//     whose module language fails AppliesTo, so the worklist would stay empty.
 	//     A rule declaring no languages applies everywhere and is never skipped.
-	canProduceFinding := func(r *rules.Rule) bool {
-		if len(r.Sinks) == 0 {
-			return false
-		}
-		if len(r.Languages) == 0 {
-			return true
-		}
-		for lang := range progLangs {
-			if r.AppliesTo(lang) {
+	//
+	//   - NO SINK CALLEE PRESENT. Every one of the rule's sink globs matches
+	//     nothing this program actually calls, so no call site can ever be a sink
+	//     for it. This is what makes a broad multi-language pack cheap on a repo
+	//     that uses few of the modeled libraries: the distinct-callee set is a
+	//     BY-PRODUCT of BuildCallGraph (cg.Callees) rather than its own walk, and
+	//     it is far smaller than the instruction count (54 vs 637 on
+	//     test/go/sql_injection), so the check costs |callees| × |sink patterns|
+	//     once instead of a full worklist pass. Collecting it in a separate walk
+	//     measured +6.6% on a dependency-heavy Go scan — more than it saved.
+	//
+	//     Gated on SINKS ONLY, never sources. Taint also enters through seeding
+	//     that is not a callee-glob match at all — addHTTPRequestSource,
+	//     buildReqSourceHosts, request-object provenance — so a source-side
+	//     prefilter could drop real findings. A sink is always a call.
+	hasSinkCallee := func(r *rules.Rule) bool {
+		for callee := range cg.Callees {
+			if _, _, ok := r.MatchSink(callee); ok {
 				return true
 			}
 		}
 		return false
+	}
+	canProduceFinding := func(r *rules.Rule) bool {
+		if len(r.Sinks) == 0 {
+			return false
+		}
+		if len(r.Languages) > 0 {
+			any := false
+			for lang := range progLangs {
+				if r.AppliesTo(lang) {
+					any = true
+					break
+				}
+			}
+			if !any {
+				return false
+			}
+		}
+		return hasSinkCallee(r)
 	}
 
 	// Each rule's analysis is independent — it reads the shared, immutable call
