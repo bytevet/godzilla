@@ -76,20 +76,39 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// goroutine) avoids a data race on the shared matcher cache.
 	_ = e.rs.Compile() // guard-compile errors are already reported by the loader at load
 
-	// Languages actually present in this program. A rule that declares languages
-	// and matches none of them can produce nothing: enqueue rejects every function
-	// whose module language fails AppliesTo, so its worklist stays empty and it
-	// returns nil. Skipping its goroutine outright keeps a multi-language rule pack
-	// from spawning (and scheduling) dozens of no-op analyses on a single-language
-	// scan. A rule with no declared languages applies everywhere and is never
-	// skipped.
+	// Languages actually present in this program, for the language half of
+	// canProduceFinding below.
 	progLangs := map[string]bool{}
 	for _, mod := range prog.Modules {
 		if mod != nil {
 			progLangs[mod.GetLanguage()] = true
 		}
 	}
-	ruleApplies := func(r *rules.Rule) bool {
+
+	// canProduceFinding decides whether a rule is worth a goroutine and a seeded
+	// worklist at all. A pass costs an O(functions × instructions) walk, so a rule
+	// that CANNOT yield a finding must not get one — with a 78-rule pack, 61-74% of
+	// the passes were exactly that.
+	//
+	// Two independent reasons a rule is a guaranteed no-op:
+	//
+	//   - NO SINKS. Dataflow findings are emitted in exactly two places, and both
+	//     sit behind a sink match: the isSink branch, and the dependency
+	//     sink-wrapper path, whose summary recordSinkParam only ever writes from
+	//     inside that same branch. MatchSink over an empty sink list always returns
+	//     false, so there is no path to a finding. This is what excludes the
+	//     `kind: secret` and `kind: dangerous-call` rules — they are evaluated by
+	//     ScanSecrets and ScanDangerousCalls, not here — and it catches a malformed
+	//     rule too. Tested on the CONCRETE property (no sinks) rather than on the
+	//     kind, because that property is the actual reason.
+	//
+	//   - NO LANGUAGE IN COMMON with the program. enqueue rejects every function
+	//     whose module language fails AppliesTo, so the worklist would stay empty.
+	//     A rule declaring no languages applies everywhere and is never skipped.
+	canProduceFinding := func(r *rules.Rule) bool {
+		if len(r.Sinks) == 0 {
+			return false
+		}
 		if len(r.Languages) == 0 {
 			return true
 		}
@@ -109,7 +128,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	for i := range e.rs.Rules {
-		if !ruleApplies(&e.rs.Rules[i]) {
+		if !canProduceFinding(&e.rs.Rules[i]) {
 			continue // results[i] stays nil, exactly what an empty worklist returns
 		}
 		wg.Add(1)

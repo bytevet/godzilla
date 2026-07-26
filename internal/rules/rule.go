@@ -278,6 +278,11 @@ type RuleSet struct {
 	// `_default-propagators.yaml` fragment; Compile hands it to each rule, so the
 	// engine never has to know defaults exist. Not from this document's YAML.
 	DefaultPropagators []string `yaml:"-"`
+
+	// defaultProps is DefaultPropagators compiled once (see Compile). Unexported;
+	// a RuleSet copied by value shares it, which is safe because it is read-only
+	// after construction.
+	defaultProps []*compiledGlob
 }
 
 // Compile precompiles every rule's patterns (see Rule.Compile). Call it once,
@@ -287,8 +292,15 @@ type RuleSet struct {
 // Idempotent.
 func (rs *RuleSet) Compile() error {
 	var errs []error
-	// Compiled once for the whole set and shared by reference with every rule.
-	defaults := classifyAll(rs.DefaultPropagators)
+	// Compiled ONCE for the whole set and shared by reference with every rule.
+	// Memoized because Compile is called on every scan (from both Scan and
+	// Engine.Analyze) while Rule.Compile is idempotent: without this guard the
+	// set-wide propagator list — ~100 globs — was re-classified on each call, which
+	// made classifyGlob the single largest allocation source in a small scan.
+	if rs.defaultProps == nil && len(rs.DefaultPropagators) > 0 {
+		rs.defaultProps = classifyAll(rs.DefaultPropagators)
+	}
+	defaults := rs.defaultProps
 	for i := range rs.Rules {
 		rs.Rules[i].defaultProps = defaults
 		if err := rs.Rules[i].Compile(); err != nil {
