@@ -21,6 +21,9 @@ rules:
       # Archive entry enumerators: zipfile.ZipFile.namelist/infolist and
       # tarfile.TarFile.getnames/getmembers. The returned names (or the .name/
       # .filename fields of the returned info objects) are attacker-controlled.
+      # The receiver is a local variable (`z`/`tf`), not the module, so these must
+      # stay receiver-wildcarded -- an anchored "py:*tarfile*.getmembers" matches
+      # nothing real and would silently delete tar detection.
       - "py:*.namelist"
       - "py:*.infolist"
       - "py:*.getnames"
@@ -29,6 +32,14 @@ rules:
       # secure_filename strips directory separators and "../", collapsing the
       # entry to a safe basename -- the documented Flask/Werkzeug mitigation.
       - "py:*secure_filename"
+      # NOT a sanitizer but an EXCLUSION, which the sanitizer list is the only
+      # lever for: a source glob cannot negate, and the engine classifies a callee
+      # sanitizer-before-source. inspect.getmembers() is Python's introspection
+      # API -- it enumerates a live object's attributes, never archive entries --
+      # and collides with the receiver-wildcarded tarfile glob above. Left
+      # unexcluded it reports HIGH-severity, CI-blocking zip-slip false positives
+      # in any plugin loader or pydoc-shaped module that writes what it inspects.
+      - "py:inspect.getmembers"
     # os.path.join does NOT contain the name to a base directory (a leading
     # "../" still escapes), so it forwards taint rather than clearing it --
     # mirroring py-path-traversal's identical treatment.
