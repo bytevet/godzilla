@@ -82,7 +82,10 @@ func propagatesTaint(inst *ir.Instruction) bool {
 	if !propagatingOps[inst.Op] {
 		return false
 	}
-	return !(inst.Op == ir.OpCode_OP_CODE_BIN_OP && comparisonBinOps[inst.GetBinOp()])
+	if inst.Op == ir.OpCode_OP_CODE_BIN_OP && comparisonBinOps[inst.GetBinOp()] {
+		return false
+	}
+	return true
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted
