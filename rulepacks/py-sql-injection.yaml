@@ -22,6 +22,24 @@ rules:
       - "py:*.execute#0"
       - "py:*.executemany#0"
       - "py:*.executescript#0"
+      # SQLAlchemy's raw-SQL escape hatch: runs the string with no parameterization.
+      - "py:*.exec_driver_sql#0"
+    # An ORM's raw-SQL wrapper is a PASSTHROUGH, not a sink: sqlalchemy.text(sql)
+    # returns a TextClause carrying the string verbatim, and it is the later
+    # session.execute(clause) that runs it. Without these the taint dies inside the
+    # wrapper, so `execute` sees a clean argument and nothing fires -- which is why
+    # ORM-backed apps reported zero SQL-injection findings while other classes fired
+    # in the same code. Covered as both a bare call (`text(sql)`) and an attribute
+    # call (`sqlalchemy.text` / Flask-SQLAlchemy's `db.text`), since the frontend
+    # resolves the callee differently per import style.
+    #
+    # These only FORWARD taint, never create it, so a query built entirely from
+    # constants stays untainted and the parameterized forms are unaffected.
+    propagators:
+      - "py:text"
+      - "py:*.text"
+      - "py:literal_column"
+      - "py:*.literal_column"
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
     sanitizers: []
