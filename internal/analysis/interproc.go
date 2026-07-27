@@ -76,29 +76,75 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	// goroutine) avoids a data race on the shared matcher cache.
 	_ = e.rs.Compile() // guard-compile errors are already reported by the loader at load
 
-	// Languages actually present in this program. A rule that declares languages
-	// and matches none of them can produce nothing: enqueue rejects every function
-	// whose module language fails AppliesTo, so its worklist stays empty and it
-	// returns nil. Skipping its goroutine outright keeps a multi-language rule pack
-	// from spawning (and scheduling) dozens of no-op analyses on a single-language
-	// scan. A rule with no declared languages applies everywhere and is never
-	// skipped.
+	// Languages actually present in this program, for the language half of
+	// canProduceFinding below.
 	progLangs := map[string]bool{}
 	for _, mod := range prog.Modules {
 		if mod != nil {
 			progLangs[mod.GetLanguage()] = true
 		}
 	}
-	ruleApplies := func(r *rules.Rule) bool {
-		if len(r.Languages) == 0 {
-			return true
-		}
-		for lang := range progLangs {
-			if r.AppliesTo(lang) {
+
+	// canProduceFinding decides whether a rule is worth a goroutine and a seeded
+	// worklist at all. A pass costs an O(functions × instructions) walk, so a rule
+	// that CANNOT yield a finding must not get one — with a 78-rule pack, 61-74% of
+	// the passes were exactly that.
+	//
+	// Two independent reasons a rule is a guaranteed no-op:
+	//
+	//   - NO SINKS. Dataflow findings are emitted in exactly two places, and both
+	//     sit behind a sink match: the isSink branch, and the dependency
+	//     sink-wrapper path, whose summary recordSinkParam only ever writes from
+	//     inside that same branch. MatchSink over an empty sink list always returns
+	//     false, so there is no path to a finding. This is what excludes the
+	//     `kind: secret` and `kind: dangerous-call` rules — they are evaluated by
+	//     ScanSecrets and ScanDangerousCalls, not here — and it catches a malformed
+	//     rule too. Tested on the CONCRETE property (no sinks) rather than on the
+	//     kind, because that property is the actual reason.
+	//
+	//   - NO LANGUAGE IN COMMON with the program. enqueue rejects every function
+	//     whose module language fails AppliesTo, so the worklist would stay empty.
+	//     A rule declaring no languages applies everywhere and is never skipped.
+	//
+	//   - NO SINK CALLEE PRESENT. Every one of the rule's sink globs matches
+	//     nothing this program actually calls, so no call site can ever be a sink
+	//     for it. This is what makes a broad multi-language pack cheap on a repo
+	//     that uses few of the modeled libraries: the distinct-callee set is a
+	//     BY-PRODUCT of BuildCallGraph (cg.Callees) rather than its own walk, and
+	//     it is far smaller than the instruction count (54 vs 637 on
+	//     test/go/sql_injection), so the check costs |callees| × |sink patterns|
+	//     once instead of a full worklist pass. Collecting it in a separate walk
+	//     measured +6.6% on a dependency-heavy Go scan — more than it saved.
+	//
+	//     Gated on SINKS ONLY, never sources. Taint also enters through seeding
+	//     that is not a callee-glob match at all — addHTTPRequestSource,
+	//     buildReqSourceHosts, request-object provenance — so a source-side
+	//     prefilter could drop real findings. A sink is always a call.
+	hasSinkCallee := func(r *rules.Rule) bool {
+		for callee := range cg.Callees {
+			if _, _, ok := r.MatchSink(callee); ok {
 				return true
 			}
 		}
 		return false
+	}
+	canProduceFinding := func(r *rules.Rule) bool {
+		if len(r.Sinks) == 0 {
+			return false
+		}
+		if len(r.Languages) > 0 {
+			any := false
+			for lang := range progLangs {
+				if r.AppliesTo(lang) {
+					any = true
+					break
+				}
+			}
+			if !any {
+				return false
+			}
+		}
+		return hasSinkCallee(r)
 	}
 
 	// Each rule's analysis is independent — it reads the shared, immutable call
@@ -109,7 +155,7 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	for i := range e.rs.Rules {
-		if !ruleApplies(&e.rs.Rules[i]) {
+		if !canProduceFinding(&e.rs.Rules[i]) {
 			continue // results[i] stays nil, exactly what an empty worklist returns
 		}
 		wg.Add(1)
@@ -681,13 +727,26 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	reported := map[*ir.Instruction]bool{}
 	var findings []Finding
 
+	// The rule is fixed for this whole pass, so decide per LANGUAGE once instead of
+	// re-running AppliesTo (a slice scan with a case-insensitive compare) on every
+	// enqueue — which happens once per function seeded and again per call edge.
+	langOK := map[string]bool{}
+	ruleAppliesToLang := func(lang string) bool {
+		ok, seen := langOK[lang]
+		if !seen {
+			ok = rule.AppliesTo(lang)
+			langOK[lang] = ok
+		}
+		return ok
+	}
+
 	queued := map[string]bool{}
 	var queue []string
 	enqueue := func(name string) {
 		if byKey[name] == nil {
 			return
 		}
-		if mod := modByKey[name]; mod == nil || !rule.AppliesTo(mod.Language) {
+		if mod := modByKey[name]; mod == nil || !ruleAppliesToLang(mod.Language) {
 			return
 		}
 		if !queued[name] {

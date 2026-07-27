@@ -77,3 +77,44 @@ func BenchmarkEngine_RuleScaling(b *testing.B) {
 		})
 	}
 }
+
+// inertRules returns count rules that CANNOT produce a dataflow finding: they
+// declare no sinks, the shape of a `kind: secret` or `kind: dangerous-call` rule
+// as the taint engine sees it (both are evaluated by their own passes).
+func inertRules(count int) *rules.RuleSet {
+	rs := &rules.RuleSet{}
+	for i := 0; i < count; i++ {
+		rs.Rules = append(rs.Rules, rules.Rule{
+			ID:       fmt.Sprintf("bench-inert-%d", i),
+			Severity: rules.SeverityHigh,
+			Kind:     "secret",
+			Matches:  `\bAKIA[0-9A-Z]{16}\b`,
+		})
+	}
+	return rs
+}
+
+// BenchmarkEngine_InertRules is a REGRESSION GUARD, not a target to optimise.
+// Analyze used to spawn a goroutine and a full seeded worklist for every rule,
+// gated only on language, so a rule that could never fire still cost an
+// O(functions × instructions) walk. Adding 14 secret rules to the shipped pack
+// made that visible as a +76% allocation regression on a small scan.
+//
+// With the cannot-fire gate in Analyze, rule count must not matter here: all
+// three sub-benchmarks should report essentially the same ns/op and allocs/op.
+// If they start diverging, something has begun evaluating inert rules again.
+func BenchmarkEngine_InertRules(b *testing.B) {
+	prog := buildScaleProgram(120)
+	for _, n := range []int{0, 14, 100} {
+		rs := inertRules(n)
+		if err := rs.Compile(); err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("inert=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				NewEngine(rs).Analyze(prog)
+			}
+		})
+	}
+}

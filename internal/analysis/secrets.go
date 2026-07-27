@@ -98,7 +98,10 @@ func scanText(s string, pos *ir.Position, lang, fn string, dets []secretDetector
 		return
 	}
 	for _, d := range dets {
-		if !d.rule.AppliesTo(lang) || !d.re.MatchString(s) {
+		// Match BEFORE the language check: a miss is the overwhelmingly common case
+		// and MatchString is cheaper than AppliesTo's slice scan, so testing the
+		// regexp first keeps the rare-hit path from paying for the filter.
+		if !d.re.MatchString(s) || !d.rule.AppliesTo(lang) {
 			continue
 		}
 		key := d.rule.ID + "@" + posKey(pos)

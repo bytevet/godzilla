@@ -29,6 +29,15 @@ type CallGraph struct {
 	// dispatch with no known implementation) are simply dropped, so Edges
 	// never dangles.
 	Edges map[string][]string
+
+	// Callees is the set of DISTINCT callee names this program calls, including
+	// the unresolved ones Edges drops (unlowered stdlib, dynamic dispatch) and
+	// those in functions with no CanonicalName, which Funcs skips. It is collected
+	// here rather than by a separate walk because this pass already visits every
+	// instruction — the engine uses it to skip a rule whose sink globs match
+	// nothing the program calls, and a second walk to build it cost more on a
+	// dependency-heavy scan than the skipping saved.
+	Callees map[string]bool
 }
 
 // BuildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
@@ -50,8 +59,9 @@ type CallGraph struct {
 // A call naming neither (an unresolved dynamic value) is dropped.
 func BuildCallGraph(prog *ir.Program) *CallGraph {
 	g := &CallGraph{
-		Funcs: map[string]*ir.Function{},
-		Edges: map[string][]string{},
+		Funcs:   map[string]*ir.Function{},
+		Edges:   map[string][]string{},
+		Callees: map[string]bool{},
 	}
 	if prog == nil {
 		return g
@@ -59,6 +69,14 @@ func BuildCallGraph(prog *ir.Program) *CallGraph {
 
 	var allFuncs []*ir.Function
 	for _, fn := range funcs(prog) {
+		// Collect callees for EVERY function, including the unnamed ones skipped
+		// below: they are still analyzed (Analyze keys them as __localN), so a sink
+		// inside one must keep its rule from being prefiltered away.
+		for inst := range instrs(fn) {
+			if inst.Call != nil {
+				g.Callees[inst.Call.GetCallee()] = true
+			}
+		}
 		if fn.CanonicalName == "" {
 			continue
 		}
