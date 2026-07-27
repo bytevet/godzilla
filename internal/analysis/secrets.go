@@ -42,74 +42,66 @@ func secretDetectorsOf(rs *rules.RuleSet) []secretDetector {
 	return ds
 }
 
-// ScanSecrets walks a gIR program for hardcoded secrets embedded in string
-// constants, using rs's `kind: secret` rules. This is a non-dataflow,
-// pattern-based analysis (distinct from the taint engine) and complements it in
-// the same Finding stream.
-func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
-	var findings []Finding
-	dets := secretDetectorsOf(rs)
-	if prog == nil || len(dets) == 0 {
-		return findings
-	}
-
-	seen := map[string]bool{} // dedupe by ruleID@position
-	for _, mod := range prog.Modules {
-		if mod == nil {
-			continue
-		}
-		for _, g := range mod.Globals {
-			if g == nil {
-				continue
-			}
-			scanConstant(g.GetInitValue(), g.GetPos(), mod.GetLanguage(), "", dets, seen, &findings)
-		}
-	}
-	for mod, fn := range funcs(prog) {
-		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
-		for inst := range instrs(fn) {
-			for _, op := range inst.GetOperands() {
-				scanConstant(op.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
-			}
-			if inst.Call != nil {
-				for _, a := range inst.Call.GetArgs() {
-					scanConstant(a.GetConstant(), inst.GetPos(), lang, name, dets, seen, &findings)
-				}
-			}
-		}
-	}
-	return findings
+// secretScan is one run of the secret scanner. It owns the compiled detectors,
+// the per-(rule, position) dedup set, and the path-exclusion memo, so the
+// per-string helpers are methods instead of a seven-parameter free function.
+type secretScan struct {
+	dets     []secretDetector
+	seen     map[string]bool // ruleID@position, for dedup
+	excluded map[string]bool // filename -> excluded, see pathExcluded
+	findings []Finding
 }
 
-func scanConstant(c *ir.Constant, pos *ir.Position, lang, fn string, dets []secretDetector, seen map[string]bool, findings *[]Finding) {
-	if c == nil {
-		return
+func newSecretScan(rs *rules.RuleSet) *secretScan {
+	return &secretScan{
+		dets:     secretDetectorsOf(rs),
+		seen:     map[string]bool{},
+		excluded: map[string]bool{},
 	}
-	scanText(c.GetStringVal(), pos, lang, fn, dets, seen, findings)
 }
 
-// scanText runs every secret detector over a single string (a gIR constant or a
-// line of a config file) and appends a Finding for each match, deduped by rule
-// id and position. lang is "" for a config file, which has no language; a rule
-// that declares `languages:` is then skipped, since it asked to be scoped to
-// one.
-func scanText(s string, pos *ir.Position, lang, fn string, dets []secretDetector, seen map[string]bool, findings *[]Finding) {
-	if s == "" || secretPathExcluded(pos.GetFilename()) {
+// pathExcluded is secretPathExcluded memoized per filename. Exclusion is a
+// property of the FILE, but it was being recomputed for every string constant in
+// the program — lowercasing, slash-normalizing and splitting the whole path each
+// time, across the entire lowered dependency closure. Profiling a repo self-scan
+// put that at 123.5 MB of allocations and 99.6% of all strings.Split.
+func (s *secretScan) pathExcluded(filename string) bool {
+	if v, ok := s.excluded[filename]; ok {
+		return v
+	}
+	v := secretPathExcluded(filename)
+	s.excluded[filename] = v
+	return v
+}
+
+// constant scans a gIR constant's string value, if it has one.
+func (s *secretScan) constant(c *ir.Constant, pos *ir.Position, lang, fn string) {
+	if c != nil {
+		s.text(c.GetStringVal(), pos, lang, fn)
+	}
+}
+
+// text runs every detector over a single string (a gIR constant or a line of a
+// config file) and appends a Finding for each match, deduped by rule id and
+// position. lang is "" for a config file, which has no language; a rule that
+// declares `languages:` is then skipped, since it asked to be scoped to one.
+func (s *secretScan) text(str string, pos *ir.Position, lang, fn string) {
+	if str == "" || s.pathExcluded(pos.GetFilename()) {
 		return
 	}
-	for _, d := range dets {
+	for _, d := range s.dets {
 		// Match BEFORE the language check: a miss is the overwhelmingly common case
 		// and MatchString is cheaper than AppliesTo's slice scan, so testing the
 		// regexp first keeps the rare-hit path from paying for the filter.
-		if !d.re.MatchString(s) || !d.rule.AppliesTo(lang) {
+		if !d.re.MatchString(str) || !d.rule.AppliesTo(lang) {
 			continue
 		}
 		key := d.rule.ID + "@" + posKey(pos)
-		if seen[key] {
+		if s.seen[key] {
 			continue
 		}
-		seen[key] = true
-		*findings = append(*findings, Finding{
+		s.seen[key] = true
+		s.findings = append(s.findings, Finding{
 			RuleID:     d.rule.ID,
 			Severity:   d.rule.Severity,
 			Confidence: ParseConfidence(d.rule.Confidence, ConfidenceHigh),
@@ -121,6 +113,41 @@ func scanText(s string, pos *ir.Position, lang, fn string, dets []secretDetector
 			SinkPos:    pos,
 		})
 	}
+}
+
+// ScanSecrets walks a gIR program for hardcoded secrets embedded in string
+// constants, using rs's `kind: secret` rules. This is a non-dataflow,
+// pattern-based analysis (distinct from the taint engine) and complements it in
+// the same Finding stream.
+func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
+	s := newSecretScan(rs)
+	if prog == nil || len(s.dets) == 0 {
+		return nil
+	}
+	for _, mod := range prog.Modules {
+		if mod == nil {
+			continue
+		}
+		for _, g := range mod.Globals {
+			if g != nil {
+				s.constant(g.GetInitValue(), g.GetPos(), mod.GetLanguage(), "")
+			}
+		}
+	}
+	for mod, fn := range funcs(prog) {
+		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
+		for inst := range instrs(fn) {
+			for _, op := range inst.GetOperands() {
+				s.constant(op.GetConstant(), inst.GetPos(), lang, name)
+			}
+			if inst.Call != nil {
+				for _, a := range inst.Call.GetArgs() {
+					s.constant(a.GetConstant(), inst.GetPos(), lang, name)
+				}
+			}
+		}
+	}
+	return s.findings
 }
 
 // secretFileMaxBytes caps how large a file the config scanner will read, so a
@@ -137,14 +164,12 @@ const secretFileMaxBytes = 5 << 20 // 5 MiB
 // already covered by ScanSecrets) to avoid double-reporting. root may be a file
 // or a directory; a non-existent path yields no findings.
 func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
-	var findings []Finding
-	dets := secretDetectorsOf(rs)
-	if len(dets) == 0 {
-		return findings
+	s := newSecretScan(rs)
+	if len(s.dets) == 0 {
+		return nil
 	}
-	seen := map[string]bool{}
 	scanFile := func(path string) {
-		if secretPathExcluded(path) {
+		if s.pathExcluded(path) {
 			return
 		}
 		info, err := os.Stat(path)
@@ -156,20 +181,19 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 			return
 		}
 		for i, line := range strings.Split(string(data), "\n") {
-			pos := &ir.Position{Filename: path, Line: int32(i + 1), Column: 1}
-			scanText(line, pos, "", "", dets, seen, &findings)
+			s.text(line, &ir.Position{Filename: path, Line: int32(i + 1), Column: 1}, "", "")
 		}
 	}
 
 	info, err := os.Stat(root)
 	if err != nil {
-		return findings
+		return nil
 	}
 	if !info.IsDir() {
 		if isScannableConfigFile(root) {
 			scanFile(root)
 		}
-		return findings
+		return s.findings
 	}
 
 	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
@@ -178,7 +202,7 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 		}
 		return nil
 	})
-	return findings
+	return s.findings
 }
 
 // configFileExts and configFileNames enumerate the textual config/infra files
