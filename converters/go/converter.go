@@ -2,6 +2,7 @@ package go_converter
 
 import (
 	"fmt"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"os"
@@ -1163,8 +1164,31 @@ func (c *Converter) convertConstant(con *ssa.Const) *ir.Constant {
 	}
 	// Model every constant by its string form: it feeds the secrets scanner and
 	// stays untainted (a compile-time constant is never attacker-controlled).
-	res.Value = &ir.Constant_StringVal{StringVal: con.Value.String()}
+	res.Value = &ir.Constant_StringVal{StringVal: exactConstant(con.Value)}
 	return res
+}
+
+// exactConstant renders a Go constant EXACTLY, which is not what
+// constant.Value.String() does. That method returns a human-readable form:
+// strings come back QUOTED, and anything past roughly 72 characters is TRUNCATED
+// with a trailing "..." and no closing quote.
+//
+// Truncation silently cost recall. Every secret detector whose match extends past
+// that boundary became undetectable in Go alone — a JWT needs all three
+// dot-separated segments, a SendGrid key is 69 characters with 43 of them in the
+// final segment, and PEM bodies and long connection URLs are longer still. The
+// identical literal in a .py file was reported, because every other frontend
+// stores the raw string.
+//
+// The quoting was its own small mess: ssrf.go had to strip surrounding quotes
+// before reconstructing a URL prefix (and a truncated constant has no closing
+// quote to strip), and a `const_arg` regexp anchored with ^...$ would never match
+// a Go literal, since the quotes are part of the subject.
+func exactConstant(v constant.Value) string {
+	if v.Kind() == constant.String {
+		return constant.StringVal(v) // exact and unquoted
+	}
+	return v.ExactString() // exact for numeric/bool; never abbreviated
 }
 
 func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {

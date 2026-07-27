@@ -70,11 +70,15 @@ func taintedSet(names ...string) map[string]*ir.Position {
 // --- constStr: reads a string constant, stripping Go's surrounding quotes -----
 
 func TestConstStr(t *testing.T) {
-	if s, ok := constStr(cstV(`"https://h/"`)); !ok || s != "https://h/" {
-		t.Errorf("constStr(quoted) = %q,%v; want %q,true", s, ok, "https://h/")
-	}
 	if s, ok := constStr(cstV("https://h/")); !ok || s != "https://h/" {
-		t.Errorf("constStr(unquoted) = %q,%v; want %q,true", s, ok, "https://h/")
+		t.Errorf("constStr(literal) = %q,%v; want %q,true", s, ok, "https://h/")
+	}
+	// Frontends store the RAW literal, so a value whose own content is quoted must
+	// survive intact. The Go frontend used to hand over go/constant's quoted form,
+	// which forced an unquoting step here that ate these characters — and silently
+	// mangled any string that legitimately started and ended with a quote.
+	if s, ok := constStr(cstV(`"quoted content"`)); !ok || s != `"quoted content"` {
+		t.Errorf("constStr(content-with-quotes) = %q,%v; want %q,true", s, ok, `"quoted content"`)
 	}
 	if _, ok := constStr(regV("t0")); ok {
 		t.Errorf("constStr(register) = ok; want not ok")

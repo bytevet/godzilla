@@ -1,8 +1,13 @@
 # Shared Go request sources, request-object provenance, and the strings.Join
 # propagator. Pulled into the go-*.yaml rules with `extend: $_go-common.yaml`.
 sources:
-  - "go:*net/url*.Get"
-  - "go:*net/http.Header*.Get"
+  # NOTE: the net/url and net/http accessors (url.Values.Get, Header.Get,
+  # Request.FormValue, ...) are deliberately NOT sources. They are default
+  # PROPAGATORS (_default-propagators.yaml): they carry taint that a request
+  # object already introduced through the stdlib parsing a framework does
+  # internally. Listing them here instead made them generate taint from nothing,
+  # so server-controlled data — `w.Header().Get("Content-Type")` on the RESPONSE
+  # writer — was reported as a critical injection. See test/go/response_header_safe.
   - "go:@net/http.Request" # synthetic *http.Request source (addHTTPRequestSource)
   - "go:*gin-gonic/gin.Context*.Query"
   - "go:*gin-gonic/gin.Context*.DefaultQuery"

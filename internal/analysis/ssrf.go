@@ -171,11 +171,12 @@ func markSeen(seen map[string]bool, v *ir.Value) map[string]bool {
 	return next
 }
 
-// constStr reads an operand's literal string value. Go lowers string constants
-// via go/constant's quoted Stringer, so surrounding double quotes are stripped;
-// other frontends store the raw literal (a no-op strip). Returns ok=false for a
-// register or non-string operand, which cleanly distinguishes a constant piece
-// from a tainted/dynamic one.
+// constStr reads an operand's literal string value. Every frontend stores the
+// raw literal, so no unquoting is needed — the Go frontend used to be the
+// exception (go/constant's quoted, truncating Stringer) and this function had to
+// strip the surrounding quotes, which also mangled any literal whose own content
+// began and ended with one. Returns ok=false for a register or non-string
+// operand, which cleanly distinguishes a constant piece from a tainted/dynamic one.
 func constStr(v *ir.Value) (string, bool) {
 	c := v.GetConstant()
 	if c == nil {
@@ -184,11 +185,7 @@ func constStr(v *ir.Value) (string, bool) {
 	if _, ok := c.Value.(*ir.Constant_StringVal); !ok {
 		return "", false
 	}
-	s := c.GetStringVal()
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		s = s[1 : len(s)-1]
-	}
-	return s, true
+	return c.GetStringVal(), true
 }
 
 // templateSkeleton renders a printf/brace format template as a skeleton: literal
