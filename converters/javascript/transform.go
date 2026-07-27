@@ -57,9 +57,14 @@ func needsTransform(path string) bool {
 // esmSyntaxRe matches a top-level ES-module statement — exactly what goja rejects
 // ("Unexpected reserved word" on the import keyword). Anchored to the start of a
 // line so `import` appearing as part of an identifier, a property, or mid-string
-// does not match. Dynamic `import(...)` is deliberately excluded: it is an
-// expression that parses fine as a script.
+// does not match.
 var esmSyntaxRe = regexp.MustCompile(`(?m)^[ \t]*(?:import[ \t{*'"]|export[ \t{*])`)
+
+// dynamicImportRe matches `import(...)`, which goja also rejects. It cannot be
+// line-anchored like esmSyntaxRe: a dynamic import is an EXPRESSION and normally
+// appears mid-line (`const m = await import("./" + name)`), inside an otherwise
+// unremarkable CommonJS file that needs no other transform.
+var dynamicImportRe = regexp.MustCompile(`\bimport\s*\(`)
 
 // needsTransformSrc reports whether a file must take the esbuild path, deciding
 // for plain .js on CONTENT rather than extension.
@@ -80,20 +85,10 @@ func needsTransformSrc(path string, src []byte) bool {
 	if needsTransform(path) {
 		return true
 	}
-	return strings.ToLower(filepath.Ext(path)) == ".js" && esmSyntaxRe.Match(src)
-}
-
-func loaderFor(path string) api.Loader {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".ts":
-		return api.LoaderTS
-	case ".tsx":
-		return api.LoaderTSX
-	case ".jsx":
-		return api.LoaderJSX
-	default: // .mjs / .cjs
-		return api.LoaderJS
+	if strings.ToLower(filepath.Ext(path)) != ".js" {
+		return false
 	}
+	return esmSyntaxRe.Match(src) || dynamicImportRe.Match(src)
 }
 
 // transformToJS runs esbuild to strip TypeScript types and lower ES modules to
@@ -106,22 +101,45 @@ func loaderFor(path string) api.Loader {
 // merge treats the file as a skipped/failed conversion, exactly like a parse
 // error.
 func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
-	loader := loaderFor(path)
-	code, consumer, err := runESBuild(string(src), loader, filepath.Base(path))
-	if err == nil || loader != api.LoaderJS {
-		return code, consumer, err
+	code, consumer, err := "", (*sourcemap.Consumer)(nil), error(nil)
+	for i, loader := range loaderLadder(path) {
+		c, cons, e := runESBuild(string(src), loader, filepath.Base(path))
+		if e == nil {
+			return c, cons, nil
+		}
+		if i == 0 {
+			code, consumer, err = c, cons, e // the primary loader's error is the honest one
+		}
 	}
-	// A .js file that the JS loader rejects is usually FLOW-annotated -- esbuild
-	// has no Flow loader, and parse-server alone ships 51 such files (`type` and
-	// `interface` declarations, `:` parameter annotations). Flow's annotation
-	// syntax overlaps TypeScript's closely enough that the TS loader strips it,
-	// which is all this frontend needs: types carry no taint, so an approximate
-	// strip beats dropping the file. Tried only after the JS loader has already
-	// failed, so a file that parses normally is unaffected.
-	if tsCode, tsConsumer, tsErr := runESBuild(string(src), api.LoaderTS, filepath.Base(path)); tsErr == nil {
-		return tsCode, tsConsumer, nil
+	return code, consumer, err
+}
+
+// loaderLadder returns the esbuild loaders to try for path, in order, stopping at
+// the first that parses.
+//
+// Guessing the dialect from the extension and committing to it is what made this
+// frontend fragile: an extension is a hint, not a contract, and being wrong cost
+// the WHOLE file. .js in the wild holds plain script, ES modules, Flow
+// annotations, and JSX — four dialects behind one extension, and each one
+// discovered the hard way became another special case here.
+//
+// Trying candidates instead turns "predict the dialect" into "find the one that
+// parses", so a dialect we did not anticipate costs an extra attempt rather than
+// the file. Attempts are only ever paid on failure, and a failed esbuild parse is
+// cheap next to losing the source. The first loader's error is the one reported,
+// since a later loader failing says nothing useful about a file it was never
+// meant to read.
+func loaderLadder(path string) []api.Loader {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ts":
+		return []api.Loader{api.LoaderTS, api.LoaderTSX}
+	case ".tsx":
+		return []api.Loader{api.LoaderTSX}
+	case ".jsx":
+		return []api.Loader{api.LoaderJSX, api.LoaderTSX}
+	default: // .js / .mjs / .cjs — plain script, ESM, Flow, or JSX
+		return []api.Loader{api.LoaderJS, api.LoaderTS, api.LoaderTSX}
 	}
-	return code, consumer, err // report the original JS-loader error, not the TS one
 }
 
 // runESBuild is the shared esbuild pass behind transformToJS (whole-file
@@ -133,11 +151,18 @@ func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error)
 // treats the file as a skipped/failed conversion, exactly like a parse error.
 func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sourcemap.Consumer, error) {
 	res := api.Transform(code, api.TransformOptions{
-		Loader:      loader,
-		Format:      api.FormatCommonJS,
-		Target:      api.ESNext,
-		Sourcemap:   api.SourceMapExternal,
-		Sourcefile:  sourcefile,
+		Loader:     loader,
+		Format:     api.FormatCommonJS,
+		Target:     api.ESNext,
+		Sourcemap:  api.SourceMapExternal,
+		Sourcefile: sourcefile,
+		// The consumer is goja, not a browser, and goja cannot parse `import(...)`.
+		// ESNext otherwise counts it as supported, so esbuild passes it through
+		// untouched and the file fails at PARSE time instead of transform time --
+		// which reads as a broken transform when it is really an unsupported
+		// construct. Declaring it unsupported makes esbuild downlevel it to the
+		// require-based form the lowering already understands.
+		Supported:   map[string]bool{"dynamic-import": false},
 		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
 	})
 	if len(res.Errors) > 0 {

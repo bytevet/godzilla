@@ -362,8 +362,15 @@ func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
 	parts := make([]string, 0, len(coverage))
 	for _, c := range coverage {
 		status := "ok"
-		if !c.Converted {
+		switch {
+		case !c.Converted:
 			status = "FAILED"
+		case c.Skipped > 0:
+			// PARTIAL is the case a bare ok used to hide: the frontend ran, so the
+			// language is not "failed", yet some of its source never reached the
+			// engine. Printing the ratio is what makes a scan that silently dropped
+			// most of a project distinguishable from a genuinely clean one.
+			status = fmt.Sprintf("PARTIAL(%d/%d files)", c.Files-c.Skipped, c.Files)
 		}
 		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
 	}
