@@ -3,6 +3,7 @@ package js_converter
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
@@ -38,16 +39,48 @@ func isSFC(path string) bool {
 	return false
 }
 
-// needsTransform reports whether an extension requires an esbuild preprocessing
-// pass — TypeScript type-stripping and/or lowering ES modules to CommonJS —
-// before goja (which parses neither TS annotations nor top-level import/export)
-// can read it. Plain .js takes the fast path with no transform and no sourcemap.
+// needsTransform reports whether an extension ALONE requires an esbuild
+// preprocessing pass — TypeScript type-stripping and/or lowering ES modules to
+// CommonJS — before goja (which parses neither TS annotations nor top-level
+// import/export) can read it.
+//
+// A plain .js file may still need one; extension is not sufficient evidence for
+// that case, so see needsTransformSrc, which is what the converter actually uses.
 func needsTransform(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".ts", ".tsx", ".jsx", ".mjs", ".cjs":
 		return true
 	}
 	return false
+}
+
+// esmSyntaxRe matches a top-level ES-module statement — exactly what goja rejects
+// ("Unexpected reserved word" on the import keyword). Anchored to the start of a
+// line so `import` appearing as part of an identifier, a property, or mid-string
+// does not match. Dynamic `import(...)` is deliberately excluded: it is an
+// expression that parses fine as a script.
+var esmSyntaxRe = regexp.MustCompile(`(?m)^[ \t]*(?:import[ \t{*'"]|export[ \t{*])`)
+
+// needsTransformSrc reports whether a file must take the esbuild path, deciding
+// for plain .js on CONTENT rather than extension.
+//
+// Extension alone is not enough: ES-module syntax is routine in .js files —
+// Babel-transpiled projects and anything with `"type": "module"` write it — and
+// goja cannot parse a single one of them. Judging by extension meant those files
+// failed to parse and were skipped one by one, while the language still reported
+// coverage=ok because a handful of CommonJS files in the same tree converted. On
+// parse-server that silently dropped 165 of 192 source files.
+//
+// Sniffing costs one regexp over the source, paid only for .js; the scan already
+// holds the bytes. A false positive (an `import` line inside a comment or
+// template literal) merely buys an unnecessary esbuild pass, which is harmless
+// since the transform is a no-op for code that was already plain script — whereas
+// a false negative loses the whole file, so the test leans toward transforming.
+func needsTransformSrc(path string, src []byte) bool {
+	if needsTransform(path) {
+		return true
+	}
+	return strings.ToLower(filepath.Ext(path)) == ".js" && esmSyntaxRe.Match(src)
 }
 
 func loaderFor(path string) api.Loader {
@@ -73,7 +106,22 @@ func loaderFor(path string) api.Loader {
 // merge treats the file as a skipped/failed conversion, exactly like a parse
 // error.
 func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
-	return runESBuild(string(src), loaderFor(path), filepath.Base(path))
+	loader := loaderFor(path)
+	code, consumer, err := runESBuild(string(src), loader, filepath.Base(path))
+	if err == nil || loader != api.LoaderJS {
+		return code, consumer, err
+	}
+	// A .js file that the JS loader rejects is usually FLOW-annotated -- esbuild
+	// has no Flow loader, and parse-server alone ships 51 such files (`type` and
+	// `interface` declarations, `:` parameter annotations). Flow's annotation
+	// syntax overlaps TypeScript's closely enough that the TS loader strips it,
+	// which is all this frontend needs: types carry no taint, so an approximate
+	// strip beats dropping the file. Tried only after the JS loader has already
+	// failed, so a file that parses normally is unaffected.
+	if tsCode, tsConsumer, tsErr := runESBuild(string(src), api.LoaderTS, filepath.Base(path)); tsErr == nil {
+		return tsCode, tsConsumer, nil
+	}
+	return code, consumer, err // report the original JS-loader error, not the TS one
 }
 
 // runESBuild is the shared esbuild pass behind transformToJS (whole-file

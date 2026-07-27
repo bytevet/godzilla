@@ -245,7 +245,7 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 		if terr != nil {
 			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
 		}
-	case needsTransform(path):
+	case needsTransformSrc(path, src):
 		var terr error
 		code, consumer, terr = transformToJS(path, src)
 		if terr != nil {
