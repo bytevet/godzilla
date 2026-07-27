@@ -47,49 +47,11 @@ var intrinsicPropagators = map[string]bool{
 	"go.range":          true,
 }
 
-// comparisonBinOps are the BIN_OP kinds whose result is a BOOLEAN. A comparison
-// carries influence, not content: `user == "admin"` yields one of two values, so
-// nothing an attacker supplies survives into it and no injection can be built
-// from it. Propagating through them let a tainted comparison launder into a
-// string build (`fmt.Sprint(isAdmin)`) and be reported as a critical, high
-// confidence injection.
-//
-// Expressed as a DENYLIST of exactly these six kinds, never an allowlist of the
-// content-carrying ones, because the kind is optional in gIR: the C/C++ frontend
-// (converters/llvm) and part of the Java lowering emit BIN_OP without setting it,
-// which reads back as BIN_OP_UNSPECIFIED. An allowlist would silently stop all
-// BIN_OP propagation for those languages. Anything not listed here — including
-// UNSPECIFIED — keeps propagating, which is the fail-open direction for a
-// recall-first engine.
-//
-// Deliberately NOT here: ADD (string concatenation, the universal carrier in
-// every language), REM (Python's `%` formatting — see constSkeleton), and
-// AND/OR/XOR, which gIR defines as bitwise but the JavaScript frontend also uses
-// for logical `&&`/`||`/`??`, where `req.query.name || "default"` is a real flow.
-var comparisonBinOps = map[ir.BinOpKind]bool{
-	ir.BinOpKind_BIN_OP_EQL: true,
-	ir.BinOpKind_BIN_OP_NEQ: true,
-	ir.BinOpKind_BIN_OP_LSS: true,
-	ir.BinOpKind_BIN_OP_LEQ: true,
-	ir.BinOpKind_BIN_OP_GTR: true,
-	ir.BinOpKind_BIN_OP_GEQ: true,
-}
-
-// propagatesTaint reports whether an instruction forwards taint from its
-// operands to its result register. It is propagatingOps plus the one kind-aware
-// exception above.
-func propagatesTaint(inst *ir.Instruction) bool {
-	if !propagatingOps[inst.Op] {
-		return false
-	}
-	if inst.Op == ir.OpCode_OP_CODE_BIN_OP && comparisonBinOps[inst.GetBinOp()] {
-		return false
-	}
-	return true
-}
-
 // propagatingOps are non-call opcodes that propagate taint from any tainted
-// operand to the instruction's result register.
+// operand to the instruction's result register. A comparison is absent by
+// construction rather than by exception: a frontend lowers `user == "admin"` to
+// the inert builtin.compare intrinsic, since a boolean result carries influence,
+// not content.
 var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_BIN_OP:      true,
 	ir.OpCode_OP_CODE_UN_OP:       true,

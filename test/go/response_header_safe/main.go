@@ -1,13 +1,7 @@
-// Response-header read is NOT untrusted input: `w.Header()` is the handler's own
-// outbound header map, populated by this server, and `resp.Header` on a client
-// response is likewise not request data. Neither may seed taint.
-//
-// This is the control for a real false positive: the shared Go source fragment
-// used to list `go:*net/http.Header*.Get` and `go:*net/url*.Get` as SOURCES, so
-// every Go rule inherited them and reported a critical, high-confidence command
-// injection here — with no attacker-controlled input anywhere in the file. Those
-// accessors are default PROPAGATORS instead, which carries real request taint
-// through the stdlib without inventing any.
+// Neither the handler's own response headers nor a self-built url.Values is
+// untrusted input, so neither may seed taint. Control for the false positive
+// caused by listing the net/http and net/url accessors as sources: every Go rule
+// inherited them and fired critical here, with no attacker input in the file.
 package main
 
 import (

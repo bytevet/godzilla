@@ -42,9 +42,8 @@ func secretDetectorsOf(rs *rules.RuleSet) []secretDetector {
 	return ds
 }
 
-// secretScan is one run of the secret scanner. It owns the compiled detectors,
-// the per-(rule, position) dedup set, and the path-exclusion memo, so the
-// per-string helpers are methods instead of a seven-parameter free function.
+// secretScan is one run of the secret scanner: the compiled detectors, the
+// ruleID@position dedup set, the path-exclusion memo, and the findings so far.
 type secretScan struct {
 	dets     []secretDetector
 	seen     map[string]bool // ruleID@position, for dedup
@@ -61,10 +60,9 @@ func newSecretScan(rs *rules.RuleSet) *secretScan {
 }
 
 // pathExcluded is secretPathExcluded memoized per filename. Exclusion is a
-// property of the FILE, but it was being recomputed for every string constant in
-// the program — lowercasing, slash-normalizing and splitting the whole path each
-// time, across the entire lowered dependency closure. Profiling a repo self-scan
-// put that at 123.5 MB of allocations and 99.6% of all strings.Split.
+// property of the FILE, but was recomputed — lowercase, normalize, split — for
+// every string constant in the lowered dependency closure (123.5 MB of
+// allocations on a self-scan).
 func (s *secretScan) pathExcluded(filename string) bool {
 	if v, ok := s.excluded[filename]; ok {
 		return v
@@ -72,13 +70,6 @@ func (s *secretScan) pathExcluded(filename string) bool {
 	v := secretPathExcluded(filename)
 	s.excluded[filename] = v
 	return v
-}
-
-// constant scans a gIR constant's string value, if it has one.
-func (s *secretScan) constant(c *ir.Constant, pos *ir.Position, lang, fn string) {
-	if c != nil {
-		s.text(c.GetStringVal(), pos, lang, fn)
-	}
 }
 
 // text runs every detector over a single string (a gIR constant or a line of a
@@ -130,19 +121,26 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		}
 		for _, g := range mod.Globals {
 			if g != nil {
-				s.constant(g.GetInitValue(), g.GetPos(), mod.GetLanguage(), "")
+				s.text(g.GetInitValue().GetStringVal(), g.GetPos(), mod.GetLanguage(), "")
 			}
 		}
 	}
 	for mod, fn := range funcs(prog) {
+		// Exclusion is a property of the file, and a function has exactly one, so
+		// testing it here skips an excluded dependency's blocks and operands
+		// outright rather than re-testing per string constant. A function with no
+		// Pos falls through to the per-string check in text.
+		if s.pathExcluded(fn.GetPos().GetFilename()) {
+			continue
+		}
 		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
 		for inst := range instrs(fn) {
 			for _, op := range inst.GetOperands() {
-				s.constant(op.GetConstant(), inst.GetPos(), lang, name)
+				s.text(op.GetConstant().GetStringVal(), inst.GetPos(), lang, name)
 			}
 			if inst.Call != nil {
 				for _, a := range inst.Call.GetArgs() {
-					s.constant(a.GetConstant(), inst.GetPos(), lang, name)
+					s.text(a.GetConstant().GetStringVal(), inst.GetPos(), lang, name)
 				}
 			}
 		}
@@ -180,8 +178,10 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 		if err != nil {
 			return
 		}
-		for i, line := range strings.Split(string(data), "\n") {
-			s.text(line, &ir.Position{Filename: path, Line: int32(i + 1), Column: 1}, "", "")
+		lineNo := 0
+		for line := range strings.SplitSeq(string(data), "\n") {
+			lineNo++
+			s.text(line, &ir.Position{Filename: path, Line: int32(lineNo), Column: 1}, "", "")
 		}
 	}
 

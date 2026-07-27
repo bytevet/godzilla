@@ -967,8 +967,16 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 		irInst.Op = ir.OpCode_OP_CODE_ALLOC
 		irInst.Heap = i.Heap
 	case *ssa.BinOp:
-		irInst.Op = ir.OpCode_OP_CODE_BIN_OP
-		irInst.BinOp = c.convertBinOp(i.Op)
+		// A comparison's result is a bool -- influence, not content -- so it lowers
+		// to the inert builtin.compare intrinsic instead of a propagating BIN_OP,
+		// which stops `fmt.Sprint(user == "admin")` reading as an injection.
+		if isComparisonToken(i.Op) {
+			irInst.Op = ir.OpCode_OP_CODE_INTRINSIC
+			irInst.Intrinsic = "builtin.compare"
+		} else {
+			irInst.Op = ir.OpCode_OP_CODE_BIN_OP
+			irInst.BinOp = c.convertBinOp(i.Op)
+		}
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.X), c.convertValue(i.Y))
 	case *ssa.UnOp:
 		irInst.Op = ir.OpCode_OP_CODE_UN_OP
@@ -1164,31 +1172,20 @@ func (c *Converter) convertConstant(con *ssa.Const) *ir.Constant {
 	}
 	// Model every constant by its string form: it feeds the secrets scanner and
 	// stays untainted (a compile-time constant is never attacker-controlled).
-	res.Value = &ir.Constant_StringVal{StringVal: exactConstant(con.Value)}
+	res.Value = &ir.Constant_StringVal{StringVal: constantText(con.Value)}
 	return res
 }
 
-// exactConstant renders a Go constant EXACTLY, which is not what
-// constant.Value.String() does. That method returns a human-readable form:
-// strings come back QUOTED, and anything past roughly 72 characters is TRUNCATED
-// with a trailing "..." and no closing quote.
-//
-// Truncation silently cost recall. Every secret detector whose match extends past
-// that boundary became undetectable in Go alone — a JWT needs all three
-// dot-separated segments, a SendGrid key is 69 characters with 43 of them in the
-// final segment, and PEM bodies and long connection URLs are longer still. The
-// identical literal in a .py file was reported, because every other frontend
-// stores the raw string.
-//
-// The quoting was its own small mess: ssrf.go had to strip surrounding quotes
-// before reconstructing a URL prefix (and a truncated constant has no closing
-// quote to strip), and a `const_arg` regexp anchored with ^...$ would never match
-// a Go literal, since the quotes are part of the subject.
-func exactConstant(v constant.Value) string {
+// constantText renders a Go constant for the IR. A string must come back
+// verbatim: constant.Value.String() is a display form that quotes it and
+// truncates past ~72 chars, which hid every long secret (JWTs, SendGrid keys, PEM
+// bodies) in Go alone and forced callers to unquote. Numeric and bool constants
+// keep that display form -- ExactString would render 3.14 as the rational 157/50.
+func constantText(v constant.Value) string {
 	if v.Kind() == constant.String {
-		return constant.StringVal(v) // exact and unquoted
+		return constant.StringVal(v)
 	}
-	return v.ExactString() // exact for numeric/bool; never abbreviated
+	return v.String()
 }
 
 func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
@@ -1405,20 +1402,18 @@ func (c *Converter) convertBinOp(op token.Token) ir.BinOpKind {
 		return ir.BinOpKind_BIN_OP_SHR
 	case token.AND_NOT:
 		return ir.BinOpKind_BIN_OP_AND_NOT
-	case token.EQL:
-		return ir.BinOpKind_BIN_OP_EQL
-	case token.NEQ:
-		return ir.BinOpKind_BIN_OP_NEQ
-	case token.LSS:
-		return ir.BinOpKind_BIN_OP_LSS
-	case token.LEQ:
-		return ir.BinOpKind_BIN_OP_LEQ
-	case token.GTR:
-		return ir.BinOpKind_BIN_OP_GTR
-	case token.GEQ:
-		return ir.BinOpKind_BIN_OP_GEQ
 	}
 	return ir.BinOpKind_BIN_OP_UNSPECIFIED
+}
+
+// isComparisonToken reports whether op yields a bool. Those lower to the
+// builtin.compare intrinsic, so they never reach convertBinOp.
+func isComparisonToken(op token.Token) bool {
+	switch op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return true
+	}
+	return false
 }
 
 func (c *Converter) convertUnOp(op token.Token) ir.UnOpKind {

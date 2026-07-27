@@ -1,10 +1,8 @@
-# Only the CONCATENATION flow may fire. The equality test on the same tainted
-# value also reaches exec.Command, but a boolean has two possible values and
-# cannot carry an injection — BIN_OP used to propagate regardless of kind, so
-# that comparison was reported as a second critical finding.
+# Only the CONCATENATION flow may fire; the equality test on the same tainted
+# value reaches exec.Command too, but a boolean cannot carry an injection.
 findings:
     - rule: go-command-injection
       min: 1
       max: 1
-      line: 30
+      line: 21
       sink: Command

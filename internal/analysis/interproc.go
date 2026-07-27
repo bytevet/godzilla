@@ -1715,7 +1715,7 @@ func analyzeFunc(
 				}
 			}
 		default:
-			if propagatesTaint(inst) {
+			if propagatingOps[inst.Op] {
 				markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
 			}
 		}

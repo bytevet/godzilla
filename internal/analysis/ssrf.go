@@ -171,12 +171,9 @@ func markSeen(seen map[string]bool, v *ir.Value) map[string]bool {
 	return next
 }
 
-// constStr reads an operand's literal string value. Every frontend stores the
-// raw literal, so no unquoting is needed — the Go frontend used to be the
-// exception (go/constant's quoted, truncating Stringer) and this function had to
-// strip the surrounding quotes, which also mangled any literal whose own content
-// began and ended with one. Returns ok=false for a register or non-string
-// operand, which cleanly distinguishes a constant piece from a tainted/dynamic one.
+// constStr reads an operand's literal string value verbatim — every frontend
+// stores the raw literal. Returns ok=false for a register or non-string operand,
+// which cleanly distinguishes a constant piece from a tainted/dynamic one.
 func constStr(v *ir.Value) (string, bool) {
 	c := v.GetConstant()
 	if c == nil {

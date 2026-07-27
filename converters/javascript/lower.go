@@ -1262,14 +1262,21 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	return regValue(inst.Name)
 }
 
-// lowerBinary lowers a binary expression (arithmetic, bitwise, comparison,
-// or -- approximated, see package doc -- logical) to a BIN_OP instruction.
+// lowerBinary lowers a binary expression (arithmetic, bitwise, or --
+// approximated, see package doc -- logical) to a BIN_OP instruction. A
+// comparison instead lowers to the inert builtin.compare intrinsic: its result
+// is a bool, which carries influence rather than content.
 func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	left := fs.lowerExpr(v.Left)
 	right := fs.lowerExpr(v.Right)
 	inst := fs.newValueInst(v.Idx0())
-	inst.Op = ir.OpCode_OP_CODE_BIN_OP
-	inst.BinOp = binOpKind(v.Operator)
+	if isComparisonToken(v.Operator) {
+		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+		inst.Intrinsic = "builtin.compare"
+	} else {
+		inst.Op = ir.OpCode_OP_CODE_BIN_OP
+		inst.BinOp = binOpKind(v.Operator)
+	}
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
 	return regValue(inst.Name)
@@ -1514,20 +1521,19 @@ func binOpKind(op token.Token) ir.BinOpKind {
 		return ir.BinOpKind_BIN_OP_SHL
 	case token.SHIFT_RIGHT, token.UNSIGNED_SHIFT_RIGHT:
 		return ir.BinOpKind_BIN_OP_SHR
-	case token.EQUAL, token.STRICT_EQUAL:
-		return ir.BinOpKind_BIN_OP_EQL
-	case token.NOT_EQUAL, token.STRICT_NOT_EQUAL:
-		return ir.BinOpKind_BIN_OP_NEQ
-	case token.LESS:
-		return ir.BinOpKind_BIN_OP_LSS
-	case token.LESS_OR_EQUAL:
-		return ir.BinOpKind_BIN_OP_LEQ
-	case token.GREATER:
-		return ir.BinOpKind_BIN_OP_GTR
-	case token.GREATER_OR_EQUAL:
-		return ir.BinOpKind_BIN_OP_GEQ
 	}
 	return ir.BinOpKind_BIN_OP_UNSPECIFIED
+}
+
+// isComparisonToken reports whether op yields a bool. Those lower to the
+// builtin.compare intrinsic, so they never reach binOpKind.
+func isComparisonToken(op token.Token) bool {
+	switch op {
+	case token.EQUAL, token.STRICT_EQUAL, token.NOT_EQUAL, token.STRICT_NOT_EQUAL,
+		token.LESS, token.LESS_OR_EQUAL, token.GREATER, token.GREATER_OR_EQUAL:
+		return true
+	}
+	return false
 }
 
 // binOpKindForCompoundAssign maps a compound-assignment token (`+=`, `-=`,
