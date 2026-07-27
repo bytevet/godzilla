@@ -31,6 +31,15 @@
 // propagation carries taint through the rest. See emitRootPropertyRead and
 // isOpaqueBase in lower.go.
 //
+// A parameter is opaque whether it holds a framework request object or ordinary
+// data, and the two want opposite things: the first must INTRODUCE taint (the
+// request register is not itself tainted — see internal/analysis/doc.go), the
+// second must CARRY the taint it already has. The callee name serves the first;
+// the base register, kept in Call.Value and tagged builtin.member_read, serves
+// the second. Before that, the base was discarded and reading a property off an
+// already-tainted parameter produced a clean register — the shape most request
+// data takes once it crosses a function boundary.
+//
 // Real call expressions lower to CALL with a syntactic dotted Callee built from
 // the callee expression (Identifier/DotExpression/string-keyed Bracket chains;
 // anything else is "<dynamic>") -- the name reflects source syntax, never a

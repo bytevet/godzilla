@@ -406,7 +406,7 @@ func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
 		if b.Key == "" || b.Local == "" {
 			continue
 		}
-		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, pat.Idx0()))
+		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, nil, pat.Idx0()))
 	}
 }
 
@@ -496,12 +496,32 @@ func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bo
 // (see isOpaqueBase) as an OP_CODE_CALL with a purely syntactic callee
 // "js:<root>.<field>", so it can match a rule's source glob (e.g.
 // "js:*req.query*") exactly like a real call would.
-func (fs *funcState) emitRootPropertyRead(root, field string, idx file.Idx) *ir.Value {
+//
+// When the base is a REGISTER it is also carried in Call.Value — the same place
+// emitCallRecvInst puts a method call's receiver — and the instruction is tagged
+// builtin.member_read so the engine propagates that receiver's taint to the
+// result. Without it the base was simply dropped, so reading a property off an
+// already-tainted parameter produced a CLEAN register: `use(mk(req))` where
+// `use(o){sink(o.field)}` found nothing, while the scalar equivalent fired. That
+// is the shape most request data takes once it crosses a function boundary.
+//
+// A parameter is an opaque base whether it holds a framework request object or
+// ordinary data, and the two need opposite things: the former must INTRODUCE
+// taint via the callee glob (it is not itself tainted — see internal/analysis
+// doc.go on request sources), the latter must CARRY the taint it already has.
+// Naming the callee exactly as before serves the first; the receiver serves the
+// second. A non-register base (a global, `this`, a closure-captured free name)
+// keeps the plain FuncName form, which leaves that whole branch untouched.
+func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, idx file.Idx) *ir.Value {
 	callee := "js:" + root + "." + field
 	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Comment = "property-read"
 	inst.Call = calleeCommon(callee)
+	if base != nil && base.GetRegName() != "" {
+		inst.Call.Value = base
+		inst.Intrinsic = "builtin.member_read"
+	}
 	fs.emit(inst)
 	return regValue(inst.Name)
 }
@@ -1200,7 +1220,7 @@ func (fs *funcState) lowerDot(v *ast.DotExpression) *ir.Value {
 	field := string(v.Identifier.Name)
 
 	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, field, v.Idx0())
+		return fs.emitRootPropertyRead(root, field, base, v.Idx0())
 	}
 
 	return fs.emitFieldRead(base, field, v.Idx0())
@@ -1227,7 +1247,7 @@ func (fs *funcState) lowerBracket(v *ast.BracketExpression) *ir.Value {
 	idx := fs.lowerExpr(v.Member)
 
 	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, bracketFieldName(v.Member), v.Idx0())
+		return fs.emitRootPropertyRead(root, bracketFieldName(v.Member), base, v.Idx0())
 	}
 
 	inst := fs.newValueInst(v.Idx0())

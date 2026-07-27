@@ -33,6 +33,18 @@ const formatIntrinsic = "builtin.format"
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
 
+// memberReadIntrinsic marks a synthesized member read (`obj.field` lowered as a
+// CALL so its name can match a source glob) whose base the frontend kept in
+// Call.Value. The engine carries that base's taint to the result: reading a
+// property off a tainted object yields tainted data, which no rule models because
+// it is not a transform.
+//
+// It is a CROSS-FRONTEND contract, not a JS detail: any frontend that lowers a
+// member read as a synthetic call should set it rather than inventing another
+// mechanism (Python currently merges an extra INDEX through a BIN_OP_OR for the
+// same purpose — see converters/python/lower.go — and can retire onto this).
+const memberReadIntrinsic = "builtin.member_read"
+
 // kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
 // argument's NAME available to rule guards: Args[0] is the name (a string
 // constant), Args[1] the value it wraps. gIR's CallCommon carries only positional

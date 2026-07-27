@@ -1492,6 +1492,25 @@ func analyzeFunc(
 			if inst.Name != "" {
 				markTaintFromOperands(tainted, inst.Name, propagatorOperands(inst))
 			}
+		default:
+			// A frontend-synthesized member read (builtin.member_read) off a base it
+			// kept in Call.Value: carry the base's taint to the result. Reading a
+			// property off an already-tainted object is not a transform, so no rule
+			// models it, yet it is how object-carried data is consumed once it
+			// crosses a function boundary — without this the read returns clean and
+			// the flow ends there.
+			//
+			// Placed in the DEFAULT arm on purpose: a callee that matches a
+			// sanitizer, source or sink glob keeps that meaning, since the cases
+			// above already returned. Reads Call.Value directly rather than going
+			// through propagatorOperands, which allocates a slice per call, per rule,
+			// per fixpoint pass — Args is always empty here, so that would be pure
+			// waste on a gated allocation metric.
+			if inst.Name != "" && inst.GetIntrinsic() == memberReadIntrinsic {
+				if pos, ok := isTainted(tainted, inst.Call.GetValue()); ok {
+					markTainted(tainted, inst.Name, pos)
+				}
+			}
 		}
 
 		// Inter-procedural, direct call: if the callee is a function we lowered,
@@ -1692,7 +1711,7 @@ func analyzeFunc(
 			}
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:
-			if _, pos, ok := firstTainted(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
+			if _, pos, ok := firstTaintedArg(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
 				// Interprocedural ENG-9: a tainted value returned on a path a
 				// validator guard dominates (`if !valid(x) { return "" }; return x`)
 				// is validated on every returning path, so the function is not
