@@ -200,6 +200,13 @@ func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx
 // for cross-function calls is unchanged. When receiver is nil (a free/identifier
 // call or `new`), Call.Value falls back to the callee FuncName as before.
 func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Value {
+	return regValue(fs.emitCallRecvInst(callee, receiver, args, idx).Name)
+}
+
+// emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
+// needs the LOWERED argument values (rather than re-lowering the expressions,
+// which would duplicate their side effects) can read them off Call.Args.
+func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Instruction {
 	cc := calleeCommon(callee)
 	if receiver != nil {
 		cc.Value = receiver
@@ -211,7 +218,44 @@ func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = cc
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return inst
+}
+
+// emitPromiseContinuation models `p.then(cb)` by emitting the call it actually
+// performs at runtime: cb(<p's resolved value>).
+//
+// Without it a promise is a wall taint cannot cross, and in modern Node that wall
+// sits across the middle of most request handling. parse-server is the case that
+// forced this: its router reads `req.body` in one function which RETURNS a value,
+// and a generic `.then(result => ...)` callback several frames away writes the
+// response — 234 `.then` calls hold that architecture together, and not one flow
+// survived the hop, so a 3,225-function lowering produced zero findings.
+//
+// The continuation is emitted as an INDIRECT call (no callee name, the callback
+// in Call.Value), which is exactly the shape the engine's higher-order machinery
+// already resolves through its points-to set — so this needs no engine change,
+// and it inherits that path's singleton-only discipline: a `.then` whose callback
+// cannot be resolved unambiguously binds nothing rather than guessing.
+//
+// The receiver stands in for the resolved value, which is what makes the chain
+// work: a tainted promise yields a tainted callback parameter. Only `.then`'s
+// FIRST argument is treated this way — its second argument, and `.catch`, receive
+// the rejection reason, not the value.
+func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, call *ir.Instruction, idx file.Idx) {
+	if receiver == nil || !strings.HasSuffix(callee, ".then") {
+		return
+	}
+	args := call.Call.GetArgs()
+	if len(args) == 0 || args[0] == nil {
+		return
+	}
+	cc := calleeCommon("") // empty callee == indirect; the engine resolves Call.Value
+	cc.Value = args[0]
+	cc.Args = []*ir.Value{receiver}
+	inst := fs.newValueInst(idx)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
 }
 
 // emitStore emits an OP_CODE_STORE of val into the address computed from
@@ -1402,7 +1446,9 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
 		}
 	}
-	return fs.emitCallRecv(callee, receiver, v.ArgumentList, v.Idx0())
+	call := fs.emitCallRecvInst(callee, receiver, v.ArgumentList, v.Idx0())
+	fs.emitPromiseContinuation(callee, receiver, call, v.Idx0())
+	return regValue(call.Name)
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an
