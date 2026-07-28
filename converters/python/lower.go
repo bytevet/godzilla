@@ -21,6 +21,10 @@ type modCtx struct {
 	localFuncs map[string]bool
 	aliases    map[string]string
 	imported   map[string]bool
+	// constGlobals are module-level names provably bound once to a string
+	// literal; lookupName inlines their value instead of emitting a GlobalName
+	// the engine cannot read. See constglobal.go.
+	constGlobals map[string]*ir.Constant
 }
 
 // newFuncState creates a funcState for a function in this module. The single
@@ -29,6 +33,7 @@ func (m *modCtx) newFuncState() *funcState {
 	fs := newFuncState(m.filename)
 	fs.moduleName = m.moduleName
 	fs.localFuncs = m.localFuncs
+	fs.constGlobals = m.constGlobals
 	fs.aliases = m.aliases
 	fs.importedNames = m.imported
 	return fs
@@ -66,7 +71,8 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
 	imported := collectImportedNames(root.list("body"))
-	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported}
+	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported,
+		constGlobals: constStringGlobals(root)}
 
 	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
 	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
@@ -559,6 +565,10 @@ type funcState struct {
 	moduleName string
 	localFuncs map[string]bool
 
+	// constGlobals are the module's provably-immutable string constants, inlined
+	// at their use sites by lookupName. See constglobal.go.
+	constGlobals map[string]*ir.Constant
+
 	// selfName and methodPrefix let lowerCall qualify a `self.method(x)` call
 	// inside a class method to the sibling method's canonical name
 	// ("py:<module>.<Class>.method"). selfName is the receiver param ("self" or
@@ -882,6 +892,14 @@ func (fs *funcState) lookupName(id string) *ir.Value {
 	// (still a GlobalName).
 	if fs.localFuncs[id] {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + id}}
+	}
+	// A module-level string constant is inlined as its literal rather than left
+	// as an opaque GlobalName, so every consumer that reads constant text sees it
+	// -- notably the SSRF host check, which proves a URL's host is fixed from its
+	// constant prefix and otherwise read `BASE + "/" + user` as attacker
+	// controllable. Only names constStringGlobals proved immutable get here.
+	if c, ok := fs.constGlobals[id]; ok {
+		return &ir.Value{Kind: &ir.Value_Constant{Constant: c}}
 	}
 	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: id}}
 }
