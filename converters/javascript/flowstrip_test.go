@@ -8,12 +8,35 @@ import (
 	"testing"
 )
 
+// blankAll returns s with every non-newline byte replaced by a space, for the
+// cases where a whole declaration is expected to disappear. Spelling those out by
+// hand is how a want string ends up one space short of the input.
+func blankAll(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		return ' '
+	}, s)
+}
+
+// blankSpan returns s with the first occurrence of sub replaced by spaces, so a
+// want string states WHICH span disappears instead of asserting a hand-counted
+// run of spaces.
+func blankSpan(s, sub string) string {
+	i := strings.Index(s, sub)
+	if i < 0 {
+		panic("blankSpan: " + sub + " not in " + s)
+	}
+	return s[:i] + blankAll(sub) + s[i+len(sub):]
+}
+
 func TestStripFlowOffsets(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"maybe param", "function f(x: ?string) { return x; }", "function f(x         ) { return x; }"},
 		{"indexer", "function f(o: {[string]: mixed}) { return o; }", "function f(o                   ) { return o; }"},
 		{"opaque", "opaque type ID = string;", "                        "},
-		{"type alias body", "type O = { a?: ?string };", "                        ;"},
+		{"type alias body", "type O = { a?: ?string };", "                         "},
 		{"return type", "function f(): ?string { return null; }", "function f()          { return null; }"},
 		{"const decl", "const a: ?T = g();", "const a     = g();"},
 		// value code that MUST survive untouched
@@ -25,6 +48,33 @@ func TestStripFlowOffsets(t *testing.T) {
 		{"string with colon", "const u = 'http://x';", "const u = 'http://x';"},
 		{"template with colon", "const u = `a:${b}`;", "const u = `a:${b}`;"},
 		{"object arg in call", "f({ a: 1 });", "f({ a: 1 });"},
+		// Constructs found by running the stripper over parse-server's whole src
+		// tree; each one blocked a real file.
+		{"export modifier", "export type T = { a: ?string };", blankAll("export type T = { a: ?string };")},
+		{"declare export", "// @flow\ndeclare export type T = string;",
+			"// @flow\n" + blankAll("declare export type T = string;")},
+		{"multi-line union", "type T =\n  | 'a'\n  | 'b';\nconst x: ?T = g();",
+			blankAll("type T =\n  | 'a'\n  | 'b';") + "\n" + blankSpan("const x: ?T = g();", ": ?T")},
+		{"cast", "// @flow\nconst a = (x: any);", "// @flow\nconst a = (x     );"},
+		{"nested cast", "// @flow\nn = Object.keys((s.t: any)).length;", "// @flow\nn = Object.keys((s.t     )).length;"},
+		{"cast of object literal", "// @flow\nconst c = ({ ...a || {} }: T);", "// @flow\nconst c = ({ ...a || {} }   );"},
+		{"generic bound", "// @flow\nclass C { m<T: { [k: string]: any }>(a: T) { return a; } }",
+			"// @flow\n" + blankSpan(blankSpan("class C { m<T: { [k: string]: any }>(a: T) { return a; } }",
+				"<T: { [k: string]: any }>"), ": T")},
+		{"property after comment", "// @flow\nclass C {\n  // note\n  p: ?string;\n  static q: ?number;\n}",
+			"// @flow\nclass C {\n  // note\n  " + blankSpan("p: ?string;", ": ?string") +
+				"\n  " + blankSpan("static q: ?number;", ": ?number") + "\n}"},
+		// value code that MUST survive untouched
+		{"import type", "import type X from './y';\nconst a: ?T = g();",
+			"import type X from './y';\nconst a     = g();"},
+		{"object literal in ternary branch", "// @flow\nconst r = c ? g({}) : h();", "// @flow\nconst r = c ? g({}) : h();"},
+		{"less-than then ternary", "// @flow\nconst r = x < y ? 1 : 2;", "// @flow\nconst r = x < y ? 1 : 2;"},
+		{"object key after block", "// @flow\nif (a) { b(); }\nconst o = { k: 1 };", "// @flow\nif (a) { b(); }\nconst o = { k: 1 };"},
+		// React names variables `type` throughout. Read as a type alias, this blanks
+		// the rest of the enclosing function -- and stays brace-balanced while doing
+		// it, so the result parses and is silently WRONG rather than dropped.
+		{"type as a variable name", "// @flow\nconst c = (type as U);\nnext();", "// @flow\nconst c = (type as U);\nnext();"},
+		{"type as an argument", "// @flow\nrender(request, type, props);\nnext();", "// @flow\nrender(request, type, props);\nnext();"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,29 +120,60 @@ function run(cmd: ?string, o: Opts): ?string {
 }
 module.exports = { run };
 `
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flow_pos.js")
-	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	mod, _, err := NewConverter().convertJSFile(path, "flowpos")
-	if err != nil {
-		t.Fatalf("convert: %v", err)
-	}
-	var got []string
-	for _, f := range mod.GetFunctions() {
-		for _, b := range f.GetBlocks() {
-			for _, in := range b.GetInstrs() {
-				if c := in.GetCall(); c != nil && strings.Contains(c.GetCallee(), "exec") {
-					got = append(got, fmt.Sprintf("%d:%d", in.GetPos().GetLine(), in.GetPos().GetColumn()))
+	assertSinkPos(t, "annotations", src, "8:3")
+
+	// A second source whose Flow syntax spans LINES rather than sitting inside
+	// one: a declaration blanked across a multi-line union, and a cast. Those
+	// blanks rewrite whole runs of the buffer, so they are where a lost newline
+	// would show up — the single-line case above cannot catch it.
+	multiline := `// @flow
+export type Sort =
+  | 'asc'
+  | 'desc'
+  | { [string]: number };
+
+declare export type Handle = number;
+
+function run(cmd: ?string, s: Sort): ?string {
+  const child = require('child_process');
+  if (Object.keys((s: any)).length > 0) {
+    child.exec(cmd);
+  }
+  return cmd;
+}
+module.exports = { run };
+`
+	assertSinkPos(t, "multiline", multiline, "12:5")
+}
+
+// assertSinkPos lowers src as a Flow-typed .js and asserts the exec call it
+// contains is reported at want ("line:column", 1-based).
+func assertSinkPos(t *testing.T, name, src, want string) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "flow_pos.js")
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mod, _, err := NewConverter().convertJSFile(path, "flowpos")
+		if err != nil {
+			t.Fatalf("convert: %v", err)
+		}
+		var got []string
+		for _, f := range mod.GetFunctions() {
+			for _, b := range f.GetBlocks() {
+				for _, in := range b.GetInstrs() {
+					if c := in.GetCall(); c != nil && strings.Contains(c.GetCallee(), "exec") {
+						got = append(got, fmt.Sprintf("%d:%d", in.GetPos().GetLine(), in.GetPos().GetColumn()))
+					}
 				}
 			}
 		}
-	}
-	if len(got) == 0 {
-		t.Fatal("no exec call lowered from the Flow source")
-	}
-	if got[0] != "8:3" {
-		t.Errorf("exec lowered at %s, want 8:3 — the strip shifted positions", got[0])
-	}
+		if len(got) == 0 {
+			t.Fatal("no exec call lowered from the Flow source")
+		}
+		if got[0] != want {
+			t.Errorf("exec lowered at %s, want %s — the strip shifted positions", got[0], want)
+		}
+	})
 }

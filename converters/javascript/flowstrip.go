@@ -7,8 +7,9 @@ import "strings"
 // Flow ships in plain `.js` files, so the loader ladder reaches them, but every
 // rung fails: esbuild has no Flow loader (its api.Loader enum has no such entry
 // and the package contains no Flow support at all), and Flow's type syntax is
-// not valid TypeScript either. parse-server drops 19 files this way, including
-// PostgresStorageAdapter.js, which is where its SQL sinks live.
+// not valid TypeScript either. parse-server dropped 19 files this way, including
+// PostgresStorageAdapter.js, which is where its SQL sinks live; it now converts
+// all 196.
 //
 // # Why blanking, and why it may not rewrite
 //
@@ -71,7 +72,7 @@ func stripFlow(src string) (string, bool) {
 	if !looksLikeFlow(src) {
 		return src, false
 	}
-	s := &flowScanner{src: src, out: []byte(src)}
+	s := &flowScanner{src: src, out: []byte(src), memberStart: true}
 	if !s.run() {
 		return src, false
 	}
@@ -86,16 +87,20 @@ type flowScanner struct {
 	// paren/bracket/brace nesting, used to find an annotation's terminator and to
 	// tell a parameter list from an ordinary expression.
 	paren, brack, brace int
-	// parenAtParams is the paren depth at which the current parenthesised group
-	// opened, with braceAtParams the brace depth at that moment. An annotation may
-	// only appear at the SAME brace depth: that is what keeps a `:` inside an
-	// object literal passed as an argument -- f({ a: 1 }) -- from being mistaken
-	// for one.
-	parenAtParams, braceAtParams int
-	// ternary counts unmatched `?` at the current statement level. A ternary's `:`
-	// binds to one of them, so it is not an annotation. Reset at statement and
-	// block boundaries, where a `?` can no longer be pending.
-	ternary int
+	// parenGroups records, per open paren, the brace depth at which it opened. An
+	// annotation may only appear directly inside the INNERMOST group and at that
+	// group's own brace depth, which is what keeps a `:` inside an object literal
+	// argument -- f({ a: 1 }) -- from being mistaken for one. It is a stack rather
+	// than a single depth because Flow casts nest: `Object.keys((x: any))` puts one
+	// annotation-capable group inside another.
+	parenGroups []int
+	// ternary counts unmatched `?` at the current nesting level. A ternary's `:`
+	// binds to one of them, so it is not an annotation. Saved and restored across
+	// every bracket, since a `?` cannot bind across one -- and an object literal in
+	// a ternary branch, `fast ? c.deleteMany({}) : c.drop()`, must not lose the
+	// pending `?` its own `{}` opens.
+	ternary      int
+	ternaryStack []int
 	// prev is the last significant (non-space, non-comment) byte seen. It is what
 	// distinguishes a return-type `)` `:` from a ternary's `:`.
 	prev byte
@@ -108,6 +113,18 @@ type flowScanner struct {
 	// rather than guessed.
 	classBody    []bool
 	pendingClass bool
+	// memberStart is true while the scanner sits where a class member may begin --
+	// after `;`, `{` or `}`, through any modifier keyword. identStartsMember
+	// records that state as of the last identifier consumed, which is what the `:`
+	// immediately after it needs to know.
+	//
+	// Without it, a Flow generic BOUND in a method signature -- parse-server's
+	// `paramsAreEquals<T: { [key: string]: any }>(…)` -- matches the class-property
+	// shape (`ident :` at class-body brace depth, outside any paren).
+	// blankAnnotation would then take the `{` as an object type, run past the
+	// signature into the method BODY, and blank until the braces happened to
+	// balance. That is the one outcome this file exists to avoid.
+	memberStart, identStartsMember bool
 }
 
 // blank overwrites [from,to) with spaces, leaving newlines in place so line
@@ -170,7 +187,8 @@ func (s *flowScanner) run() bool {
 			word := s.src[start:s.i]
 			// `opaque type X = ...` -- blanking just the keyword leaves a plain TS
 			// type alias behind, same length, no position shift.
-			if word == "opaque" && s.nextWordIs("type") {
+			opaqueType := word == "opaque" && s.nextWordIs("type")
+			if opaqueType {
 				s.blank(start, s.i)
 			}
 			// The next `{` opens a class body, where `name: T` is a property
@@ -181,12 +199,31 @@ func (s *flowScanner) run() bool {
 			// A `type X = …` / `interface X { … }` declaration is erased wholesale
 			// by the TS loader, so blanking the whole thing is always safe -- and it
 			// is the only way to reach Flow-only types in the BODY (`{ a?: ?string }`),
-			// which no amount of TS-compatible syntax around them rescues. `type` is
-			// not reserved, so it only counts when it introduces a declaration:
-			// followed by an identifier, and not preceded by a member access.
-			if (word == "type" || word == "interface") && s.prev != '.' && s.startsDeclaration() {
-				s.blankDeclaration(start)
-				continue
+			// which no amount of TS-compatible syntax around them rescues.
+			//
+			// Neither word is reserved, so all three conditions are needed before the
+			// blank: it must STATEMENT-START (React names variables `type` constantly,
+			// and `(type as ReactConsumerType<any>)` otherwise reads as `type Alias`
+			// and blanks the rest of the function), be followed by an identifier, and
+			// not be a member access.
+			if (word == "type" || word == "interface") && s.memberStart && s.prev != '.' &&
+				s.startsDeclaration() {
+				if from, ok := s.declarationStart(start); ok {
+					s.blankDeclaration(from)
+					continue
+				}
+			}
+			if declModifiers[word] || opaqueType {
+				s.identStartsMember = false
+			} else {
+				s.identStartsMember, s.memberStart = s.memberStart, false
+			}
+			// A type-parameter list may follow a declaration's NAME, and Flow spells
+			// its bound with `:` where TypeScript uses `extends` -- so
+			// `paramsAreEquals<T: { [key: string]: any }>(…)` reaches no loader.
+			inClass := len(s.classBody) > 0 && s.classBody[len(s.classBody)-1]
+			if (inClass && s.identStartsMember) || s.prevWord == "function" {
+				s.blankTypeParams()
 			}
 			s.prevWord, s.prev = word, word[len(word)-1]
 			continue
@@ -195,31 +232,33 @@ func (s *flowScanner) run() bool {
 		switch c {
 		case '(':
 			s.paren++
-			// A `(` that follows an identifier, `function`, or `=>`-style position
-			// opens a call OR a parameter list. Only a declaration's parameter list
-			// can carry annotations, and a call's arguments never contain a bare
-			// `:` at depth, so treating both as annotation-capable is safe: the `:`
-			// simply never appears in the call case.
-			if s.parenAtParams == 0 {
-				s.parenAtParams, s.braceAtParams = s.paren, s.brace
-			}
+			s.pushTernary()
+			// A `(` opens a parameter list, a call, or a parenthesised expression.
+			// All three are annotation-capable in Flow -- the last one because a cast
+			// is written `(expr: T)` -- and the shapes that must NOT be read as
+			// annotations are excluded by the ternary counter and the brace-depth
+			// check rather than by refusing the group.
+			s.parenGroups = append(s.parenGroups, s.brace)
 		case ')':
-			if s.paren == s.parenAtParams {
-				s.parenAtParams = 0
+			s.popTernary()
+			if n := len(s.parenGroups); n > 0 {
+				s.parenGroups = s.parenGroups[:n-1]
 			}
 			s.paren--
 		case '[':
 			s.brack++
+			s.pushTernary()
 		case ']':
 			s.brack--
+			s.popTernary()
 		case '{':
 			s.brace++
-			s.ternary = 0
+			s.pushTernary()
 			s.classBody = append(s.classBody, s.pendingClass)
 			s.pendingClass = false
 		case '}':
 			s.brace--
-			s.ternary = 0
+			s.popTernary()
 			if n := len(s.classBody); n > 0 {
 				s.classBody = s.classBody[:n-1]
 			}
@@ -246,10 +285,41 @@ func (s *flowScanner) run() bool {
 				continue
 			}
 		}
+		switch c {
+		case '{', '}', ';':
+			s.memberStart = true
+		case '+', '-', '#': // variance sigil or private-field name: still at the start
+		default:
+			s.memberStart = false
+		}
 		s.prev = c
 		s.i++
 	}
 	return s.paren == 0 && s.brack == 0 && s.brace == 0
+}
+
+// inParenGroup reports whether the scanner sits directly inside the innermost
+// parenthesised group, at the brace depth that group opened at.
+func (s *flowScanner) inParenGroup() bool {
+	n := len(s.parenGroups)
+	return n > 0 && s.brace == s.parenGroups[n-1]
+}
+
+// pushTernary/popTernary save the pending-`?` count across a bracket. A ternary
+// cannot bind across one, so the count restarts inside and the outer count is
+// restored on the way out.
+func (s *flowScanner) pushTernary() {
+	s.ternaryStack = append(s.ternaryStack, s.ternary)
+	s.ternary = 0
+}
+
+func (s *flowScanner) popTernary() {
+	if n := len(s.ternaryStack); n > 0 {
+		s.ternary = s.ternaryStack[n-1]
+		s.ternaryStack = s.ternaryStack[:n-1]
+		return
+	}
+	s.ternary = 0
 }
 
 // startsDeclaration reports whether the `type`/`interface` keyword just consumed
@@ -265,40 +335,119 @@ func (s *flowScanner) startsDeclaration() bool {
 	return s.src[j] < '0' || s.src[j] > '9' // a digit means this is not an identifier
 }
 
-// blankDeclaration blanks a whole type/interface declaration, from the keyword at
-// `from` through its terminating `;` or the close of its brace body.
+// declarationStart walks back from the `type`/`interface` keyword at kwStart over
+// any `export`/`declare` modifiers, returning the offset the blank must begin at.
+//
+// Blanking the keyword alone leaves the modifier stranded — `export` followed by
+// nothing is a syntax error, and `export type` is how parse-server writes nearly
+// every one of these. It reports false when the keyword follows `import`, where
+// `import type X from 'y'` is valid TypeScript that esbuild already erases: there
+// the declaration is not ours to blank, and doing so would destroy the import.
+func (s *flowScanner) declarationStart(kwStart int) (int, bool) {
+	from := kwStart
+	for {
+		j := from - 1
+		for j >= 0 && isSpaceByte(s.src[j]) {
+			j--
+		}
+		end := j + 1
+		for j >= 0 && isWordByte(s.src[j]) {
+			j--
+		}
+		switch s.src[j+1 : end] {
+		case "export", "declare":
+			from = j + 1
+		case "import":
+			return 0, false
+		default:
+			return from, true
+		}
+	}
+}
+
+// blankDeclaration blanks a whole type/interface declaration, from `from` through
+// its terminating `;` or the close of its brace body.
 func (s *flowScanner) blankDeclaration(from int) {
 	depth := 0
+	lastSig := byte('=') // the declaration is incomplete until its body starts
 	for s.i < len(s.src) {
-		switch s.src[s.i] {
+		c := s.src[s.i]
+		switch c {
 		case '{', '(', '[':
 			depth++
 		case '}', ')', ']':
 			depth--
 			if depth == 0 {
 				s.i++
-				s.blank(from, s.i)
-				s.prev, s.prevWord = ' ', ""
+				// A brace body may still be followed by `;` (`export type X = {…};`),
+				// which is harmless left behind but tidier consumed.
+				for s.i < len(s.src) && isSpaceByte(s.src[s.i]) && s.src[s.i] != '\n' {
+					s.i++
+				}
+				if s.i < len(s.src) && s.src[s.i] == ';' {
+					s.i++
+				}
+				s.finishDeclaration(from)
 				return
 			}
 		case ';':
 			if depth == 0 {
 				s.i++
-				s.blank(from, s.i)
-				s.prev, s.prevWord = ' ', ""
+				s.finishDeclaration(from)
 				return
 			}
 		case '\n':
-			if depth == 0 {
+			// A newline ends the declaration only if it is actually complete. A
+			// multi-line union — `type T =\n  | 'a'\n  | 'b';` — is the common Flow
+			// shape, and stopping at its first newline would strand every remaining
+			// branch as a syntax error. Continue while either side of the break shows
+			// the expression is unfinished.
+			if depth == 0 && !continuesType(lastSig) && !s.nextLineContinuesType() {
 				s.blank(from, s.i)
 				s.prev, s.prevWord = ' ', ""
 				return
 			}
 		}
+		if !isSpaceByte(c) {
+			lastSig = c
+		}
 		s.i++
 	}
+	s.finishDeclaration(from)
+}
+
+// finishDeclaration blanks [from, s.i) and resets the token context, since the
+// scanner resumes after a span that no longer exists.
+func (s *flowScanner) finishDeclaration(from int) {
 	s.blank(from, s.i)
 	s.prev, s.prevWord = ' ', ""
+}
+
+// continuesType reports whether c, as the last significant byte before a line
+// break, leaves a type expression open.
+func continuesType(c byte) bool {
+	switch c {
+	case '=', '|', '&', ',', '<', '(', '[', '{', ':', '?', '.', '>', '+', '-':
+		return true
+	}
+	return false
+}
+
+// nextLineContinuesType reports whether the first significant byte after the
+// newline at s.i resumes the type expression rather than starting a statement.
+func (s *flowScanner) nextLineContinuesType() bool {
+	j := s.i
+	for j < len(s.src) && isSpaceByte(s.src[j]) {
+		j++
+	}
+	if j >= len(s.src) {
+		return false
+	}
+	switch s.src[j] {
+	case '|', '&', ',', '>', '=', ')', ']', '}', ':', '?', '.':
+		return true
+	}
+	return false
 }
 
 // annotationStarts decides whether the `:` at s.i begins a TYPE annotation
@@ -309,17 +458,30 @@ func (s *flowScanner) annotationStarts() bool {
 	// on the same nesting level; the cheapest reliable discriminator is that a
 	// type annotation follows an identifier, a `)` (return type) or a `?`
 	// (optional parameter).
-	if s.prev != ')' && s.prev != '?' && !isWordByte(s.prev) {
+	switch {
+	case s.prev == ')' || s.prev == '?' || isWordByte(s.prev):
+		// prevWord only describes the token when the `:` follows a word; after a
+		// bracket it is a stale leftover from inside that bracket.
+		if isWordByte(s.prev) {
+			switch s.prevWord {
+			case "case", "default", "return", "typeof", "in", "of", "new", "delete", "void":
+				return false
+			}
+		}
+	case s.prev == '}' || s.prev == ']':
+		// A cast may apply to a destructuring pattern or an object literal --
+		// `({ type }: SchemaField)` -- where the `:` follows the closing bracket.
+		// Only ever inside a parenthesised group: at statement level the same shape
+		// is a block followed by a label.
+		return s.inParenGroup()
+	default:
 		return false
 	}
-	switch s.prevWord {
-	case "case", "default", "return", "typeof", "in", "of", "new", "delete", "void":
-		return false
-	}
-	// Inside a parameter list: `function f(x: T)` / `(x: ?T) => …`. The brace
-	// check is what excludes an object literal argument, f({ a: 1 }), whose `:`
-	// sits one brace deeper than the group that opened.
-	if s.parenAtParams > 0 && s.paren == s.parenAtParams && s.brace == s.braceAtParams {
+	// Directly inside a parenthesised group: a parameter list (`function f(x: T)`,
+	// `(x: ?T) => …`) or a cast (`(x: any)`). The brace check is what excludes an
+	// object literal argument, f({ a: 1 }), whose `:` sits one brace deeper than
+	// the group that opened.
+	if s.inParenGroup() {
 		return true
 	}
 	// Return type: the `:` directly follows the `)` that closed a parameter list.
@@ -327,8 +489,9 @@ func (s *flowScanner) annotationStarts() bool {
 		return true
 	}
 	// Class property: `name: ?T;` directly in a class body, not nested in any
-	// parenthesised group.
-	if n := len(s.classBody); n > 0 && s.classBody[n-1] && s.paren == 0 && isWordByte(s.prev) {
+	// parenthesised group, and starting a member rather than sitting inside one.
+	if n := len(s.classBody); n > 0 && s.classBody[n-1] && s.paren == 0 && isWordByte(s.prev) &&
+		s.identStartsMember {
 		return true
 	}
 	// Variable declarator: `const x: T = …`.
@@ -336,6 +499,66 @@ func (s *flowScanner) annotationStarts() bool {
 		return true
 	}
 	return false
+}
+
+// typeParamScanLimit bounds the lookahead for a type-parameter list's closing
+// `>`. A real one is short; anything longer is a sign the `<` was a comparison.
+const typeParamScanLimit = 512
+
+// blankTypeParams blanks a type-PARAMETER list at s.i, `<T: Bound, U>`, and
+// reports whether it did.
+//
+// The whole list is blanked rather than just the bound, because the TS loader
+// erases type parameters outright — so, as everywhere else here, the strip only
+// has to leave something that parses.
+//
+// `<` is ambiguous with less-than, and getting that wrong would blank a real
+// comparison, so three conditions must all hold: the caller has established that
+// what precedes is a declaration NAME; a matching `>` is found within
+// typeParamScanLimit with balanced nesting and no `;` or `=` (neither can appear
+// in a type-parameter list, but both are common between two comparisons); and the
+// list actually contains a `:`, without which there is no Flow syntax to remove
+// and nothing to gain by touching it.
+func (s *flowScanner) blankTypeParams() bool {
+	if s.i >= len(s.src) || s.src[s.i] != '<' {
+		return false
+	}
+	end := min(len(s.src), s.i+typeParamScanLimit)
+	depth, colon := 0, false
+	for j := s.i; j < end; j++ {
+		switch s.src[j] {
+		case '<', '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ':':
+			colon = true
+		case ';', '=':
+			return false
+		case '>':
+			depth--
+			if depth == 0 {
+				if !colon {
+					return false
+				}
+				s.blank(s.i, j+1)
+				s.i = j + 1
+				return true
+			}
+		}
+		if depth < 0 {
+			return false
+		}
+	}
+	return false
+}
+
+// declModifiers are the words that may precede a declaration or class member's
+// name without ending the statement-start position: the export/ambient markers, the
+// property modifiers, and the accessor and async keywords that introduce a method.
+var declModifiers = map[string]bool{
+	"export": true, "declare": true, "static": true, "readonly": true,
+	"get": true, "set": true, "async": true,
 }
 
 // declaratorContext reports whether the identifier just consumed was introduced
