@@ -21,6 +21,10 @@ type modCtx struct {
 	localFuncs map[string]bool
 	aliases    map[string]string
 	imported   map[string]bool
+	// constGlobals are module-level names provably bound once to a string
+	// literal; lookupName inlines their value instead of emitting a GlobalName
+	// the engine cannot read. See constglobal.go.
+	constGlobals map[string]*ir.Constant
 }
 
 // newFuncState creates a funcState for a function in this module. The single
@@ -29,6 +33,7 @@ func (m *modCtx) newFuncState() *funcState {
 	fs := newFuncState(m.filename)
 	fs.moduleName = m.moduleName
 	fs.localFuncs = m.localFuncs
+	fs.constGlobals = m.constGlobals
 	fs.aliases = m.aliases
 	fs.importedNames = m.imported
 	return fs
@@ -66,7 +71,8 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// Module-level import aliases resolve aliased/from-imported sink modules (FE-2).
 	aliases := collectImportAliases(root.list("body"))
 	imported := collectImportedNames(root.list("body"))
-	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported}
+	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported,
+		constGlobals: constStringGlobals(root)}
 
 	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
 	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
@@ -108,29 +114,13 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// literals, most importantly the hardcoded-secret scanner. Surface each as
 	// a gIR Global with an init value (the proto's intended home for a module
 	// constant), mirroring how package-level vars appear in the Go frontend.
-	for _, s := range root.list("body") {
-		if s.kind() != "Assign" {
-			continue
-		}
-		val := s.node("value")
-		if val.kind() != "Constant" {
-			continue
-		}
-		c := constantValue(val).GetConstant()
-		if c == nil {
-			continue
-		}
-		for _, target := range s.list("targets") {
-			if target.kind() != "Name" {
-				continue
-			}
-			mod.Globals = append(mod.Globals, &ir.Global{
-				Name:      target.str("id"),
-				InitValue: c,
-				Pos:       posFromNode(filename, val),
-			})
-		}
-	}
+	eachModuleConstAssign(root, func(name string, c *ir.Constant, val astNode) {
+		mod.Globals = append(mod.Globals, &ir.Global{
+			Name:      name,
+			InitValue: c,
+			Pos:       posFromNode(filename, val),
+		})
+	})
 
 	moduleFn := convertModuleInit(ctx, root)
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)
@@ -226,7 +216,16 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 //     (FastAPI @app.get, @router.post, aiohttp @routes.get, Sanic @app.get, …);
 //  2. a `<verb>`-named method, verb in handlerMethodVerbs, of a class
 //     subclassing one of handlerBaseClasses (Tornado RequestHandler, Flask
-//     MethodView, … — matched by simple base name, transitively).
+//     MethodView, … — matched by simple base name, transitively);
+//
+// Shape 1 covers the class-based APIs too, because a decorator NAME is the
+// signal there rather than the method's: Flask-AppBuilder routes @expose("/data")
+// to a method called `data`, DRF routes @action(detail=True) to one called
+// `upload_example`. Neither name is an HTTP verb and neither is a registration on
+// an app/router object, so both were invisible -- the handler's parameters stayed
+// clean and NO rule could fire downstream of them, which is why a campaign miss
+// in superset, label-studio or pyload showed the expected class firing zero times
+// across the entire project rather than firing at the wrong line.
 //
 // routeParamSource is the canonical name of the synthetic source CALL seeded at
 // each recognized parameter; it is a source glob in every Python taint rulepack,
@@ -234,16 +233,28 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 const routeParamSource = "py:@http.param"
 
 var (
-	// routeDecoratorVerbs mark a route function via its decorator (@app.get,
-	// @router.websocket, …). handlerMethodVerbs mark a verb method of a handler
-	// class (get/post/…); no `websocket`, which is a distinct handler class
-	// rather than a method name. handlerBaseClasses are the base classes (by
-	// simple name) whose subclasses are request handlers. `route` covers the
-	// method-agnostic registration decorator (Flask/Bottle/Sanic @app.route,
-	// @blueprint.route) whose URL captures (`<path:fname>`) arrive as params.
-	routeDecoratorVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true, "websocket": true, "route": true}
-	handlerMethodVerbs  = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
-	handlerBaseClasses  = map[string]bool{
+	// routeDecorators mark a route function/method by its decorator. The VALUE is
+	// whether a BARE occurrence counts: an HTTP verb must carry a receiver prefix
+	// (@app.get), since a bare @get is far too likely to be something else, while
+	// an imported routing symbol (@expose, @action) is specific enough on its own
+	// and is never written with one. `route` is both -- Flask/Bottle/Sanic write
+	// @app.route, flask-classful writes a bare @route -- which is exactly the
+	// per-entry difference this map's value exists to express.
+	//
+	// handlerMethodVerbs mark a verb method of a handler class (get/post/…); no
+	// `websocket`, which is a distinct handler class rather than a method name.
+	// handlerBaseClasses are the base classes (by simple name) whose subclasses
+	// are request handlers.
+	routeDecorators = map[string]bool{
+		"get": false, "post": false, "put": false, "delete": false, "patch": false,
+		"head": false, "options": false, "websocket": false,
+		"route":      true, // Flask/Bottle/Sanic @app.route; flask-classful bare @route
+		"expose":     true, // Flask-AppBuilder @expose("/data") on BaseApi/BaseView
+		"expose_api": true, // Flask-AppBuilder legacy alias
+		"action":     true, // Django REST Framework @action(detail=True) on a ViewSet
+	}
+	handlerMethodVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
+	handlerBaseClasses = map[string]bool{
 		"RequestHandler": true, // Tornado
 		"MethodView":     true, // Flask pluggable views
 		// Django class-based views + DRF APIView. A verb method (get/post/…) of a
@@ -263,6 +274,23 @@ var (
 		"RedirectView":   true,
 		"APIView":        true, // Django REST Framework
 		"GenericAPIView": true, // Django REST Framework
+		// DRF ViewSets. Their STANDARD actions (list/create/retrieve/…) are
+		// deliberately NOT added to handlerMethodVerbs: those take the request
+		// object plus a `pk`, and request.data/.query_params are already precise
+		// source globs, so seeding them would buy almost nothing while making
+		// every helper method named `create`/`update` in any handler class a
+		// taint origin. A ViewSet's CUSTOM actions are what carry untrusted
+		// input, and shape 3 catches those by their @action decorator. Listing
+		// the bases still matters: it makes `self.request` resolve inside them.
+		"ViewSet":              true,
+		"GenericViewSet":       true,
+		"ModelViewSet":         true,
+		"ReadOnlyModelViewSet": true,
+		"Resource":             true, // flask-restful / flask-restx
+		"HTTPEndpoint":         true, // Starlette
+		"BaseApi":              true, // Flask-AppBuilder
+		"BaseView":             true, // Flask-AppBuilder
+		"ModelRestApi":         true, // Flask-AppBuilder
 	}
 	// requestObjectParams name a handler parameter that holds the framework
 	// REQUEST OBJECT itself rather than an untrusted URL capture. Django/DRF verb
@@ -294,12 +322,16 @@ func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 	return nil
 }
 
-// hasRouteDecorator reports whether any decorator is a routing decorator: a
-// dotted name whose last component is a routing verb and which has a receiver
-// prefix (so a bare @get is not mistaken for one).
+// hasRouteDecorator reports whether any decorator is a routing decorator. A
+// dotted decorator matches on its last component; a bare one matches only if
+// routeDecorators marks it as valid bare (see that map).
 func hasRouteDecorator(node astNode) bool {
 	for _, d := range node.strList("decorators") {
-		if i := strings.LastIndex(d, "."); i >= 0 && routeDecoratorVerbs[d[i+1:]] {
+		name, dotted := d, false
+		if i := strings.LastIndex(d, "."); i >= 0 {
+			name, dotted = d[i+1:], true
+		}
+		if bare, ok := routeDecorators[name]; ok && (dotted || bare) {
 			return true
 		}
 	}
@@ -508,6 +540,10 @@ type funcState struct {
 	// unresolved and inter-procedural taint through the local helper is lost.
 	moduleName string
 	localFuncs map[string]bool
+
+	// constGlobals are the module's provably-immutable string constants, inlined
+	// at their use sites by lookupName. See constglobal.go.
+	constGlobals map[string]*ir.Constant
 
 	// selfName and methodPrefix let lowerCall qualify a `self.method(x)` call
 	// inside a class method to the sibling method's canonical name
@@ -832,6 +868,14 @@ func (fs *funcState) lookupName(id string) *ir.Value {
 	// (still a GlobalName).
 	if fs.localFuncs[id] {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + id}}
+	}
+	// A module-level string constant is inlined as its literal rather than left
+	// as an opaque GlobalName, so every consumer that reads constant text sees it
+	// -- notably the SSRF host check, which proves a URL's host is fixed from its
+	// constant prefix and otherwise read `BASE + "/" + user` as attacker
+	// controllable. Only names constStringGlobals proved immutable get here.
+	if c, ok := fs.constGlobals[id]; ok {
+		return &ir.Value{Kind: &ir.Value_Constant{Constant: c}}
 	}
 	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: id}}
 }

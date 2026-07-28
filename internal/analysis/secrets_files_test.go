@@ -57,7 +57,6 @@ func TestScanSecretsInFiles_FindsConfigSecrets(t *testing.T) {
 }
 
 func TestSecretPatterns_VendorPrefixes(t *testing.T) {
-	dets := secretDets(t)
 	cases := []struct {
 		id  string
 		hit string
@@ -70,12 +69,12 @@ func TestSecretPatterns_VendorPrefixes(t *testing.T) {
 		{"secret-slack-webhook", sgWebhook},
 		{"secret-db-connection", mysqlConn},
 	}
+	rs := builtinRuleSet(t) // compiled once: every case shares the same rules
 	for _, tc := range cases {
-		seen := map[string]bool{}
-		var findings []Finding
-		scanText(tc.hit, nil, "", "", dets, seen, &findings)
+		sc := newSecretScan(rs)
+		sc.text(tc.hit, nil, "", "")
 		hitIDs := map[string]bool{}
-		for _, f := range findings {
+		for _, f := range sc.findings {
 			hitIDs[f.RuleID] = true
 		}
 		if !hitIDs[tc.id] {
@@ -123,7 +122,6 @@ func TestSecretPathExcluded(t *testing.T) {
 }
 
 func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
-	dets := secretDets(t)
 	benign := []string{
 		"password = os.Getenv(\"DB_PASSWORD\")",
 		"api_key: ${API_KEY}",
@@ -131,12 +129,12 @@ func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
 		"token = process.env.TOKEN",
 		"# see docs for how to set the stripe key",
 	}
+	rs := builtinRuleSet(t) // compiled once: every case shares the same rules
 	for _, line := range benign {
-		seen := map[string]bool{}
-		var findings []Finding
-		scanText(line, nil, "", "", dets, seen, &findings)
-		if len(findings) != 0 {
-			t.Errorf("benign line should not fire a secret rule: %q -> %v", line, findings)
+		sc := newSecretScan(rs)
+		sc.text(line, nil, "", "")
+		if len(sc.findings) != 0 {
+			t.Errorf("benign line should not fire a secret rule: %q -> %v", line, sc.findings)
 		}
 	}
 }

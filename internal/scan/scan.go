@@ -36,6 +36,15 @@ type LangCoverage struct {
 	Detected  bool
 	Converted bool
 	Err       string
+	// Files is how many source files of this language the walk found, and Skipped
+	// how many of them the frontend could not lower. Converted is all-or-nothing
+	// and so hides a PARTIAL failure: a frontend that lowers three files out of two
+	// hundred still reports ok, which is how 165 of parse-server's 192 files were
+	// silently dropped while coverage read clean. Skipped is 0 for a frontend whose
+	// unit of work is not a file (Go lowers packages), so a 0 means "nothing known
+	// to be dropped", not a guarantee.
+	Files   int
+	Skipped int
 }
 
 // Result is the outcome of scanning a path.
@@ -246,11 +255,13 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 		if conv == nil {
 			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
 		}
-		prog, targetPkgs, err := conv(path)
+		prog, targetPkgs, skipped, err := conv(path)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		return prog, []LangCoverage{{Language: lang, Detected: true, Converted: true}}, targetPkgs, nil
+		return prog, []LangCoverage{{
+			Language: lang, Detected: true, Converted: true, Files: 1, Skipped: skipped,
+		}}, targetPkgs, nil
 	}
 
 	present := detectLanguages(path)
@@ -269,14 +280,15 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	results := make([]*feResult, len(frontends))
 	var wg sync.WaitGroup
 	for i, fe := range frontends {
-		if !present[fe.name] {
+		if present[fe.name] == 0 {
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cov := LangCoverage{Language: fe.name, Detected: true}
-			prog, targetPkgs, err := fe.convert(path)
+			cov := LangCoverage{Language: fe.name, Detected: true, Files: present[fe.name]}
+			prog, targetPkgs, skipped, err := fe.convert(path)
+			cov.Skipped = skipped
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
 				cov.Err = err.Error()
@@ -316,7 +328,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 // dependencies can be scoped out; nil for frontends that don't lower deps.
 type frontend struct {
 	name    string
-	convert func(string) (*ir.Program, map[string]bool, error)
+	convert func(string) (*ir.Program, map[string]bool, int, error)
 	matches func(path string) bool
 }
 
@@ -344,10 +356,12 @@ var languageFrontends = []frontend{
 
 // goConvert lowers a Go path and returns its target (user-authored) package set,
 // so scopeFindings can drop findings whose sink sits inside a lowered dependency.
-func goConvert(p string) (*ir.Program, map[string]bool, error) {
+func goConvert(p string) (*ir.Program, map[string]bool, int, error) {
 	c := go_converter.NewConverter()
 	prog, err := c.ConvertFile(p)
-	return prog, c.TargetPackages(), err
+	// 0 skipped: the Go frontend lowers packages, not files, so it has no
+	// per-file skip count to report (see LangCoverage.Skipped).
+	return prog, c.TargetPackages(), 0, err
 }
 
 // fileConverter is the shape every non-dep-lowering frontend's converter shares:
@@ -362,10 +376,17 @@ type fileConverter interface {
 // findings to scope, so it returns a nil target-package set. newC is the
 // frontend's NewConverter, called per conversion so each scan gets a fresh
 // converter.
-func noDepConvert[T fileConverter](newC func() T) func(string) (*ir.Program, map[string]bool, error) {
-	return func(p string) (*ir.Program, map[string]bool, error) {
-		prog, err := newC().ConvertFile(p)
-		return prog, nil, err
+func noDepConvert[T fileConverter](newC func() T) func(string) (*ir.Program, map[string]bool, int, error) {
+	return func(p string) (*ir.Program, map[string]bool, int, error) {
+		c := newC()
+		prog, err := c.ConvertFile(p)
+		// A per-file frontend reports how many files it had to drop; one whose unit
+		// of work is not a file simply does not implement this.
+		skipped := 0
+		if s, ok := any(c).(interface{ Skipped() int }); ok {
+			skipped = s.Skipped()
+		}
+		return prog, nil, skipped, err
 	}
 }
 
@@ -393,7 +414,7 @@ func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []an
 // fileFrontend returns the language tag and conversion function for a single
 // source file, or a nil function for an unsupported extension. It dispatches off
 // the shared languageFrontends table (first match wins, in table order).
-func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bool, error)) {
+func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bool, int, error)) {
 	for _, fe := range languageFrontends {
 		if fe.matches(path) {
 			return fe.name, fe.convert
@@ -413,12 +434,12 @@ func isCppFile(path string) bool {
 // detectLanguages walks dir and reports which supported languages have source
 // files present (skipping vendor/node_modules/.git), so convert only runs the
 // relevant frontends.
-func detectLanguages(dir string) map[string]bool {
-	present := map[string]bool{}
+func detectLanguages(dir string) map[string]int {
+	present := map[string]int{}
 	_ = walkignore.Files(dir, func(p string, d fs.DirEntry) error {
 		for _, fe := range languageFrontends {
 			if fe.matches(p) {
-				present[fe.name] = true
+				present[fe.name]++
 				break
 			}
 		}

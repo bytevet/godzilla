@@ -48,7 +48,10 @@ var intrinsicPropagators = map[string]bool{
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted
-// operand to the instruction's result register.
+// operand to the instruction's result register. A comparison is absent by
+// construction rather than by exception: a frontend lowers `user == "admin"` to
+// the inert builtin.compare intrinsic, since a boolean result carries influence,
+// not content.
 var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_BIN_OP:      true,
 	ir.OpCode_OP_CODE_UN_OP:       true,
@@ -429,6 +432,28 @@ func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Pos
 		}
 	}
 	return "", nil, false
+}
+
+// firstTaintedArg is firstTainted with the field-aware predicate: a value counts
+// as tainted when the whole register is, OR when it carries the any-field marker.
+//
+// It exists for the RETURN path. Every argument site already uses isTaintedArg, so
+// a struct with a tainted field taints the callee's parameter — but a function that
+// STORES into a field and returns the struct records only `t0#f0`/`t0#*`, never
+// `t0` (visitStore marks the FIELD_ADDR result, not the base), so a plain-register
+// check at RET saw nothing and the flow died at the return. The two directions of
+// the same boundary disagreed.
+//
+// Deliberately NOT used for the sink check, which stays field-blind: a sink fires
+// on the value actually passed, and widening it there would report a sink that
+// received a clean field of a partly-tainted struct.
+func firstTaintedArg(tainted taintState, vals []*ir.Value) (*ir.Position, bool) {
+	for _, v := range vals {
+		if p, hit := isTaintedArg(tainted, v); hit {
+			return p, true
+		}
+	}
+	return nil, false
 }
 
 // markTainted records reg as tainted with the given origin, unless it is

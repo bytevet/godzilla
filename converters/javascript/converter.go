@@ -31,6 +31,15 @@
 // propagation carries taint through the rest. See emitRootPropertyRead and
 // isOpaqueBase in lower.go.
 //
+// A parameter is opaque whether it holds a framework request object or ordinary
+// data, and the two want opposite things: the first must INTRODUCE taint (the
+// request register is not itself tainted — see internal/analysis/doc.go), the
+// second must CARRY the taint it already has. The callee name serves the first;
+// the base register, kept in Call.Value and tagged builtin.member_read, serves
+// the second. Before that, the base was discarded and reading a property off an
+// already-tainted parameter produced a clean register — the shape most request
+// data takes once it crosses a function boundary.
+//
 // Real call expressions lower to CALL with a syntactic dotted Callee built from
 // the callee expression (Identifier/DotExpression/string-keyed Bracket chains;
 // anything else is "<dynamic>") -- the name reflects source syntax, never a
@@ -80,7 +89,14 @@ import (
 )
 
 // Converter lowers JavaScript source files/directories into gIR.
-type Converter struct{}
+type Converter struct {
+	skipped int // files this run could not lower; see Skipped
+}
+
+// Skipped reports how many source files this converter could not lower. The scan
+// layer surfaces it per language, so a run that dropped most of a project is
+// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
+func (c *Converter) Skipped() int { return c.skipped }
 
 // NewConverter returns a ready-to-use JavaScript-to-gIR converter.
 func NewConverter() *Converter {
@@ -148,6 +164,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	for i, r := range results {
 		if r.err != nil {
 			fmt.Fprintf(os.Stderr, "js_converter: skipping %s: %v\n", files[i], r.err)
+			c.skipped++
 			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}
@@ -230,14 +247,18 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 
 	// Vue/Svelte single-file components are compiled to plain JS by the SFC
 	// extractor (script block + template directives as synthetic sink calls);
-	// TypeScript / JSX / ES-module files are esbuild-transformed to plain CommonJS
-	// JS (goja parses neither TS annotations nor top-level import/export). Both
-	// return a sourcemap consumer that remaps positions back to the original file;
-	// plain .js skips this entirely. SFCs must be intercepted before the generic
-	// transform — esbuild has no .vue/.svelte loader.
+	// extensions that always need one (.ts/.tsx/.jsx/.mjs/.cjs) are esbuild-
+	// transformed to CommonJS up front. Both return a sourcemap consumer that
+	// remaps positions back to the original file. SFCs must be intercepted before
+	// the generic transform — esbuild has no .vue/.svelte loader.
+	//
+	// .js takes NEITHER branch here. It is the ambiguous extension — plain script,
+	// ES modules, Flow and JSX all ship as .js — so rather than predict the
+	// dialect, it goes straight to goja and the parse failure below decides.
 	code := string(src)
 	var consumer *sourcemap.Consumer
 	var dirs []directivePos
+	var transformed bool
 	switch {
 	case isSFC(path):
 		var terr error
@@ -245,16 +266,37 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 		if terr != nil {
 			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
 		}
+		transformed = true
 	case needsTransform(path):
 		var terr error
 		code, consumer, terr = transformToJS(path, src)
 		if terr != nil {
 			return nil, "", fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
 		}
+		transformed = true
 	}
 
 	fset := &file.FileSet{}
 	astProg, err := parser.ParseFile(fset, path, code, 0)
+	if err != nil && !transformed {
+		// goja could not read it as plain script, so it is one of the other .js
+		// dialects: run the loader ladder. Letting the parse failure be the trigger
+		// replaced a content sniff (a pair of regexps for import/export over every
+		// .js file) that had to PREDICT this, and predicting failed both ways — it
+		// missed Flow annotations in a file with no import/export, and its regexps
+		// cost 7% of a scan on the common CommonJS file that needed no transform at
+		// all. Failing first is exact, and is paid only by files that would
+		// otherwise be lost, so it is never worth gating on a size heuristic.
+		//
+		// If the ladder cannot read it either, goja's original error is the one
+		// reported: it describes the file as written.
+		if tcode, tconsumer, terr := transformToJS(path, src); terr == nil {
+			tfset := &file.FileSet{}
+			if tprog, perr := parser.ParseFile(tfset, path, tcode, 0); perr == nil {
+				fset, astProg, consumer, err = tfset, tprog, tconsumer, nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("js_converter: failed to parse %s: %w", path, err)
 	}

@@ -95,7 +95,11 @@ this is a file map.
 - `taint.go` — the taint transfer helpers (SSA def-use, `visitStore`/`taintContainer` for aggregate/variadic
   aliasing, intrinsic + opcode propagators). `BIN_OP` is a universal propagator so `+` concatenation carries
   taint across **every** language — including Rust, whose frontend lowers `String + &str` (rustc's `Add::add`
-  call) to `BIN_OP_ADD` just like Go/JS/Python `+`, so the engine needs no Rust-callee special case.
+  call) to `BIN_OP_ADD` just like Go/JS/Python `+`, so the engine needs no Rust-callee special case. That
+  works because a comparison is never lowered to `BIN_OP`: a frontend emits the inert **`builtin.compare`**
+  intrinsic instead (Go/JS/Python do), since a boolean result carries influence, not content — which is what
+  stops `fmt.Sprint(user == "admin")` reading as an injection. Teaching a frontend to emit it is the whole
+  opt-in; the engine has no comparison-specific code.
 - `interproc.go` — `Engine.Analyze`, the inter-procedural worklist: cross-function summaries, the
   framework-agnostic HTTP request sources (rule source globs + the net/http entries in the
   `_default-propagators.yaml` fragment, plus `buildReqSourceHosts` for a dependency that reads an

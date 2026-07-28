@@ -270,7 +270,10 @@ def conv_stmt(node):
         return {
             "kind": "Try",
             "body": conv_body(node.body),
-            "handlers": [{"body": conv_body(h.body)} for h in node.handlers],
+            # `name` is the `except E as name` binding. It is not lowered as a
+            # statement, but it DOES bind a name, which whole-module binding
+            # analyses (converters/python/constglobal.go) must be able to see.
+            "handlers": [{"name": h.name, "body": conv_body(h.body)} for h in node.handlers],
             "orelse": conv_body(node.orelse),
             "finalbody": conv_body(node.finalbody),
             "pos": p,
@@ -290,6 +293,21 @@ def conv_stmt(node):
             "module": node.module,
             "level": node.level,
             "names": [{"name": a.name, "asname": a.asname} for a in node.names],
+            "pos": p,
+        }
+    if isinstance(node, ast.AnnAssign):
+        # `x: T = v` binds exactly like `x = v` -- the annotation is irrelevant to
+        # dataflow, so lowering it as an Assign keeps taint alive through the
+        # increasingly common annotated form. Previously it fell through to
+        # "Unknown", which drops the VALUE expression too: `x: str = tainted()`
+        # lost the taint entirely. Without a value it declares only a type and
+        # binds nothing, so it is inert.
+        if node.value is None:
+            return {"kind": "Pass", "pos": p}
+        return {
+            "kind": "Assign",
+            "targets": [conv_expr(node.target)],
+            "value": conv_expr(node.value),
             "pos": p,
         }
     if isinstance(

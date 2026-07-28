@@ -33,6 +33,18 @@ const formatIntrinsic = "builtin.format"
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
 
+// memberReadIntrinsic marks a synthesized member read (`obj.field` lowered as a
+// CALL so its name can match a source glob) whose base the frontend kept in
+// Call.Value. The engine carries that base's taint to the result: reading a
+// property off a tainted object yields tainted data, which no rule models because
+// it is not a transform.
+//
+// It is a CROSS-FRONTEND contract, not a JS detail: any frontend that lowers a
+// member read as a synthetic call should set it rather than inventing another
+// mechanism (Python currently merges an extra INDEX through a BIN_OP_OR for the
+// same purpose — see converters/python/lower.go — and can retire onto this).
+const memberReadIntrinsic = "builtin.member_read"
+
 // kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
 // argument's NAME available to rule guards: Args[0] is the name (a string
 // constant), Args[1] the value it wraps. gIR's CallCommon carries only positional
@@ -171,11 +183,9 @@ func markSeen(seen map[string]bool, v *ir.Value) map[string]bool {
 	return next
 }
 
-// constStr reads an operand's literal string value. Go lowers string constants
-// via go/constant's quoted Stringer, so surrounding double quotes are stripped;
-// other frontends store the raw literal (a no-op strip). Returns ok=false for a
-// register or non-string operand, which cleanly distinguishes a constant piece
-// from a tainted/dynamic one.
+// constStr reads an operand's literal string value verbatim — every frontend
+// stores the raw literal. Returns ok=false for a register or non-string operand,
+// which cleanly distinguishes a constant piece from a tainted/dynamic one.
 func constStr(v *ir.Value) (string, bool) {
 	c := v.GetConstant()
 	if c == nil {
@@ -184,11 +194,7 @@ func constStr(v *ir.Value) (string, bool) {
 	if _, ok := c.Value.(*ir.Constant_StringVal); !ok {
 		return "", false
 	}
-	s := c.GetStringVal()
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		s = s[1 : len(s)-1]
-	}
-	return s, true
+	return c.GetStringVal(), true
 }
 
 // templateSkeleton renders a printf/brace format template as a skeleton: literal

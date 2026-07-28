@@ -55,7 +55,14 @@ import (
 var pyASTScript []byte
 
 // Converter lowers Python source files/directories into gIR.
-type Converter struct{}
+type Converter struct {
+	skipped int // files this run could not lower; see Skipped
+}
+
+// Skipped reports how many source files this converter could not lower. The scan
+// layer surfaces it per language, so a run that dropped most of a project is
+// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
+func (c *Converter) Skipped() int { return c.skipped }
 
 // NewConverter returns a ready-to-use Python-to-gIR converter.
 func NewConverter() *Converter {
@@ -125,6 +132,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	for i, r := range results {
 		if r.err != nil {
 			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", files[i], r.err)
+			c.skipped++
 			convertErrs = append(convertErrs, r.err.Error())
 			continue
 		}

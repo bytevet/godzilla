@@ -1,8 +1,11 @@
 # Shared Go request sources, request-object provenance, and the strings.Join
 # propagator. Pulled into the go-*.yaml rules with `extend: $_go-common.yaml`.
 sources:
-  - "go:*net/url*.Get"
-  - "go:*net/http.Header*.Get"
+  # A source may only name a type that is untrusted BY CONSTRUCTION. A generic
+  # container usable on either side of a request (http.Header, url.Values) is a
+  # PROPAGATOR instead — see _default-propagators.yaml. As a source it generated
+  # taint from nothing, so `w.Header().Get(...)` on the RESPONSE writer fired
+  # critical; control: test/go/response_header_safe.
   - "go:@net/http.Request" # synthetic *http.Request source (addHTTPRequestSource)
   - "go:*gin-gonic/gin.Context*.Query"
   - "go:*gin-gonic/gin.Context*.DefaultQuery"

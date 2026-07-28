@@ -183,23 +183,17 @@ func calleeCommon(callee string) *ir.CallCommon {
 	}
 }
 
-// emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
-// its result register. Shared by lowerNew and (via emitCallRecv) lowerCall,
-// whose only difference is how they build the callee name.
+// emitCall emits an OP_CODE_CALL to callee with no receiver, lowering args in
+// order, and returns its result register. Used by lowerNew; a method call goes
+// through emitCallRecvInst directly so lowerCall can reach the instruction.
 func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	return fs.emitCallRecv(callee, nil, args, idx)
+	return regValue(fs.emitCallRecvInst(callee, nil, args, idx).Name)
 }
 
-// emitCallRecv emits an OP_CODE_CALL to callee. For a method call (`obj.m(x)`),
-// receiver is the already-lowered base object; it is placed in Call.Value so the
-// engine -- which reads a method call's receiver from Call.Value (see
-// propagatorOperands in internal/analysis) -- carries taint from the receiver
-// through a taint-preserving transform such as `tainted.slice(i)` or
-// `tainted.toLowerCase()`. JS methods take no explicit receiver argument, so the
-// receiver stays OUT of Args and the arg->param alignment the engine relies on
-// for cross-function calls is unchanged. When receiver is nil (a free/identifier
-// call or `new`), Call.Value falls back to the callee FuncName as before.
-func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Value {
+// emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
+// needs the LOWERED argument values (rather than re-lowering the expressions,
+// which would duplicate their side effects) can read them off Call.Args.
+func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Instruction {
 	cc := calleeCommon(callee)
 	if receiver != nil {
 		cc.Value = receiver
@@ -211,7 +205,44 @@ func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = cc
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return inst
+}
+
+// emitPromiseContinuation models `p.then(cb)` by emitting the call it actually
+// performs at runtime: cb(<p's resolved value>).
+//
+// Without it a promise is a wall taint cannot cross, and in modern Node that wall
+// sits across the middle of most request handling. parse-server is the case that
+// forced this: its router reads `req.body` in one function which RETURNS a value,
+// and a generic `.then(result => ...)` callback several frames away writes the
+// response — 234 `.then` calls hold that architecture together, and not one flow
+// survived the hop, so a 3,225-function lowering produced zero findings.
+//
+// The continuation is emitted as an INDIRECT call (no callee name, the callback
+// in Call.Value), which is exactly the shape the engine's higher-order machinery
+// already resolves through its points-to set — so this needs no engine change,
+// and it inherits that path's singleton-only discipline: a `.then` whose callback
+// cannot be resolved unambiguously binds nothing rather than guessing.
+//
+// The receiver stands in for the resolved value, which is what makes the chain
+// work: a tainted promise yields a tainted callback parameter. Only `.then`'s
+// FIRST argument is treated this way — its second argument, and `.catch`, receive
+// the rejection reason, not the value.
+func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, call *ir.Instruction, idx file.Idx) {
+	if receiver == nil || !strings.HasSuffix(callee, ".then") {
+		return
+	}
+	args := call.Call.GetArgs()
+	if len(args) == 0 || args[0] == nil {
+		return
+	}
+	cc := calleeCommon("") // empty callee == indirect; the engine resolves Call.Value
+	cc.Value = args[0]
+	cc.Args = []*ir.Value{receiver}
+	inst := fs.newValueInst(idx)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
 }
 
 // emitStore emits an OP_CODE_STORE of val into the address computed from
@@ -362,7 +393,7 @@ func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
 		if b.Key == "" || b.Local == "" {
 			continue
 		}
-		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, pat.Idx0()))
+		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, nil, pat.Idx0()))
 	}
 }
 
@@ -452,12 +483,32 @@ func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bo
 // (see isOpaqueBase) as an OP_CODE_CALL with a purely syntactic callee
 // "js:<root>.<field>", so it can match a rule's source glob (e.g.
 // "js:*req.query*") exactly like a real call would.
-func (fs *funcState) emitRootPropertyRead(root, field string, idx file.Idx) *ir.Value {
+//
+// When the base is a REGISTER it is also carried in Call.Value — the same place
+// emitCallRecvInst puts a method call's receiver — and the instruction is tagged
+// builtin.member_read so the engine propagates that receiver's taint to the
+// result. Without it the base was simply dropped, so reading a property off an
+// already-tainted parameter produced a CLEAN register: `use(mk(req))` where
+// `use(o){sink(o.field)}` found nothing, while the scalar equivalent fired. That
+// is the shape most request data takes once it crosses a function boundary.
+//
+// A parameter is an opaque base whether it holds a framework request object or
+// ordinary data, and the two need opposite things: the former must INTRODUCE
+// taint via the callee glob (it is not itself tainted — see internal/analysis
+// doc.go on request sources), the latter must CARRY the taint it already has.
+// Naming the callee exactly as before serves the first; the receiver serves the
+// second. A non-register base (a global, `this`, a closure-captured free name)
+// keeps the plain FuncName form, which leaves that whole branch untouched.
+func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, idx file.Idx) *ir.Value {
 	callee := "js:" + root + "." + field
 	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Comment = "property-read"
 	inst.Call = calleeCommon(callee)
+	if base != nil && base.GetRegName() != "" {
+		inst.Call.Value = base
+		inst.Intrinsic = "builtin.member_read"
+	}
 	fs.emit(inst)
 	return regValue(inst.Name)
 }
@@ -1156,7 +1207,7 @@ func (fs *funcState) lowerDot(v *ast.DotExpression) *ir.Value {
 	field := string(v.Identifier.Name)
 
 	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, field, v.Idx0())
+		return fs.emitRootPropertyRead(root, field, base, v.Idx0())
 	}
 
 	return fs.emitFieldRead(base, field, v.Idx0())
@@ -1183,7 +1234,7 @@ func (fs *funcState) lowerBracket(v *ast.BracketExpression) *ir.Value {
 	idx := fs.lowerExpr(v.Member)
 
 	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, bracketFieldName(v.Member), v.Idx0())
+		return fs.emitRootPropertyRead(root, bracketFieldName(v.Member), base, v.Idx0())
 	}
 
 	inst := fs.newValueInst(v.Idx0())
@@ -1262,14 +1313,21 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	return regValue(inst.Name)
 }
 
-// lowerBinary lowers a binary expression (arithmetic, bitwise, comparison,
-// or -- approximated, see package doc -- logical) to a BIN_OP instruction.
+// lowerBinary lowers a binary expression (arithmetic, bitwise, or --
+// approximated, see package doc -- logical) to a BIN_OP instruction. A
+// comparison instead lowers to the inert builtin.compare intrinsic: its result
+// is a bool, which carries influence rather than content.
 func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	left := fs.lowerExpr(v.Left)
 	right := fs.lowerExpr(v.Right)
 	inst := fs.newValueInst(v.Idx0())
-	inst.Op = ir.OpCode_OP_CODE_BIN_OP
-	inst.BinOp = binOpKind(v.Operator)
+	if isComparisonToken(v.Operator) {
+		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+		inst.Intrinsic = "builtin.compare"
+	} else {
+		inst.Op = ir.OpCode_OP_CODE_BIN_OP
+		inst.BinOp = binOpKind(v.Operator)
+	}
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
 	return regValue(inst.Name)
@@ -1355,7 +1413,7 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // note on the js-ssrf sample's chained axios.get(...).then(...) handler.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	// For a method call, lower the receiver (the callee's base object) so its
-	// register can be carried in Call.Value (see emitCallRecv): this both
+	// register can be carried in Call.Value (see emitCallRecvInst): this both
 	// evaluates the base -- which, off an opaque request object like `req.url`,
 	// is itself the synthetic taint source -- and lets a taint-preserving method
 	// like `.slice`/`.toLowerCase` propagate the receiver's taint to the result.
@@ -1395,7 +1453,9 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
 		}
 	}
-	return fs.emitCallRecv(callee, receiver, v.ArgumentList, v.Idx0())
+	call := fs.emitCallRecvInst(callee, receiver, v.ArgumentList, v.Idx0())
+	fs.emitPromiseContinuation(callee, receiver, call, v.Idx0())
+	return regValue(call.Name)
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an
@@ -1514,20 +1574,19 @@ func binOpKind(op token.Token) ir.BinOpKind {
 		return ir.BinOpKind_BIN_OP_SHL
 	case token.SHIFT_RIGHT, token.UNSIGNED_SHIFT_RIGHT:
 		return ir.BinOpKind_BIN_OP_SHR
-	case token.EQUAL, token.STRICT_EQUAL:
-		return ir.BinOpKind_BIN_OP_EQL
-	case token.NOT_EQUAL, token.STRICT_NOT_EQUAL:
-		return ir.BinOpKind_BIN_OP_NEQ
-	case token.LESS:
-		return ir.BinOpKind_BIN_OP_LSS
-	case token.LESS_OR_EQUAL:
-		return ir.BinOpKind_BIN_OP_LEQ
-	case token.GREATER:
-		return ir.BinOpKind_BIN_OP_GTR
-	case token.GREATER_OR_EQUAL:
-		return ir.BinOpKind_BIN_OP_GEQ
 	}
 	return ir.BinOpKind_BIN_OP_UNSPECIFIED
+}
+
+// isComparisonToken reports whether op yields a bool. Those lower to the
+// builtin.compare intrinsic, so they never reach binOpKind.
+func isComparisonToken(op token.Token) bool {
+	switch op {
+	case token.EQUAL, token.STRICT_EQUAL, token.NOT_EQUAL, token.STRICT_NOT_EQUAL,
+		token.LESS, token.LESS_OR_EQUAL, token.GREATER, token.GREATER_OR_EQUAL:
+		return true
+	}
+	return false
 }
 
 // binOpKindForCompoundAssign maps a compound-assignment token (`+=`, `-=`,
