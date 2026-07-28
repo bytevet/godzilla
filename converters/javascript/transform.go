@@ -3,7 +3,6 @@ package js_converter
 import (
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
@@ -39,56 +38,21 @@ func isSFC(path string) bool {
 	return false
 }
 
-// needsTransform reports whether an extension ALONE requires an esbuild
-// preprocessing pass — TypeScript type-stripping and/or lowering ES modules to
-// CommonJS — before goja (which parses neither TS annotations nor top-level
-// import/export) can read it.
+// needsTransform reports whether an extension ALONE is enough to know an esbuild
+// preprocessing pass is required — TypeScript type-stripping and/or lowering ES
+// modules to CommonJS — before goja (which parses neither TS annotations nor
+// top-level import/export) can read it.
 //
-// A plain .js file may still need one; extension is not sufficient evidence for
-// that case, so see needsTransformSrc, which is what the converter actually uses.
+// It is a fast path, not the decision: .js files also routinely need a transform
+// (ES modules, Flow and JSX all ship under that extension), and convertJSFile
+// discovers that from goja's own parse failure rather than by predicting it. So a
+// false NEGATIVE here costs one doomed parse, never the file.
 func needsTransform(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".ts", ".tsx", ".jsx", ".mjs", ".cjs":
 		return true
 	}
 	return false
-}
-
-// esmSyntaxRe matches a top-level ES-module statement — exactly what goja rejects
-// ("Unexpected reserved word" on the import keyword). Anchored to the start of a
-// line so `import` appearing as part of an identifier, a property, or mid-string
-// does not match.
-var esmSyntaxRe = regexp.MustCompile(`(?m)^[ \t]*(?:import[ \t{*'"]|export[ \t{*])`)
-
-// dynamicImportRe matches `import(...)`, which goja also rejects. It cannot be
-// line-anchored like esmSyntaxRe: a dynamic import is an EXPRESSION and normally
-// appears mid-line (`const m = await import("./" + name)`), inside an otherwise
-// unremarkable CommonJS file that needs no other transform.
-var dynamicImportRe = regexp.MustCompile(`\bimport\s*\(`)
-
-// needsTransformSrc reports whether a file must take the esbuild path, deciding
-// for plain .js on CONTENT rather than extension.
-//
-// Extension alone is not enough: ES-module syntax is routine in .js files —
-// Babel-transpiled projects and anything with `"type": "module"` write it — and
-// goja cannot parse a single one of them. Judging by extension meant those files
-// failed to parse and were skipped one by one, while the language still reported
-// coverage=ok because a handful of CommonJS files in the same tree converted. On
-// parse-server that silently dropped 165 of 192 source files.
-//
-// Sniffing costs one regexp over the source, paid only for .js; the scan already
-// holds the bytes. A false positive (an `import` line inside a comment or
-// template literal) merely buys an unnecessary esbuild pass, which is harmless
-// since the transform is a no-op for code that was already plain script — whereas
-// a false negative loses the whole file, so the test leans toward transforming.
-func needsTransformSrc(path string, src []byte) bool {
-	if needsTransform(path) {
-		return true
-	}
-	if strings.ToLower(filepath.Ext(path)) != ".js" {
-		return false
-	}
-	return esmSyntaxRe.Match(src) || dynamicImportRe.Match(src)
 }
 
 // transformToJS runs esbuild to strip TypeScript types and lower ES modules to
