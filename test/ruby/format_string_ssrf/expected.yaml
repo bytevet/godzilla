@@ -1,0 +1,4 @@
+# Taint reaches the HOST through the format template: hostFixed() must not suppress.
+findings:
+  - rule: ruby-ssrf
+    min: 1

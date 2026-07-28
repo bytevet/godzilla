@@ -33,6 +33,17 @@ const formatIntrinsic = "builtin.format"
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
 
+// compareIntrinsic is the language-neutral marker a frontend sets on a
+// COMPARISON. Its result is a bool -- influence, not content -- so it must not
+// propagate operand taint, which it achieves by being an intrinsic absent from
+// intrinsicPropagators rather than a BIN_OP (every BIN_OP propagates).
+//
+// It is a CROSS-FRONTEND contract: Go, JavaScript, Python and Ruby all emit it.
+// The engine still has to FOLLOW it when tracing a branch condition back to a
+// validator (see guards.go), which is the one place a comparison's operands
+// matter even though its taint does not.
+const compareIntrinsic = "builtin.compare"
+
 // memberReadIntrinsic marks a synthesized member read (`obj.field` lowered as a
 // CALL so its name can match a source glob) whose base the frontend kept in
 // Call.Value. The engine carries that base's taint to the result: reading a

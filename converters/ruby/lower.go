@@ -655,7 +655,7 @@ func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 			acc = v
 			continue
 		}
-		acc = fs.emitBinOp(acc, v, part)
+		acc = fs.emitBinOp(ir.BinOpKind_BIN_OP_ADD, acc, v, part)
 	}
 	return acc
 }
@@ -891,16 +891,87 @@ func (fs *funcState) lowerBacktick(n interface{}) *ir.Value {
 	return fs.lowerCallExprVals("ruby:%x", args, n)
 }
 
+// lowerBinary lowers `a <op> b`. Ripper shapes this as
+// ["binary", left, "<op>", right] -- the operator is a PLAIN STRING at index 2,
+// which is why scalarText reads it rather than identName.
+//
+// The operator used to be discarded entirely and every binary expression lowered
+// as BIN_OP_ADD. Since ADD is the engine's universal propagator, Ruby
+// `user == "admin"` carried taint (the false-positive class the Go and JS
+// frontends fixed by moving comparisons onto builtin.compare), and it also fed
+// internal/analysis/ssrf.go's constant-prefix reconstruction -- which walks
+// BIN_OP_ADD -- as though a comparison were string building.
 func (fs *funcState) lowerBinary(n interface{}) *ir.Value {
 	left := fs.lowerExpr(at(n, 1))
 	right := fs.lowerExpr(at(n, 3))
-	return fs.emitBinOp(left, right, n)
+	op := scalarText(at(n, 2))
+	if isComparisonOp(op) {
+		// The result is a bool (or an Integer for `<=>`, a MatchData index for
+		// `=~`): influence, not content. An inert intrinsic still gives the engine
+		// a def-use edge for guard analysis, matching Go/JS/Python.
+		inst := fs.newValueInst(n)
+		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+		inst.Intrinsic = "builtin.compare"
+		inst.Operands = []*ir.Value{left, right}
+		fs.emit(inst)
+		return regValue(inst.Name)
+	}
+	return fs.emitBinOp(binOpKind(op), left, right, n)
 }
 
-func (fs *funcState) emitBinOp(left, right *ir.Value, n interface{}) *ir.Value {
+// isComparisonOp reports whether a Ruby binary operator yields a comparison
+// result rather than a value built from its operands' text.
+func isComparisonOp(op string) bool {
+	switch op {
+	case "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!~":
+		return true
+	}
+	return false
+}
+
+// binOpKind maps a Ruby binary operator to its gIR kind.
+//
+// Only two kinds are load-bearing; every BIN_OP propagates taint regardless of
+// kind (see propagatingOps in internal/analysis/taint.go), so the rest are
+// descriptive:
+//
+//   - BIN_OP_ADD is the one kind ssrf.go's constSkeleton walks to rebuild a URL's
+//     constant prefix. `<<` maps to it because Ruby's shovel on a String or Array
+//     IS an append -- calling it SHL would still propagate taint but would make
+//     `url << part` opaque to the host check.
+//   - BIN_OP_REM is read by the same function as a printf-style template with the
+//     format at operand 0. Ruby's `"...%s" % v` has exactly Python's shape, which
+//     is what that arm was written for.
+func binOpKind(op string) ir.BinOpKind {
+	switch op {
+	case "+", "<<":
+		return ir.BinOpKind_BIN_OP_ADD
+	case "%":
+		return ir.BinOpKind_BIN_OP_REM
+	case "-":
+		return ir.BinOpKind_BIN_OP_SUB
+	case "*", "**":
+		return ir.BinOpKind_BIN_OP_MUL
+	case "/":
+		return ir.BinOpKind_BIN_OP_QUO
+	// `&&`/`||`/`and`/`or` must keep propagating: `params[:a] || "default"`
+	// evaluates to one of its operands, so the result carries their taint.
+	case "&", "&&", "and":
+		return ir.BinOpKind_BIN_OP_AND
+	case "|", "||", "or":
+		return ir.BinOpKind_BIN_OP_OR
+	case "^":
+		return ir.BinOpKind_BIN_OP_XOR
+	case ">>":
+		return ir.BinOpKind_BIN_OP_SHR
+	}
+	return ir.BinOpKind_BIN_OP_ADD // unknown operator: propagate conservatively
+}
+
+func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n interface{}) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_BIN_OP
-	inst.BinOp = ir.BinOpKind_BIN_OP_ADD
+	inst.BinOp = kind
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
 	return regValue(inst.Name)

@@ -1,0 +1,5 @@
+# Exactly one finding: the concatenation. The comparison must not produce one.
+findings:
+  - rule: ruby-command-injection
+    min: 1
+    max: 1
