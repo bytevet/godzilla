@@ -12,12 +12,13 @@ import (
 // cases where a whole declaration is expected to disappear. Spelling those out by
 // hand is how a want string ends up one space short of the input.
 func blankAll(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' {
-			return r
+	b := []byte(s)
+	for i, c := range b {
+		if c != '\n' && c != '\r' {
+			b[i] = ' '
 		}
-		return ' '
-	}, s)
+	}
+	return string(b)
 }
 
 // blankSpan returns s with the first occurrence of sub replaced by spaces, so a
@@ -75,6 +76,21 @@ func TestStripFlowOffsets(t *testing.T) {
 		// it, so the result parses and is silently WRONG rather than dropped.
 		{"type as a variable name", "// @flow\nconst c = (type as U);\nnext();", "// @flow\nconst c = (type as U);\nnext();"},
 		{"type as an argument", "// @flow\nrender(request, type, props);\nnext();", "// @flow\nrender(request, type, props);\nnext();"},
+		// A `{` only opens a declaration position when it opens a BLOCK. A specifier
+		// list is not one, and reading it as one blanked the import and everything
+		// after it until the braces happened to rebalance.
+		{"import specifier list", "// @flow\nimport { type Config } from './c';\nconst cp = require('cp');\nfunction r(cmd: ?string) { cp.exec(cmd); }",
+			"// @flow\nimport { type Config } from './c';\nconst cp = require('cp');\n" + blankSpan("function r(cmd: ?string) { cp.exec(cmd); }", ": ?string")},
+		{"export specifier list", "// @flow\nexport { type Config } from './c';\nconst a: ?T = g();",
+			"// @flow\nexport { type Config } from './c';\n" + blankSpan("const a: ?T = g();", ": ?T")},
+		{"object literal is not a declaration position", "// @flow\nconst o = { type Config };\nconst a: ?T = g();",
+			"// @flow\nconst o = { type Config };\n" + blankSpan("const a: ?T = g();", ": ?T")},
+		// A generic bound may follow any binding NAME, `class` included.
+		{"class generic bound", "// @flow\nclass Box<T: Object> { v: ?T; }",
+			"// @flow\n" + blankSpan(blankSpan("class Box<T: Object> { v: ?T; }", "<T: Object>"), ": ?T")},
+		// ...but a bare identifier starting a statement is an expression, not a
+		// binding, so `a<b ? c : d>e` must survive.
+		{"comparison pair around a ternary", "// @flow\nconst t = 1;\na<b ? c : d>e;", "// @flow\nconst t = 1;\na<b ? c : d>e;"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +141,7 @@ module.exports = { run };
 	// A second source whose Flow syntax spans LINES rather than sitting inside
 	// one: a declaration blanked across a multi-line union, and a cast. Those
 	// blanks rewrite whole runs of the buffer, so they are where a lost newline
-	// would show up — the single-line case above cannot catch it.
+	// would show up -- the single-line case above cannot catch it.
 	multiline := `// @flow
 export type Sort =
   | 'asc'
@@ -159,21 +175,21 @@ func assertSinkPos(t *testing.T, name, src, want string) {
 		if err != nil {
 			t.Fatalf("convert: %v", err)
 		}
-		var got []string
+		var got string
 		for _, f := range mod.GetFunctions() {
 			for _, b := range f.GetBlocks() {
 				for _, in := range b.GetInstrs() {
-					if c := in.GetCall(); c != nil && strings.Contains(c.GetCallee(), "exec") {
-						got = append(got, fmt.Sprintf("%d:%d", in.GetPos().GetLine(), in.GetPos().GetColumn()))
+					if c := in.GetCall(); c != nil && got == "" && strings.Contains(c.GetCallee(), "exec") {
+						got = fmt.Sprintf("%d:%d", in.GetPos().GetLine(), in.GetPos().GetColumn())
 					}
 				}
 			}
 		}
-		if len(got) == 0 {
+		if got == "" {
 			t.Fatal("no exec call lowered from the Flow source")
 		}
-		if got[0] != want {
-			t.Errorf("exec lowered at %s, want %s — the strip shifted positions", got[0], want)
+		if got != want {
+			t.Errorf("exec lowered at %s, want %s -- the strip shifted positions", got, want)
 		}
 	})
 }
