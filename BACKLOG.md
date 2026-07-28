@@ -21,6 +21,7 @@ toolchain-gated, net-new frontends, or deferred perf work.
 |----|-----|--------|------|
 | ENG-1 | crit | ✅ `4f445c9` | Sanitizer result no longer re-tainted by the return summary (early-return in `handleCall`). |
 | ENG-2 | high | ✅ `41ae16f` | Flow-sensitive per-block dataflow (RPO + union join) with strong updates on non-escaping allocs. |
+| ENG-13 | high | ✅ `4f2871c` | Guard tracing follows `builtin.compare`. Moving comparisons onto an inert intrinsic (`5978082`) stopped them PROPAGATING as intended, but also stopped `guards.go` TRACING through them, so `if validate(x) == true` no longer reached the validator — in Go, JS and Python. Different properties; only the first was intended. |
 | ENG-3 | high | ✅ `5c26335` | Field-sensitive containers via one-level access-path keys; whole-container fallback kept for INDEX/variadic. |
 | ENG-4 | high | ✅ `ea27eb3` | Shared default-propagator pack (stdlib string/path/url); extended this session with net/http+net/url request accessors. |
 | ENG-5 | high | ✅ `4f445c9` | Receiver-aware INVOKE arg→param mapping for Java instance methods. |
@@ -47,6 +48,10 @@ toolchain-gated, net-new frontends, or deferred perf work.
 | FE-8 | high | ✅ `12389e9` | Java findings anchor to each class's `.java` via the SourceFile attribute. |
 | FE-9 | med | ✅ `f866600` | Java probes `java -version` and surfaces the real javac diagnostic on failure. |
 | FE-10 | med | ✅ `f866600` | Rust MIR-shape smoke test warns on rustc format drift. |
+| FE-11 | high | ✅ `da50352` | `.js` dialect chosen by PARSE FAILURE, not prediction. A content sniff (and before it, the extension alone) had to guess which of plain-script/ESM/Flow/JSX a `.js` was; guessing cost the whole file when wrong and 7% of `Scan_JS` when right. goja parses first, `loaderLadder` runs only on failure. |
+| FE-12 | high | 🟡 `9357b76` | Flow-typed `.js` recovered by blanking Flow syntax in place (`flowstrip.go`), offset-preserving because `go-sourcemap` is consumer-only and positions are mandatory. parse-server 176/195 → 186/195. **Left:** Flow cast expressions `(x: T)`, ambiguous with arrow params — 9 files still drop, `PostgresStorageAdapter.js` among them. Full fidelity would mean `hermes-parser` (C++→WASM) via a pure-Go WASM runtime; needs an ABI spike first. |
+| FE-13 | high | ✅ `4f2871c` | Ruby binary operators reach gIR. `lowerBinary` never read the operator, so every binary expression lowered as `BIN_OP_ADD` — the universal propagator — and `user == "admin"` carried taint. `<<`→ADD (shovel is append), `%`→REM (so `ssrf.go` reads it as a format template), comparisons→`builtin.compare`. |
+| FE-14 | med | ⏸ | Ruby `.to_s` is not a modeled propagator, so it DROPS taint; `unary` (`!x`) and `ifop` (`cond ? a : b`) are unlowered and sink taint into `ruby.unsupported`. The ternary is a real false negative. Found while writing FE-13's samples. |
 
 ## Detection & secrets coverage (COV)
 

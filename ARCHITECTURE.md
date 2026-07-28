@@ -181,8 +181,11 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
 - **Python** (`converters/python/`) — shells out to `python3` for an `ast` JSON
   dump, then lowers it to a real CFG (`ssabuild`). Emits `py:` names; requires `python3`.
 - **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
-  lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node) before
-  parsing, with source maps remapping positions back. `.vue`/`.svelte` SFCs are also
+  lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node), with source
+  maps remapping positions back; a plain `.js` is handed to goja first and only falls
+  back to esbuild when the parse fails, since one extension covers four dialects.
+  Flow, which esbuild cannot load at all, is blanked in place beforehand
+  (`flowstrip.go`) so byte offsets — and therefore positions — are preserved. `.vue`/`.svelte` SFCs are also
   handled (`sfc.go`): the `<script>` block lowers as JS/TS and each dangerous template
   directive (`v-html`, `{@html}`) compiles to a synthetic sink call. Emits `js:` names.
 - **Java** (`converters/java/`) — analyzes JVM **bytecode**. An embedded helper

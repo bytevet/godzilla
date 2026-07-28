@@ -134,7 +134,7 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 
 | | Go | Python | JavaScript | Java | Rust | Ruby |
 |---|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
