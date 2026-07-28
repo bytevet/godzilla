@@ -226,7 +226,19 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 //     (FastAPI @app.get, @router.post, aiohttp @routes.get, Sanic @app.get, …);
 //  2. a `<verb>`-named method, verb in handlerMethodVerbs, of a class
 //     subclassing one of handlerBaseClasses (Tornado RequestHandler, Flask
-//     MethodView, … — matched by simple base name, transitively).
+//     MethodView, … — matched by simple base name, transitively);
+//  3. a method carrying a routing decorator from methodRouteDecorators
+//     (Flask-AppBuilder @expose, DRF @action, flask-classful @route), whatever
+//     the method and class are called.
+//
+// Shape 3 exists because shapes 1 and 2 both key off a NAME the framework no
+// longer supplies. Modern class-based APIs route `@expose("/data")` to a method
+// called `data` and `@action(detail=True)` to one called `upload_example`, on a
+// class whose base is BaseApi or ModelViewSet. Neither name is an HTTP verb, so
+// no parameter was seeded, so the whole handler was clean and NO rule could fire
+// downstream of it -- which is why a campaign miss in superset, label-studio or
+// pyload showed the expected class firing zero times across the entire project
+// rather than firing at the wrong line.
 //
 // routeParamSource is the canonical name of the synthetic source CALL seeded at
 // each recognized parameter; it is a source glob in every Python taint rulepack,
@@ -263,6 +275,36 @@ var (
 		"RedirectView":   true,
 		"APIView":        true, // Django REST Framework
 		"GenericAPIView": true, // Django REST Framework
+		// DRF ViewSets. Their STANDARD actions (list/create/retrieve/…) are
+		// deliberately NOT added to handlerMethodVerbs: those take the request
+		// object plus a `pk`, and request.data/.query_params are already precise
+		// source globs, so seeding them would buy almost nothing while making
+		// every helper method named `create`/`update` in any handler class a
+		// taint origin. A ViewSet's CUSTOM actions are what carry untrusted
+		// input, and shape 3 catches those by their @action decorator. Listing
+		// the bases still matters: it makes `self.request` resolve inside them.
+		"ViewSet":              true,
+		"GenericViewSet":       true,
+		"ModelViewSet":         true,
+		"ReadOnlyModelViewSet": true,
+		"Resource":             true, // flask-restful / flask-restx
+		"HTTPEndpoint":         true, // Starlette
+		"BaseApi":              true, // Flask-AppBuilder
+		"BaseView":             true, // Flask-AppBuilder
+		"ModelRestApi":         true, // Flask-AppBuilder
+	}
+	// methodRouteDecorators mark a method as a route entry point by the
+	// DECORATOR's name rather than the method's (shape 3 above). Unlike
+	// routeDecoratorVerbs these also match a BARE name (`@expose`), because they
+	// are imported symbols rather than registrations on an app/router object.
+	// They are specific enough that a bare match is not the false-positive risk a
+	// bare `@get` would be — which is why routeDecoratorVerbs still requires a
+	// receiver prefix.
+	methodRouteDecorators = map[string]bool{
+		"expose":     true, // Flask-AppBuilder @expose("/data") on BaseApi/BaseView
+		"expose_api": true, // Flask-AppBuilder legacy alias
+		"action":     true, // Django REST Framework @action(detail=True) on a ViewSet
+		"route":      true, // flask-classful / flask-restful @route("/x")
 	}
 	// requestObjectParams name a handler parameter that holds the framework
 	// REQUEST OBJECT itself rather than an untrusted URL capture. Django/DRF verb
@@ -294,12 +336,20 @@ func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 	return nil
 }
 
-// hasRouteDecorator reports whether any decorator is a routing decorator: a
-// dotted name whose last component is a routing verb and which has a receiver
-// prefix (so a bare @get is not mistaken for one).
+// hasRouteDecorator reports whether any decorator is a routing decorator, by
+// either of two tests: a routing VERB with a receiver prefix (`@app.get`, so a
+// bare @get is not mistaken for one), or a name in methodRouteDecorators, which
+// matches bare or dotted (`@expose`, `@api.route`).
 func hasRouteDecorator(node astNode) bool {
 	for _, d := range node.strList("decorators") {
-		if i := strings.LastIndex(d, "."); i >= 0 && routeDecoratorVerbs[d[i+1:]] {
+		name := d
+		if i := strings.LastIndex(d, "."); i >= 0 {
+			name = d[i+1:]
+			if routeDecoratorVerbs[name] {
+				return true
+			}
+		}
+		if methodRouteDecorators[name] {
 			return true
 		}
 	}
