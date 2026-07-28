@@ -9,8 +9,12 @@ func FuzzScanText(f *testing.F) {
 	f.Add("password = \"\"")
 	f.Add("postgres://u:p@h/db")
 	f.Add("")
-	sc := newSecretScan(builtinRuleSet(f))
+	// The rule set is immutable and expensive to compile, so it is built once --
+	// but the scan carries per-run state (seen, findings), so a shared instance
+	// would accumulate across every fuzz input, growing without bound and slowing
+	// its own map lookups. One scan per input.
+	rs := builtinRuleSet(f)
 	f.Fuzz(func(t *testing.T, s string) {
-		sc.text(s, nil, "", "")
+		newSecretScan(rs).text(s, nil, "", "")
 	})
 }

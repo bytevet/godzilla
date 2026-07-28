@@ -183,24 +183,11 @@ func calleeCommon(callee string) *ir.CallCommon {
 	}
 }
 
-// emitCall emits an OP_CODE_CALL to callee, lowering args in order, and returns
-// its result register. Shared by lowerNew and (via emitCallRecv) lowerCall,
-// whose only difference is how they build the callee name.
+// emitCall emits an OP_CODE_CALL to callee with no receiver, lowering args in
+// order, and returns its result register. Used by lowerNew; a method call goes
+// through emitCallRecvInst directly so lowerCall can reach the instruction.
 func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	return fs.emitCallRecv(callee, nil, args, idx)
-}
-
-// emitCallRecv emits an OP_CODE_CALL to callee. For a method call (`obj.m(x)`),
-// receiver is the already-lowered base object; it is placed in Call.Value so the
-// engine -- which reads a method call's receiver from Call.Value (see
-// propagatorOperands in internal/analysis) -- carries taint from the receiver
-// through a taint-preserving transform such as `tainted.slice(i)` or
-// `tainted.toLowerCase()`. JS methods take no explicit receiver argument, so the
-// receiver stays OUT of Args and the arg->param alignment the engine relies on
-// for cross-function calls is unchanged. When receiver is nil (a free/identifier
-// call or `new`), Call.Value falls back to the callee FuncName as before.
-func (fs *funcState) emitCallRecv(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Value {
-	return regValue(fs.emitCallRecvInst(callee, receiver, args, idx).Name)
+	return regValue(fs.emitCallRecvInst(callee, nil, args, idx).Name)
 }
 
 // emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
@@ -1426,7 +1413,7 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // note on the js-ssrf sample's chained axios.get(...).then(...) handler.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	// For a method call, lower the receiver (the callee's base object) so its
-	// register can be carried in Call.Value (see emitCallRecv): this both
+	// register can be carried in Call.Value (see emitCallRecvInst): this both
 	// evaluates the base -- which, off an opaque request object like `req.url`,
 	// is itself the synthetic taint source -- and lets a taint-preserving method
 	// like `.slice`/`.toLowerCase` propagate the receiver's taint to the result.

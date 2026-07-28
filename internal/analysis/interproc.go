@@ -1711,7 +1711,11 @@ func analyzeFunc(
 			}
 			visitIntrinsic(inst, defs, tainted)
 		case ir.OpCode_OP_CODE_RET:
-			if _, pos, ok := firstTaintedArg(tainted, inst.GetOperands()); ok && res.returnsOrigin == nil {
+			// The cheap check goes FIRST: once the function is already known
+			// taint-returning the scan cannot change the outcome, and skipping it
+			// avoids isTaintedArg's per-miss "#*" key allocation on every later
+			// worklist pass over this RET.
+			if pos, ok := firstTaintedArg(tainted, inst.GetOperands()); res.returnsOrigin == nil && ok {
 				// Interprocedural ENG-9: a tainted value returned on a path a
 				// validator guard dominates (`if !valid(x) { return "" }; return x`)
 				// is validated on every returning path, so the function is not

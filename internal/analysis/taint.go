@@ -447,13 +447,13 @@ func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Pos
 // Deliberately NOT used for the sink check, which stays field-blind: a sink fires
 // on the value actually passed, and widening it there would report a sink that
 // received a clean field of a partly-tainted struct.
-func firstTaintedArg(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Position, ok bool) {
+func firstTaintedArg(tainted taintState, vals []*ir.Value) (*ir.Position, bool) {
 	for _, v := range vals {
 		if p, hit := isTaintedArg(tainted, v); hit {
-			return v.GetRegName(), p, true
+			return p, true
 		}
 	}
-	return "", nil, false
+	return nil, false
 }
 
 // markTainted records reg as tainted with the given origin, unless it is

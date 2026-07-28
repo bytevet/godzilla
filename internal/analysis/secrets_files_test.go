@@ -69,12 +69,12 @@ func TestSecretPatterns_VendorPrefixes(t *testing.T) {
 		{"secret-slack-webhook", sgWebhook},
 		{"secret-db-connection", mysqlConn},
 	}
+	rs := builtinRuleSet(t) // compiled once: every case shares the same rules
 	for _, tc := range cases {
-		sc := newSecretScan(builtinRuleSet(t))
+		sc := newSecretScan(rs)
 		sc.text(tc.hit, nil, "", "")
-		findings := sc.findings
 		hitIDs := map[string]bool{}
-		for _, f := range findings {
+		for _, f := range sc.findings {
 			hitIDs[f.RuleID] = true
 		}
 		if !hitIDs[tc.id] {
@@ -129,12 +129,12 @@ func TestSecretPatterns_NoFalsePositiveOnPlaceholders(t *testing.T) {
 		"token = process.env.TOKEN",
 		"# see docs for how to set the stripe key",
 	}
+	rs := builtinRuleSet(t) // compiled once: every case shares the same rules
 	for _, line := range benign {
-		sc := newSecretScan(builtinRuleSet(t))
+		sc := newSecretScan(rs)
 		sc.text(line, nil, "", "")
-		findings := sc.findings
-		if len(findings) != 0 {
-			t.Errorf("benign line should not fire a secret rule: %q -> %v", line, findings)
+		if len(sc.findings) != 0 {
+			t.Errorf("benign line should not fire a secret rule: %q -> %v", line, sc.findings)
 		}
 	}
 }

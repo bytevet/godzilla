@@ -65,17 +65,20 @@ func needsTransform(path string) bool {
 // merge treats the file as a skipped/failed conversion, exactly like a parse
 // error.
 func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
-	code, consumer, err := "", (*sourcemap.Consumer)(nil), error(nil)
-	for i, loader := range loaderLadder(path) {
-		c, cons, e := runESBuild(string(src), loader, filepath.Base(path))
-		if e == nil {
-			return c, cons, nil
+	// Hoisted: every rung would otherwise re-copy the whole source into a fresh
+	// string, and a file that fails every rung is exactly the large one.
+	code, base := string(src), filepath.Base(path)
+	var firstErr error
+	for _, loader := range loaderLadder(path) {
+		out, cons, err := runESBuild(code, loader, base)
+		if err == nil {
+			return out, cons, nil
 		}
-		if i == 0 {
-			code, consumer, err = c, cons, e // the primary loader's error is the honest one
+		if firstErr == nil {
+			firstErr = err // the primary loader's error is the honest one
 		}
 	}
-	return code, consumer, err
+	return "", nil, firstErr
 }
 
 // loaderLadder returns the esbuild loaders to try for path, in order, stopping at
@@ -106,6 +109,15 @@ func loaderLadder(path string) []api.Loader {
 	}
 }
 
+// esbuildSupported is hoisted out of runESBuild so the map is not reallocated on
+// every transform. The consumer is goja, not a browser, and goja cannot parse
+// `import(...)`. ESNext otherwise counts it as supported, so esbuild passes it
+// through untouched and the file fails at PARSE time instead of transform time --
+// which reads as a broken transform when it is really an unsupported construct.
+// Declaring it unsupported makes esbuild downlevel it to the require-based form
+// the lowering already understands.
+var esbuildSupported = map[string]bool{"dynamic-import": false}
+
 // runESBuild is the shared esbuild pass behind transformToJS (whole-file
 // TS/ESM transform) and the SFC extractor (its synthesized combined buffer):
 // it strips TS types and lowers ES modules to CommonJS with the same options,
@@ -126,7 +138,7 @@ func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sou
 		// which reads as a broken transform when it is really an unsupported
 		// construct. Declaring it unsupported makes esbuild downlevel it to the
 		// require-based form the lowering already understands.
-		Supported:   map[string]bool{"dynamic-import": false},
+		Supported:   esbuildSupported,
 		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
 	})
 	if len(res.Errors) > 0 {
