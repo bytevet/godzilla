@@ -13,6 +13,9 @@
 // alias and blanks the rest of the enclosing function while staying brace-balanced
 // — a file that parses and is silently wrong, which is strictly worse than a drop.
 
+// A specifier list is NOT a declaration position; `type` here is a named import.
+import { type Config, parse } from './config';
+
 export type SchemaField = { +type: string, targetClass: ?string };
 
 declare export type Handle = number;

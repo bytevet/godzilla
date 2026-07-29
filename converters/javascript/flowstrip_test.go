@@ -24,6 +24,13 @@ func blankAll(s string) string {
 // blankSpan returns s with the first occurrence of sub replaced by spaces, so a
 // want string states WHICH span disappears instead of asserting a hand-counted
 // run of spaces.
+func blankSpans(s string, subs ...string) string {
+	for _, sub := range subs {
+		s = blankSpan(s, sub)
+	}
+	return s
+}
+
 func blankSpan(s, sub string) string {
 	i := strings.Index(s, sub)
 	if i < 0 {
@@ -34,12 +41,12 @@ func blankSpan(s, sub string) string {
 
 func TestStripFlowOffsets(t *testing.T) {
 	cases := []struct{ name, in, want string }{
-		{"maybe param", "function f(x: ?string) { return x; }", "function f(x         ) { return x; }"},
-		{"indexer", "function f(o: {[string]: mixed}) { return o; }", "function f(o                   ) { return o; }"},
-		{"opaque", "opaque type ID = string;", "                        "},
-		{"type alias body", "type O = { a?: ?string };", "                         "},
-		{"return type", "function f(): ?string { return null; }", "function f()          { return null; }"},
-		{"const decl", "const a: ?T = g();", "const a     = g();"},
+		{"maybe param", "function f(x: ?string) { return x; }", blankSpan("function f(x: ?string) { return x; }", ": ?string")},
+		{"indexer", "function f(o: {[string]: mixed}) { return o; }", blankSpan("function f(o: {[string]: mixed}) { return o; }", ": {[string]: mixed}")},
+		{"opaque", "opaque type ID = string;", blankAll("opaque type ID = string;")},
+		{"type alias body", "type O = { a?: ?string };", blankAll("type O = { a?: ?string };")},
+		{"return type", "function f(): ?string { return null; }", blankSpan("function f(): ?string { return null; }", ": ?string")},
+		{"const decl", "const a: ?T = g();", blankSpan("const a: ?T = g();", ": ?T")},
 		// value code that MUST survive untouched
 		{"ternary", "const a = c ? x : y;", "const a = c ? x : y;"},
 		{"object literal", "const o = { a: 1, b: 2 };", "const o = { a: 1, b: 2 };"},
@@ -56,18 +63,18 @@ func TestStripFlowOffsets(t *testing.T) {
 			"// @flow\n" + blankAll("declare export type T = string;")},
 		{"multi-line union", "type T =\n  | 'a'\n  | 'b';\nconst x: ?T = g();",
 			blankAll("type T =\n  | 'a'\n  | 'b';") + "\n" + blankSpan("const x: ?T = g();", ": ?T")},
-		{"cast", "// @flow\nconst a = (x: any);", "// @flow\nconst a = (x     );"},
-		{"nested cast", "// @flow\nn = Object.keys((s.t: any)).length;", "// @flow\nn = Object.keys((s.t     )).length;"},
-		{"cast of object literal", "// @flow\nconst c = ({ ...a || {} }: T);", "// @flow\nconst c = ({ ...a || {} }   );"},
+		{"cast", "// @flow\nconst a = (x: any);", "// @flow\n" + blankSpan("const a = (x: any);", ": any")},
+		{"nested cast", "// @flow\nn = Object.keys((s.t: any)).length;", "// @flow\n" + blankSpan("n = Object.keys((s.t: any)).length;", ": any")},
+		{"cast of object literal", "// @flow\nconst c = ({ ...a || {} }: T);", "// @flow\n" + blankSpan("const c = ({ ...a || {} }: T);", ": T")},
 		{"generic bound", "// @flow\nclass C { m<T: { [k: string]: any }>(a: T) { return a; } }",
-			"// @flow\n" + blankSpan(blankSpan("class C { m<T: { [k: string]: any }>(a: T) { return a; } }",
-				"<T: { [k: string]: any }>"), ": T")},
+			"// @flow\n" + blankSpans("class C { m<T: { [k: string]: any }>(a: T) { return a; } }",
+				"<T: { [k: string]: any }>", ": T")},
 		{"property after comment", "// @flow\nclass C {\n  // note\n  p: ?string;\n  static q: ?number;\n}",
 			"// @flow\nclass C {\n  // note\n  " + blankSpan("p: ?string;", ": ?string") +
 				"\n  " + blankSpan("static q: ?number;", ": ?number") + "\n}"},
 		// value code that MUST survive untouched
 		{"import type", "import type X from './y';\nconst a: ?T = g();",
-			"import type X from './y';\nconst a     = g();"},
+			"import type X from './y';\n" + blankSpan("const a: ?T = g();", ": ?T")},
 		{"object literal in ternary branch", "// @flow\nconst r = c ? g({}) : h();", "// @flow\nconst r = c ? g({}) : h();"},
 		{"less-than then ternary", "// @flow\nconst r = x < y ? 1 : 2;", "// @flow\nconst r = x < y ? 1 : 2;"},
 		{"object key after block", "// @flow\nif (a) { b(); }\nconst o = { k: 1 };", "// @flow\nif (a) { b(); }\nconst o = { k: 1 };"},
@@ -87,10 +94,21 @@ func TestStripFlowOffsets(t *testing.T) {
 			"// @flow\nconst o = { type Config };\n" + blankSpan("const a: ?T = g();", ": ?T")},
 		// A generic bound may follow any binding NAME, `class` included.
 		{"class generic bound", "// @flow\nclass Box<T: Object> { v: ?T; }",
-			"// @flow\n" + blankSpan(blankSpan("class Box<T: Object> { v: ?T; }", "<T: Object>"), ": ?T")},
+			"// @flow\n" + blankSpans("class Box<T: Object> { v: ?T; }", "<T: Object>", ": ?T")},
 		// ...but a bare identifier starting a statement is an expression, not a
 		// binding, so `a<b ? c : d>e` must survive.
 		{"comparison pair around a ternary", "// @flow\nconst t = 1;\na<b ? c : d>e;", "// @flow\nconst t = 1;\na<b ? c : d>e;"},
+		// `class` is not reserved as a property name, and an unstamped pending-class
+		// flag was consumed by the next `{` anywhere -- blanking an unrelated
+		// literal's value to leave `{ a }`, which is valid shorthand and so PARSES.
+		{"class as an object key", "// @flow\nconst o = { class: 'b' };\nconst p = { a: 1 };", "// @flow\nconst o = { class: 'b' };\nconst p = { a: 1 };"},
+		{"class as a member read", "// @flow\nconst k = o.class;\nrun({ a: 1 });", "// @flow\nconst k = o.class;\nrun({ a: 1 });"},
+		{"class body vs mixin argument", "// @flow\nclass X extends mix({ a: 1 }) { v: ?T; }",
+			"// @flow\n" + blankSpan("class X extends mix({ a: 1 }) { v: ?T; }", ": ?T")},
+		// `>` closes a type-argument list; only as the tail of `=>` does it leave the
+		// type open. Continuing at a bare `>` ran the blank into the next statement.
+		{"generic alias without a semicolon", "// @flow\ntype P = Array<string>\nconst cp = require('cp');",
+			"// @flow\n" + blankAll("type P = Array<string>") + "\nconst cp = require('cp');"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
