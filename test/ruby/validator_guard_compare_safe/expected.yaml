@@ -1,0 +1,2 @@
+# The validator dominates the sink even through the `== true` comparison.
+findings: []

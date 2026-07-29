@@ -78,6 +78,19 @@ func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error)
 			firstErr = err // the primary loader's error is the honest one
 		}
 	}
+	// Last rung: Flow. esbuild has no Flow loader and Flow is not valid
+	// TypeScript, so no choice of loader recovers these -- the source itself has
+	// to change. stripFlow blanks Flow-only syntax in place, preserving every byte
+	// offset so esbuild's sourcemap (and therefore remapPositions) stays correct;
+	// see flowstrip.go. Retrying the whole ladder rather than one loader keeps the
+	// dialect question open: a Flow file may also be an ES module or use JSX.
+	if stripped, ok := stripFlow(code); ok && stripped != code {
+		for _, loader := range loaderLadder(path) {
+			if out, cons, err := runESBuild(stripped, loader, base); err == nil {
+				return out, cons, nil
+			}
+		}
+	}
 	return "", nil, firstErr
 }
 

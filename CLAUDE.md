@@ -67,10 +67,15 @@ changing one:
   parameter — see its doc comment.
 - `python/`, `ruby/` — shell out to `python3` / `ruby` for an AST dump via an embedded helper
   (`pyast.py`, `rbdump.rb`), then lower it.
-- `javascript/` — pure-Go goja parse. TS/JSX/ESM go through esbuild's in-process `Transform` with a
-  source-map consumer remapping positions back (`transform.go`); plain `.js` skips it. `.vue`/`.svelte`
-  SFCs (`sfc.go`) lower the `<script>` block as the module body and append each dangerous template
-  directive (`v-html`, `{@html}`) as a synthetic sink CALL.
+- `javascript/` — pure-Go goja parse. Extensions that always need one (`.ts/.tsx/.jsx/.mjs/.cjs`) take
+  esbuild's in-process `Transform` up front, with a source-map consumer remapping positions back
+  (`transform.go`). Plain `.js` does NOT: it is the ambiguous extension — plain script, ESM, Flow and
+  JSX all ship as `.js` — so it goes straight to goja and the PARSE FAILURE drives `loaderLadder`,
+  which is exact where predicting the dialect was not. `flowstrip.go` is that ladder's last rung:
+  Flow has no esbuild loader, so it blanks Flow-only syntax IN PLACE, every removed byte becoming a
+  space, because positions must survive and the sourcemap library cannot compose two maps.
+  `.vue`/`.svelte` SFCs (`sfc.go`) lower the `<script>` block as the module body and append each
+  dangerous template directive (`v-html`, `{@html}`) as a synthetic sink CALL.
 - `java/` — JVM **bytecode**, via an embedded `JavaDump.java` (JDK 24+, `java.lang.classfile`) plus an
   operand-stack simulation in `lower.go`. Instance calls become `OP_CODE_INVOKE` with the receiver in
   `Call.Value`, so sink `#0` pinning and the engine's arg→param mapping line up. A Maven/Gradle target is

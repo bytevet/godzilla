@@ -74,6 +74,14 @@ engine's linear fast path (no perf regression on straight-line handlers).
       Residual (not blocking, no known instance): relax any rule scoping that
       compensated for straight-line imprecision. Nothing has been identified that
       still needs it, so this is opened only if a specific over-narrow rule is found.
+      **Re-verified independently** by disabling `guardIndex.guarded` and confirming
+      the safe samples start firing — ruby path-traversal 0→1, ruby compare-guard
+      0→1, python redirect 0→1, js redirect 0→1 — so they exercise the dominator
+      analysis rather than passing vacuously. Two guard-named samples deliberately do
+      NOT move: `python/validated_redirect_safe` covers the INTERprocedural validator
+      and `ruby/control_flow_safe` is a branch-traversal control. That pass also
+      exposed a real defect the samples had missed (see ENG-13): `guards.go` had
+      stopped tracing through comparisons once they became intrinsics.
 
 ## Acceptance gate (every phase, before commit)
 

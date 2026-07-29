@@ -142,8 +142,18 @@ func validatorArgsOf(condReg string, defs map[string]*ir.Instruction, rule *rule
 		}
 		// Not a validator call itself: follow boolean-shaping operands (negation,
 		// comparison against a constant, type convert) toward the validator.
-		switch def.Op {
-		case ir.OpCode_OP_CODE_UN_OP, ir.OpCode_OP_CODE_BIN_OP, ir.OpCode_OP_CODE_CONVERT:
+		//
+		// compareIntrinsic has to be listed explicitly. A comparison used to lower
+		// to OP_CODE_BIN_OP and was covered by that arm; once the frontends moved
+		// it onto an inert intrinsic so it would stop PROPAGATING taint, this walk
+		// silently stopped following it, and `if validate(x) == true { ... }` no
+		// longer reached the validator. Not propagating and not being traceable are
+		// different properties, and only the first was intended.
+		switch {
+		case def.Op == ir.OpCode_OP_CODE_UN_OP,
+			def.Op == ir.OpCode_OP_CODE_BIN_OP,
+			def.Op == ir.OpCode_OP_CODE_CONVERT,
+			def.Op == ir.OpCode_OP_CODE_INTRINSIC && def.GetIntrinsic() == compareIntrinsic:
 			var regs []string
 			for _, op := range def.GetOperands() {
 				regs = append(regs, walk(op.GetRegName())...)
