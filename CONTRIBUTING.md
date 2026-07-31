@@ -4,7 +4,7 @@ This guide covers the essentials.
 
 ## Development setup
 
-- **Go 1.25+** is required.
+- **Go 1.26+** is required.
 - Optional per-language toolchains (their frontend tests **skip** when absent):
   **`python3`** (Python), a **JDK 24+ `java`** (Java), **`rustc`** (Rust),
   **`ruby`** (Ruby). The Go and JavaScript frontends are pure Go and need nothing

@@ -4,7 +4,7 @@ version: 2
 # GitHub Actions (ci.yml, release.yml, security.yml) current via reviewable PRs,
 # so we get reproducible pins without `latest`'s silent drift.
 updates:
-  # Base images: golang:1.25-bookworm, debian:bookworm-slim, eclipse-temurin:25-jdk.
+  # Base images: golang:1.26-bookworm, debian:bookworm-slim, eclipse-temurin:25-jdk.
   - package-ecosystem: docker
     directory: /
     schedule:

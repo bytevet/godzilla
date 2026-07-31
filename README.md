@@ -53,7 +53,7 @@ go install godzilla/cmd/godzilla@latest    # or, from a clone:
 go build -o godzilla ./cmd/godzilla
 ```
 
-Requires **Go 1.25+**. Scanning Python, Ruby, Java, or Rust also needs that
+Requires **Go 1.26+**. Scanning Python, Ruby, Java, or Rust also needs that
 language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`,
 each degrading gracefully when absent. Or skip install and
 [run with Docker](#run-with-docker).

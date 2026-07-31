@@ -13,7 +13,7 @@
 # Java/Rust.
 #
 # Base images are pinned on purpose (see the release workflow's Dependabot config
-# for automated bumps): the runtime `go` must track go.mod's `go 1.25.5`, and the
+# for automated bumps): the runtime `go` must track go.mod's `go 1.26.5`, and the
 # Java frontend hard-requires a JDK 24+ (Temurin 25).
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ FROM debian:bookworm-slim AS slim
 
 # The Go frontend loads packages via `go list` (golang.org/x/tools), so the Go
 # toolchain must be present at scan time — copy the exact version used to build.
-COPY --from=golang:1.25-bookworm /usr/local/go /usr/local/go
+COPY --from=golang:1.26-bookworm /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # python3 (stdlib ast) and ruby (stdlib Ripper) are the Python/Ruby frontends'

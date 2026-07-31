@@ -1,6 +1,6 @@
 module godzilla
 
-go 1.25.5
+go 1.26.5
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.55.0
