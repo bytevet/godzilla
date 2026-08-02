@@ -204,9 +204,9 @@ arg[0].String in ['DES', 'RC4', 'Blowfish']
 A non-recoverable argument is `"<DYN>"`, so a prefix/exact check fails and the
 entry is **suppressed** (confirm, don't guess). A guard that *raises* is
 suppressed too — an out-of-range `arg[i]` or `.Elems[i]` is an eval error, which
-reads as "not confirmed" and silently hides the finding. Guard an index with the
-check that proves it exists (`.Type == "aggregate"` before `.Elems[0]`), rather
-than relying on the error. Because a wildcard `matches` can
+reads as "not confirmed" and silently hides the finding. Prove an index exists
+before using it (`len(.Elems) > 0` before `.Elems[0]`) rather than relying on the
+error. Because a wildcard `matches` can
 span `<DYN>`, combine `matches`/`==` with `.Complete` when an exact match matters.
 Guards compile once at load; a syntax, type, or regexp error fails `rules lint`,
 and a guard that fails to compile suppresses its entry rather than firing.

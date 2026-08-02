@@ -18,15 +18,17 @@ rules:
     # `shell=flag` records no keyword name at all (the frontend marks constants
     # only), so it would read as absent — hence every non-tainted argument must
     # be a keyword we can name.
-    # `.Type == "aggregate"` is not redundant with `.TaintInChildren`: a dict is
-    # "map" with empty .Elems, so .Elems[0] would raise — and a guard that raises
-    # SUPPRESSES its sink, which would hide the finding rather than report it.
+    # The two container clauses do different jobs. `len(.Elems) > 0` proves the
+    # index below is safe — a dict has no .Elems, and .Elems[0] on it would raise,
+    # which SUPPRESSES the sink rather than reporting it. `.TaintInChildren` is
+    # about where the taint is: a list mutated after it was built (`l[0] = x`) has
+    # elements that all look constant, and only this stops it being cleared.
     when: >-
       not ((kwargs.shell.String == "" or kwargs.shell.String == "false")
            and all(filter(arg, not .Tainted), .Name != "")
            and any(arg, .Tainted)
            and all(filter(arg, .Tainted),
-                   .Type == "aggregate"
+                   len(.Elems) > 0
                    and .TaintInChildren
                    and .Elems[0].Complete
                    and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$")))
