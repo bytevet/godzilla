@@ -72,7 +72,17 @@ type Arg struct {
 // match matters. Compiled once at load.
 type Guard struct {
 	prog *vm.Program
+	// What the source actually mentions. A guard cannot observe a root it never
+	// names, so anything it does not read is not worth building: kwargsOf
+	// allocates a map per evaluation (lazily, but a single keyword argument is
+	// enough to trigger it), and container reconstruction walks the IR.
+	usesKWArgs     bool
+	needsStructure bool
 }
+
+// NeedsStructure reports whether the guard reads container structure, so a caller
+// can skip reconstructing it. A nil guard reads nothing.
+func (g *Guard) NeedsStructure() bool { return g != nil && g.needsStructure }
 
 // DenyGuard never fires. It stands in for a guard that could not be compiled or
 // is unavailable, so a malformed/unusable `when:` SUPPRESSES its entry instead of
@@ -181,7 +191,12 @@ func CompileGuard(src string) (*Guard, error) {
 	if err != nil {
 		return DenyGuard, fmt.Errorf("guard %q: %w", src, err)
 	}
-	g := &Guard{prog: prog}
+	g := &Guard{
+		prog:       prog,
+		usesKWArgs: strings.Contains(src, "kwargs"),
+		needsStructure: strings.Contains(src, "Elems") || strings.Contains(src, "Entries") ||
+			strings.Contains(src, "TaintInChildren"),
+	}
 	guardCache.Store(src, g)
 	return g, nil
 }
@@ -219,7 +234,11 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 		}
 		return true
 	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args, KWArgs: kwargsOf(args), HostFixed: fn})
+	env := guardEnv{Arg: args, HostFixed: fn}
+	if g.usesKWArgs {
+		env.KWArgs = kwargsOf(args)
+	}
+	out, err := expr.Run(g.prog, env)
 	if err != nil {
 		return false
 	}

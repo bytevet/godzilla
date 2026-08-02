@@ -15,15 +15,15 @@ func TestArgVals(t *testing.T) {
 	concat := binOp("c", ir.BinOpKind_BIN_OP_ADD, cstV("cmd:"), regV("t0")) // "cmd:" + t0
 	defs := defsOf(concat)
 
-	partial := argVals(callInst("s1", "x:sink", regV("c")).Call, defs, nil)[0]
+	partial := argVals(callInst("s1", "x:sink", regV("c")).Call, defs, nil, true)[0]
 	if partial.String != "cmd:"+rules.DynMarker || partial.Complete {
 		t.Errorf("partial = %+v, want {String:cmd:<DYN> Complete:false}", partial)
 	}
-	full := argVals(callInst("s2", "x:sink", cstV("AES/ECB/PKCS5Padding")).Call, defs, nil)[0]
+	full := argVals(callInst("s2", "x:sink", cstV("AES/ECB/PKCS5Padding")).Call, defs, nil, true)[0]
 	if !full.Complete || full.String != "AES/ECB/PKCS5Padding" || full.Type != "string" {
 		t.Errorf("full = %+v, want a complete string constant", full)
 	}
-	dyn := argVals(callInst("s3", "x:sink", regV("t0")).Call, defs, nil)[0]
+	dyn := argVals(callInst("s3", "x:sink", regV("t0")).Call, defs, nil, true)[0]
 	if dyn.Complete || dyn.String != rules.DynMarker {
 		t.Errorf("dynamic = %+v, want {String:<DYN> Complete:false}", dyn)
 	}
@@ -45,7 +45,7 @@ func TestArgValsScalarConstants(t *testing.T) {
 		{"false", boolV(false), "false", "bool"},
 		{"int", intV(8080), "8080", "int"},
 	} {
-		got := argVals(callInst("s", "x:sink", tc.val).Call, nil, nil)[0]
+		got := argVals(callInst("s", "x:sink", tc.val).Call, nil, nil, true)[0]
 		if got.String != tc.wantStr || !got.Complete || got.Type != tc.wantType {
 			t.Errorf("%s: argVals = %+v, want {String:%s Complete:true Type:%s}", tc.name, got, tc.wantStr, tc.wantType)
 		}

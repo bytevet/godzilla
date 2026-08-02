@@ -343,10 +343,15 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 // behind it), in which case every Arg reports Tainted false, so a rule keying on
 // it simply never suppresses there. The structure budget is shared across the
 // whole call, not per argument.
-func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState) []rules.Arg {
+func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState, expand bool) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
+	// A guard that never names .Elems/.Entries cannot observe the structure, so
+	// a zero budget skips reconstructing it entirely.
 	budget := maxArgNodes
+	if !expand {
+		budget = 0
+	}
 	for i, v := range la {
 		out[i] = argOf(v, defs, tainted, &budget)
 	}
@@ -1536,7 +1541,7 @@ func analyzeFunc(
 				// never reported through a wrapper — documented in writing-rules.md.
 				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
 				// it only if the rule mentions it, so an unrelated guard pays nothing.
-				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs, tainted),
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs, tainted, sinkGuard.NeedsStructure()),
 					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break
 				}
