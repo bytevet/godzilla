@@ -11,14 +11,22 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     extend: $_py-sources.yaml
-    # Passing tainted data as an element of a direct argv LIST (no shell) is not
-    # command injection: the value reaches execve as one argument, never a shell
+    # Passing tainted data as an element of a direct argv LIST is not command
+    # injection: the value reaches execve as one argument, never a shell
     # interpreter. The Python frontend lowers container literals to
     # builtin.aggregate so element taint survives into a later whole-container
-    # use, which would otherwise make the safe argv form fire; `argvList()` is
-    # the engine fact that tells the two apart (it also checks no truthy
-    # `shell=` keyword). See test/python/subprocess_argv_safe.
-    when: 'not argvList()'
+    # use, which would otherwise make the safe argv form fire.
+    #
+    # Suppress only when BOTH hold: no shell is requested, and every tainted
+    # argument arrived as an in-place container ("aggregate"). A tainted plain
+    # string still fires, and `shell=True` re-arms the sink because the list is
+    # then joined into one shell string. `kwargs.shell` is the zero Arg when the
+    # call passes no `shell=`, so the first clause simply reads false there.
+    # See test/python/subprocess_argv_safe and subprocess_argv_shell.
+    when: >-
+      not (kwargs.shell.String != "true"
+           and len(filter(arg, .Tainted)) > 0
+           and all(filter(arg, .Tainted), .Type == "aggregate"))
     sinks:
       - "py:os.system"
       - "py:os.popen"

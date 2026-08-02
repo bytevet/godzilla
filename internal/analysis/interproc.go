@@ -341,7 +341,10 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 // argVals reconstructs each logical argument as a guard's `arg[i]`: the string
 // skeleton (constant runs + DynMarker for dynamic runs, via constSkeleton),
 // whether the whole argument is constant, and its best-effort static type.
-func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
+// argVals renders a call's logical arguments for a `when:` guard. tainted may be
+// nil — a dangerous-call guard has no flow behind it — in which case every Arg
+// reports Tainted false, so a rule keying on it simply never suppresses there.
+func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
@@ -363,7 +366,13 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
 				s, complete = sc, true
 			}
 		}
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name}
+		// Taint is read from the UNWRAPPED value: the kwarg marker stands in for
+		// the value in the argument list, so the taint belongs to what it wraps.
+		isTaint := false
+		if tainted != nil {
+			_, isTaint = isTainted(tainted, v)
+		}
+		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name, Tainted: isTaint}
 	}
 	return out
 }
@@ -395,6 +404,15 @@ func constScalar(v *ir.Value) (string, bool) {
 // instruction is string-typed, else "" (unknown). The IR-type fallback matters:
 // without it a fully tainted string — the common guarded case — would report "".
 func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) string {
+	// A container CONSTRUCTED IN PLACE — a Python list/dict/set literal or
+	// comprehension — reports "aggregate". This is what lets a rule tell the
+	// safe argv form apart from a shell string: in
+	// `subprocess.run(["ls", name])` the tainted value is an element of an
+	// aggregate, not the command text. Checked before the skeleton fallbacks,
+	// which would otherwise type it by its reconstructed text.
+	if d := defs[v.GetRegName()]; d != nil && d.GetIntrinsic() == aggregateIntrinsic {
+		return "aggregate"
+	}
 	if c := v.GetConstant(); c != nil {
 		switch c.Value.(type) {
 		case *ir.Constant_StringVal:
@@ -1447,10 +1465,8 @@ func analyzeFunc(
 				// never reported through a wrapper — documented in writing-rules.md.
 				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
 				// it only if the rule mentions it, so an unrelated guard pays nothing.
-				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs), rules.Facts{
-					HostFixed: func() bool { return !urlHostControllable(inj, tainted, defs) },
-					ArgvList:  func() bool { return argvListSafe(inj, tainted, defs, inst.Call) },
-				}) {
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs, tainted),
+					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break
 				}
 				// ENG-9: suppress when a validator guard on this flow's source

@@ -31,6 +31,14 @@ type Arg struct {
 	// distinguish the dangerous `shell=True` from an innocuous `check=True` —
 	// so a config-flag rule matches on `.Name` together with `.String`.
 	Name string
+	// Tainted reports whether this argument carries taint at the call. It lets a
+	// rule ask WHICH argument the untrusted value arrived in, rather than the
+	// engine deciding on the rule's behalf: `subprocess.run(["ls", name])` is
+	// safe because the tainted value is an element of an argv list, and a rule
+	// can now say exactly that (see rulepacks/py-command-injection.yaml).
+	// Always false where there is no taint state — a dangerous-call guard has
+	// no flow behind it — so a rule keying on it simply never suppresses there.
+	Tainted bool
 }
 
 // Guard is a compiled `when:` expression that decides whether a dynamic sink or
@@ -58,12 +66,32 @@ var DenyGuard = &Guard{}
 // confined to the path/query of a constant scheme://host.
 type guardEnv struct {
 	Arg []Arg `expr:"arg"`
+	// KWArgs indexes the same arguments by the keyword they were passed under,
+	// so a rule reads `kwargs.shell.String == "true"` instead of scanning
+	// `arg[i].Name` at an index it cannot know. Derived from Arg, so the engine
+	// supplies nothing extra. A MISSING keyword yields the zero Arg rather than
+	// an error (expr's map semantics), so `kwargs.shell.String == "true"` is
+	// simply false on a call with no `shell=` — the safe reading, and what lets
+	// a guard mention a keyword that is usually absent.
+	KWArgs map[string]Arg `expr:"kwargs"`
 	// hostFixed() with no argument asks about the sink's own injection points;
 	// hostFixed(arg[i]) asks about one specific argument. See EvalHostFixed.
 	HostFixed func(...Arg) bool `expr:"hostFixed"`
-	// argvList() answers whether the tainted injection point arrives as an
-	// in-place argument LIST with no shell interpreter. See EvalArgvList.
-	ArgvList func() bool `expr:"argvList"`
+}
+
+// kwargsOf indexes arguments by keyword name, skipping positional ones. On a
+// duplicate keyword the first wins; a call cannot legally pass one twice.
+func kwargsOf(args []Arg) map[string]Arg {
+	m := make(map[string]Arg, len(args))
+	for _, a := range args {
+		if a.Name == "" {
+			continue
+		}
+		if _, dup := m[a.Name]; !dup {
+			m[a.Name] = a
+		}
+	}
+	return m
 }
 
 // hostFixedRe matches a constant prefix that already pins a complete
@@ -111,32 +139,6 @@ type EvalHostFixed func() bool
 // suppressing.
 func alwaysControllable() bool { return false }
 
-// EvalArgvList is the engine-supplied fact behind the `argvList()` guard
-// builtin: the tainted value reaches the sink's injection point as a container
-// CONSTRUCTED IN PLACE (builtin.aggregate) and the call passes no truthy
-// `shell=` keyword -- i.e. `subprocess.run(["ls", "-la", name])`, where the
-// tainted element is an argv entry handed to execve, not shell-interpreted.
-//
-// Like hostFixed, it is a fact the guard layer cannot compute for itself: it
-// needs the injection-point arguments, the taint state and the IR def map. The
-// POLICY -- that command injection should suppress on it -- stays in the rule's
-// `when:` rather than the engine branching on a CWE string.
-//
-// Python's frontend lowers every container literal to builtin.aggregate so that
-// element taint survives into a later whole-container use; this fact is what
-// keeps that from turning the safe argv form into a false positive.
-type EvalArgvList func() bool
-
-// Facts are the engine-supplied answers a `when:` expression may consult. A nil
-// field fails OPEN -- the fact reads as "dangerous", so the entry still fires
-// rather than being silently suppressed. Named fields (rather than positional
-// func() bool parameters) keep two same-typed facts from being swapped at a
-// call site.
-type Facts struct {
-	HostFixed EvalHostFixed
-	ArgvList  EvalArgvList
-}
-
 // CompileGuard parses, type-checks, and compiles a `when:` expression. It returns
 // an error for a syntax error, an unknown name, a non-boolean result, or an
 // invalid constant regexp in `matches` (expr validates all of these at compile),
@@ -156,12 +158,11 @@ func CompileGuard(src string) (*Guard, error) {
 // Eval reports whether the guard holds for the call's arguments. A nil guard
 // (no `when:`) always fires; DenyGuard never does; a run error (e.g. an
 // out-of-range arg index) is unconfirmed -> false (suppress).
-func (g *Guard) Eval(args []Arg) bool { return g.EvalWith(args, Facts{}) }
+func (g *Guard) Eval(args []Arg) bool { return g.EvalWith(args, nil) }
 
-// EvalWith is Eval with the engine's optional facts supplied. Any nil fact fails
-// open: hostFixed reads as not-host-fixed and argvList as not-an-argv-list, so a
-// missing fact never silently suppresses an entry.
-func (g *Guard) EvalWith(args []Arg, facts Facts) bool {
+// EvalWith is Eval with the engine's optional facts supplied. hostFixed may be
+// nil, in which case the guard sees a not-host-fixed answer (fail open).
+func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 	if g == nil {
 		return true
 	}
@@ -172,10 +173,10 @@ func (g *Guard) EvalWith(args []Arg, facts Facts) bool {
 	// answered from the skeletons alone and must ALL be host-fixed.
 	fn := func(as ...Arg) bool {
 		if len(as) == 0 {
-			if facts.HostFixed == nil {
+			if hostFixed == nil {
 				return alwaysControllable()
 			}
-			return facts.HostFixed()
+			return hostFixed()
 		}
 		for _, a := range as {
 			if !ArgHostFixed(a) {
@@ -184,13 +185,7 @@ func (g *Guard) EvalWith(args []Arg, facts Facts) bool {
 		}
 		return true
 	}
-	argv := func() bool {
-		if facts.ArgvList == nil {
-			return false // fail open: not an argv list, so the entry still fires
-		}
-		return facts.ArgvList()
-	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: fn, ArgvList: argv})
+	out, err := expr.Run(g.prog, guardEnv{Arg: args, KWArgs: kwargsOf(args), HostFixed: fn})
 	if err != nil {
 		return false
 	}

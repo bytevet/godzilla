@@ -131,3 +131,55 @@ func TestArgHostFixed(t *testing.T) {
 		}
 	}
 }
+
+// TestGuardKWArgsAndTainted covers the two primitives a rule needs to express an
+// argv-vs-shell policy in YAML instead of the engine deciding for it: `kwargs`
+// (arguments indexed by the keyword they were passed under) and Arg.Tainted.
+//
+// The important case is a MISSING keyword. `kwargs.shell` on a call with no
+// `shell=` must read as the zero Arg, NOT raise — a run error would suppress the
+// entry (Eval returns false on error), turning an absent keyword into a silent
+// false negative. This pins expr's map semantics so a dependency bump that
+// changed them would fail here rather than quietly weakening the rule.
+func TestGuardKWArgsAndTainted(t *testing.T) {
+	shellOn := []Arg{
+		{String: DynMarker, Tainted: true, Type: "aggregate"},
+		{String: "true", Complete: true, Type: "bool", Name: "shell"},
+	}
+	shellOff := []Arg{
+		{String: DynMarker, Tainted: true, Type: "aggregate"},
+	}
+	taintedStr := []Arg{
+		{String: DynMarker, Tainted: true, Type: "string"},
+	}
+	// The real py-command-injection guard: fire unless no shell was requested
+	// AND every tainted argument arrived as an in-place container.
+	const argvPolicy = `not (kwargs.shell.String != "true" ` +
+		`and len(filter(arg, .Tainted)) > 0 ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate"))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"missing keyword reads as zero Arg", `kwargs.shell.String == "true"`, shellOff, false},
+		{"present keyword is readable", `kwargs.shell.String == "true"`, shellOn, true},
+		{"membership on a missing keyword", `"shell" in kwargs`, shellOff, false},
+		{"positional args are not indexed", `"" in kwargs`, taintedStr, false},
+		{"argv policy: safe list suppresses", argvPolicy, shellOff, false},
+		{"argv policy: shell=True re-arms", argvPolicy, shellOn, true},
+		{"argv policy: tainted string fires", argvPolicy, taintedStr, true},
+		{"argv policy: no taint at all fires", argvPolicy, []Arg{{String: "ls", Complete: true}}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval(%q) = %v, want %v", tc.name, tc.src, got, tc.want)
+		}
+	}
+}
