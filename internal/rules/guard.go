@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -175,12 +176,25 @@ func CompileGuard(src string) (*Guard, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, nil
 	}
+	// Every sink and callee entry compiles its rule's guard, so one source is
+	// compiled once per entry: the shipped packs ask for 88 compiles of 10
+	// distinct sources, and a shared fragment makes that worse, not better. A
+	// Guard is immutable and an expr program is safe to Run concurrently, so
+	// they are shared. Errors are not cached — they fail `rules lint` at load.
+	if g, ok := guardCache.Load(src); ok {
+		return g.(*Guard), nil
+	}
 	prog, err := expr.Compile(src, expr.Env(guardEnv{}), expr.AsBool())
 	if err != nil {
 		return DenyGuard, fmt.Errorf("guard %q: %w", src, err)
 	}
-	return &Guard{prog: prog}, nil
+	g := &Guard{prog: prog}
+	guardCache.Store(src, g)
+	return g, nil
 }
+
+// guardCache memoizes CompileGuard by source; see the note there.
+var guardCache sync.Map
 
 // Eval reports whether the guard holds for the call's arguments. A nil guard
 // (no `when:`) always fires; DenyGuard never does; a run error (e.g. an

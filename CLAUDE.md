@@ -129,7 +129,7 @@ propagators as canonical-FQN globs, where `*` matches across `/` and `.`) and th
 may pin its injection point with a `#<idx>` suffix (`"go:*database/sql*.Query#0"`): only taint reaching
 that LOGICAL (receiver-excluded) argument fires, which is what stops `db.Query("... = ?", tainted)` from
 being a false positive. A bare pattern means all args. `guard.go` — the `when:` expression DSL and the
-`hostFixed()` fact; a rule-level `when:` is the default every unguarded sink inherits. `loader/` — YAML
+`hostFixed()` fact; a rule-level `when:` is the default every unguarded sink inherits, and a fragment may supply that default. `loader/` — YAML
 loading; the built-in packs live in the top-level `rulepacks/`, embedded by `rulepacks/embed.go` and
 returned by `Builtin()`. `validate` rejects an empty ID or an unrecognized severity. Three `kind:`s —
 dataflow (default), `dangerous-call`, and `secret`. `_`-prefixed **fragments** are pulled in with

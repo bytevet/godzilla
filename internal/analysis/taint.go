@@ -39,11 +39,11 @@ func (e *Engine) ScopeSeed(reportable map[string]bool) *Engine {
 // "aggregate" argument type.
 const aggregateIntrinsic = "builtin.aggregate"
 
-// aggregateMapIntrinsic is the keyed container construction: same propagation as
-// aggregateIntrinsic, but its operands run key,value,key,value, which is what
-// lets argVals expose entries to a guard by key. A frontend emits it only when
-// every key pairs up (a `**spread` yields the unkeyed form instead), so the
-// pairing can be trusted wherever it appears.
+// aggregateMapIntrinsic is the keyed container construction (a dict literal):
+// same element-taint semantics, but its operands run key,value,key,value so
+// argVals can expose entries to a guard by key. Emitted only when every key
+// pairs up — a `**spread` yields the unkeyed form. Python-only today; the other
+// frontends reach the same taint through visitStore.
 const aggregateMapIntrinsic = "builtin.aggregate_map"
 
 // intrinsicPropagators is the set of language-specific OP_CODE_INTRINSIC

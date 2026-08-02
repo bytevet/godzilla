@@ -374,13 +374,6 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 	def := defs[uv.GetRegName()]
 	a := scalarArg(name, uv, def, defs, tainted)
 	expandStructure(&a, def, defs, tainted, budget)
-	// Whether the taint is actually reachable by reading this value's children.
-	// Computed on EVERY path, including the ones that reconstruct nothing — a
-	// value whose structure was not built has no tainted child by construction,
-	// which is precisely what a rule must not mistake for "safe". Checking direct
-	// children is enough: an aggregate child is itself Tainted whenever any of
-	// ITS elements is, because the aggregate intrinsic propagates.
-	a.TaintInChildren = childTainted(a)
 	return a
 }
 
@@ -397,7 +390,9 @@ func expandStructure(a *rules.Arg, def *ir.Instruction, defs map[string]*ir.Inst
 		*budget -= len(ops)
 		a.Elems = make([]rules.Arg, 0, len(ops))
 		for _, o := range ops {
-			a.Elems = append(a.Elems, argOf(o, defs, tainted, budget))
+			c := argOf(o, defs, tainted, budget)
+			a.TaintInChildren = a.TaintInChildren || c.Tainted
+			a.Elems = append(a.Elems, c)
 		}
 	case aggregateMapIntrinsic:
 		if len(ops)%2 != 0 {
@@ -419,25 +414,12 @@ func expandStructure(a *rules.Arg, def *ir.Instruction, defs map[string]*ir.Inst
 				a.Entries = make(map[string]rules.Arg, len(ops)/2)
 			}
 			if _, dup := a.Entries[k.String]; !dup {
-				a.Entries[k.String] = argOf(ops[i+1], defs, tainted, budget)
+				v := argOf(ops[i+1], defs, tainted, budget)
+				a.TaintInChildren = a.TaintInChildren || v.Tainted
+				a.Entries[k.String] = v
 			}
 		}
 	}
-}
-
-// childTainted reports whether any reconstructed element or entry carries taint.
-func childTainted(a rules.Arg) bool {
-	for _, e := range a.Elems {
-		if e.Tainted {
-			return true
-		}
-	}
-	for _, e := range a.Entries {
-		if e.Tainted {
-			return true
-		}
-	}
-	return false
 }
 
 // scalarArg renders an argument's own value — skeleton, completeness, type,
