@@ -18,6 +18,9 @@ rules:
     # `shell=flag` records no keyword name at all (the frontend marks constants
     # only), so it would read as absent — hence every non-tainted argument must
     # be a keyword we can name.
+    # `.Type == "aggregate"` is not redundant with `.TaintInChildren`: a dict is
+    # "map" with empty .Elems, so .Elems[0] would raise — and a guard that raises
+    # SUPPRESSES its sink, which would hide the finding rather than report it.
     when: >-
       not ((kwargs.shell.String == "" or kwargs.shell.String == "false")
            and all(filter(arg, not .Tainted), .Name != "")
