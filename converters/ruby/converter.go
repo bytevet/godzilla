@@ -25,15 +25,12 @@
 package ruby_converter
 
 import (
-	"bytes"
 	_ "embed"
-	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
-	"godzilla/internal/chunks"
+	"godzilla/converters/frontend"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -58,65 +55,39 @@ func NewConverter() *Converter { return &Converter{} }
 // ConvertFile lowers the Ruby source at path into gIR. path may be a single
 // .rb file or a directory (all *.rb files under it are converted recursively,
 // one gIR Module per file). Requires `ruby` on PATH.
+//
+// The single-file/directory-batch skeleton is the shared frontend.Batch driver;
+// what is Ruby's alone: parsing is chunked — one `ruby rbdump.rb --batch
+// <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
+// not per file.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	// Module names are the file path relative to the scan root, so same-named
-	// functions in different files get distinct canonical names instead of
-	// colliding in the analyzer. For a single file the root is its own
-	// directory, so its module name stays the bare filename (see
-	// walkignore.CollectTarget).
-	root, files, isDir, err := walkignore.CollectTarget(path, func(p string) bool { return strings.HasSuffix(p, ".rb") })
-	if err != nil {
-		return nil, err
+	var rubyExe, scriptPath string
+	b := frontend.Batch[rbFileResult]{
+		Label: "ruby_converter",
+		Lang:  "Ruby",
+		Mode:  "ast",
+		Match: func(p string) bool { return strings.HasSuffix(p, ".rb") },
+		Setup: func() (func(), error) {
+			exe, err := exec.LookPath("ruby")
+			if err != nil {
+				return nil, fmt.Errorf("ruby_converter: ruby not found on PATH (required to parse Ruby source): %w", err)
+			}
+			rubyExe = exe
+			sp, cleanup, err := writeHelperScript()
+			if err != nil {
+				return nil, err
+			}
+			scriptPath = sp
+			return cleanup, nil
+		},
+		Parse: func(root string, files []string, out []rbFileResult) {
+			convertRubyChunk(rubyExe, scriptPath, root, files, out)
+		},
+		Result: func(r *rbFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no Ruby files found under %s", root)
-	}
-
-	rubyExe, err := exec.LookPath("ruby")
-	if err != nil {
-		return nil, fmt.Errorf("ruby_converter: ruby not found on PATH (required to parse Ruby source): %w", err)
-	}
-	scriptPath, cleanup, err := writeHelperScript()
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-
-	if !isDir {
-		results := make([]rbFileResult, 1)
-		c.convertRubyChunk(rubyExe, scriptPath, root, files, results)
-		if results[0].err != nil {
-			return nil, results[0].err
-		}
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
-	}
-
-	// Directory batch: one unparseable file must not abort the whole batch.
-	// Parsing is chunked — one `ruby rbdump.rb --batch <chunk...>` invocation
-	// per chunk, run concurrently — so interpreter startup is paid per chunk,
-	// not per file. Results land at fixed indices, keeping module order the
-	// sorted file order.
-	results := make([]rbFileResult, len(files))
-	chunks.Run(len(files), func(start, end int) {
-		c.convertRubyChunk(rubyExe, scriptPath, root, files[start:end], results[start:end])
-	})
-
-	prog := &ir.Program{Mode: "ast"}
-	var convertErrs []string
-	for i, r := range results {
-		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "ruby_converter: skipping %s: %v\n", files[i], r.err)
-			c.skipped++
-			convertErrs = append(convertErrs, r.err.Error())
-			continue
-		}
-		prog.Modules = append(prog.Modules, r.mod)
-	}
-	if len(prog.Modules) == 0 {
-		return nil, fmt.Errorf("ruby_converter: no Ruby files under %s converted successfully (%d failed): %s",
-			root, len(convertErrs), strings.Join(convertErrs, "; "))
-	}
-	return prog, nil
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
 }
 
 // rbFileResult is one file's outcome within a batch chunk.
@@ -126,41 +97,19 @@ type rbFileResult struct {
 }
 
 // convertRubyChunk parses a contiguous chunk of files with a single
-// `rbdump.rb --batch` invocation (one JSON document per file, argv order) and
-// lowers each, writing into out (index-aligned with files). A process-level
-// failure marks every file in the chunk; a per-file parse failure marks only
-// that file, mirroring the old file-at-a-time error semantics.
-func (c *Converter) convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rbFileResult) {
-	ctx, cancel := proc.ParseContext()
-	defer cancel()
-	args := append([]string{scriptPath, "--batch"}, files...)
-	cmd := exec.CommandContext(ctx, rubyExe, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		for i, f := range files {
-			out[i].err = fmt.Errorf("ruby_converter: ruby failed parsing %s: %v (stderr: %s)", f, err, strings.TrimSpace(stderr.String()))
+// `rbdump.rb --batch` invocation (one JSON document per file, argv order) via
+// proc.RunBatchScript and lowers each, writing into out (index-aligned with
+// files). A process-level failure marks every file in the chunk; a per-file
+// parse failure marks only that file, mirroring the old file-at-a-time error
+// semantics.
+func convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rbFileResult) {
+	proc.RunBatchScript("ruby_converter", "rbdump.rb", rubyExe, scriptPath, files, func(i int, doc any, err error) {
+		if err != nil {
+			out[i].err = err
+			return
 		}
-		return
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	dec.UseNumber()
-	for i, f := range files {
-		var node interface{}
-		if err := dec.Decode(&node); err != nil {
-			out[i].err = fmt.Errorf("ruby_converter: failed to parse rbdump.rb output for %s: %w", f, err)
-			continue
-		}
-		if obj, ok := node.(map[string]interface{}); ok {
-			if msg, ok := obj["error"]; ok {
-				out[i].err = fmt.Errorf("ruby_converter: failed to parse %s: %v", f, msg)
-				continue
-			}
-		}
-		out[i].mod = convertModule(node, f, moduleNameFor(root, f))
-	}
+		out[i].mod = convertModule(doc, files[i], moduleNameFor(root, files[i]))
+	})
 }
 
 // writeHelperScript materializes the embedded rbdump.rb into a temp file.

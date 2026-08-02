@@ -819,6 +819,12 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	paramMemTaint := paramSummaries{}  // callee -> out-param index -> origin (ENG-6b)
 	paramSinkTaint := paramSummaries{} // callee -> string-param index -> wrapped sink pos (dep sink wrapper)
 	reported := map[*ir.Instruction]bool{}
+	// guardMemo memoizes each function's guard/dominator index (ENG-9) for this
+	// rule: the index is purely structural — immutable body plus the rule's fixed
+	// validator list — so rebuilding it on every worklist revisit repeated the
+	// dominator computation for nothing. A nil entry (no validators / no guards)
+	// is memoized too, hence the presence check at the visit site.
+	guardMemo := map[*ir.Function]*guardIndex{}
 	var findings []Finding
 
 	// The rule is fixed for this whole pass, so decide per LANGUAGE once instead of
@@ -893,7 +899,13 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		// caller to report instead (taintsParamSink). An empty scope makes every
 		// function reportable, matching the "seed everything" mode above.
 		funcReportable := len(idx.reportable) == 0 || idx.reportable[mod.Name]
-		res := analyzeFunc(idx.fnIndexFor(fn), mod, fn, rule, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
+		fx := idx.fnIndexFor(fn)
+		guards, ok := guardMemo[fn]
+		if !ok {
+			guards = buildGuardIndex(fn, rule, fx.defs)
+			guardMemo[fn] = guards
+		}
+		res := analyzeFunc(fx, mod, fn, rule, guards, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -1101,6 +1113,7 @@ func analyzeFunc(
 	mod *ir.Module,
 	fn *ir.Function,
 	rule *rules.Rule,
+	guards *guardIndex,
 	seeds paramPositions,
 	funcSeeds map[int]map[string]bool,
 	opaqueSeeds map[int]bool,
@@ -1123,11 +1136,10 @@ func analyzeFunc(
 	defs := fx.defs
 	nonEscaping := fx.nonEscaping
 
-	// Guard/barrier index (ENG-9), built once and only for a rule that declares
-	// validators (nil otherwise, so the common path pays nothing). curBlock tracks
-	// the block being visited so a sink can ask whether a validator guard
-	// dominates it on the path taken.
-	guards := buildGuardIndex(fn, rule, defs)
+	// guards is the memoized guard/barrier index (ENG-9), built once per
+	// (function, rule) by the caller and nil for a rule without validators, so
+	// the common path pays nothing. curBlock tracks the block being visited so a
+	// sink can ask whether a validator guard dominates it on the path taken.
 	var curBlock int32
 
 	// linearFn marks a branch-free function, in ANY language — the majority of
@@ -1234,10 +1246,10 @@ func analyzeFunc(
 	}
 
 	var res funcResult
-	effectSeen := map[string]bool{}
+	effectSeen := map[funcParamRef]bool{}
 
 	addEffect := func(callee string, param int, origin *ir.Position) {
-		key := callee + "#" + strconv.Itoa(param)
+		key := funcParamRef{callee: callee, param: param}
 		if effectSeen[key] {
 			return
 		}
@@ -1246,21 +1258,22 @@ func analyzeFunc(
 	}
 
 	// addFuncEffect records that a function value flowed into a callee parameter
-	// (the higher-order channel). Dedup is keyed on callee#param#target — unlike the
-	// taint/req channels, which store a single origin per (callee,param), this stores
-	// a SET, so two distinct callbacks passed to the same param must BOTH be recorded
-	// (that is exactly what makes the param ambiguous and disables the singleton gate).
-	funcEffectSeen := map[string]bool{}
+	// (the higher-order channel). Dedup is keyed on the full (callee, param, target)
+	// effect — unlike the taint/req channels, which store a single origin per
+	// (callee,param), this stores a SET, so two distinct callbacks passed to the same
+	// param must BOTH be recorded (that is exactly what makes the param ambiguous and
+	// disables the singleton gate).
+	funcEffectSeen := map[funcValEffect]bool{}
 	addFuncEffect := func(callee string, param int, target string) {
 		if callee == "" || target == "" {
 			return
 		}
-		key := callee + "#" + strconv.Itoa(param) + "#" + target
-		if funcEffectSeen[key] {
+		fe := funcValEffect{callee: callee, param: param, target: target}
+		if funcEffectSeen[fe] {
 			return
 		}
-		funcEffectSeen[key] = true
-		res.funcEffects = append(res.funcEffects, funcValEffect{callee: callee, param: param, target: target})
+		funcEffectSeen[fe] = true
+		res.funcEffects = append(res.funcEffects, fe)
 	}
 
 	// addFuncOpaque records that an unresolvable value reached a callee's
@@ -1304,6 +1317,7 @@ func analyzeFunc(
 	// seeds the loaded register. Both cross a function boundary, so any finding
 	// they feed is Medium confidence (interprocOrigins), matching the confidence
 	// contract for over-approximating flows.
+	globalSeen := map[string]bool{}
 	recordGlobalStore := func(inst *ir.Instruction) {
 		ops := inst.GetOperands()
 		if len(ops) < 2 {
@@ -1317,11 +1331,10 @@ func analyzeFunc(
 		if !ok {
 			return
 		}
-		key := "g:" + g
-		if effectSeen[key] {
+		if globalSeen[g] {
 			return
 		}
-		effectSeen[key] = true
+		globalSeen[g] = true
 		res.globalEffects = append(res.globalEffects, globalEffect{name: g, origin: pos})
 	}
 
@@ -1358,13 +1371,10 @@ func analyzeFunc(
 		if !ok {
 			return
 		}
-		key := "pm:" + strconv.Itoa(idx)
-		if effectSeen[key] {
-			return
-		}
-		effectSeen[key] = true
 		if res.taintsParamMemory == nil {
 			res.taintsParamMemory = paramPositions{}
+		} else if _, seen := res.taintsParamMemory[idx]; seen {
+			return
 		}
 		res.taintsParamMemory[idx] = pos
 	}
@@ -1850,7 +1860,7 @@ func analyzeFunc(
 	// monotonically across passes (deduped by effectSeen / reported).
 	// Fast path: a function with a single basic block has no control-flow merges
 	// or back-edges, so its taint converges in one forward pass. Skip the whole
-	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps, cloneState,
+	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps, the
 	// preds/rpo indexes, and the multi-pass loop — and just seed and visit once.
 	// This is the majority of functions (every straight-line-lowered Python / JS /
 	// Ruby / Java / Go-closure body), so it removes most of the engine's
@@ -1914,8 +1924,10 @@ func analyzeFunc(
 					visit(inst)
 				}
 			}
+			// `in` is fresh this pass and nothing else references it once the
+			// block is done, so the out state can take it without a clone.
 			if !statesEqual(blockOut[idx], tainted) {
-				blockOut[idx] = cloneState(tainted)
+				blockOut[idx] = tainted
 				changed = true
 			}
 		}

@@ -285,6 +285,22 @@ type RuleSet struct {
 	defaultProps []*compiledGlob
 }
 
+// WithRules returns a new RuleSet holding the given rules plus every set-wide
+// field of rs — DefaultPropagators (and its compiled form). DefaultPropagators
+// is a side channel (`yaml:"-"`, filled by the loader, invisible in the rules
+// slice), so any code that derives a RuleSet from another by filtering or
+// rewriting its rules must build the result with this constructor rather than a
+// struct literal: forgetting the field would silently strip the set-wide
+// propagators from every rule — a mass false-negative, not an error.
+func (rs *RuleSet) WithRules(rulesList []Rule) *RuleSet {
+	return &RuleSet{
+		Rules:              rulesList,
+		DefaultPropagators: rs.DefaultPropagators,
+		// Sharing the compiled form is safe: it is read-only after construction.
+		defaultProps: rs.defaultProps,
+	}
+}
+
 // Compile precompiles every rule's patterns (see Rule.Compile). Call it once,
 // single-threaded, before matching — in particular before running independent
 // analysis passes concurrently over the same rule set, so they don't race

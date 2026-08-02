@@ -453,6 +453,15 @@ func cloneState(st simState) simState {
 	return simState{stack: slices.Clone(st.stack), locals: maps.Clone(st.locals)}
 }
 
+// javaFormatCallees are the exact canonical FQNs of the JDK formatters that
+// carry the builtin.format marker (template/value in Args[0]; see
+// internal/analysis/ssrf.go). Owners are bytecode internal names, hence the
+// slashed java/lang/String.
+var javaFormatCallees = map[string]bool{
+	"java:java/lang/String.format":  true,
+	"java:java/lang/String.valueOf": true,
+}
+
 // invoke lowers a method call. Calls with a receiver (virtual/interface/special)
 // become OP_CODE_INVOKE with the receiver in CallCommon.Value and the explicit
 // args in Args, so a sink's `#0` injection point and the engine's arg→param
@@ -481,8 +490,12 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	inst := &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos}
 	// Tag String.format / String.valueOf (template/value in Args[0]) with the
 	// language-neutral builtin.format marker so the engine's SSRF host
-	// reconstruction reads the marker, not a Java callee-name shape.
-	if strings.Contains(callee, "String.format") || strings.Contains(callee, "String.valueOf") {
+	// reconstruction reads the marker, not a Java callee-name shape. The match is
+	// exact canonical FQNs (the owner is the bytecode internal name, so
+	// java/lang/String): a substring match would let a user method on a class
+	// merely named like String (MyString.format) claim "Args[0] is the template"
+	// semantics and wrongly prove a fixed host, suppressing a real SSRF finding.
+	if javaFormatCallees[callee] {
 		inst.Intrinsic = "builtin.format"
 	}
 	s.instrs = append(s.instrs, inst)

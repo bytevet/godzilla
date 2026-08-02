@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"godzilla/internal/analysis"
+	"godzilla/internal/srclines"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -229,7 +230,7 @@ func TestBuildPrompt_And_Context_IncludeTaintPath(t *testing.T) {
 		},
 	}
 
-	cc := codeContextFor(lineCache{}, f)
+	cc := codeContextFor(srclines.Cache{}, f)
 	// Context must include a snippet at the INTERMEDIATE hop (line 4, the clean()
 	// call) — the whole point of feeding the path (LLM-2 context poverty).
 	if !strings.Contains(cc, "clean(x)") {

@@ -35,7 +35,8 @@ func TestScanSecretsInFiles_FindsConfigSecrets(t *testing.T) {
 	// source-literal secrets via gIR; scanning it again would double-report).
 	write("main.go", "package main\nconst k = \""+awsKey+"\"\n")
 
-	findings := ScanSecretsInFiles(dir, builtinRuleSet(t))
+	// nil isSource: this test exercises the static sourceFileExts fallback.
+	findings := ScanSecretsInFiles(dir, builtinRuleSet(t), nil)
 	got := map[string]int{}
 	for _, f := range findings {
 		got[f.RuleID]++

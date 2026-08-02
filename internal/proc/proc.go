@@ -8,9 +8,14 @@
 package proc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -35,6 +40,52 @@ func WriteEmbeddedScript(pattern string, content []byte) (string, func(), error)
 	}
 	path := tmp.Name()
 	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// RunBatchScript runs one `<exe> <scriptPath> --batch <files...>` helper
+// invocation (see WriteEmbeddedScript) under the parse deadline and decodes its
+// stdout as one JSON document per file, in argv order (numbers preserved as
+// json.Number). perFile is called exactly once per file index with the decoded
+// document or a non-nil error: a process-level failure marks every file in the
+// batch, while a per-file decode failure or an {"error": ...} document marks
+// only that file — mirroring the frontends' old file-at-a-time error
+// semantics. label prefixes error messages ("py_converter"); scriptName names
+// the embedded helper in them ("pyast.py"). Shared by the interpreter
+// frontends (Python, Ruby), whose batch parses differ only in these labels and
+// in what they do with each document.
+func RunBatchScript(label, scriptName, exe, scriptPath string, files []string, perFile func(i int, doc any, err error)) {
+	ctx, cancel := ParseContext()
+	defer cancel()
+	args := append([]string{scriptPath, "--batch"}, files...)
+	cmd := exec.CommandContext(ctx, exe, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if runErr := cmd.Run(); runErr != nil {
+		for i, f := range files {
+			perFile(i, nil, fmt.Errorf("%s: %s failed parsing %s: %v (stderr: %s)",
+				label, filepath.Base(exe), f, runErr, strings.TrimSpace(stderr.String())))
+		}
+		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	dec.UseNumber()
+	for i, f := range files {
+		var doc any
+		if err := dec.Decode(&doc); err != nil {
+			perFile(i, nil, fmt.Errorf("%s: failed to parse %s output for %s: %w", label, scriptName, f, err))
+			continue
+		}
+		if obj, ok := doc.(map[string]any); ok {
+			if msg, ok := obj["error"]; ok {
+				perFile(i, nil, fmt.Errorf("%s: failed to parse %s: %v", label, f, msg))
+				continue
+			}
+		}
+		perFile(i, doc, nil)
+	}
 }
 
 const (

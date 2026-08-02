@@ -90,7 +90,17 @@ func Scan(path string, rs *rules.RuleSet) (Result, error) {
 // depLoweringLangs names the frontends that lower dependency bodies, so their
 // dependency modules must be analyzed demand-driven. Only these contribute a
 // non-empty targetPkgs; a module of any other language is entirely user code.
-var depLoweringLangs = map[string]bool{"go": true}
+// Derived from the frontend table's lowersDeps flags — the single source of
+// truth — so it cannot drift from the table.
+var depLoweringLangs = func() map[string]bool {
+	m := map[string]bool{}
+	for _, fe := range languageFrontends {
+		if fe.lowersDeps {
+			m[fe.name] = true
+		}
+	}
+	return m
+}()
 
 // seedScope returns the set of module names the engine should seed eagerly (user
 // code). With no dependency lowering (targetPkgs empty) it returns nil, so every
@@ -144,7 +154,7 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
 		// language frontend parses — the dominant hardcoded-secret vector.
 		wg.Add(1)
-		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath, rs) }()
+		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath, rs, isSourcePath) }()
 	}
 	wg.Wait()
 
@@ -204,12 +214,12 @@ func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding
 // commit touching only docs — is not an error: it returns cleanly (with any
 // secrets those files contained), so a pre-commit hook does not spuriously fail.
 func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
-	merged := &ir.Program{Mode: "ssa"}
+	merged := &ir.Program{}
 	var coverage []LangCoverage
 	var findings []analysis.Finding
 	targetPkgs := map[string]bool{}
 	for _, p := range paths {
-		findings = append(findings, analysis.ScanSecretsInFiles(p, rs)...)
+		findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 		info, err := os.Stat(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
@@ -265,7 +275,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	}
 
 	present := detectLanguages(path)
-	merged := &ir.Program{Mode: "ssa"}
+	merged := &ir.Program{}
 	var coverage []LangCoverage
 	frontends := languageFrontends
 	// Present frontends are independent (separate converters, separate source
@@ -330,6 +340,11 @@ type frontend struct {
 	name    string
 	convert func(string) (*ir.Program, map[string]bool, int, error)
 	matches func(path string) bool
+	// lowersDeps marks a frontend that lowers third-party dependency bodies: its
+	// convert returns a non-nil targetPkgs set, its modules are seeded
+	// demand-driven (seedScope), and its findings are scoped to user code
+	// (scopeFindings). The single source of truth behind depLoweringLangs.
+	lowersDeps bool
 }
 
 // languageFrontends is the single source of truth for the language→frontend
@@ -339,19 +354,20 @@ type frontend struct {
 // scans, so keep go/python/javascript/java/cpp/rust/ruby as-is. The Go entry
 // uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
 var languageFrontends = []frontend{
-	{"go", goConvert, func(p string) bool { return strings.HasSuffix(p, ".go") }},
-	{"python", noDepConvert(py_converter.NewConverter),
-		func(p string) bool { return strings.HasSuffix(p, ".py") }},
-	{"javascript", noDepConvert(js_converter.NewConverter),
-		js_converter.IsJSFamily},
-	{"java", noDepConvert(java_converter.NewConverter),
-		func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
-	{"cpp", noDepConvert(cpp_converter.NewConverter),
-		isCppFile},
-	{"rust", noDepConvert(rust_converter.NewConverter),
-		func(p string) bool { return strings.HasSuffix(p, ".rs") }},
-	{"ruby", noDepConvert(ruby_converter.NewConverter),
-		func(p string) bool { return strings.HasSuffix(p, ".rb") }},
+	{name: "go", convert: goConvert, lowersDeps: true,
+		matches: func(p string) bool { return strings.HasSuffix(p, ".go") }},
+	{name: "python", convert: noDepConvert(py_converter.NewConverter),
+		matches: func(p string) bool { return strings.HasSuffix(p, ".py") }},
+	{name: "javascript", convert: noDepConvert(js_converter.NewConverter),
+		matches: js_converter.IsJSFamily},
+	{name: "java", convert: noDepConvert(java_converter.NewConverter),
+		matches: func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
+	{name: "cpp", convert: noDepConvert(cpp_converter.NewConverter),
+		matches: isCppFile},
+	{name: "rust", convert: noDepConvert(rust_converter.NewConverter),
+		matches: func(p string) bool { return strings.HasSuffix(p, ".rs") }},
+	{name: "ruby", convert: noDepConvert(ruby_converter.NewConverter),
+		matches: func(p string) bool { return strings.HasSuffix(p, ".rb") }},
 }
 
 // goConvert lowers a Go path and returns its target (user-authored) package set,
@@ -393,9 +409,12 @@ func noDepConvert[T fileConverter](newC func() T) func(string) (*ir.Program, map
 // scopeFindings drops findings whose sink function lives in a lowered dependency
 // package (not user code). Dependencies are lowered so taint flows THROUGH them,
 // but a sink reached inside a library is noise, not an actionable finding. Only
-// a dep-lowering frontend's language can produce such a finding (depLoweringLangs
-// — the same fact that decides which modules seedScope holds back), so findings
-// from every other language, and those with no recorded package, are kept.
+// a dep-lowering frontend's language can produce such a finding (depLoweringLangs,
+// derived from the frontend table's lowersDeps flags — the same fact that decides
+// which modules seedScope holds back), so findings from every other language, and
+// those with no recorded package, are kept. Scoping keys on Finding.Language
+// (not module membership) because a Finding records its language and package
+// directly but not its module, and targetPkgs is a set of PACKAGE paths.
 // A no-op when targetPkgs is empty (nothing was dep-lowered).
 func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []analysis.Finding {
 	if len(targetPkgs) == 0 {
@@ -409,6 +428,15 @@ func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []an
 		kept = append(kept, f)
 	}
 	return kept
+}
+
+// isSourcePath reports whether a language frontend handles path, off the shared
+// languageFrontends table. Passed to analysis.ScanSecretsInFiles so the raw-file
+// secrets pass skips exactly the files whose string literals the gIR-constant
+// scanner already covers — one source of truth, no drifting extension list.
+func isSourcePath(path string) bool {
+	_, conv := fileFrontend(path)
+	return conv != nil
 }
 
 // fileFrontend returns the language tag and conversion function for a single

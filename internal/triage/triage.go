@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"godzilla/internal/analysis"
+	"godzilla/internal/srclines"
 )
 
 // ignoreToken is the directive that suppresses a finding when it appears in a
@@ -32,28 +33,14 @@ const ignoreToken = "godzilla:ignore"
 // once each. A finding already suppressed (e.g. by the LLM reviewer) is left
 // as-is.
 func ApplyInlineIgnores(findings []analysis.Finding) []analysis.Finding {
-	fileLines := map[string][]string{}
-	readLines := func(path string) []string {
-		if lines, ok := fileLines[path]; ok {
-			return lines
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fileLines[path] = nil
-			return nil
-		}
-		lines := strings.Split(string(data), "\n")
-		fileLines[path] = lines
-		return lines
-	}
-
+	cache := srclines.Cache{}
 	for i := range findings {
 		f := &findings[i]
 		if f.Suppressed || f.SinkPos == nil {
 			continue
 		}
-		lines := readLines(f.SinkPos.GetFilename())
-		if lines == nil {
+		lines, ok := cache.Lines(f.SinkPos.GetFilename())
+		if !ok {
 			continue
 		}
 		line := int(f.SinkPos.GetLine())

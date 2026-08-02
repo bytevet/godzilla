@@ -24,20 +24,25 @@ package rust_converter
 import (
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"godzilla/converters/frontend"
 	"godzilla/internal/buildpolicy"
-	"godzilla/internal/chunks"
 	"godzilla/internal/proc"
-	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
-type Converter struct{}
+type Converter struct {
+	skipped int // files this run could not lower; see Skipped
+}
+
+// Skipped reports how many source files this converter could not lower. The scan
+// layer surfaces it per language, so a run that dropped most of a project is
+// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
+func (c *Converter) Skipped() int { return c.skipped }
 
 func NewConverter() *Converter { return &Converter{} }
 
@@ -60,69 +65,40 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		}
 	}
 
-	files, err := collect(path)
-	if err != nil {
-		return nil, err
-	}
-	// FE-10: verify (once) that this rustc's MIR still lowers to the shapes taint
-	// analysis needs, warning loudly on format drift rather than silently
-	// producing zero findings.
-	warnIfMIRDrifted()
-
-	// One `rustc --emit=mir` process per file, run concurrently (bounded by
-	// GOMAXPROCS via chunks.Run) — the same shape the Python and Ruby frontends
-	// use for their interpreter invocations. Each emitMIR writes to its own temp
-	// output, so the compiles are independent. Results land at fixed indices, so
-	// prog.Modules keeps the sorted file order regardless of completion order.
-	type fileResult struct {
-		mod *ir.Module
-		err error
-	}
-	results := make([]fileResult, len(files))
-	chunks.Run(len(files), func(start, end int) {
-		for i := start; i < end; i++ {
-			mir, err := emitMIR(files[i])
+	// One `rustc --emit=mir` process per file, run concurrently by the shared
+	// frontend.Batch driver — the same shape the Python and Ruby frontends use
+	// for their interpreter invocations. Each emitMIR writes to its own temp
+	// output, so the compiles are independent.
+	b := frontend.Batch[rsFileResult]{
+		Label: "rust_converter",
+		Lang:  "Rust",
+		Mode:  "mir",
+		Match: func(p string) bool { return strings.EqualFold(filepath.Ext(p), ".rs") },
+		Setup: func() (func(), error) {
+			// FE-10: verify (once) that this rustc's MIR still lowers to the shapes
+			// taint analysis needs, warning loudly on format drift rather than
+			// silently producing zero findings.
+			warnIfMIRDrifted()
+			return nil, nil
+		},
+		Parse: frontend.PerFile(func(_, f string) rsFileResult {
+			mir, err := emitMIR(f)
 			if err != nil {
-				results[i].err = err
-				continue
+				return rsFileResult{err: err}
 			}
-			results[i].mod = lowerMIR(mir, files[i])
-		}
-	})
-
-	prog := &ir.Program{Mode: "mir"}
-	for i, r := range results {
-		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", files[i], r.err)
-			continue
-		}
-		prog.Modules = append(prog.Modules, r.mod)
+			return rsFileResult{mod: lowerMIR(mir, f)}
+		}),
+		Result: func(r *rsFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	if len(prog.Modules) == 0 {
-		return nil, fmt.Errorf("no Rust source compiled under %s", path)
-	}
-	return prog, nil
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
 }
 
-func collect(path string) ([]string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return []string{path}, nil
-	}
-	var out []string
-	_ = walkignore.Files(path, func(p string, d fs.DirEntry) error {
-		if strings.EqualFold(filepath.Ext(p), ".rs") {
-			if info, e := d.Info(); e == nil && walkignore.TooBig(info.Size()) {
-				return nil
-			}
-			out = append(out, p)
-		}
-		return nil
-	})
-	return out, nil
+// rsFileResult is one file's outcome within a batch conversion.
+type rsFileResult struct {
+	mod *ir.Module
+	err error
 }
 
 // emitMIR runs rustc to dump textual MIR for one source file. Spans are enabled

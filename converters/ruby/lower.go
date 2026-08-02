@@ -711,50 +711,23 @@ func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 }
 
 // lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end` into a
-// REAL CFG diamond via the Builder: the condition is lowered in the current
-// block, which ends in an OP_CODE_IF to a fresh then-block and else-block; each
-// arm is lowered in its own block and jumps to a fresh merge block; the merge is
-// sealed once both arm-ends are its known predecessors, so any variable rebound
-// on one or both arms reconciles automatically via an on-demand ReadVariable PHI
-// (retiring the manual env-merge path). `if`, `unless`, and `elsif` share the
-// layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
+// REAL CFG diamond via the Builder's IfDiamond scaffold, so any variable
+// rebound on one or both arms reconciles automatically via an on-demand
+// ReadVariable PHI (retiring the manual env-merge path). `if`, `unless`, and
+// `elsif` share the layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
 // the polarity of `unless` is immaterial to taint (both arms are reachable), so
 // it is lowered like `if`. A nested `elsif` recurses into the else-block, so an
 // arbitrarily long chain becomes nested diamonds.
 func (fs *funcState) lowerIf(n interface{}) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
-	thenB := fs.b.NewBlock()
-	elseB := fs.b.NewBlock()
-	merge := fs.b.NewBlock()
-	fs.b.SetIf(fs.cur, cond, thenB, elseB)
-	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
-	fs.b.Seal(elseB)
-
-	fs.cur = thenB
-	fs.terminated = false
-	var lastBody *ir.Value
-	if body, ok := asList(at(n, 2)); ok {
-		lastBody = fs.lowerStmtSeqLast(body)
-	}
-	thenEnd := fs.cur // the arm may itself have branched; jump from its END
-	thenTerm := fs.terminated
-	if !thenTerm { // a returning arm has no fall-through edge to the merge
-		fs.b.SetJump(thenEnd, merge)
-	}
-
-	fs.cur = elseB
-	fs.terminated = false
-	lastElse := fs.lowerElseTail(at(n, 3))
-	elseEnd := fs.cur
-	elseTerm := fs.terminated
-	if !elseTerm {
-		fs.b.SetJump(elseEnd, merge)
-	}
-
-	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
-	fs.cur = merge
-	// The merge is dead only if BOTH arms returned; otherwise it falls through.
-	fs.terminated = thenTerm && elseTerm
+	var lastBody, lastElse *ir.Value
+	thenEnd, elseEnd, merge := fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
+		func() {
+			if body, ok := asList(at(n, 2)); ok {
+				lastBody = fs.lowerStmtSeqLast(body)
+			}
+		},
+		func() { lastElse = fs.lowerElseTail(at(n, 3)) })
 	return fs.branchResult(lastBody, lastElse, thenEnd, elseEnd, merge)
 }
 
@@ -794,39 +767,14 @@ func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
 }
 
 // lowerLoopCFG builds the REAL loop CFG shared by `while`/`until` and their
-// statement-modifier forms: header/body/exit blocks. The current block jumps to
-// the header; the header lowers cond and branches (body, exit); lowerBody fills
-// the body, which jumps BACK to the header (the back-edge). The header is left
-// UNSEALED while the body is built, so a loop variable read in the condition or
-// body parks an incomplete PHI that is filled when the header is sealed after
-// the back-edge is wired — this is what gives loop-carried taint: a value
-// written in the body and read at the top of the next iteration flows through
-// the header PHI (which the old single-block lowering could not model). The
-// header PHI over [pre-loop, back-edge] carries taint into and out of the loop.
-// The seal ORDER matters and is why both loop forms share this function rather
-// than each open-coding it.
+// statement-modifier forms via the Builder's HeaderLoop scaffold, which owns
+// the header/body/exit blocks and the seal order (the header PHI over
+// [pre-loop, back-edge] is what carries loop-carried taint — see the
+// scaffold's doc). cond is a Ruby AST node, lowered in the (unsealed) header.
 func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header) // enter the loop
-	fs.cur = header
-	c := fs.lowerExpr(cond) // condition, lowered in the (unsealed) header
-	fs.b.SetIf(header, c, body, exit)
-
-	fs.b.Seal(body) // body's sole predecessor (header) is known
-	fs.cur = body
-	fs.terminated = false
-	lowerBody()
-	if !fs.terminated { // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
-	}
-
-	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
-	fs.b.Seal(exit)   // exit's sole predecessor is the header
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return fs.lowerExpr(cond) },
+		lowerBody)
 	return constString("")
 }
 

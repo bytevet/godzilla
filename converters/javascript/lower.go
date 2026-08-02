@@ -555,182 +555,85 @@ func (fs *funcState) lowerBody(stmts []ast.Statement) {
 	}
 }
 
-// lowerIf lowers `if (test) consequent [else alternate]` into a REAL CFG diamond
-// via the Builder: the condition is lowered in the current block, which ends in
-// an OP_CODE_IF to a fresh then-block and else-block; each arm is lowered in its
-// own block and jumps to a fresh merge block; the merge is sealed once both
-// arm-ends are its known predecessors, so any variable rebound on one or both
-// arms reconciles automatically via an on-demand ReadVariable PHI (retiring the
-// manual env-merge path — including the ubiquitous "default if empty" idiom
-// `if (!x) x = "d"`, whose pre-branch tainted value is now kept by the merge
-// PHI). An `else if` is an IfStatement in the parent's Alternate, so
-// an arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
+// lowerIf lowers `if (test) consequent [else alternate]` into a REAL CFG
+// diamond via the Builder's IfDiamond scaffold, so any variable rebound on one
+// or both arms reconciles automatically via an on-demand ReadVariable PHI
+// (retiring the manual env-merge path — including the ubiquitous "default if
+// empty" idiom `if (!x) x = "d"`, whose pre-branch tainted value is now kept
+// by the merge PHI). An `else if` is an IfStatement in the parent's Alternate,
+// so an arbitrarily long chain becomes nested diamonds via the recursive
+// lowerBody.
 func (fs *funcState) lowerIf(v *ast.IfStatement) {
 	cond := fs.lowerExpr(v.Test) // condition (also lowers any embedded source/sink)
-	thenB := fs.b.NewBlock()
-	elseB := fs.b.NewBlock()
-	merge := fs.b.NewBlock()
-	fs.b.SetIf(fs.cur, cond, thenB, elseB)
-	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
-	fs.b.Seal(elseB)
-
-	fs.cur = thenB
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Consequent))
-	thenTerm := fs.terminated
-	if !thenTerm { // a returning arm has no fall-through edge to the merge
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.cur = elseB
-	fs.terminated = false
-	if v.Alternate != nil {
-		fs.lowerBody(stmtList(v.Alternate))
-	}
-	elseTerm := fs.terminated
-	if !elseTerm {
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
-	fs.cur = merge
-	// The merge is dead only if BOTH arms returned; otherwise it falls through.
-	fs.terminated = thenTerm && elseTerm
+	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
+		func() { fs.lowerBody(stmtList(v.Consequent)) },
+		func() {
+			if v.Alternate != nil {
+				fs.lowerBody(stmtList(v.Alternate))
+			}
+		})
 }
 
-// lowerWhile lowers `while (test) body` into a REAL loop CFG: header/body/exit
-// blocks. The current block jumps to the header; the header lowers the condition
-// and branches (body, exit); the body is lowered and jumps BACK to the header
-// (the back-edge). The header is left UNSEALED while the body is built, so a
-// loop variable read in the condition or body parks an incomplete PHI filled
-// when the header is sealed after the back-edge is wired — this is what gives
-// loop-carried taint: a value written in the body and read at the top of the
-// next iteration flows through the header PHI (which the old single-block
-// lowering could not model).
+// lowerWhile lowers `while (test) body` into a REAL loop CFG via the Builder's
+// HeaderLoop scaffold (header/body/exit; the header PHI is what carries
+// loop-carried taint — see the scaffold's doc).
 func (fs *funcState) lowerWhile(v *ast.WhileStatement) {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header) // enter the loop
-	fs.cur = header
-	cond := fs.lowerExpr(v.Test) // condition, lowered in the (unsealed) header
-	fs.b.SetIf(header, cond, body, exit)
-
-	fs.b.Seal(body) // body's sole predecessor (header) is known
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if !fs.terminated { // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
-	}
-
-	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
-	fs.b.Seal(exit)   // exit's sole predecessor is the header
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return fs.lowerExpr(v.Test) }, // condition, lowered in the (unsealed) header
+		func() { fs.lowerBody(stmtList(v.Body)) })
 }
 
 // lowerDoWhile lowers `do body while (test)` — the body runs BEFORE the test —
-// into a loop CFG: the current block jumps into the body block; the body is the
-// loop header (its back-edge comes from the test block), so it is left UNSEALED
-// until the back-edge is wired; the test block re-enters the body when true, or
-// falls to exit. Loop-carried taint flows through the body-header PHI.
+// via the Builder's BodyLoop scaffold (the body is the loop header; its
+// back-edge comes from the test block). Loop-carried taint flows through the
+// body-header PHI.
 func (fs *funcState) lowerDoWhile(v *ast.DoWhileStatement) {
-	body := fs.b.NewBlock()
-	test := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, body) // the body always runs at least once
-	fs.cur = body              // body is the loop header (UNSEALED: has a back-edge)
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, test) // body end -> test
-	}
-
-	fs.b.Seal(test) // test's sole predecessor (the body end) is known
-	fs.cur = test
-	cond := fs.lowerExpr(v.Test)
-	fs.b.SetIf(test, cond, body, exit) // wire the back-edge test -> body
-
-	fs.b.Seal(body) // predecessors (entry-jump + back-edge) now known
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.BodyLoop(&fs.cur, &fs.terminated,
+		func() { fs.lowerBody(stmtList(v.Body)) },
+		func() *ir.Value { return fs.lowerExpr(v.Test) })
 }
 
-// lowerFor lowers a C-style `for (init; test; update) body` into a loop CFG. The
-// initializer runs once in the pre-loop (current) block; the header evaluates
-// the test (a missing test is an opaque always-true, so both body and exit are
-// traversed) and branches to body or exit; the update runs at the END of the
-// body block, before the back-edge to the header. Reassignments/accumulations in
-// the body or update flow through the header PHI, modeling loop-carried taint.
+// lowerFor lowers a C-style `for (init; test; update) body` into the HeaderLoop
+// CFG. The initializer runs once in the pre-loop (current) block; the header
+// evaluates the test (a missing test is an opaque always-true, so both body and
+// exit are traversed) and branches to body or exit; the update runs at the END
+// of the body block, before the back-edge to the header. Reassignments/
+// accumulations in the body or update flow through the header PHI, modeling
+// loop-carried taint.
 func (fs *funcState) lowerFor(v *ast.ForStatement) {
 	if v.Initializer != nil {
 		fs.lowerForInit(v.Initializer) // evaluated once in the pre-loop block
 	}
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	var cond *ir.Value
-	if v.Test != nil {
-		cond = fs.lowerExpr(v.Test) // lowered in the (unsealed) header
-	} else {
-		cond = stringValue("")
-	}
-	fs.b.SetIf(header, cond, body, exit)
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if v.Update != nil {
-		fs.lowerExpr(v.Update) // the `i++` step, at the body's END block
-	}
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, header) // back-edge
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value {
+			if v.Test != nil {
+				return fs.lowerExpr(v.Test) // lowered in the (unsealed) header
+			}
+			return stringValue("")
+		},
+		func() {
+			fs.lowerBody(stmtList(v.Body))
+			if v.Update != nil {
+				fs.lowerExpr(v.Update) // the `i++` step, at the body's END block
+			}
+		})
 }
 
-// lowerForRange lowers `for (into in|of source) body` into the same
-// header/body/exit loop CFG as lowerWhile. The source is lowered once in the
-// pre-loop block; the loop variable (into) is bound to the source's value at the
-// top of the BODY block each iteration (element taint == container taint, so a
-// tainted iterable taints the loop variable, mirroring converters/python's
-// for-loop target binding). Reassignments/accumulations in the body flow through
-// the header PHI, modeling loop-carried taint.
+// lowerForRange lowers `for (into in|of source) body` into the same HeaderLoop
+// CFG as lowerWhile. The source is lowered once in the pre-loop block; the loop
+// variable (into) is bound to the source's value at the top of the BODY block
+// each iteration (element taint == container taint, so a tainted iterable
+// taints the loop variable, mirroring converters/python's for-loop target
+// binding). Reassignments/accumulations in the body flow through the header
+// PHI, modeling loop-carried taint.
 func (fs *funcState) lowerForRange(into ast.ForInto, source ast.Expression, bodyStmt ast.Statement) {
 	src := fs.lowerExpr(source) // evaluate the iterable in the pre-loop block
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	fs.b.SetIf(header, stringValue(""), body, exit) // opaque iteration condition
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	fs.bindForInto(into, src) // bind the loop variable each iteration
-	fs.lowerBody(stmtList(bodyStmt))
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, header) // back-edge
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return stringValue("") }, // opaque iteration condition
+		func() {
+			fs.bindForInto(into, src) // bind the loop variable each iteration
+			fs.lowerBody(stmtList(bodyStmt))
+		})
 }
 
 // bindForInto binds a for-in/for-of loop variable (the `x` in `for (x of it)` /

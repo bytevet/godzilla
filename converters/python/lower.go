@@ -1007,99 +1007,46 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 	}
 }
 
-// lowerIf lowers `if cond: body [elif/else: orelse]` into a REAL CFG diamond via
-// the Builder: the condition is lowered in the current block, which ends in an
-// OP_CODE_IF to a fresh then-block and else-block; each arm is lowered in its own
-// block and jumps to a fresh merge block; the merge is sealed once both arm-ends
-// are its known predecessors, so any variable rebound on one or both arms
-// reconciles automatically via an on-demand ReadVariable PHI (retiring the manual
-// env-merge path — including the ubiquitous "default if empty" idiom
+// lowerIf lowers `if cond: body [elif/else: orelse]` into a REAL CFG diamond
+// via the Builder's IfDiamond scaffold, so any variable rebound on one or both
+// arms reconciles automatically via an on-demand ReadVariable PHI (retiring the
+// manual env-merge path — including the ubiquitous "default if empty" idiom
 // `if not x: x = "d"`, whose pre-branch tainted value is now kept by the merge
 // PHI). Python's `elif` is an `If` node in the parent's `orelse`, so an
 // arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
 func (fs *funcState) lowerIf(s astNode) {
-	// Lower the condition for its side effects and as the branch value: a source
-	// bound by a walrus (if (x := request.args.get(...)):) or a sink/source call
-	// in the test would otherwise be dropped.
-	var cond *ir.Value
-	if t := s.node("test"); t != nil {
-		cond = fs.lowerExpr(t)
-	} else {
-		cond = stringValue("")
-	}
-	thenB := fs.b.NewBlock()
-	elseB := fs.b.NewBlock()
-	merge := fs.b.NewBlock()
-	fs.b.SetIf(fs.cur, cond, thenB, elseB)
-	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
-	fs.b.Seal(elseB)
-
-	fs.cur = thenB
-	fs.terminated = false
-	fs.lowerBody(s.list("body"))
-	thenTerm := fs.terminated
-	if !thenTerm { // a returning arm has no fall-through edge to the merge
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.cur = elseB
-	fs.terminated = false
-	fs.lowerBody(s.list("orelse"))
-	elseTerm := fs.terminated
-	if !elseTerm {
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
-	fs.cur = merge
-	// The merge is dead only if BOTH arms returned; otherwise it falls through.
-	fs.terminated = thenTerm && elseTerm
+	cond := fs.lowerTest(s) // condition, lowered in the current block
+	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
+		func() { fs.lowerBody(s.list("body")) },
+		func() { fs.lowerBody(s.list("orelse")) })
 }
 
-// lowerWhile lowers `while cond: body [else: orelse]` into a REAL loop CFG:
-// header/body/exit blocks. The current block jumps to the header; the header
-// lowers the condition and branches (body, exit); the body is lowered and jumps
-// BACK to the header (the back-edge). The header is left UNSEALED while the body
-// is built, so a loop variable read in the condition or body parks an incomplete
-// PHI that is filled when the header is sealed after the back-edge is wired —
-// this is what gives loop-carried taint: a value written in the body and read at
-// the top of the next iteration flows through the header PHI (which the old
-// single-block lowering could not model). The `else` clause runs after normal
-// loop completion, so it is lowered into the exit block.
-func (fs *funcState) lowerWhile(s astNode) {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header) // enter the loop
-	fs.cur = header
-	var cond *ir.Value
+// lowerTest lowers a statement's `test` condition in the current block, for
+// its side effects and as the branch value: a source bound by a walrus
+// (if (x := request.args.get(...)):) or a sink/source call in the test would
+// otherwise be dropped. A missing test yields an opaque placeholder.
+func (fs *funcState) lowerTest(s astNode) *ir.Value {
 	if t := s.node("test"); t != nil {
-		cond = fs.lowerExpr(t) // condition, lowered in the (unsealed) header
-	} else {
-		cond = stringValue("")
+		return fs.lowerExpr(t)
 	}
-	fs.b.SetIf(header, cond, body, exit)
+	return stringValue("")
+}
 
-	fs.b.Seal(body) // body's sole predecessor (header) is known
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerBody(s.list("body"))
-	if !fs.terminated { // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
-	}
-
-	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
-	fs.b.Seal(exit)   // exit's sole predecessor is the header
-	fs.cur = exit
-	fs.terminated = false
+// lowerWhile lowers `while cond: body [else: orelse]` into a REAL loop CFG via
+// the Builder's HeaderLoop scaffold (header/body/exit; the header PHI is what
+// carries loop-carried taint — see the scaffold's doc). The `else` clause runs
+// after normal loop completion, so it is lowered into the exit block.
+func (fs *funcState) lowerWhile(s astNode) {
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return fs.lowerTest(s) }, // condition, lowered in the (unsealed) header
+		func() { fs.lowerBody(s.list("body")) })
 	fs.lowerBody(s.list("orelse")) // while-else: runs after normal completion
 }
 
 // lowerFor lowers `for target in iter: body [else: orelse]` into the same
-// header/body/exit loop CFG as lowerWhile. The iterable is lowered once in the
-// pre-loop block; the loop target is bound to the iterable's value at the top of
-// the BODY block each iteration (element taint == container taint, so a tainted
+// HeaderLoop CFG as lowerWhile. The iterable is lowered once in the pre-loop
+// block; the loop target is bound to the iterable's value at the top of the
+// BODY block each iteration (element taint == container taint, so a tainted
 // iterable taints the target). Reassignments/accumulations in the body flow
 // through the header PHI, modeling loop-carried taint. The iteration condition
 // is opaque (a placeholder), so the engine traverses both the body and the exit.
@@ -1108,29 +1055,14 @@ func (fs *funcState) lowerFor(s astNode) {
 	if it := s.node("iter"); it != nil {
 		iterVal = fs.lowerExpr(it) // evaluate the iterable in the pre-loop block
 	}
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	fs.b.SetIf(header, stringValue(""), body, exit)
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	if tgt := s.node("target"); tgt != nil && iterVal != nil {
-		fs.assign(tgt, iterVal) // bind the loop variable each iteration
-	}
-	fs.lowerBody(s.list("body"))
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, header) // back-edge
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return stringValue("") }, // opaque iteration condition
+		func() {
+			if tgt := s.node("target"); tgt != nil && iterVal != nil {
+				fs.assign(tgt, iterVal) // bind the loop variable each iteration
+			}
+			fs.lowerBody(s.list("body"))
+		})
 	fs.lowerBody(s.list("orelse")) // for-else: runs after normal completion
 }
 

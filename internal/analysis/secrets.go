@@ -45,18 +45,48 @@ func secretDetectorsOf(rs *rules.RuleSet) []secretDetector {
 // secretScan is one run of the secret scanner: the compiled detectors, the
 // ruleID@position dedup set, the path-exclusion memo, and the findings so far.
 type secretScan struct {
-	dets     []secretDetector
+	dets []secretDetector
+	// pre is every detector's pattern ORed into one alternation regexp, used as
+	// a single-pass prefilter in text: RE2 compiles an alternation to one
+	// near-flat automaton, so the overwhelmingly common no-match string pays one
+	// scan instead of one per detector. Purely an optimization — a string that
+	// passes still runs each detector's own regexp, which alone decides the
+	// match and attributes it to its rule. nil (no detectors, or the union
+	// failed to compile) means no prefilter: the per-detector loop is the
+	// unchanged fallback.
+	pre      *regexp.Regexp
 	seen     map[string]bool // ruleID@position, for dedup
 	excluded map[string]bool // filename -> excluded, see pathExcluded
 	findings []Finding
 }
 
 func newSecretScan(rs *rules.RuleSet) *secretScan {
+	dets := secretDetectorsOf(rs)
 	return &secretScan{
-		dets:     secretDetectorsOf(rs),
+		dets:     dets,
+		pre:      combinedDetectorRe(dets),
 		seen:     map[string]bool{},
 		excluded: map[string]bool{},
 	}
+}
+
+// combinedDetectorRe ORs the detectors' patterns into one prefilter regexp.
+// Each pattern is wrapped in a non-capturing group so inline flags like (?i)
+// stay scoped to their own pattern. Returns nil when there is nothing to
+// combine or the union does not compile (callers then skip the prefilter).
+func combinedDetectorRe(dets []secretDetector) *regexp.Regexp {
+	if len(dets) == 0 {
+		return nil
+	}
+	parts := make([]string, len(dets))
+	for i, d := range dets {
+		parts[i] = "(?:" + d.re.String() + ")"
+	}
+	re, err := regexp.Compile(strings.Join(parts, "|"))
+	if err != nil {
+		return nil
+	}
+	return re
 }
 
 // pathExcluded is secretPathExcluded memoized per filename. Exclusion is a
@@ -78,6 +108,11 @@ func (s *secretScan) pathExcluded(filename string) bool {
 // declares `languages:` is then skipped, since it asked to be scoped to one.
 func (s *secretScan) text(str string, pos *ir.Position, lang, fn string) {
 	if str == "" || s.pathExcluded(pos.GetFilename()) {
+		return
+	}
+	// One pass over the union of all patterns rejects the common secret-free
+	// string before the per-detector loop (see secretScan.pre).
+	if s.pre != nil && !s.pre.MatchString(str) {
 		return
 	}
 	for _, d := range s.dets {
@@ -159,12 +194,23 @@ const secretFileMaxBytes = 5 << 20 // 5 MiB
 // secret-leak vector: a credential committed to a config file rather than
 // source code, which the gIR-constant scanner (ScanSecrets) cannot see. Source
 // files handled by a frontend are skipped here (their string literals are
-// already covered by ScanSecrets) to avoid double-reporting. root may be a file
-// or a directory; a non-existent path yields no findings.
-func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
+// already covered by ScanSecrets) to avoid double-reporting: isSource, when
+// non-nil, is the caller's authoritative "a language frontend handles this
+// path" predicate (internal/scan derives it from its frontend table, the single
+// source of truth for supported extensions); the static sourceFileExts fallback
+// additionally covers extensions no frontend claims but ScanSecrets-adjacent
+// tooling knows are source (C/C++ headers) and callers passing nil. root may be
+// a file or a directory; a non-existent path yields no findings.
+func ScanSecretsInFiles(root string, rs *rules.RuleSet, isSource func(path string) bool) []Finding {
 	s := newSecretScan(rs)
 	if len(s.dets) == 0 {
 		return nil
+	}
+	scannable := func(path string) bool {
+		if isSource != nil && isSource(path) {
+			return false
+		}
+		return isScannableConfigFile(path)
 	}
 	scanFile := func(path string) {
 		if s.pathExcluded(path) {
@@ -190,14 +236,14 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet) []Finding {
 		return nil
 	}
 	if !info.IsDir() {
-		if isScannableConfigFile(root) {
+		if scannable(root) {
 			scanFile(root)
 		}
 		return s.findings
 	}
 
 	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
-		if isScannableConfigFile(path) {
+		if scannable(path) {
 			scanFile(path)
 		}
 		return nil
@@ -217,9 +263,17 @@ var configFileExts = map[string]bool{
 
 // sourceFileExts are handled by a language frontend, whose string literals the
 // gIR-constant scanner already covers; skip them here to avoid double-reporting.
+// The authoritative predicate is the isSource callback ScanSecretsInFiles takes
+// (internal/scan derives it from its languageFrontends table); this static list
+// is the fallback for nil-predicate callers plus the source extensions no
+// frontend claims (C/C++ headers, which clang can't compile standalone). Keep it
+// in sync with internal/scan's frontend table.
 var sourceFileExts = map[string]bool{
-	".go": true, ".py": true, ".js": true, ".ts": true, ".java": true,
-	".rs": true, ".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".h": true, ".hpp": true,
+	".go": true, ".py": true,
+	".js": true, ".ts": true, ".tsx": true, ".jsx": true, ".mjs": true, ".cjs": true,
+	".vue": true, ".svelte": true,
+	".java": true, ".rs": true, ".rb": true,
+	".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".c++": true, ".h": true, ".hpp": true,
 }
 
 // isScannableConfigFile reports whether path is a textual config/infra file the

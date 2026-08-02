@@ -412,7 +412,7 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 
 	// Build each module's shell (name, types, globals) sequentially on the main
 	// converter, and collect its functions in deterministic order.
-	irProg := &ir.Program{Mode: "ssa"}
+	irProg := &ir.Program{}
 	irProg.Modules = make([]*ir.Module, 0, len(pkgList))
 	type modWork struct {
 		mod   *ir.Module
@@ -942,6 +942,17 @@ func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {
 	return irBlock
 }
 
+// goFormatCallees are the exact canonical FQNs of the stdlib string-returning
+// fmt formatters that carry the builtin.format marker (the literal template —
+// or first value — is the call's Args[0]; see internal/analysis/ssrf.go). Only
+// these three exist in the stdlib; anything else keeping the marker off is the
+// point of the exact match.
+var goFormatCallees = map[string]bool{
+	"go:fmt.Sprintf":  true,
+	"go:fmt.Sprint":   true,
+	"go:fmt.Sprintln": true,
+}
+
 // convertInstructionInto lowers one SSA instruction into irInst
 // (caller-provided storage, see the slabs in convertBlock). irInst and pos must
 // be zero-valued; pos is used (and linked as irInst.Pos) only when the
@@ -991,9 +1002,11 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 		irInst.Call = c.convertCall(i.Call)
 		// Tag a printf-style formatter (fmt.Sprint*, template in Args[0]) with the
 		// language-neutral builtin.format marker so the engine's SSRF host
-		// reconstruction reads the marker, not a Go callee-name shape.
-		if callee := irInst.Call.GetCallee(); strings.Contains(callee, "Sprintf") ||
-			strings.Contains(callee, "Sprintln") || strings.HasSuffix(callee, "Sprint") {
+		// reconstruction reads the marker, not a Go callee-name shape. The match is
+		// exact canonical FQNs: a name-shape heuristic would let a user function
+		// merely named like a formatter (MySprintf) claim "Args[0] is the template"
+		// semantics and wrongly prove a fixed host, suppressing a real SSRF finding.
+		if goFormatCallees[irInst.Call.GetCallee()] {
 			irInst.Intrinsic = "builtin.format"
 		}
 	case *ssa.Return:
