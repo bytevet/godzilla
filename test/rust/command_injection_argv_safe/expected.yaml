@@ -1,5 +1,4 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# FP sentinel: a direct-argv Command with a fixed non-shell program is not
-# command injection — the Rust mirror of test/python/subprocess_argv_safe.
+# FP sentinel: fixed non-shell program with a tainted argv element.
 findings: []

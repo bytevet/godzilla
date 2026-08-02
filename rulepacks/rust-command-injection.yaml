@@ -17,11 +17,9 @@ rules:
       allow-list the program and arguments instead of passing user-controlled
       data to a shell.
     extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml, $_shell-argv.yaml]
-    # `Command` never invokes a shell, so an argv element is injection only when
-    # the program re-interprets it, or is itself untrusted (Command::new#0). The
-    # program lives in a different call from the argument, so the frontend
-    # forwards it down the builder chain — arg[0] carries it at every step. See
-    # rustCommandBuilder in converters/rust/mir.go. Guard: $_shell-argv.yaml.
+    # The program lives in a different call from the argument, so the frontend
+    # aliases each builder step to its receiver (rustCommandStep in
+    # converters/rust/mir.go) and $_shell-argv.yaml reads it as arg[0].
     sinks:
       - "rust:*Command::new#0"
       - "rust:*Command::arg#1"

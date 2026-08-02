@@ -1,10 +1,7 @@
 """Taint stored INTO a container and read back out again.
 
-`d[k] = tainted` followed by a read of the same container must keep the taint.
-Both forms are exercised: an element assigned into an empty dict, and a list
-literal indexed straight back. The empty-dict case is the reason the container
-needs a register of its own -- a store whose destination is a constant has no
-address register for the engine to mark.
+An element assigned into an empty dict, and a list literal indexed straight
+back; both must keep the taint.
 """
 import os
 

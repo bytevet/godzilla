@@ -3,8 +3,7 @@
 # these are `kind: dangerous-call` rules gated on the keyword's name AND value --
 # `kwargs` indexes the call's arguments by the keyword they were passed under
 # (from the Python frontend's builtin.kwarg marker), without which `verify=False`
-# would be indistinguishable from any other false keyword. A keyword the call
-# does not pass reads as the zero argument, so the guard is simply false there.
+# would be indistinguishable from any other false keyword.
 #
 # All ship severity: low + confidence: medium, keeping them advisory under the
 # default `-fail-on medium` gate and inside the LLM reviewer's adjudication

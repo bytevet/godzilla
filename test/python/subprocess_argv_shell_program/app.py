@@ -1,12 +1,7 @@
 """An argv list that LAUNCHES a shell is still command injection.
 
-`subprocess.run(["sh", "-c", cmd])` passes no shell=True, so the argv-list
-suppression would clear it on shape alone -- but argv[0] is a shell, which
-re-interprets the remaining arguments, so the untrusted value is executed. The
-guard therefore requires argv[0] to be a known program that is not itself a
-shell before it suppresses.
-
-Contrast test/python/subprocess_argv_safe, whose argv[0] is `ls`.
+No shell=True, but argv[0] re-interprets what follows. Contrast
+subprocess_argv_safe, whose argv[0] is `ls`.
 """
 import subprocess
 

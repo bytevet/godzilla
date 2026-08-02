@@ -1,9 +1,6 @@
 """An argv list is NOT safe once a shell is involved.
 
-Guards the argv-list suppression from over-reaching: with shell=True the list
-is joined into a single string and handed to /bin/sh, so the untrusted element is
-shell-interpreted after all. The sibling sentinel subprocess_argv_safe covers the
-same call WITHOUT shell, which must stay silent.
+With shell=True the list is joined into one string and handed to /bin/sh.
 """
 import subprocess
 

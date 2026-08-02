@@ -1,7 +1,6 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# Taint stored into a container and read back: `d[k] = tainted` into an empty
-# dict, and a list literal indexed straight back. One finding per route.
+# One finding per route: store-then-read through a dict and a list.
 findings:
     - rule: py-command-injection
       min: 2

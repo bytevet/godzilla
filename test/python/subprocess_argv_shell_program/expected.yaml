@@ -1,7 +1,6 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# Over-suppression guard for the argv-list rule: argv[0] IS a shell, so the list
-# form is not safe and must still fire. Pairs with subprocess_argv_safe.
+# Over-suppression guard: argv[0] is a shell, so the list form is not safe.
 findings:
     - rule: py-command-injection
       min: 2

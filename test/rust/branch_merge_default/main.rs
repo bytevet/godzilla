@@ -4,10 +4,6 @@
 // so the post-join Command::arg sink read the constant (a false negative). The
 // block-structured lowering now PHI-merges `host` at the control-flow join, so
 // the tainted path stays live into the sink.
-//
-// The program is a SHELL deliberately: an argv element passed to a fixed
-// non-shell program is not command injection, so `sh -c` is what keeps this
-// control-flow regression observable at a sink.
 use std::process::Command;
 
 fn main() {

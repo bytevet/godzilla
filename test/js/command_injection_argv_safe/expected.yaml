@@ -1,5 +1,4 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# FP sentinel: spawn/execFile with a fixed non-shell program is not command
-# injection — the JS mirror of test/python/subprocess_argv_safe.
+# FP sentinel: spawn/execFile with a fixed non-shell program.
 findings: []

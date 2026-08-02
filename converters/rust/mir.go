@@ -496,28 +496,25 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	switch {
 	case strings.Contains(canonical, "Arguments::new"):
 		inst.Intrinsic = "builtin.format"
-	case rustIdentityConv(canonical), rustCommandBuilder(canonical):
+	case rustIdentityConv(canonical):
 		inst.Intrinsic = "builtin.identity"
 	}
 	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
+	// A Command builder step returns its receiver, so bind the result to the
+	// RECEIVER's value: arg[0] then resolves to Command::new's result at every
+	// step, which is what lets a rule see the program at the `.arg` sink where
+	// the taint lands. Aliasing here keeps builtin.identity meaning only "this
+	// value's text is Args[0]'s text" — ssrf.go reads that marker too.
+	if rustCommandStep(canonical) && len(cc.Args) > 0 {
+		st.env[dst] = cc.Args[0]
+	}
 }
 
-// rustCommandBuilder reports whether a Rust callee is a std::process::Command
-// builder step whose reconstructed text should be the PROGRAM it will run.
-//
-// `Command::new("sh").arg("-c").arg(x)` splits program and argument across
-// calls, so the rule cannot see at the `.arg` sink which program will run.
-// Marking each step builtin.identity forwards Args[0]'s skeleton — the program
-// for Command::new, the receiver for .arg/.args — so it reaches every step. The
-// instruction stays an OP_CODE_CALL: only text reconstruction changes.
-func rustCommandBuilder(callee string) bool {
-	for _, suffix := range []string{"Command::new", "Command::arg", "Command::args"} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
-		}
-	}
-	return false
+// rustCommandStep reports whether a callee is a std::process::Command builder
+// step that returns its receiver.
+func rustCommandStep(callee string) bool {
+	return strings.HasSuffix(callee, "Command::arg") || strings.HasSuffix(callee, "Command::args")
 }
 
 // rustIdentityConv reports whether a Rust callee is a string-valued conversion
@@ -529,6 +526,8 @@ func rustIdentityConv(callee string) bool {
 	for _, suffix := range []string{
 		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
 		"String::from", "borrow", "must_use", "format",
+		// Command::new(p): the value's text is the program it will run.
+		"Command::new",
 	} {
 		if strings.HasSuffix(callee, suffix) {
 			return true

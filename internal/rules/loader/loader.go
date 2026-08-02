@@ -224,10 +224,7 @@ func mergeFragment(dst, base *rules.Rule) {
 	dst.RequestObjectSources = mergeUniq(base.RequestObjectSources, dst.RequestObjectSources)
 	dst.Validators = mergeUniq(base.Validators, dst.Validators)
 	dst.Callees = mergeUniq(base.Callees, dst.Callees)
-	// `when:` is the one scalar a fragment may contribute, so a guard shared by
-	// several packs lives in one file (see rulepacks/_shell-argv.yaml) instead of
-	// being restated per language. Own-wins, matching how an entry's `when:`
-	// overrides its rule's.
+	// `when:` is the one scalar a fragment contributes; own-wins.
 	if dst.When == "" {
 		dst.When = base.When
 	}

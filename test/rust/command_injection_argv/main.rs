@@ -4,9 +4,8 @@
 // rather than a single Command::arg — exercising taint flow through an array
 // aggregate into the args sink.
 //
-// The vector is a shell invocation (`sh -c <tainted>`): an argv element handed to
-// a fixed non-shell program is NOT command injection (see
-// command_injection_argv_safe), so the shell is what makes this a finding.
+// argv[0] is a shell on purpose: an element passed to a fixed non-shell program
+// is not injection (see command_injection_argv_safe).
 mod http {
     pub struct Request;
     impl Request {

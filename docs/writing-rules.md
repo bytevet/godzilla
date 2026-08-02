@@ -139,7 +139,8 @@ callees:                                  # dangerous-call
   `arg[0].String == 'cmd:'` is false for a partial constant while
   `arg[0].String startsWith 'cmd:'` is true.
 - `.Complete` — the whole argument is a compile-time constant.
-- `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, or `""` if unknown.
+- `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, the container kinds
+  `"aggregate"`/`"map"`, or `""` if unknown.
 - `.Name` — the keyword the argument was passed under (`"shell"` for
   `subprocess.run(cmd, shell=True)`), or `""` for a positional argument or a
   frontend that does not record names (currently Python only). Without it a guard
@@ -154,15 +155,14 @@ callees:                                  # dangerous-call
   was not reconstructed (see below).
 - `.Entries` — the same for a keyed container (`.Type == "map"`), indexed by its
   constant keys: `arg[0].Entries.mode`. An entry whose key is computed is absent,
-  since a rule cannot name it.
+  since a rule cannot name it. Only the Python frontend currently produces
+  addressable container structure.
 - `.TaintInChildren` — reading `.Elems`/`.Entries` will actually find the taint.
   A value can be `.Tainted` with this **false**: the container was mutated after
   it was built (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant
   key, it came from elsewhere (`tainted.split(",")`), or the structure was never
   reconstructed. Ask for it whenever a guard reasons element-by-element — walking
   the children in those cases finds nothing and would wrongly read as safe.
-
-`.Type` also reports `"aggregate"` and `"map"` for the two container forms.
 
 A keyword can appear at any position, so address it through `kwargs`, which
 indexes the same arguments by the keyword they were passed under — this is how
@@ -179,24 +179,16 @@ reads false; it is never an error.
 bounds how much of a container it rebuilds, and a container that does not fit
 contributes *no* structure rather than partial structure. Write the guard so an
 absent or unreachable structure keeps the finding — ask for `.TaintInChildren`
-and `.Complete` before concluding anything is safe, as `py-command-injection`
-does:
+and `.Complete` before concluding anything is safe:
 
 ```yaml
-    when: >-
-      not (kwargs.shell.String != "true"
-           and any(arg, .Tainted)
-           and all(filter(arg, .Tainted),
-                   .Type == "aggregate"
-                   and .TaintInChildren
-                   and .Elems[0].Complete
-                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh)$")))
+    when: 'not (arg[0].TaintInChildren and arg[0].Elems[0].Complete
+                and arg[0].Elems[0].String == "ls")'
 ```
 
-Each clause asserts something the engine confirmed, so anything it could not
-confirm fires. That is why the fields are worded positively: an `Arg` built
-without one reads as "not established", which costs a spurious finding rather
-than a silent miss.
+The shipped rules are `rulepacks/py-command-injection.yaml` and the guard it
+shares with the JS and Rust packs, `rulepacks/_shell-argv.yaml`.
+
 
 Write the condition with expr's native operators/builtins — `startsWith`,
 `endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined

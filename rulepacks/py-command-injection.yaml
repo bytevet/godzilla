@@ -11,26 +11,13 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     extend: $_py-sources.yaml
-    # Passing tainted data as an element of a direct argv LIST is not command
-    # injection: the value reaches execve as one argument, never a shell
-    # interpreter. The Python frontend lowers container literals to
-    # builtin.aggregate so element taint survives into a later whole-container
-    # use, which would otherwise make the safe argv form fire.
+    # Same rule as $_shell-argv.yaml, but Python's tainted value arrives INSIDE a
+    # lowered container, so the program is `.Elems[0]` rather than `arg[0]`.
     #
-    # Suppress only when ALL of these hold: no shell is requested; every tainted
-    # argument arrived as an in-place container ("aggregate"); and that
-    # container's argv[0] is a KNOWN program that is not itself a shell. The last
-    # clause is what keeps `subprocess.run(["sh", "-c", tainted])` firing — an
-    # argv list is only safe if the program it launches does not re-interpret its
-    # arguments.
-    #
-    # Every clause demands positive evidence, so anything unproven fires. That
-    # includes `shell=`: absent (the zero Arg, "") or a literal false clears it,
-    # while `shell=1` does not. A NON-CONSTANT `shell=flag` records no keyword
-    # name at all (the frontend marks constants only), so it would read as
-    # absent — hence every non-tainted argument must be a keyword we can name.
-    # The program list is best-effort: it covers interpreters known to
-    # re-interpret their arguments, not every possible one.
+    # `shell=` is cleared only when absent or literally false. A non-constant
+    # `shell=flag` records no keyword name at all (the frontend marks constants
+    # only), so it would read as absent — hence every non-tainted argument must
+    # be a keyword we can name.
     when: >-
       not ((kwargs.shell.String == "" or kwargs.shell.String == "false")
            and all(filter(arg, not .Tainted), .Name != "")
