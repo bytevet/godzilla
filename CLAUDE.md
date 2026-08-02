@@ -167,6 +167,16 @@ scaffolding: `internal/chunks`, `internal/proc`, `internal/walkignore`, `interna
   and run `go generate` — never hand-edit `pkg/ir/v1/*.pb.go`.
 - **Canonical names are the cross-language join.** Frontends must emit stable `<lang>:...` FQNs; rules match
   them with globs. Adding a sink/source is usually a YAML edit, not code.
+- **The guard and rule contract needs the maintainer's explicit approval — ASK FIRST, every time.** This
+  covers the `when:` DSL surface (`internal/rules/guard.go`: the `guardEnv` roots `arg`/`kwargs`, the `Arg`
+  fields, and the engine-supplied facts like `hostFixed()`) and the `Rule` model itself
+  (`internal/rules/rule.go`: `sources`/`sinks`/`sanitizers`/`propagators`, `kind:`, `extend:`, `#<idx>`
+  pinning). It is a PUBLIC API: every built-in pack and every user-authored rules directory is written
+  against it, and unlike Go code they are not compiled — a removed field or a changed fact silently
+  suppresses findings instead of failing the build, and a guard that errors at runtime suppresses its entry.
+  Adding a field or fact is as breaking as removing one, because rules then depend on it. Propose the change
+  and the rule edits it forces, get agreement, then implement. Using the existing surface — a new `when:` on
+  a rule, a new sink glob — is ordinary work and needs no approval.
 - **Source mapping is mandatory** — every instruction/function/global populates `Pos`; it drives reporting.
 - **Isolated sample modules.** Vulnerable test code lives under `test/{go,python,js,java,rust,ruby,c,cpp}/`;
   Go samples are isolated modules — never pollute the root `go.mod` with sample dependencies.
