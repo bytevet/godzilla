@@ -443,10 +443,9 @@ def conv_expr(node):
         return {"kind": "Await", "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, (ast.List, ast.Tuple)):
-        # As a VALUE: a list/tuple literal (lower elements so an inner source/sink
-        # fires; the container itself stays untainted). As an unpacking TARGET
-        # (a, b = ...): bind each element. Both are handled by the "Sequence"
-        # lowering, distinguished by context (lowerExpr vs assign).
+        # As a VALUE: a list/tuple literal, which carries its elements' taint. As
+        # an unpacking TARGET (a, b = ...): bind each element. Both are handled by
+        # the "Sequence" lowering, distinguished by context (lowerExpr vs assign).
         return {"kind": "Sequence", "container": "list", "elts": [conv_expr(e) for e in node.elts], "pos": p}
 
     if isinstance(node, ast.Set):
@@ -465,16 +464,13 @@ def conv_expr(node):
         # "list" instead: the elements still carry taint, but no key structure is
         # claimed rather than a mis-paired one.
         elts = []
-        aligned = True
         for k, v in zip(node.keys, node.values):
-            if k is None:
-                aligned = False
-            else:
+            if k is not None:
                 elts.append(conv_expr(k))
             elts.append(conv_expr(v))
         return {
             "kind": "Sequence",
-            "container": "dict" if aligned else "list",
+            "container": "list" if None in node.keys else "dict",
             "elts": elts,
             "pos": p,
         }

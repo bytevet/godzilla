@@ -340,68 +340,77 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 
 // argVals reconstructs each logical argument as a guard's `arg[i]`: the string
 // skeleton (constant runs + DynMarker for dynamic runs, via constSkeleton),
-// whether the whole argument is constant, and its best-effort static type.
-// argVals renders a call's logical arguments for a `when:` guard. tainted may be
-// nil — a dangerous-call guard has no flow behind it — in which case every Arg
-// reports Tainted false, so a rule keying on it simply never suppresses there.
+// whether the whole argument is constant, its best-effort static type, the
+// keyword it was passed under, whether it is tainted, and — for a container
+// literal — its elements. tainted may be nil (a dangerous-call guard has no flow
+// behind it), in which case every Arg reports Tainted false, so a rule keying on
+// it simply never suppresses there. The structure budget is shared across the
+// whole call, not per argument.
 func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
+	budget := maxArgNodes
 	for i, v := range la {
-		out[i] = argOf(v, defs, tainted, 0)
+		out[i] = argOf(v, defs, tainted, &budget)
 	}
 	return out
 }
 
-// Bounds on the structure argOf reconstructs for a container argument. A guard
-// only ever needs the shallow shape (is argv[0] a shell? what is entry "mode"?),
-// and the walk runs per guarded sink, so both limits are deliberately small.
+// maxArgNodes bounds the TOTAL number of argument nodes one call's structure
+// reconstruction may build. A per-level width cap would not: 32 elements at each
+// of 3 levels is 33k nodes and megabytes of garbage per guard evaluation, and a
+// suppressing guard is re-evaluated on every fixpoint pass. One shared budget
+// makes the cost linear in the budget rather than exponential in the nesting.
 //
-// Exceeding either yields NO structure rather than partial structure: a rule
-// must require positive evidence (`len(.Elems) > 0 and .Elems[0].Complete`)
-// before suppressing, so a truncated container fails OPEN and still fires.
-// Partial structure would instead let a rule suppress on an element that only
-// looked safe because the rest was dropped.
-const (
-	maxArgDepth = 3
-	maxArgElems = 32
-)
+// A container that does not fit in the remaining budget contributes NO structure
+// rather than partial structure. That distinction is load-bearing: a rule must
+// demand positive evidence (`len(.Elems) > 0 and .Elems[0].Complete`) before
+// suppressing, so an unexpanded container fails OPEN and still fires, whereas
+// half a container could let a rule clear it on the part that happened to fit.
+const maxArgNodes = 256
 
-// argOf renders one call argument for a guard, recursing into container
-// literals up to the limits above. depth is the current nesting level.
-func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, depth int) rules.Arg {
-	a := scalarArg(v, defs, tainted)
-	if depth >= maxArgDepth {
-		return a
-	}
-	// Structure is read from the UNWRAPPED value, matching scalarArg.
-	_, uv := unwrapKwarg(v, defs)
+// argOf renders one call argument for a guard, expanding container literals
+// while the shared budget allows.
+func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, budget *int) rules.Arg {
+	// A keyword argument arrives wrapped in a name marker; unwrap it once here so
+	// the skeleton, type and structure all describe the VALUE while .Name carries
+	// the keyword it was passed under.
+	name, uv := unwrapKwarg(v, defs)
 	def := defs[uv.GetRegName()]
+	a := scalarArg(name, uv, def, defs, tainted)
+
 	ops := def.GetOperands()
-	if len(ops) > maxArgElems {
+	if len(ops) == 0 || len(ops) > *budget {
 		return a
 	}
 	switch def.GetIntrinsic() {
 	case aggregateIntrinsic:
+		*budget -= len(ops)
 		a.Elems = make([]rules.Arg, 0, len(ops))
 		for _, o := range ops {
-			a.Elems = append(a.Elems, argOf(o, defs, tainted, depth+1))
+			a.Elems = append(a.Elems, argOf(o, defs, tainted, budget))
 		}
 	case aggregateMapIntrinsic:
 		if len(ops)%2 != 0 {
 			return a // not a clean key,value run: claim no key structure
 		}
-		a.Entries = make(map[string]rules.Arg, len(ops)/2)
+		*budget -= len(ops)
 		for i := 0; i+1 < len(ops); i += 2 {
-			k := argOf(ops[i], defs, tainted, depth+1)
+			// A key is only ever read for its constant text, so it needs no
+			// structure of its own — a tuple key would otherwise expand a whole
+			// subtree that is then discarded.
+			k := scalarArg("", ops[i], defs[ops[i].GetRegName()], defs, tainted)
 			// Only a fully constant key names an entry; a computed key cannot be
 			// addressed by a rule, so its pair is left out of Entries (the value
 			// still carries taint through the aggregate itself).
 			if !k.Complete {
 				continue
 			}
+			if a.Entries == nil {
+				a.Entries = make(map[string]rules.Arg, len(ops)/2)
+			}
 			if _, dup := a.Entries[k.String]; !dup {
-				a.Entries[k.String] = argOf(ops[i+1], defs, tainted, depth+1)
+				a.Entries[k.String] = argOf(ops[i+1], defs, tainted, budget)
 			}
 		}
 	}
@@ -409,12 +418,9 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, dep
 }
 
 // scalarArg renders an argument's own value — skeleton, completeness, type,
-// keyword name and taint — without recursing into any structure.
-func scalarArg(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState) rules.Arg {
-	// A keyword argument arrives wrapped in a name marker; unwrap it so the
-	// skeleton, completeness and type describe the VALUE while .Name carries
-	// the keyword it was passed under.
-	name, v := unwrapKwarg(v, defs)
+// keyword name and taint — without recursing into any structure. name, v and def
+// come from the caller's single unwrap so nothing is resolved twice.
+func scalarArg(name string, v *ir.Value, def *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState) rules.Arg {
 	s, complete := constSkeleton(v, defs, map[string]bool{})
 	// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
 	// back as an empty, incomplete skeleton. Render it here — in the guard path
@@ -435,7 +441,7 @@ func scalarArg(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState)
 	if tainted != nil {
 		_, isTaint = isTainted(tainted, v)
 	}
-	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name, Tainted: isTaint}
+	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, def, defs), Name: name, Tainted: isTaint}
 }
 
 // constScalar renders a non-string constant (bool/int/float) as its literal text,
@@ -464,14 +470,15 @@ func constScalar(v *ir.Value) (string, bool) {
 // constant's kind, else "string" when we recovered constant text or the defining
 // instruction is string-typed, else "" (unknown). The IR-type fallback matters:
 // without it a fully tainted string — the common guarded case — would report "".
-func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) string {
+// def is v's defining instruction, already resolved by the caller.
+func argType(v *ir.Value, skeleton string, def *ir.Instruction, defs map[string]*ir.Instruction) string {
 	// A container CONSTRUCTED IN PLACE — a Python list/dict/set literal or
 	// comprehension — reports "aggregate". This is what lets a rule tell the
 	// safe argv form apart from a shell string: in
 	// `subprocess.run(["ls", name])` the tainted value is an element of an
 	// aggregate, not the command text. Checked before the skeleton fallbacks,
 	// which would otherwise type it by its reconstructed text.
-	switch d := defs[v.GetRegName()]; d.GetIntrinsic() {
+	switch def.GetIntrinsic() {
 	case aggregateIntrinsic:
 		return "aggregate"
 	case aggregateMapIntrinsic:

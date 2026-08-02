@@ -778,8 +778,13 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 // previously lowered to a constant, and a constant destination makes visitStore
 // early-return (it needs an address register), which is why `d[k] = tainted`
 // used to drop taint even before any element existed.
-func (fs *funcState) emitAggregate(elts []*ir.Value, n astNode) *ir.Value {
-	return fs.emitAggregateOf(aggregateIntrinsic, elts, n)
+func (fs *funcState) emitAggregate(intrinsic string, elts []*ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = intrinsic
+	inst.Operands = elts
+	fs.emit(inst)
+	return regValue(inst.Name)
 }
 
 // Canonical container constructions. Both propagate taint identically; the map
@@ -790,14 +795,16 @@ const (
 	aggregateMapIntrinsic = "builtin.aggregate_map"
 )
 
-// emitAggregateOf is emitAggregate with the container kind spelled out.
-func (fs *funcState) emitAggregateOf(intrinsic string, elts []*ir.Value, n astNode) *ir.Value {
-	inst := fs.newValueInst(n)
-	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-	inst.Intrinsic = intrinsic
-	inst.Operands = elts
-	fs.emit(inst)
-	return regValue(inst.Name)
+// lowerAggregate lowers each element expression and builds the container from
+// the results. Shared by the two places a container is built in place — a
+// literal and a comprehension — which differ only in where their elements come
+// from.
+func (fs *funcState) lowerAggregate(intrinsic string, elts []astNode, n astNode) *ir.Value {
+	vals := make([]*ir.Value, 0, len(elts))
+	for _, e := range elts {
+		vals = append(vals, fs.lowerExpr(e))
+	}
+	return fs.emitAggregate(intrinsic, vals, n)
 }
 
 func regValue(name string) *ir.Value {
@@ -1453,24 +1460,19 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// container with no register identity and made EVERY Python container
 		// flow invisible — not just the literal, but `d[k] = tainted` too, since
 		// visitStore needs an address register. Command injection keeps its argv
-		// precision through the `argvList()` guard instead of by erasing the
+		// precision through its `when:` guard instead of by erasing the
 		// container; see rulepacks/py-command-injection.yaml and
 		// test/python/subprocess_argv_safe.
-		elts := n.list("elts")
-		vals := make([]*ir.Value, 0, len(elts))
-		for _, e := range elts {
-			if v := fs.lowerExpr(e); v != nil {
-				vals = append(vals, v)
-			}
-		}
+		//
 		// A dict literal whose keys all pair up carries its run as
 		// key,value,key,value; pyast.py marks anything else "list" so no key
 		// structure is claimed. The two intrinsics propagate taint identically
 		// and differ only in the shape a guard may read back.
+		intrinsic := aggregateIntrinsic
 		if n.str("container") == "dict" {
-			return fs.emitAggregateOf(aggregateMapIntrinsic, vals, n)
+			intrinsic = aggregateMapIntrinsic
 		}
-		return fs.emitAggregate(vals, n)
+		return fs.lowerAggregate(intrinsic, n.list("elts"), n)
 
 	case "Starred":
 		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
@@ -1491,15 +1493,19 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 				fs.lowerExpr(cond)
 			}
 		}
-		vals := make([]*ir.Value, 0, 3)
+		elts := make([]astNode, 0, 3)
 		for _, key := range []string{"elt", "key", "value"} {
 			if e := n.node(key); e != nil {
-				if v := fs.lowerExpr(e); v != nil {
-					vals = append(vals, v)
-				}
+				elts = append(elts, e)
 			}
 		}
-		return fs.emitAggregate(vals, n)
+		// A dict comprehension yields key,value pairs like a dict literal; every
+		// other form yields plain elements.
+		intrinsic := aggregateIntrinsic
+		if n.node("key") != nil {
+			intrinsic = aggregateMapIntrinsic
+		}
+		return fs.lowerAggregate(intrinsic, elts, n)
 
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
@@ -1812,24 +1818,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	if isSelfMethod {
 		cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
 	}
-	// An `ast.*` node constructor (ast.Module/ast.Expression/ast.Interactive/...)
-	// builds a new AST node from its child nodes; a node assembled from tainted
-	// parts is itself tainted. Its children are commonly wrapped in a list
-	// (`ast.Module(body=[node], type_ignores=[])`, CVE-2025-3248 langflow), but a
-	// list literal is lowered to an untainted placeholder on purpose (a direct-argv
-	// subprocess list must NOT be flagged -- see the Sequence case and the
-	// subprocess_argv_safe sentinel). So for ast constructors ONLY, spread a
-	// sequence argument's elements as direct call args, letting element taint reach
-	// the constructor (a rulepack propagator) without touching the general
-	// list-taint behavior any sink relies on.
-	astCtor := strings.HasPrefix(callee, "py:ast.")
 	appendArg := func(a astNode) {
-		if astCtor && a != nil && a.kind() == "Sequence" {
-			for _, e := range a.list("elts") {
-				cc.Args = append(cc.Args, fs.lowerExpr(e))
-			}
-			return
-		}
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
 	for _, a := range n.list("args") {
@@ -1846,11 +1835,8 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		// left alone).
 		a := kw.node("value")
 		name := kw.str("arg")
-		// A `**kwargs` splat has no name, and an ast.* constructor's sequence value
-		// must still be SPREAD into element args (see appendArg) — wrapping it would
-		// hide the elements and drop taint into the constructor. Both keep the
-		// existing path.
-		if name == "" || (astCtor && a != nil && a.kind() == "Sequence") {
+		// A `**kwargs` splat has no name to record, so it stays a plain argument.
+		if name == "" {
 			appendArg(a)
 			continue
 		}

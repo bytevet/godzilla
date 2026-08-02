@@ -54,12 +54,12 @@ var intrinsicPropagators = map[string]bool{
 	// (used by the Rust frontend): taint on any constructed element flows to the
 	// aggregate value, so a later whole-aggregate use (e.g. a format! argument
 	// pack) observes it. Field-precise reads are folded at lowering time.
-	"builtin.aggregate": true,
+	aggregateIntrinsic: true,
 	// The keyed form (a dict literal): same element-taint semantics.
-	"builtin.aggregate_map": true,
-	"go.map.lookup":         true,
-	"go.next":               true,
-	"go.range":              true,
+	aggregateMapIntrinsic: true,
+	"go.map.lookup":       true,
+	"go.next":             true,
+	"go.range":            true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted

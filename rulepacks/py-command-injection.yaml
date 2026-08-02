@@ -33,7 +33,7 @@ rules:
     # subprocess_argv_shell_program.
     when: >-
       not (kwargs.shell.String != "true"
-           and len(filter(arg, .Tainted)) > 0
+           and any(arg, .Tainted)
            and all(filter(arg, .Tainted),
                    .Type == "aggregate"
                    and len(.Elems) > 0

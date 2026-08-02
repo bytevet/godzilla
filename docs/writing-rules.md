@@ -145,12 +145,45 @@ callees:                                  # dangerous-call
   frontend that does not record names (currently Python only). Without it a guard
   can only see that *some* boolean argument is true, which cannot tell the
   dangerous `shell=True` from an innocuous `check=True`.
+- `.Tainted` — untrusted data reaches the sink through *this* argument. Lets a
+  rule ask **where** the taint arrived rather than only that it did: an element
+  of an argv list is not the command string. Always false for a
+  `dangerous-call` rule, which has no flow behind it.
+- `.Elems` — for a container built in place (`.Type == "aggregate"`), its
+  elements in order, so `arg[0].Elems[0]` is `argv[0]`. Empty when the container
+  was not reconstructed (see below).
+- `.Entries` — the same for a keyed container (`.Type == "map"`), indexed by its
+  constant keys: `arg[0].Entries.mode`. An entry whose key is computed is absent,
+  since a rule cannot name it.
 
-A keyword can appear at any position, so match it by iterating rather than by
-index — this is how the security-config rules are written:
+`.Type` also reports `"aggregate"` and `"map"` for the two container forms.
+
+A keyword can appear at any position, so address it through `kwargs`, which
+indexes the same arguments by the keyword they were passed under — this is how
+the security-config rules are written:
 
 ```yaml
-    when: 'any(arg, .Name == "verify" && .String == "false")'
+    when: 'kwargs.verify.String == "false"'
+```
+
+A keyword the call does not pass yields the zero argument, so the guard simply
+reads false; it is never an error.
+
+**Container structure is best-effort, so demand positive evidence.** The engine
+bounds how much of a container it rebuilds, and a container that does not fit
+contributes *no* structure rather than partial structure. Write the guard so an
+absent structure keeps the finding — check `len(.Elems) > 0` and `.Complete`
+before concluding anything is safe, as `py-command-injection` does:
+
+```yaml
+    when: >-
+      not (kwargs.shell.String != "true"
+           and any(arg, .Tainted)
+           and all(filter(arg, .Tainted),
+                   .Type == "aggregate"
+                   and len(.Elems) > 0
+                   and .Elems[0].Complete
+                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh)$")))
 ```
 
 Write the condition with expr's native operators/builtins — `startsWith`,

@@ -94,13 +94,20 @@ type guardEnv struct {
 	HostFixed func(...Arg) bool `expr:"hostFixed"`
 }
 
-// kwargsOf indexes arguments by keyword name, skipping positional ones. On a
-// duplicate keyword the first wins; a call cannot legally pass one twice.
+// kwargsOf indexes arguments by keyword name, skipping positional ones. The map
+// is allocated only once a keyword is actually seen: most guarded calls are
+// all-positional, and of the guards that ship only one reads `kwargs` at all, so
+// eagerly building it charged every `not hostFixed()` evaluation for an empty
+// map. A nil map is indistinguishable to a guard — expr yields the zero Arg for
+// any lookup — so the absent case needs no special handling.
 func kwargsOf(args []Arg) map[string]Arg {
-	m := make(map[string]Arg, len(args))
+	var m map[string]Arg
 	for _, a := range args {
 		if a.Name == "" {
 			continue
+		}
+		if m == nil {
+			m = make(map[string]Arg, len(args))
 		}
 		if _, dup := m[a.Name]; !dup {
 			m[a.Name] = a

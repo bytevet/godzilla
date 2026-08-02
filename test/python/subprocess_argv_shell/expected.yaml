@@ -1,6 +1,6 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# Over-suppression guard for `argvList()`: an argv list WITH shell=True is joined
+# Over-suppression guard for the argv-list rule: an argv list WITH shell=True is joined
 # into a shell string, so it must still fire. Pairs with subprocess_argv_safe.
 findings:
     - rule: py-command-injection
