@@ -36,7 +36,7 @@ rules:
            and any(arg, .Tainted)
            and all(filter(arg, .Tainted),
                    .Type == "aggregate"
-                   and len(.Elems) > 0
+                   and .TaintInChildren
                    and .Elems[0].Complete
                    and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))
     sinks:

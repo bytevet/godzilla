@@ -155,6 +155,12 @@ callees:                                  # dangerous-call
 - `.Entries` — the same for a keyed container (`.Type == "map"`), indexed by its
   constant keys: `arg[0].Entries.mode`. An entry whose key is computed is absent,
   since a rule cannot name it.
+- `.TaintInChildren` — reading `.Elems`/`.Entries` will actually find the taint.
+  A value can be `.Tainted` with this **false**: the container was mutated after
+  it was built (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant
+  key, it came from elsewhere (`tainted.split(",")`), or the structure was never
+  reconstructed. Ask for it whenever a guard reasons element-by-element — walking
+  the children in those cases finds nothing and would wrongly read as safe.
 
 `.Type` also reports `"aggregate"` and `"map"` for the two container forms.
 
@@ -172,8 +178,9 @@ reads false; it is never an error.
 **Container structure is best-effort, so demand positive evidence.** The engine
 bounds how much of a container it rebuilds, and a container that does not fit
 contributes *no* structure rather than partial structure. Write the guard so an
-absent structure keeps the finding — check `len(.Elems) > 0` and `.Complete`
-before concluding anything is safe, as `py-command-injection` does:
+absent or unreachable structure keeps the finding — ask for `.TaintInChildren`
+and `.Complete` before concluding anything is safe, as `py-command-injection`
+does:
 
 ```yaml
     when: >-
@@ -181,10 +188,15 @@ before concluding anything is safe, as `py-command-injection` does:
            and any(arg, .Tainted)
            and all(filter(arg, .Tainted),
                    .Type == "aggregate"
-                   and len(.Elems) > 0
+                   and .TaintInChildren
                    and .Elems[0].Complete
                    and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh)$")))
 ```
+
+Each clause asserts something the engine confirmed, so anything it could not
+confirm fires. That is why the fields are worded positively: an `Arg` built
+without one reads as "not established", which costs a spurious finding rather
+than a silent miss.
 
 Write the condition with expr's native operators/builtins — `startsWith`,
 `endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined

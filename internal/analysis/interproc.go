@@ -378,10 +378,24 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 	name, uv := unwrapKwarg(v, defs)
 	def := defs[uv.GetRegName()]
 	a := scalarArg(name, uv, def, defs, tainted)
+	expandStructure(&a, def, defs, tainted, budget)
+	// Whether the taint is actually reachable by reading this value's children.
+	// Computed on EVERY path, including the ones that reconstruct nothing — a
+	// value whose structure was not built has no tainted child by construction,
+	// which is precisely what a rule must not mistake for "safe". Checking direct
+	// children is enough: an aggregate child is itself Tainted whenever any of
+	// ITS elements is, because the aggregate intrinsic propagates.
+	a.TaintInChildren = childTainted(a)
+	return a
+}
 
+// expandStructure fills in a's Elems/Entries from its defining container
+// construction, while the shared budget allows. A container that does not fit
+// contributes nothing rather than a partial reconstruction.
+func expandStructure(a *rules.Arg, def *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState, budget *int) {
 	ops := def.GetOperands()
 	if len(ops) == 0 || len(ops) > *budget {
-		return a
+		return
 	}
 	switch def.GetIntrinsic() {
 	case aggregateIntrinsic:
@@ -392,7 +406,7 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 		}
 	case aggregateMapIntrinsic:
 		if len(ops)%2 != 0 {
-			return a // not a clean key,value run: claim no key structure
+			return // not a clean key,value run: claim no key structure
 		}
 		*budget -= len(ops)
 		for i := 0; i+1 < len(ops); i += 2 {
@@ -414,7 +428,21 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 			}
 		}
 	}
-	return a
+}
+
+// childTainted reports whether any reconstructed element or entry carries taint.
+func childTainted(a rules.Arg) bool {
+	for _, e := range a.Elems {
+		if e.Tainted {
+			return true
+		}
+	}
+	for _, e := range a.Entries {
+		if e.Tainted {
+			return true
+		}
+	}
+	return false
 }
 
 // scalarArg renders an argument's own value — skeleton, completeness, type,

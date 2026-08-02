@@ -54,6 +54,21 @@ type Arg struct {
 	// container on the strength of the part that happened to survive.
 	Elems   []Arg
 	Entries map[string]Arg
+	// TaintInChildren reports that a reconstructed element or entry carries the
+	// taint — i.e. reading Elems/Entries will actually find it. A value can be
+	// Tainted with this FALSE: the container was mutated after it was built
+	// (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant key that
+	// Entries cannot name, it came from elsewhere entirely
+	// (`tainted.split(",")`), or the structure was never reconstructed. Walking
+	// the children in those cases finds nothing and would wrongly read as safe.
+	//
+	// This is what makes the SAFE guard the natural one to write: a rule
+	// reasoning element-by-element asks for `.TaintInChildren` and so declines
+	// the values it cannot see into, instead of silently clearing them. The
+	// polarity is deliberate — the zero value is "the taint is not accounted
+	// for", so a construction site that forgets this field produces a spurious
+	// finding rather than a silent miss.
+	TaintInChildren bool
 }
 
 // Guard is a compiled `when:` expression that decides whether a dynamic sink or

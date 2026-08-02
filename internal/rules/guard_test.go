@@ -237,3 +237,57 @@ func TestGuardArgStructure(t *testing.T) {
 		}
 	}
 }
+
+// TestGuardTaintInChildren pins the distinction between "this value carries
+// taint" and "reading its children will find that taint". They differ whenever
+// the taint did not come from a reconstructed element: a container mutated after
+// construction, a non-constant key, a value built elsewhere, or a container the
+// engine declined to expand.
+//
+// The polarity is the point. TaintInChildren's zero value is "not accounted
+// for", so a rule that reasons element-by-element declines a value it cannot see
+// into. Were the field inverted, an Arg built without setting it would read as
+// "taint is localized" and let a rule clear a finding silently.
+func TestGuardTaintInChildren(t *testing.T) {
+	el := func(s string) Arg { return Arg{String: s, Complete: true, Type: "string"} }
+	tainted := Arg{String: DynMarker, Tainted: true}
+
+	visible := Arg{Type: "aggregate", Tainted: true, TaintInChildren: true,
+		Elems: []Arg{el("ls"), tainted}}
+	// Tainted, but the taint is not in any child: `d = {}` then `d[k] = tainted`.
+	mutated := Arg{Type: "map", Tainted: true}
+	// A container the budget declined to expand: correct Type, no children.
+	unexpanded := Arg{Type: "aggregate", Tainted: true}
+	// A field nobody populated — the zero value must read as "not accounted for".
+	zeroValue := Arg{Type: "aggregate", Tainted: true, Elems: []Arg{el("ls"), tainted}}
+
+	const policy = `not (kwargs.shell.String != "true" ` +
+		`and any(arg, .Tainted) ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate" and .TaintInChildren ` +
+		`and .Elems[0].Complete ` +
+		`and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"taint reachable through children", `arg[0].TaintInChildren`, []Arg{visible}, true},
+		{"tainted but mutated after build", `arg[0].TaintInChildren`, []Arg{mutated}, false},
+		{"tainted is still true there", `arg[0].Tainted`, []Arg{mutated}, true},
+		{"policy: visible taint suppresses", policy, []Arg{visible}, false},
+		{"policy: mutated container fires", policy, []Arg{mutated}, true},
+		{"policy: unexpanded container fires", policy, []Arg{unexpanded}, true},
+		{"policy: unset field fires (fail open)", policy, []Arg{zeroValue}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
