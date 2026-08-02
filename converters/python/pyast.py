@@ -443,14 +443,13 @@ def conv_expr(node):
         return {"kind": "Await", "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, (ast.List, ast.Tuple)):
-        # As a VALUE: a list/tuple literal (lower elements so an inner source/sink
-        # fires; the container itself stays untainted). As an unpacking TARGET
-        # (a, b = ...): bind each element. Both are handled by the "Sequence"
-        # lowering, distinguished by context (lowerExpr vs assign).
-        return {"kind": "Sequence", "elts": [conv_expr(e) for e in node.elts], "pos": p}
+        # As a VALUE: a list/tuple literal, which carries its elements' taint. As
+        # an unpacking TARGET (a, b = ...): bind each element. Both are handled by
+        # the "Sequence" lowering, distinguished by context (lowerExpr vs assign).
+        return {"kind": "Sequence", "container": "list", "elts": [conv_expr(e) for e in node.elts], "pos": p}
 
     if isinstance(node, ast.Set):
-        return {"kind": "Sequence", "elts": [conv_expr(e) for e in node.elts], "pos": p}
+        return {"kind": "Sequence", "container": "list", "elts": [conv_expr(e) for e in node.elts], "pos": p}
 
     if isinstance(node, ast.Dict):
         # A dict literal is the payload shape for JSON bodies, kwargs, and DB
@@ -458,12 +457,23 @@ def conv_expr(node):
         # sink INSIDE the literal is emitted and can fire (FE-7) — previously the
         # whole dict was "Unknown" -> py.unsupported and every inner call was
         # dropped. (A None key is `**spread` per PEP 448; lower only its value.)
+        #
+        # container="dict" tells the lowering the elts run is key,value,key,value
+        # so a guard can address entries by key. A `**spread` contributes a value
+        # with no key and breaks that alignment, so such a literal is marked
+        # "list" instead: the elements still carry taint, but no key structure is
+        # claimed rather than a mis-paired one.
         elts = []
         for k, v in zip(node.keys, node.values):
             if k is not None:
                 elts.append(conv_expr(k))
             elts.append(conv_expr(v))
-        return {"kind": "Sequence", "elts": elts, "pos": p}
+        return {
+            "kind": "Sequence",
+            "container": "list" if None in node.keys else "dict",
+            "elts": elts,
+            "pos": p,
+        }
 
     if isinstance(node, ast.Starred):
         return {"kind": "Starred", "value": conv_expr(node.value), "pos": p}

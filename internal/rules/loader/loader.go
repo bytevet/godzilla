@@ -224,6 +224,10 @@ func mergeFragment(dst, base *rules.Rule) {
 	dst.RequestObjectSources = mergeUniq(base.RequestObjectSources, dst.RequestObjectSources)
 	dst.Validators = mergeUniq(base.Validators, dst.Validators)
 	dst.Callees = mergeUniq(base.Callees, dst.Callees)
+	// `when:` is the one scalar a fragment contributes; own-wins.
+	if dst.When == "" {
+		dst.When = base.When
+	}
 }
 
 // mergeUniq returns base entries followed by own entries, with duplicates

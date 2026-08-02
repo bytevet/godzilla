@@ -101,7 +101,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 				}
 				// Dynamic callee guard (`when:`): suppress unless it confirms against
 				// the call's reconstructed argument values (required-confirmation).
-				if guard != nil && !guard.Eval(argVals(inst.Call, getDefs())) {
+				if guard != nil && !guard.Eval(argVals(inst.Call, getDefs(), nil, guard.NeedsStructure())) {
 					continue
 				}
 				key := d.rule.ID + "@" + posKey(inst.GetPos())

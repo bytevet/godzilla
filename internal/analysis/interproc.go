@@ -338,34 +338,115 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	return sel
 }
 
-// argVals reconstructs each logical argument as a guard's `arg[i]`: the string
-// skeleton (constant runs + DynMarker for dynamic runs, via constSkeleton),
-// whether the whole argument is constant, and its best-effort static type.
-func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction) []rules.Arg {
+// argVals reconstructs each logical argument as a guard's `arg[i]` (see
+// rules.Arg for the fields). tainted may be nil (a dangerous-call guard has no flow
+// behind it), in which case every Arg reports Tainted false, so a rule keying on
+// it simply never suppresses there. The structure budget is shared across the
+// whole call, not per argument.
+func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState, expand bool) []rules.Arg {
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
+	// A guard that never names .Elems/.Entries cannot observe the structure, so
+	// a zero budget skips reconstructing it entirely.
+	budget := maxArgNodes
+	if !expand {
+		budget = 0
+	}
 	for i, v := range la {
-		// A keyword argument arrives wrapped in a name marker; unwrap it so the
-		// skeleton, completeness and type describe the VALUE while .Name carries
-		// the keyword it was passed under.
-		name, v := unwrapKwarg(v, defs)
-		s, complete := constSkeleton(v, defs, map[string]bool{})
-		// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
-		// back as an empty, incomplete skeleton. Render it here — in the guard path
-		// only — so a guard can read a flag argument: `shell=True` is what separates
-		// an injectable subprocess call from a safe list-argv one, and without this
-		// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
-		// into constSkeleton/constStr: those also back the SSRF host reconstruction,
-		// where a non-string operand is not part of the URL text and making one
-		// "complete" could wrongly prove a fixed host and suppress a real finding.
-		if !complete {
-			if sc, ok := constScalar(v); ok {
-				s, complete = sc, true
-			}
-		}
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name}
+		out[i] = argOf(v, defs, tainted, &budget)
 	}
 	return out
+}
+
+// maxArgNodes bounds the TOTAL argument nodes one call's reconstruction may
+// build. A per-level cap would not: 32 wide by 3 deep is 33k nodes per guard
+// evaluation, and a suppressing guard re-runs on every fixpoint pass.
+//
+// A container that does not fit contributes NO structure rather than partial
+// structure — half a container could let a rule clear it on the part that fit.
+const maxArgNodes = 256
+
+// argOf renders one call argument for a guard, expanding container literals
+// while the shared budget allows.
+func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, budget *int) rules.Arg {
+	// A keyword argument arrives wrapped in a name marker; unwrap it once here so
+	// the skeleton, type and structure all describe the VALUE while .Name carries
+	// the keyword it was passed under.
+	name, uv := unwrapKwarg(v, defs)
+	def := defs[uv.GetRegName()]
+	a := scalarArg(name, uv, def, defs, tainted)
+	expandStructure(&a, def, defs, tainted, budget)
+	return a
+}
+
+// expandStructure fills in a's Elems/Entries from its defining container
+// construction, while the shared budget allows, and records whether any of them
+// carries the taint.
+func expandStructure(a *rules.Arg, def *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState, budget *int) {
+	ops := def.GetOperands()
+	if len(ops) == 0 || len(ops) > *budget {
+		return
+	}
+	switch def.GetIntrinsic() {
+	case aggregateIntrinsic:
+		*budget -= len(ops)
+		a.Elems = make([]rules.Arg, 0, len(ops))
+		for _, o := range ops {
+			c := argOf(o, defs, tainted, budget)
+			a.TaintInChildren = a.TaintInChildren || c.Tainted
+			a.Elems = append(a.Elems, c)
+		}
+	case aggregateMapIntrinsic:
+		if len(ops)%2 != 0 {
+			return // not a clean key,value run: claim no key structure
+		}
+		*budget -= len(ops)
+		for i := 0; i+1 < len(ops); i += 2 {
+			// A key is only ever read for its constant text, so it needs no
+			// structure of its own — a tuple key would otherwise expand a whole
+			// subtree that is then discarded.
+			k := scalarArg("", ops[i], defs[ops[i].GetRegName()], defs, tainted)
+			// Only a fully constant key names an entry; a computed key cannot be
+			// addressed by a rule, so its pair is left out of Entries (the value
+			// still carries taint through the aggregate itself).
+			if !k.Complete {
+				continue
+			}
+			if a.Entries == nil {
+				a.Entries = make(map[string]rules.Arg, len(ops)/2)
+			}
+			if _, dup := a.Entries[k.String]; !dup {
+				v := argOf(ops[i+1], defs, tainted, budget)
+				a.TaintInChildren = a.TaintInChildren || v.Tainted
+				a.Entries[k.String] = v
+			}
+		}
+	}
+}
+
+// scalarArg renders an argument's own value — skeleton, completeness, type,
+// keyword name and taint — without recursing into any structure. name, v and def
+// come from the caller's single unwrap so nothing is resolved twice.
+func scalarArg(name string, v *ir.Value, def *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState) rules.Arg {
+	s, complete := constSkeleton(v, defs, map[string]bool{})
+	// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
+	// back as an empty, incomplete skeleton. Render it here — in the guard path
+	// only — so a guard can read a flag argument: `shell=True` is what separates
+	// an injectable subprocess call from a safe list-argv one, and without this
+	// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
+	// into constSkeleton/constStr: those also back the SSRF host reconstruction,
+	// where a non-string operand is not part of the URL text and making one
+	// "complete" could wrongly prove a fixed host and suppress a real finding.
+	if !complete {
+		if sc, ok := constScalar(v); ok {
+			s, complete = sc, true
+		}
+	}
+	isTaint := false
+	if tainted != nil {
+		_, isTaint = isTainted(tainted, v)
+	}
+	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, def), Name: name, Tainted: isTaint}
 }
 
 // constScalar renders a non-string constant (bool/int/float) as its literal text,
@@ -394,7 +475,20 @@ func constScalar(v *ir.Value) (string, bool) {
 // constant's kind, else "string" when we recovered constant text or the defining
 // instruction is string-typed, else "" (unknown). The IR-type fallback matters:
 // without it a fully tainted string — the common guarded case — would report "".
-func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) string {
+// def is v's defining instruction, already resolved by the caller.
+func argType(v *ir.Value, skeleton string, def *ir.Instruction) string {
+	// A container CONSTRUCTED IN PLACE — a Python list/dict/set literal or
+	// comprehension — reports "aggregate". This is what lets a rule tell the
+	// safe argv form apart from a shell string: in
+	// `subprocess.run(["ls", name])` the tainted value is an element of an
+	// aggregate, not the command text. Checked before the skeleton fallbacks,
+	// which would otherwise type it by its reconstructed text.
+	switch def.GetIntrinsic() {
+	case aggregateIntrinsic:
+		return "aggregate"
+	case aggregateMapIntrinsic:
+		return "map"
+	}
 	if c := v.GetConstant(); c != nil {
 		switch c.Value.(type) {
 		case *ir.Constant_StringVal:
@@ -410,7 +504,7 @@ func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) stri
 	if skeleton != rules.DynMarker {
 		return "string" // recovered constant text => string-valued
 	}
-	if isStringType(defs[v.GetRegName()].GetType()) {
+	if isStringType(def.GetType()) {
 		return "string"
 	}
 	return ""
@@ -1447,7 +1541,7 @@ func analyzeFunc(
 				// never reported through a wrapper — documented in writing-rules.md.
 				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
 				// it only if the rule mentions it, so an unrelated guard pays nothing.
-				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs, tainted, sinkGuard.NeedsStructure()),
 					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
 					break
 				}

@@ -11,6 +11,25 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     extend: $_py-sources.yaml
+    # Keep the interpreter list in sync with $_shell-argv.yaml. Same rule, but Python's tainted value arrives INSIDE a
+    # lowered container, so the program is `.Elems[0]` rather than `arg[0]`.
+    #
+    # `shell=` is cleared only when absent or literally false. A non-constant
+    # `shell=flag` records no keyword name at all (the frontend marks constants
+    # only), so it would read as absent — hence every non-tainted argument must
+    # be a keyword we can name.
+    # `len(.Elems) > 0` keeps the index below from raising — a dict has no .Elems,
+    # and a raising guard SUPPRESSES. `.TaintInChildren` is a different question:
+    # a list mutated after it was built (`l[0] = x`) has all-constant elements.
+    when: >-
+      not ((kwargs.shell.String == "" or kwargs.shell.String == "false")
+           and all(filter(arg, not .Tainted), .Name != "")
+           and any(arg, .Tainted)
+           and all(filter(arg, .Tainted),
+                   len(.Elems) > 0
+                   and .TaintInChildren
+                   and .Elems[0].Complete
+                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$")))
     sinks:
       - "py:os.system"
       - "py:os.popen"

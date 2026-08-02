@@ -11,7 +11,7 @@ rules:
       OS command injection. Avoid passing user-controlled data to a shell
       (child_process.exec/execSync/spawn with shell:true); use execFile or
       spawn with an argument array instead.
-    extend: $_js-sources.yaml
+    extend: [$_js-sources.yaml, $_shell-argv.yaml]
     # A bare "js:*.exec" sink is deliberately NOT used: it matches
     # RegExp.prototype.exec (regex.exec(userInput)), an extremely common,
     # benign validation call, producing a critical false positive. child_process

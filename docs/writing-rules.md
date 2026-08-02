@@ -139,19 +139,51 @@ callees:                                  # dangerous-call
   `arg[0].String == 'cmd:'` is false for a partial constant while
   `arg[0].String startsWith 'cmd:'` is true.
 - `.Complete` — the whole argument is a compile-time constant.
-- `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, or `""` if unknown.
+- `.Type` — `"string"`/`"int"`/`"float"`/`"bool"`, the container kinds
+  `"aggregate"`/`"map"`, or `""` if unknown.
 - `.Name` — the keyword the argument was passed under (`"shell"` for
   `subprocess.run(cmd, shell=True)`), or `""` for a positional argument or a
   frontend that does not record names (currently Python only). Without it a guard
   can only see that *some* boolean argument is true, which cannot tell the
   dangerous `shell=True` from an innocuous `check=True`.
+- `.Tainted` — untrusted data reaches the sink through *this* argument. Lets a
+  rule ask **where** the taint arrived rather than only that it did: an element
+  of an argv list is not the command string. Always false for a
+  `dangerous-call` rule, which has no flow behind it.
+- `.Elems` — for a container built in place (`.Type == "aggregate"`), its
+  elements in order, so `arg[0].Elems[0]` is `argv[0]`. Empty when the container
+  was not reconstructed (see below).
+- `.Entries` — the same for a keyed container (`.Type == "map"`), indexed by its
+  constant keys: `arg[0].Entries.mode`. An entry whose key is computed is absent,
+  since a rule cannot name it. Only the Python frontend emits the keyed form, so
+  `.Entries` is empty elsewhere; `.Elems` is also populated for Rust.
+- `.TaintInChildren` — reading `.Elems`/`.Entries` will actually find the taint.
+  A value can be `.Tainted` with this **false**: the container was mutated after
+  it was built (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant
+  key, it came from elsewhere (`tainted.split(",")`), or the structure was never
+  reconstructed. Ask for it whenever a guard reasons element-by-element — walking
+  the children in those cases finds nothing and would wrongly read as safe.
 
-A keyword can appear at any position, so match it by iterating rather than by
-index — this is how the security-config rules are written:
+A keyword can appear at any position, so address it through `kwargs`, which
+indexes the same arguments by the keyword they were passed under — this is how
+the security-config rules are written:
 
 ```yaml
-    when: 'any(arg, .Name == "verify" && .String == "false")'
+    when: 'kwargs.verify.String == "false"'
 ```
+
+A keyword the call does not pass yields the zero argument, so the guard simply
+reads false; it is never an error.
+
+**Container structure is best-effort.** A container that does not fit the
+engine's budget contributes no structure at all, so demand positive evidence — a
+`len()` check, `.TaintInChildren`, `.Complete` — before concluding anything is
+safe.
+
+The shipped rules are `rulepacks/py-command-injection.yaml`, which declares its
+own guard, and `rulepacks/_shell-argv.yaml`, the guard shared by the JS and Rust
+packs.
+
 
 Write the condition with expr's native operators/builtins — `startsWith`,
 `endsWith`, `contains`, `matches` (regexp), `in`, `==`, `hasPrefix` — combined
@@ -165,7 +197,11 @@ arg[0].String in ['DES', 'RC4', 'Blowfish']
 ```
 
 A non-recoverable argument is `"<DYN>"`, so a prefix/exact check fails and the
-entry is **suppressed** (confirm, don't guess). Because a wildcard `matches` can
+entry is **suppressed** (confirm, don't guess). A guard that *raises* is
+suppressed too — an out-of-range `arg[i]` or `.Elems[i]` is an eval error, which
+reads as "not confirmed" and silently hides the finding. Prove an index exists
+before using it (`len(.Elems) > 0` before `.Elems[0]`) rather than relying on the
+error. Because a wildcard `matches` can
 span `<DYN>`, combine `matches`/`==` with `.Complete` when an exact match matters.
 Guards compile once at load; a syntax, type, or regexp error fails `rules lint`,
 and a guard that fails to compile suppresses its entry rather than firing.
@@ -238,6 +274,10 @@ propagators: ["go:strings.Join"]
   sinks: ["go:*database/sql*.Query#0"]
 ```
 
+A fragment merges its pattern lists into the rule and may carry a `when:` guard,
+so packs sharing a predicate keep it in one file (`$_shell-argv.yaml`, used by
+the JS and Rust command-injection packs).
+
 Builtin fragments are available to your `--rules` files too; a same-named fragment
 in your rules dir overrides one. Extending an unknown fragment is a load error.
 
@@ -246,7 +286,7 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 | Field | Kind | Meaning |
 |---|---|---|
 | `id` | all | Unique id; validation rejects an empty or duplicate id. |
-| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule. |
+| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule: its pattern lists, plus its `when:` if the rule declares none. |
 | `languages` | all | Language tags (`[go]`, `[c, cpp]`, …). |
 | `severity` | all | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
 | `confidence` | dangerous-call, secret | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |

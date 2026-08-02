@@ -131,3 +131,163 @@ func TestArgHostFixed(t *testing.T) {
 		}
 	}
 }
+
+// TestGuardKWArgsAndTainted covers the two primitives a rule needs to express an
+// argv-vs-shell policy in YAML instead of the engine deciding for it: `kwargs`
+// (arguments indexed by the keyword they were passed under) and Arg.Tainted.
+//
+// The important case is a MISSING keyword. `kwargs.shell` on a call with no
+// `shell=` must read as the zero Arg, NOT raise — a run error would suppress the
+// entry (Eval returns false on error), turning an absent keyword into a silent
+// false negative. This pins expr's map semantics so a dependency bump that
+// changed them would fail here rather than quietly weakening the rule.
+func TestGuardKWArgsAndTainted(t *testing.T) {
+	shellOn := []Arg{
+		{String: DynMarker, Tainted: true, Type: "aggregate"},
+		{String: "true", Complete: true, Type: "bool", Name: "shell"},
+	}
+	shellOff := []Arg{
+		{String: DynMarker, Tainted: true, Type: "aggregate"},
+	}
+	taintedStr := []Arg{
+		{String: DynMarker, Tainted: true, Type: "string"},
+	}
+	// The real py-command-injection guard: fire unless no shell was requested
+	// AND every tainted argument arrived as an in-place container.
+	const argvPolicy = `not (kwargs.shell.String != "true" ` +
+		`and len(filter(arg, .Tainted)) > 0 ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate"))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"missing keyword reads as zero Arg", `kwargs.shell.String == "true"`, shellOff, false},
+		{"present keyword is readable", `kwargs.shell.String == "true"`, shellOn, true},
+		{"membership on a missing keyword", `"shell" in kwargs`, shellOff, false},
+		{"positional args are not indexed", `"" in kwargs`, taintedStr, false},
+		{"argv policy: safe list suppresses", argvPolicy, shellOff, false},
+		{"argv policy: shell=True re-arms", argvPolicy, shellOn, true},
+		{"argv policy: tainted string fires", argvPolicy, taintedStr, true},
+		{"argv policy: no taint at all fires", argvPolicy, []Arg{{String: "ls", Complete: true}}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval(%q) = %v, want %v", tc.name, tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestGuardArgStructure covers the container structure a guard reads back:
+// Elems for an ordered container, Entries for a keyed one, and — the case that
+// matters most — what happens when the structure is ABSENT because the engine
+// declined to reconstruct it (too deep, too wide, or an untrustworthy shape).
+//
+// Absent structure must FAIL OPEN. A rule suppresses only on positive evidence,
+// so an unreconstructed container reads as "unknown" and the finding still
+// fires; the alternative would turn a depth limit into a silent false negative.
+func TestGuardArgStructure(t *testing.T) {
+	el := func(s string) Arg { return Arg{String: s, Complete: true, Type: "string"} }
+	safeArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("ls"), el("-la"), {String: DynMarker, Tainted: true}}}
+	shellArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("sh"), el("-c"), {String: DynMarker, Tainted: true}}}
+	absArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("/bin/bash"), el("-c"), {String: DynMarker, Tainted: true}}}
+	// A container the engine did not reconstruct: correct Type, no Elems.
+	opaque := Arg{Type: "aggregate", Tainted: true, String: DynMarker}
+	keyed := Arg{Type: "map", Tainted: true, String: DynMarker,
+		Entries: map[string]Arg{"mode": el("raw")}}
+
+	// The real py-command-injection guard.
+	const policy = `not (kwargs.shell.String != "true" ` +
+		`and len(filter(arg, .Tainted)) > 0 ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate" and len(.Elems) > 0 ` +
+		`and .Elems[0].Complete ` +
+		`and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"elements are addressable", `arg[0].Elems[1].String == "-la"`, []Arg{safeArgv}, true},
+		{"entries are addressable by key", `arg[0].Entries.mode.String == "raw"`, []Arg{keyed}, true},
+		{"missing entry reads as zero Arg", `arg[0].Entries.nope.String == "raw"`, []Arg{keyed}, false},
+		{"policy: safe argv suppresses", policy, []Arg{safeArgv}, false},
+		{"policy: shell argv[0] fires", policy, []Arg{shellArgv}, true},
+		{"policy: absolute shell path fires", policy, []Arg{absArgv}, true},
+		{"policy: unreconstructed container fires", policy, []Arg{opaque}, true},
+		{"policy: keyed container is not argv, fires", policy, []Arg{keyed}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestGuardTaintInChildren pins the distinction between "this value carries
+// taint" and "reading its children will find that taint". They differ whenever
+// the taint did not come from a reconstructed element: a container mutated after
+// construction, a non-constant key, a value built elsewhere, or a container the
+// engine declined to expand.
+//
+// The polarity is the point. TaintInChildren's zero value is "not accounted
+// for", so a rule that reasons element-by-element declines a value it cannot see
+// into. Were the field inverted, an Arg built without setting it would read as
+// "taint is localized" and let a rule clear a finding silently.
+func TestGuardTaintInChildren(t *testing.T) {
+	el := func(s string) Arg { return Arg{String: s, Complete: true, Type: "string"} }
+	tainted := Arg{String: DynMarker, Tainted: true}
+
+	visible := Arg{Type: "aggregate", Tainted: true, TaintInChildren: true,
+		Elems: []Arg{el("ls"), tainted}}
+	// Tainted, but the taint is not in any child: `d = {}` then `d[k] = tainted`.
+	mutated := Arg{Type: "map", Tainted: true}
+	// A container the budget declined to expand: correct Type, no children.
+	unexpanded := Arg{Type: "aggregate", Tainted: true}
+	// A field nobody populated — the zero value must read as "not accounted for".
+	zeroValue := Arg{Type: "aggregate", Tainted: true, Elems: []Arg{el("ls"), tainted}}
+
+	const policy = `not (kwargs.shell.String != "true" ` +
+		`and any(arg, .Tainted) ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate" and .TaintInChildren ` +
+		`and .Elems[0].Complete ` +
+		`and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"taint reachable through children", `arg[0].TaintInChildren`, []Arg{visible}, true},
+		{"tainted but mutated after build", `arg[0].TaintInChildren`, []Arg{mutated}, false},
+		{"tainted is still true there", `arg[0].Tainted`, []Arg{mutated}, true},
+		{"policy: visible taint suppresses", policy, []Arg{visible}, false},
+		{"policy: mutated container fires", policy, []Arg{mutated}, true},
+		{"policy: unexpanded container fires", policy, []Arg{unexpanded}, true},
+		{"policy: unset field fires (fail open)", policy, []Arg{zeroValue}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

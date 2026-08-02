@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -19,7 +20,8 @@ const DynMarker = "<DYN>"
 // Arg is a call argument as a guard sees it: String is the argument's statically
 // reconstructed value (constant runs verbatim, DynMarker for dynamic runs),
 // Complete is true when the WHOLE argument is a compile-time constant, and Type
-// is its static type ("string"/"int"/"float"/"bool", or "" if unknown).
+// is its static type ("string"/"int"/"float"/"bool", the container kinds
+// "aggregate"/"map", or "" if unknown).
 type Arg struct {
 	String   string
 	Complete bool
@@ -28,9 +30,34 @@ type Arg struct {
 	// ("shell" for `subprocess.run(cmd, shell=True)`), or "" for a positional
 	// argument or a language/frontend that does not record names. Without it a
 	// guard can only see that SOME boolean argument is true, which cannot
-	// distinguish the dangerous `shell=True` from an innocuous `check=True` —
-	// so a config-flag rule matches on `.Name` together with `.String`.
+	// distinguish the dangerous `shell=True` from an innocuous `check=True`.
+	// Rules read it through `kwargs`, which indexes arguments by this name.
 	Name string
+	// Tainted reports whether this argument carries taint at the call, so a rule
+	// can ask WHICH argument the untrusted value arrived in: in
+	// `subprocess.run(["ls", name])` it is an argv element, not the command.
+	// False where there is no taint state (a dangerous-call guard), so a rule
+	// keying on it never suppresses there.
+	Tainted bool
+	// Elems are an in-place container's elements in order (Type "aggregate"):
+	// `arg[0].Elems[0]` is argv[0] of `subprocess.run(["sh", "-c", cmd])`.
+	// Entries is the keyed form (Type "map"), indexed by constant keys; a
+	// computed key names nothing and is absent.
+	//
+	// Both are EMPTY when the structure was not reconstructed, indistinguishably
+	// from "no elements" — so a rule must demand positive evidence before
+	// suppressing, and see .TaintInChildren below.
+	Elems   []Arg
+	Entries map[string]Arg
+	// TaintInChildren reports that reading Elems/Entries will actually find the
+	// taint. A value can be Tainted with this FALSE — mutated after it was built
+	// (`d = {}` then `d[k] = tainted`), taint in a non-constant key, built
+	// elsewhere (`tainted.split(",")`), or never reconstructed — where walking the
+	// children finds nothing and would wrongly read as safe.
+	//
+	// The polarity is deliberate: the zero value is "not accounted for", so a site
+	// that forgets this field costs a spurious finding, not a silent miss.
+	TaintInChildren bool
 }
 
 // Guard is a compiled `when:` expression that decides whether a dynamic sink or
@@ -45,7 +72,17 @@ type Arg struct {
 // match matters. Compiled once at load.
 type Guard struct {
 	prog *vm.Program
+	// What the source actually mentions. A guard cannot observe a root it never
+	// names, so anything it does not read is not worth building: kwargsOf
+	// allocates a map per evaluation (lazily, but a single keyword argument is
+	// enough to trigger it), and container reconstruction walks the IR.
+	usesKWArgs     bool
+	needsStructure bool
 }
+
+// NeedsStructure reports whether the guard reads container structure, so a caller
+// can skip reconstructing it. A nil guard reads nothing.
+func (g *Guard) NeedsStructure() bool { return g != nil && g.needsStructure }
 
 // DenyGuard never fires. It stands in for a guard that could not be compiled or
 // is unavailable, so a malformed/unusable `when:` SUPPRESSES its entry instead of
@@ -58,9 +95,36 @@ var DenyGuard = &Guard{}
 // confined to the path/query of a constant scheme://host.
 type guardEnv struct {
 	Arg []Arg `expr:"arg"`
+	// KWArgs indexes the same arguments by the keyword they were passed under,
+	// so a rule reads `kwargs.shell.String == "true"` instead of scanning
+	// `arg[i].Name` at an index it cannot know. Derived from Arg, so the engine
+	// supplies nothing extra. A MISSING keyword yields the zero Arg rather than
+	// an error (expr's map semantics), so `kwargs.shell.String == "true"` is
+	// simply false on a call with no `shell=` — the safe reading, and what lets
+	// a guard mention a keyword that is usually absent.
+	KWArgs map[string]Arg `expr:"kwargs"`
 	// hostFixed() with no argument asks about the sink's own injection points;
 	// hostFixed(arg[i]) asks about one specific argument. See EvalHostFixed.
 	HostFixed func(...Arg) bool `expr:"hostFixed"`
+}
+
+// kwargsOf indexes arguments by keyword name, skipping positional ones. The map
+// is allocated lazily: most guarded calls are all-positional, so building an
+// empty one on every evaluation is pure waste.
+func kwargsOf(args []Arg) map[string]Arg {
+	var m map[string]Arg
+	for _, a := range args {
+		if a.Name == "" {
+			continue
+		}
+		if m == nil {
+			m = make(map[string]Arg, len(args))
+		}
+		if _, dup := m[a.Name]; !dup {
+			m[a.Name] = a
+		}
+	}
+	return m
 }
 
 // hostFixedRe matches a constant prefix that already pins a complete
@@ -117,12 +181,28 @@ func CompileGuard(src string) (*Guard, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, nil
 	}
+	// Compiled once per sink/callee entry, so one source recurs across a pack. A
+	// Guard is immutable and an expr program is safe to Run concurrently, so
+	// programs are shared. Errors are not cached — they fail `rules lint` at load.
+	if g, ok := guardCache.Load(src); ok {
+		return g.(*Guard), nil
+	}
 	prog, err := expr.Compile(src, expr.Env(guardEnv{}), expr.AsBool())
 	if err != nil {
 		return DenyGuard, fmt.Errorf("guard %q: %w", src, err)
 	}
-	return &Guard{prog: prog}, nil
+	g := &Guard{
+		prog:       prog,
+		usesKWArgs: strings.Contains(src, "kwargs"),
+		needsStructure: strings.Contains(src, "Elems") || strings.Contains(src, "Entries") ||
+			strings.Contains(src, "TaintInChildren"),
+	}
+	guardCache.Store(src, g)
+	return g, nil
 }
+
+// guardCache memoizes compiled guards by source.
+var guardCache sync.Map
 
 // Eval reports whether the guard holds for the call's arguments. A nil guard
 // (no `when:`) always fires; DenyGuard never does; a run error (e.g. an
@@ -154,7 +234,11 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 		}
 		return true
 	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: fn})
+	env := guardEnv{Arg: args, HostFixed: fn}
+	if g.usesKWArgs {
+		env.KWArgs = kwargsOf(args)
+	}
+	out, err := expr.Run(g.prog, env)
 	if err != nil {
 		return false
 	}

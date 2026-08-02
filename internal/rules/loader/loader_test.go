@@ -375,3 +375,41 @@ rules:
 		t.Errorf("expected user rule to be appended last, got %q", rs.Rules[len(rs.Rules)-1].ID)
 	}
 }
+
+// TestExtendInheritsWhen covers the one SCALAR a fragment may contribute: a
+// `when:` guard, so packs sharing a predicate keep it in one file rather than
+// restating it per language (rulepacks/_shell-argv.yaml). A rule declaring its
+// own `when:` keeps it, matching how an entry's guard overrides its rule's.
+func TestExtendInheritsWhen(t *testing.T) {
+	dir := t.TempDir()
+	frag := "when: 'arg[0].Complete'\nsources:\n  - \"go:*A\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "_guard.yaml"), []byte(frag), 0o644); err != nil {
+		t.Fatalf("writing fragment: %v", err)
+	}
+	path := filepath.Join(dir, "rules.yaml")
+	const doc = `
+rules:
+  - id: inherits
+    severity: high
+    extend: $_guard.yaml
+    sinks: ["go:*Sink*"]
+  - id: overrides
+    severity: high
+    extend: $_guard.yaml
+    when: 'arg[0].String == "own"'
+    sinks: ["go:*Sink*"]
+`
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatalf("writing rule file: %v", err)
+	}
+	rs, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile() error: %v", err)
+	}
+	if got, want := rs.Rules[0].When, "arg[0].Complete"; got != want {
+		t.Errorf("inherited When = %q, want %q", got, want)
+	}
+	if got, want := rs.Rules[1].When, `arg[0].String == "own"`; got != want {
+		t.Errorf("own When = %q, want %q (fragment must not override)", got, want)
+	}
+}

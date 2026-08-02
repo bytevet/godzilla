@@ -33,18 +33,28 @@ func (e *Engine) ScopeSeed(reportable map[string]bool) *Engine {
 	return e
 }
 
+// aggregateIntrinsic is the language-neutral container construction — a list,
+// tuple, set or dict built in place. Frontends emit it so element taint survives
+// into a later whole-container use; argType surfaces it to guards as the
+// "aggregate" argument type.
+const aggregateIntrinsic = "builtin.aggregate"
+
+// aggregateMapIntrinsic is the keyed container construction (a dict literal):
+// same element-taint semantics, but its operands run key,value,key,value so
+// argVals can expose entries to a guard by key. Emitted only when every key
+// pairs up — a `**spread` yields the unkeyed form. Python-only today; the other
+// frontends reach the same taint through visitStore.
+const aggregateMapIntrinsic = "builtin.aggregate_map"
+
 // intrinsicPropagators is the set of language-specific OP_CODE_INTRINSIC
 // operations that pass taint from operand to result register.
 var intrinsicPropagators = map[string]bool{
-	"builtin.slice": true,
-	// builtin.aggregate models a tuple/array/struct/enum-variant construction
-	// (used by the Rust frontend): taint on any constructed element flows to the
-	// aggregate value, so a later whole-aggregate use (e.g. a format! argument
-	// pack) observes it. Field-precise reads are folded at lowering time.
-	"builtin.aggregate": true,
-	"go.map.lookup":     true,
-	"go.next":           true,
-	"go.range":          true,
+	"builtin.slice":       true,
+	aggregateIntrinsic:    true,
+	aggregateMapIntrinsic: true,
+	"go.map.lookup":       true,
+	"go.next":             true,
+	"go.range":            true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted

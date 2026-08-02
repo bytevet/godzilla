@@ -764,6 +764,49 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 	return regValue(inst.Name)
 }
 
+// emitAggregate builds a `builtin.aggregate` container-construction intrinsic
+// over the given element values, giving the container a REGISTER of its own.
+// The engine lists this intrinsic in intrinsicPropagators (see
+// internal/analysis/taint.go), so taint on any element flows to that register
+// and a later whole-container use — json.dumps(d), a template context, a
+// response body — observes it.
+//
+// Elements go in Operands, not Call.Args: visitIntrinsic propagates with
+// markTaintFromOperands, which reads Operands.
+//
+// Emitted even for an EMPTY container. The register is the point: `d = {}`
+// previously lowered to a constant, and a constant destination makes visitStore
+// early-return (it needs an address register), which is why `d[k] = tainted`
+// used to drop taint even before any element existed.
+func (fs *funcState) emitAggregate(intrinsic string, elts []*ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = intrinsic
+	inst.Operands = elts
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
+// Canonical container constructions. Both propagate taint identically; the map
+// form additionally promises its operands run key,value,key,value, which is what
+// lets a guard address an entry by key.
+const (
+	aggregateIntrinsic    = "builtin.aggregate"
+	aggregateMapIntrinsic = "builtin.aggregate_map"
+)
+
+// lowerAggregate lowers each element expression and builds the container from
+// the results. Shared by the two places a container is built in place — a
+// literal and a comprehension — which differ only in where their elements come
+// from.
+func (fs *funcState) lowerAggregate(intrinsic string, elts []astNode, n astNode) *ir.Value {
+	vals := make([]*ir.Value, 0, len(elts))
+	for _, e := range elts {
+		vals = append(vals, fs.lowerExpr(e))
+	}
+	return fs.emitAggregate(intrinsic, vals, n)
+}
+
 func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
@@ -1407,14 +1450,21 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerExpr(n.node("value"))
 
 	case "Sequence":
-		// List/tuple literal as a VALUE: lower each element so a source/sink
-		// inside it fires, but return an untainted placeholder — a freshly built
-		// container does not itself carry element taint (consistent with
-		// comprehensions and list literals; subprocess_argv_safe relies on this).
-		for _, e := range n.list("elts") {
-			fs.lowerExpr(e)
+		// List/tuple/set literal — and a flattened dict literal, whose keys and
+		// values pyast.py emits as one `elts` run — as a VALUE. Lower each
+		// element and build the container as a `builtin.aggregate`, so element
+		// taint reaches a later whole-container use (`json.dumps({"k": tainted})`
+		// into a response body: the label-studio CVE-2025-47783 shape).
+		//
+		// Command injection keeps its argv precision through py-command-injection's
+		// `when:` guard rather than by erasing the container.
+		//
+		// pyast.py marks a literal that cannot pair its keys as "list".
+		intrinsic := aggregateIntrinsic
+		if n.str("container") == "dict" {
+			intrinsic = aggregateMapIntrinsic
 		}
-		return stringValue("")
+		return fs.lowerAggregate(intrinsic, n.list("elts"), n)
 
 	case "Starred":
 		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
@@ -1427,21 +1477,25 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// for-loop; lower filter conditions) then the element/key/value
 		// expression, so a source or sink INSIDE the comprehension
 		// (e.g. [cursor.execute(q) for q in ...]) is lowered and fires. The
-		// result is a freshly built container, so — like a list literal — it
-		// does not itself carry element taint (consistent, precise container
-		// handling; see subprocess_argv_safe).
+		// result is a container built from those element expressions, so — like
+		// a literal — it carries their taint via builtin.aggregate.
 		for _, g := range n.list("generators") {
 			fs.lowerIterTarget(g)
 			for _, cond := range g.list("ifs") {
 				fs.lowerExpr(cond)
 			}
 		}
+		elts := make([]astNode, 0, 3)
 		for _, key := range []string{"elt", "key", "value"} {
 			if e := n.node(key); e != nil {
-				fs.lowerExpr(e)
+				elts = append(elts, e)
 			}
 		}
-		return stringValue("")
+		intrinsic := aggregateIntrinsic
+		if n.node("key") != nil {
+			intrinsic = aggregateMapIntrinsic
+		}
+		return fs.lowerAggregate(intrinsic, elts, n)
 
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string
@@ -1754,24 +1808,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	if isSelfMethod {
 		cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
 	}
-	// An `ast.*` node constructor (ast.Module/ast.Expression/ast.Interactive/...)
-	// builds a new AST node from its child nodes; a node assembled from tainted
-	// parts is itself tainted. Its children are commonly wrapped in a list
-	// (`ast.Module(body=[node], type_ignores=[])`, CVE-2025-3248 langflow), but a
-	// list literal is lowered to an untainted placeholder on purpose (a direct-argv
-	// subprocess list must NOT be flagged -- see the Sequence case and the
-	// subprocess_argv_safe sentinel). So for ast constructors ONLY, spread a
-	// sequence argument's elements as direct call args, letting element taint reach
-	// the constructor (a rulepack propagator) without touching the general
-	// list-taint behavior any sink relies on.
-	astCtor := strings.HasPrefix(callee, "py:ast.")
 	appendArg := func(a astNode) {
-		if astCtor && a != nil && a.kind() == "Sequence" {
-			for _, e := range a.list("elts") {
-				cc.Args = append(cc.Args, fs.lowerExpr(e))
-			}
-			return
-		}
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
 	for _, a := range n.list("args") {
@@ -1788,11 +1825,8 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		// left alone).
 		a := kw.node("value")
 		name := kw.str("arg")
-		// A `**kwargs` splat has no name, and an ast.* constructor's sequence value
-		// must still be SPREAD into element args (see appendArg) — wrapping it would
-		// hide the elements and drop taint into the constructor. Both keep the
-		// existing path.
-		if name == "" || (astCtor && a != nil && a.kind() == "Sequence") {
+		// A `**kwargs` splat has no name to record, so it stays a plain argument.
+		if name == "" {
 			appendArg(a)
 			continue
 		}

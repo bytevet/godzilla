@@ -11,5 +11,5 @@ fn main() {
     if host.is_empty() {
         host = String::from("localhost");
     }
-    Command::new("ping").arg(host).status().unwrap();
+    Command::new("sh").arg("-c").arg(host).status().unwrap();
 }

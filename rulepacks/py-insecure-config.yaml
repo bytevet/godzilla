@@ -1,8 +1,9 @@
 # Insecure security-configuration flags: a call that is safe by default made
 # dangerous by an explicit keyword argument. The flag itself is the defect, so
 # these are `kind: dangerous-call` rules gated on the keyword's name AND value --
-# without `.Name` (supplied by the Python frontend's builtin.kwarg marker)
-# `verify=False` would be indistinguishable from any other false keyword.
+# `kwargs` indexes the call's arguments by the keyword they were passed under
+# (from the Python frontend's builtin.kwarg marker), without which `verify=False`
+# would be indistinguishable from any other false keyword.
 #
 # All ship severity: low + confidence: medium, keeping them advisory under the
 # default `-fail-on medium` gate and inside the LLM reviewer's adjudication
@@ -21,17 +22,17 @@ rules:
       client at its bundle instead.
     callees:
       - callee: "py:*requests.*"
-        when: 'any(arg, .Name == "verify" && .String == "false")'
+        when: 'kwargs.verify.String == "false"'
       - callee: "py:*httpx.*"
-        when: 'any(arg, .Name == "verify" && .String == "false")'
+        when: 'kwargs.verify.String == "false"'
       - callee: "py:*aiohttp.*"
-        when: 'any(arg, .Name == "verify" && .String == "false")'
+        when: 'kwargs.verify.String == "false"'
       # A Session/client instance call (s.get(...)) lowers to an opaque receiver,
       # so the callee cannot be anchored to the library. The guard carries the
       # precision here: `verify` named False is a TLS switch in every client
       # library that accepts it, so a wildcard receiver adds reach, not noise.
       - callee: "py:*.request"
-        when: 'any(arg, .Name == "verify" && .String == "false")'
+        when: 'kwargs.verify.String == "false"'
 
   - id: py-flask-debug-enabled
     languages: [python]
@@ -46,7 +47,7 @@ rules:
       enable it outside local development.
     callees:
       - callee: "py:*.run"
-        when: 'any(arg, .Name == "debug" && .String == "true")'
+        when: 'kwargs.debug.String == "true"'
 
   - id: py-jinja-autoescape-off
     languages: [python]
@@ -61,7 +62,7 @@ rules:
       explicitly instead.
     callees:
       - callee: "py:*Environment"
-        when: 'any(arg, .Name == "autoescape" && .String == "false")'
+        when: 'kwargs.autoescape.String == "false"'
 
   - id: py-langchain-dangerous-code
     languages: [python]
@@ -78,13 +79,13 @@ rules:
       # The keyword is specific to langchain's opt-in for code-executing agents,
       # so the guard is the discriminator and the receiver need not be anchored.
       - callee: "py:*agent*"
-        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+        when: 'kwargs.allow_dangerous_code.String == "true"'
       - callee: "py:*Agent*"
-        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+        when: 'kwargs.allow_dangerous_code.String == "true"'
       - callee: "py:*Chain*"
-        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+        when: 'kwargs.allow_dangerous_code.String == "true"'
       - callee: "py:*Tool*"
-        when: 'any(arg, .Name == "allow_dangerous_code" && .String == "true")'
+        when: 'kwargs.allow_dangerous_code.String == "true"'
 
   # CWE-502 rather than the flag rules above, but it belongs with them: the defect
   # is the keyword, not a dataflow. The taint rule cannot reach this class at all --
@@ -110,4 +111,4 @@ rules:
       # Matching the keyword without the callee would flag it (verified against
       # ray's _lightning_utils.py, which this correctly leaves alone).
       - callee: "py:*torch.load"
-        when: 'any(arg, .Name == "weights_only" && .String == "false")'
+        when: 'kwargs.weights_only.String == "false"'

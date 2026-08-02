@@ -8,7 +8,8 @@
 // Java, Ruby, Rust and C/C++ into the same IR, so nothing here may match on a
 // language's callee names: anything language-specific arrives either as a
 // canonical FQN a RULE matches, or as an intrinsic the frontends agree on
-// (builtin.format, builtin.identity, builtin.kwarg). When a check seems to need
+// (builtin.format, builtin.identity, builtin.kwarg,
+// builtin.aggregate/builtin.aggregate_map). When a check seems to need
 // a language check, the fix is almost always a new intrinsic or a rule glob.
 //
 // # The core loop
