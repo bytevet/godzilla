@@ -3,6 +3,10 @@
 // The untrusted HTTP parameter is passed as an argument *vector* (Command::args)
 // rather than a single Command::arg — exercising taint flow through an array
 // aggregate into the args sink.
+//
+// The vector is a shell invocation (`sh -c <tainted>`): an argv element handed to
+// a fixed non-shell program is NOT command injection (see
+// command_injection_argv_safe), so the shell is what makes this a finding.
 mod http {
     pub struct Request;
     impl Request {
@@ -16,5 +20,5 @@ use std::process::Command;
 
 pub fn handle(req: &http::Request) {
     let arg = req.query("arg"); // untrusted HTTP query parameter
-    Command::new("echo").args([&arg]).output().unwrap();
+    Command::new("sh").args(["-c", arg.as_str()]).output().unwrap();
 }

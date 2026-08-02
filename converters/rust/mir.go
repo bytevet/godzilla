@@ -496,11 +496,36 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	switch {
 	case strings.Contains(canonical, "Arguments::new"):
 		inst.Intrinsic = "builtin.format"
-	case rustIdentityConv(canonical):
+	case rustIdentityConv(canonical), rustCommandBuilder(canonical):
 		inst.Intrinsic = "builtin.identity"
 	}
 	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
+}
+
+// rustCommandBuilder reports whether a Rust callee is a std::process::Command
+// builder step whose reconstructed text should be the PROGRAM it will run.
+//
+// `Command` is built across several calls — `Command::new("sh").arg("-c").arg(x)`
+// — so at the `.arg` sink where the taint lands, the program lives in a
+// different instruction and a rule cannot see it. That is why the pack could not
+// tell an argv element handed to `ls` (execve, safe) from one handed to `sh -c`
+// (re-interpreted), and reported both.
+//
+// Marking each step as builtin.identity forwards Args[0]'s skeleton, and Args[0]
+// is the program for `Command::new` and the RECEIVER for `.arg`/`.args`. So the
+// program's text propagates down the whole chain and `arg[0].String` at any step
+// reconstructs to it, which is what lets the rule apply the same argv-vs-shell
+// test Python does. The instruction stays an OP_CODE_CALL, so the sink still
+// matches by callee and taint still flows through the ordinary call rules —
+// the marker only affects text reconstruction.
+func rustCommandBuilder(callee string) bool {
+	for _, suffix := range []string{"Command::new", "Command::arg", "Command::args"} {
+		if strings.HasSuffix(callee, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // rustIdentityConv reports whether a Rust callee is a string-valued conversion

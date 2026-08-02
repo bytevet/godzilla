@@ -17,6 +17,23 @@ rules:
       allow-list the program and arguments instead of passing user-controlled
       data to a shell.
     extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml]
+    # An argv element handed to a fixed, non-shell program is not command
+    # injection: `Command` never invokes a shell, so the value reaches execve as
+    # one argument. It IS injection when the program is a shell, which
+    # re-interprets its arguments (`Command::new("sh").arg("-c").arg(x)`), or
+    # when the program itself is untrusted (the Command::new#0 sink).
+    #
+    # The program lives in a different call from the argument, so the frontend
+    # forwards it along the builder chain as builtin.identity text; arg[0] is the
+    # program for Command::new and the receiver — carrying that same text — for
+    # .arg/.args. See rustCommandBuilder in converters/rust/mir.go.
+    #
+    # Suppression demands a program we positively recognise: an unresolvable
+    # program leaves .Complete false and the sink fires. This mirrors
+    # py-command-injection, so the two languages agree on the argv form.
+    when: >-
+      not (arg[0].Complete
+           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
     sinks:
       - "rust:*Command::new#0"
       - "rust:*Command::arg#1"
