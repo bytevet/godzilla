@@ -17,13 +17,22 @@ rules:
     sources:
       - "ruby:*ENV*"
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
+    # The multi-argument form passes argv to execve, so a tainted argument is
+    # injection only when the program re-interprets it (`system("sh", "-c", x)`).
+    # Suppress just the safe case. Pinning to #0 used to do that by ignoring
+    # every argument after the program, which hid the shell form.
+    #
+    # arg[0] must be a bare program TOKEN: a backtick literal lowers to fragments
+    # (`%x("ping -c 1 ", h)`) whose first argument is complete but is not one.
+    when: >-
+      not (len(arg) > 1
+           and arg[0].Complete
+           and arg[0].String matches "^[A-Za-z0-9_./-]+$"
+           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
     sinks:
-      # system/exec/spawn only invoke a shell when given a single command string;
-      # pin the command argument (#0) so the safe multi-arg form
-      # (system("ls", tainted)) — which never reaches a shell — is not flagged.
-      - "ruby:system#0"
-      - "ruby:exec#0"
-      - "ruby:spawn#0"
+      - "ruby:system"
+      - "ruby:exec"
+      - "ruby:spawn"
       # A backtick / %x / popen literal is always a single shell string, so any
       # tainted part is dangerous (bare = all args).
       - "ruby:%x"                    # backtick / %x{} command literal

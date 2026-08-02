@@ -6,5 +6,5 @@
 findings:
     - rule: py-xss
       min: 1
-      line: 20
+      line: 15
       sink: HttpResponse

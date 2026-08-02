@@ -1,13 +1,7 @@
-// False-positive sentinel: an argv element handed to a fixed, non-shell program
-// is NOT command injection, so this must produce ZERO findings.
-//
-// `std::process::Command` never invokes a shell — the value reaches execve as one
-// argument of `ls`, exactly like the direct-argv form the Python sentinel
-// test/python/subprocess_argv_safe covers. The program lives in a different call
-// from the argument (`Command::new(...)` vs `.arg(...)`), so the frontend
-// forwards it along the builder chain for the rule to read; see rustCommandBuilder
-// in converters/rust/mir.go. The vulnerable counterparts are
-// command_injection (sh -c) and command_injection_argv (sh with an args vector).
+// FP sentinel: an argv element handed to a fixed, non-shell program is not
+// command injection — `Command` never invokes a shell, so the value reaches
+// execve as one argument of `ls`. Must produce ZERO findings. The vulnerable
+// counterparts are command_injection (sh -c) and command_injection_argv.
 mod http {
     pub struct Request;
     impl Request {

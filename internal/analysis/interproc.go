@@ -356,17 +356,12 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintSt
 	return out
 }
 
-// maxArgNodes bounds the TOTAL number of argument nodes one call's structure
-// reconstruction may build. A per-level width cap would not: 32 elements at each
-// of 3 levels is 33k nodes and megabytes of garbage per guard evaluation, and a
-// suppressing guard is re-evaluated on every fixpoint pass. One shared budget
-// makes the cost linear in the budget rather than exponential in the nesting.
+// maxArgNodes bounds the TOTAL argument nodes one call's reconstruction may
+// build. A per-level cap would not: 32 wide by 3 deep is 33k nodes per guard
+// evaluation, and a suppressing guard re-runs on every fixpoint pass.
 //
-// A container that does not fit in the remaining budget contributes NO structure
-// rather than partial structure. That distinction is load-bearing: a rule must
-// demand positive evidence (`len(.Elems) > 0 and .Elems[0].Complete`) before
-// suppressing, so an unexpanded container fails OPEN and still fires, whereas
-// half a container could let a rule clear it on the part that happened to fit.
+// A container that does not fit contributes NO structure rather than partial
+// structure — half a container could let a rule clear it on the part that fit.
 const maxArgNodes = 256
 
 // argOf renders one call argument for a guard, expanding container literals

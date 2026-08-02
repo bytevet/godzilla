@@ -39,35 +39,24 @@ type Arg struct {
 	// Always false where there is no taint state — a dangerous-call guard has
 	// no flow behind it — so a rule keying on it simply never suppresses there.
 	Tainted bool
-	// Elems are the elements of a container argument built in place, in order
-	// (Type "aggregate"): `arg[0].Elems[0]` is argv[0] of
-	// `subprocess.run(["sh", "-c", cmd])`. Entries is the same for a keyed
-	// container (Type "map"), indexed by its constant keys; an entry whose key
-	// is computed is absent, since a rule cannot name it.
+	// Elems are an in-place container's elements in order (Type "aggregate"):
+	// `arg[0].Elems[0]` is argv[0] of `subprocess.run(["sh", "-c", cmd])`.
+	// Entries is the keyed form (Type "map"), indexed by constant keys; a
+	// computed key names nothing and is absent.
 	//
-	// Both are EMPTY when the structure was not reconstructed — nesting deeper
-	// or wider than the engine's limits, or a container whose shape could not be
-	// trusted. That is deliberately indistinguishable from "no elements": a rule
-	// must demand positive evidence before suppressing (`len(.Elems) > 0 and
-	// .Elems[0].Complete`), so an unreconstructed container fails OPEN and the
-	// finding still fires. Partial structure would instead let a rule clear a
-	// container on the strength of the part that happened to survive.
+	// Both are EMPTY when the structure was not reconstructed, indistinguishably
+	// from "no elements" — so a rule must demand positive evidence before
+	// suppressing, and see .TaintInChildren below.
 	Elems   []Arg
 	Entries map[string]Arg
-	// TaintInChildren reports that a reconstructed element or entry carries the
-	// taint — i.e. reading Elems/Entries will actually find it. A value can be
-	// Tainted with this FALSE: the container was mutated after it was built
-	// (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant key that
-	// Entries cannot name, it came from elsewhere entirely
-	// (`tainted.split(",")`), or the structure was never reconstructed. Walking
-	// the children in those cases finds nothing and would wrongly read as safe.
+	// TaintInChildren reports that reading Elems/Entries will actually find the
+	// taint. A value can be Tainted with this FALSE — mutated after it was built
+	// (`d = {}` then `d[k] = tainted`), taint in a non-constant key, built
+	// elsewhere (`tainted.split(",")`), or never reconstructed — where walking the
+	// children finds nothing and would wrongly read as safe.
 	//
-	// This is what makes the SAFE guard the natural one to write: a rule
-	// reasoning element-by-element asks for `.TaintInChildren` and so declines
-	// the values it cannot see into, instead of silently clearing them. The
-	// polarity is deliberate — the zero value is "the taint is not accounted
-	// for", so a construction site that forgets this field produces a spurious
-	// finding rather than a silent miss.
+	// The polarity is deliberate: the zero value is "not accounted for", so a site
+	// that forgets this field costs a spurious finding, not a silent miss.
 	TaintInChildren bool
 }
 

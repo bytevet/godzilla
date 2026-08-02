@@ -12,6 +12,20 @@ rules:
       (child_process.exec/execSync/spawn with shell:true); use execFile or
       spawn with an argument array instead.
     extend: $_js-sources.yaml
+    # spawn/execFile take a program plus an argument array and never reach a
+    # shell, so a tainted element is injection only when the program
+    # re-interprets it (`spawn("sh", ["-c", x])`).
+    #
+    # The argument-count clause covers the options object: JS lowers an object
+    # literal as a PHI chain, so a `{shell: true}` flag cannot be read here and a
+    # call carrying any options object keeps firing. arg[0] must be a bare
+    # program TOKEN, which a shell command line is not.
+    when: >-
+      not (len(arg) > 1
+           and len(arg) < 3
+           and arg[0].Complete
+           and arg[0].String matches "^[A-Za-z0-9_./-]+$"
+           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
     # A bare "js:*.exec" sink is deliberately NOT used: it matches
     # RegExp.prototype.exec (regex.exec(userInput)), an extremely common,
     # benign validation call, producing a critical false positive. child_process
