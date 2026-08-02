@@ -39,6 +39,21 @@ type Arg struct {
 	// Always false where there is no taint state — a dangerous-call guard has
 	// no flow behind it — so a rule keying on it simply never suppresses there.
 	Tainted bool
+	// Elems are the elements of a container argument built in place, in order
+	// (Type "aggregate"): `arg[0].Elems[0]` is argv[0] of
+	// `subprocess.run(["sh", "-c", cmd])`. Entries is the same for a keyed
+	// container (Type "map"), indexed by its constant keys; an entry whose key
+	// is computed is absent, since a rule cannot name it.
+	//
+	// Both are EMPTY when the structure was not reconstructed — nesting deeper
+	// or wider than the engine's limits, or a container whose shape could not be
+	// trusted. That is deliberately indistinguishable from "no elements": a rule
+	// must demand positive evidence before suppressing (`len(.Elems) > 0 and
+	// .Elems[0].Complete`), so an unreconstructed container fails OPEN and the
+	// finding still fires. Partial structure would instead let a rule clear a
+	// container on the strength of the part that happened to survive.
+	Elems   []Arg
+	Entries map[string]Arg
 }
 
 // Guard is a compiled `when:` expression that decides whether a dynamic sink or

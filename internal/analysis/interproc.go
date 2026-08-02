@@ -348,33 +348,94 @@ func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintSt
 	la := logicalArgs(cc)
 	out := make([]rules.Arg, len(la))
 	for i, v := range la {
-		// A keyword argument arrives wrapped in a name marker; unwrap it so the
-		// skeleton, completeness and type describe the VALUE while .Name carries
-		// the keyword it was passed under.
-		name, v := unwrapKwarg(v, defs)
-		s, complete := constSkeleton(v, defs, map[string]bool{})
-		// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
-		// back as an empty, incomplete skeleton. Render it here — in the guard path
-		// only — so a guard can read a flag argument: `shell=True` is what separates
-		// an injectable subprocess call from a safe list-argv one, and without this
-		// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
-		// into constSkeleton/constStr: those also back the SSRF host reconstruction,
-		// where a non-string operand is not part of the URL text and making one
-		// "complete" could wrongly prove a fixed host and suppress a real finding.
-		if !complete {
-			if sc, ok := constScalar(v); ok {
-				s, complete = sc, true
-			}
-		}
-		// Taint is read from the UNWRAPPED value: the kwarg marker stands in for
-		// the value in the argument list, so the taint belongs to what it wraps.
-		isTaint := false
-		if tainted != nil {
-			_, isTaint = isTainted(tainted, v)
-		}
-		out[i] = rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name, Tainted: isTaint}
+		out[i] = argOf(v, defs, tainted, 0)
 	}
 	return out
+}
+
+// Bounds on the structure argOf reconstructs for a container argument. A guard
+// only ever needs the shallow shape (is argv[0] a shell? what is entry "mode"?),
+// and the walk runs per guarded sink, so both limits are deliberately small.
+//
+// Exceeding either yields NO structure rather than partial structure: a rule
+// must require positive evidence (`len(.Elems) > 0 and .Elems[0].Complete`)
+// before suppressing, so a truncated container fails OPEN and still fires.
+// Partial structure would instead let a rule suppress on an element that only
+// looked safe because the rest was dropped.
+const (
+	maxArgDepth = 3
+	maxArgElems = 32
+)
+
+// argOf renders one call argument for a guard, recursing into container
+// literals up to the limits above. depth is the current nesting level.
+func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, depth int) rules.Arg {
+	a := scalarArg(v, defs, tainted)
+	if depth >= maxArgDepth {
+		return a
+	}
+	// Structure is read from the UNWRAPPED value, matching scalarArg.
+	_, uv := unwrapKwarg(v, defs)
+	def := defs[uv.GetRegName()]
+	ops := def.GetOperands()
+	if len(ops) > maxArgElems {
+		return a
+	}
+	switch def.GetIntrinsic() {
+	case aggregateIntrinsic:
+		a.Elems = make([]rules.Arg, 0, len(ops))
+		for _, o := range ops {
+			a.Elems = append(a.Elems, argOf(o, defs, tainted, depth+1))
+		}
+	case aggregateMapIntrinsic:
+		if len(ops)%2 != 0 {
+			return a // not a clean key,value run: claim no key structure
+		}
+		a.Entries = make(map[string]rules.Arg, len(ops)/2)
+		for i := 0; i+1 < len(ops); i += 2 {
+			k := argOf(ops[i], defs, tainted, depth+1)
+			// Only a fully constant key names an entry; a computed key cannot be
+			// addressed by a rule, so its pair is left out of Entries (the value
+			// still carries taint through the aggregate itself).
+			if !k.Complete {
+				continue
+			}
+			if _, dup := a.Entries[k.String]; !dup {
+				a.Entries[k.String] = argOf(ops[i+1], defs, tainted, depth+1)
+			}
+		}
+	}
+	return a
+}
+
+// scalarArg renders an argument's own value — skeleton, completeness, type,
+// keyword name and taint — without recursing into any structure.
+func scalarArg(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState) rules.Arg {
+	// A keyword argument arrives wrapped in a name marker; unwrap it so the
+	// skeleton, completeness and type describe the VALUE while .Name carries
+	// the keyword it was passed under.
+	name, v := unwrapKwarg(v, defs)
+	s, complete := constSkeleton(v, defs, map[string]bool{})
+	// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
+	// back as an empty, incomplete skeleton. Render it here — in the guard path
+	// only — so a guard can read a flag argument: `shell=True` is what separates
+	// an injectable subprocess call from a safe list-argv one, and without this
+	// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
+	// into constSkeleton/constStr: those also back the SSRF host reconstruction,
+	// where a non-string operand is not part of the URL text and making one
+	// "complete" could wrongly prove a fixed host and suppress a real finding.
+	if !complete {
+		if sc, ok := constScalar(v); ok {
+			s, complete = sc, true
+		}
+	}
+	// Taint is read from the UNWRAPPED value: the kwarg marker stands in for
+	// the value in the argument list, so the taint belongs to what it wraps.
+	isTaint := false
+	if tainted != nil {
+		_, isTaint = isTainted(tainted, v)
+	}
+	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, defs), Name: name, Tainted: isTaint}
 }
 
 // constScalar renders a non-string constant (bool/int/float) as its literal text,
@@ -410,8 +471,11 @@ func argType(v *ir.Value, skeleton string, defs map[string]*ir.Instruction) stri
 	// `subprocess.run(["ls", name])` the tainted value is an element of an
 	// aggregate, not the command text. Checked before the skeleton fallbacks,
 	// which would otherwise type it by its reconstructed text.
-	if d := defs[v.GetRegName()]; d != nil && d.GetIntrinsic() == aggregateIntrinsic {
+	switch d := defs[v.GetRegName()]; d.GetIntrinsic() {
+	case aggregateIntrinsic:
 		return "aggregate"
+	case aggregateMapIntrinsic:
+		return "map"
 	}
 	if c := v.GetConstant(); c != nil {
 		switch c.Value.(type) {

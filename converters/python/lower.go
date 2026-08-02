@@ -779,9 +779,22 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 // early-return (it needs an address register), which is why `d[k] = tainted`
 // used to drop taint even before any element existed.
 func (fs *funcState) emitAggregate(elts []*ir.Value, n astNode) *ir.Value {
+	return fs.emitAggregateOf(aggregateIntrinsic, elts, n)
+}
+
+// Canonical container constructions. Both propagate taint identically; the map
+// form additionally promises its operands run key,value,key,value, which is what
+// lets a guard address an entry by key.
+const (
+	aggregateIntrinsic    = "builtin.aggregate"
+	aggregateMapIntrinsic = "builtin.aggregate_map"
+)
+
+// emitAggregateOf is emitAggregate with the container kind spelled out.
+func (fs *funcState) emitAggregateOf(intrinsic string, elts []*ir.Value, n astNode) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-	inst.Intrinsic = "builtin.aggregate"
+	inst.Intrinsic = intrinsic
 	inst.Operands = elts
 	fs.emit(inst)
 	return regValue(inst.Name)
@@ -1449,6 +1462,13 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 			if v := fs.lowerExpr(e); v != nil {
 				vals = append(vals, v)
 			}
+		}
+		// A dict literal whose keys all pair up carries its run as
+		// key,value,key,value; pyast.py marks anything else "list" so no key
+		// structure is claimed. The two intrinsics propagate taint identically
+		// and differ only in the shape a guard may read back.
+		if n.str("container") == "dict" {
+			return fs.emitAggregateOf(aggregateMapIntrinsic, vals, n)
 		}
 		return fs.emitAggregate(vals, n)
 

@@ -17,16 +17,28 @@ rules:
     # builtin.aggregate so element taint survives into a later whole-container
     # use, which would otherwise make the safe argv form fire.
     #
-    # Suppress only when BOTH hold: no shell is requested, and every tainted
-    # argument arrived as an in-place container ("aggregate"). A tainted plain
-    # string still fires, and `shell=True` re-arms the sink because the list is
-    # then joined into one shell string. `kwargs.shell` is the zero Arg when the
-    # call passes no `shell=`, so the first clause simply reads false there.
-    # See test/python/subprocess_argv_safe and subprocess_argv_shell.
+    # Suppress only when ALL of these hold: no shell is requested; every tainted
+    # argument arrived as an in-place container ("aggregate"); and that
+    # container's argv[0] is a KNOWN program that is not itself a shell. The last
+    # clause is what keeps `subprocess.run(["sh", "-c", tainted])` firing — an
+    # argv list is only safe if the program it launches does not re-interpret its
+    # arguments.
+    #
+    # Every clause demands positive evidence, so anything unproven fires: a
+    # tainted plain string, `shell=True` (which joins the list into one shell
+    # string), an argv[0] that is not a compile-time constant, or a container
+    # whose structure the engine did not reconstruct all leave .Elems empty or
+    # the match false. `kwargs.shell` is the zero Arg when no `shell=` is passed.
+    # See test/python/subprocess_argv_safe, subprocess_argv_shell and
+    # subprocess_argv_shell_program.
     when: >-
       not (kwargs.shell.String != "true"
            and len(filter(arg, .Tainted)) > 0
-           and all(filter(arg, .Tainted), .Type == "aggregate"))
+           and all(filter(arg, .Tainted),
+                   .Type == "aggregate"
+                   and len(.Elems) > 0
+                   and .Elems[0].Complete
+                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))
     sinks:
       - "py:os.system"
       - "py:os.popen"

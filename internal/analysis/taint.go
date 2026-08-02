@@ -39,6 +39,13 @@ func (e *Engine) ScopeSeed(reportable map[string]bool) *Engine {
 // "aggregate" argument type.
 const aggregateIntrinsic = "builtin.aggregate"
 
+// aggregateMapIntrinsic is the keyed container construction: same propagation as
+// aggregateIntrinsic, but its operands run key,value,key,value, which is what
+// lets argVals expose entries to a guard by key. A frontend emits it only when
+// every key pairs up (a `**spread` yields the unkeyed form instead), so the
+// pairing can be trusted wherever it appears.
+const aggregateMapIntrinsic = "builtin.aggregate_map"
+
 // intrinsicPropagators is the set of language-specific OP_CODE_INTRINSIC
 // operations that pass taint from operand to result register.
 var intrinsicPropagators = map[string]bool{
@@ -48,9 +55,11 @@ var intrinsicPropagators = map[string]bool{
 	// aggregate value, so a later whole-aggregate use (e.g. a format! argument
 	// pack) observes it. Field-precise reads are folded at lowering time.
 	"builtin.aggregate": true,
-	"go.map.lookup":     true,
-	"go.next":           true,
-	"go.range":          true,
+	// The keyed form (a dict literal): same element-taint semantics.
+	"builtin.aggregate_map": true,
+	"go.map.lookup":         true,
+	"go.next":               true,
+	"go.range":              true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted

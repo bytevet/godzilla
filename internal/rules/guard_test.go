@@ -183,3 +183,57 @@ func TestGuardKWArgsAndTainted(t *testing.T) {
 		}
 	}
 }
+
+// TestGuardArgStructure covers the container structure a guard reads back:
+// Elems for an ordered container, Entries for a keyed one, and — the case that
+// matters most — what happens when the structure is ABSENT because the engine
+// declined to reconstruct it (too deep, too wide, or an untrustworthy shape).
+//
+// Absent structure must FAIL OPEN. A rule suppresses only on positive evidence,
+// so an unreconstructed container reads as "unknown" and the finding still
+// fires; the alternative would turn a depth limit into a silent false negative.
+func TestGuardArgStructure(t *testing.T) {
+	el := func(s string) Arg { return Arg{String: s, Complete: true, Type: "string"} }
+	safeArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("ls"), el("-la"), {String: DynMarker, Tainted: true}}}
+	shellArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("sh"), el("-c"), {String: DynMarker, Tainted: true}}}
+	absArgv := Arg{Type: "aggregate", Tainted: true, String: DynMarker,
+		Elems: []Arg{el("/bin/bash"), el("-c"), {String: DynMarker, Tainted: true}}}
+	// A container the engine did not reconstruct: correct Type, no Elems.
+	opaque := Arg{Type: "aggregate", Tainted: true, String: DynMarker}
+	keyed := Arg{Type: "map", Tainted: true, String: DynMarker,
+		Entries: map[string]Arg{"mode": el("raw")}}
+
+	// The real py-command-injection guard.
+	const policy = `not (kwargs.shell.String != "true" ` +
+		`and len(filter(arg, .Tainted)) > 0 ` +
+		`and all(filter(arg, .Tainted), .Type == "aggregate" and len(.Elems) > 0 ` +
+		`and .Elems[0].Complete ` +
+		`and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))`
+
+	cases := []struct {
+		name string
+		src  string
+		args []Arg
+		want bool
+	}{
+		{"elements are addressable", `arg[0].Elems[1].String == "-la"`, []Arg{safeArgv}, true},
+		{"entries are addressable by key", `arg[0].Entries.mode.String == "raw"`, []Arg{keyed}, true},
+		{"missing entry reads as zero Arg", `arg[0].Entries.nope.String == "raw"`, []Arg{keyed}, false},
+		{"policy: safe argv suppresses", policy, []Arg{safeArgv}, false},
+		{"policy: shell argv[0] fires", policy, []Arg{shellArgv}, true},
+		{"policy: absolute shell path fires", policy, []Arg{absArgv}, true},
+		{"policy: unreconstructed container fires", policy, []Arg{opaque}, true},
+		{"policy: keyed container is not argv, fires", policy, []Arg{keyed}, true},
+	}
+	for _, tc := range cases {
+		g, err := CompileGuard(tc.src)
+		if err != nil {
+			t.Fatalf("%s: CompileGuard(%q): %v", tc.name, tc.src, err)
+		}
+		if got := g.Eval(tc.args); got != tc.want {
+			t.Errorf("%s: Eval = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
