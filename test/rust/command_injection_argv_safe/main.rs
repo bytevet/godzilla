@@ -14,7 +14,7 @@ mod http {
 use std::process::Command;
 
 pub fn handle(req: &http::Request) {
-    let name = req.query("name"); // untrusted, but only ever one argv element
+    let name = req.query("name");
     Command::new("ls").arg("-la").arg(&name).output().unwrap();
     Command::new("/bin/echo").args([name.as_str()]).output().unwrap();
 }

@@ -13,7 +13,7 @@ app = Flask(__name__)
 @app.route("/run")
 def run():
     cmd = request.args.get("cmd")
-    subprocess.run(["sh", "-c", cmd])  # argv[0] is a shell: re-interpreted
+    subprocess.run(["sh", "-c", cmd])
     return "ok"
 
 

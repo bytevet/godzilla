@@ -1456,18 +1456,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// taint reaches a later whole-container use (`json.dumps({"k": tainted})`
 		// into a response body: the label-studio CVE-2025-47783 shape).
 		//
-		// This previously returned an untainted constant, which left the
-		// container with no register identity and made EVERY Python container
-		// flow invisible — not just the literal, but `d[k] = tainted` too, since
-		// visitStore needs an address register. Command injection keeps its argv
-		// precision through its `when:` guard instead of by erasing the
-		// container; see rulepacks/py-command-injection.yaml and
-		// test/python/subprocess_argv_safe.
+		// Command injection keeps its argv precision through py-command-injection's
+		// `when:` guard rather than by erasing the container.
 		//
-		// A dict literal whose keys all pair up carries its run as
-		// key,value,key,value; pyast.py marks anything else "list" so no key
-		// structure is claimed. The two intrinsics propagate taint identically
-		// and differ only in the shape a guard may read back.
+		// pyast.py marks a literal that cannot pair its keys as "list".
 		intrinsic := aggregateIntrinsic
 		if n.str("container") == "dict" {
 			intrinsic = aggregateMapIntrinsic
@@ -1499,8 +1491,6 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 				elts = append(elts, e)
 			}
 		}
-		// A dict comprehension yields key,value pairs like a dict literal; every
-		// other form yields plain elements.
 		intrinsic := aggregateIntrinsic
 		if n.node("key") != nil {
 			intrinsic = aggregateMapIntrinsic

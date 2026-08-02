@@ -16,9 +16,7 @@
 # best-effort by nature — a wrapper script or an unlisted interpreter is not
 # recognised, which is why this guard only ever SUPPRESSES.
 #
-# Inherited by any rule that declares no `when:` of its own. py-command-injection
-# does declare one: its tainted value is an element of a lowered container, so it
-# applies the same test to `.Elems[0]` instead of `arg[0]`.
+# py-command-injection.yaml declares its own variant; see there.
 when: >-
   not (len(arg) < 3
        and arg[0].Complete

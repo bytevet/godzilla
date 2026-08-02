@@ -1,8 +1,4 @@
-"""Taint stored INTO a container and read back out again.
-
-An element assigned into an empty dict, and a list literal indexed straight
-back; both must keep the taint.
-"""
+"""Taint stored INTO a container and read back out — both routes must keep it."""
 import os
 
 from flask import Flask, request

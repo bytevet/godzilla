@@ -512,9 +512,20 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 }
 
 // rustCommandStep reports whether a callee is a std::process::Command builder
-// step that returns its receiver.
+// step that returns its receiver. The list must cover every step the API offers:
+// the program is forwarded by aliasing, so one unlisted step breaks the chain and
+// the program stops resolving at every step after it.
 func rustCommandStep(callee string) bool {
-	return strings.HasSuffix(callee, "Command::arg") || strings.HasSuffix(callee, "Command::args")
+	for _, suffix := range []string{
+		"Command::arg", "Command::args", "Command::arg0",
+		"Command::env", "Command::envs", "Command::env_remove", "Command::env_clear",
+		"Command::current_dir", "Command::stdin", "Command::stdout", "Command::stderr",
+	} {
+		if strings.HasSuffix(callee, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // rustIdentityConv reports whether a Rust callee is a string-valued conversion

@@ -338,11 +338,8 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	return sel
 }
 
-// argVals reconstructs each logical argument as a guard's `arg[i]`: the string
-// skeleton (constant runs + DynMarker for dynamic runs, via constSkeleton),
-// whether the whole argument is constant, its best-effort static type, the
-// keyword it was passed under, whether it is tainted, and — for a container
-// literal — its elements. tainted may be nil (a dangerous-call guard has no flow
+// argVals reconstructs each logical argument as a guard's `arg[i]` (see
+// rules.Arg for the fields). tainted may be nil (a dangerous-call guard has no flow
 // behind it), in which case every Arg reports Tainted false, so a rule keying on
 // it simply never suppresses there. The structure budget is shared across the
 // whole call, not per argument.
@@ -378,8 +375,8 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 }
 
 // expandStructure fills in a's Elems/Entries from its defining container
-// construction, while the shared budget allows. A container that does not fit
-// contributes nothing rather than a partial reconstruction.
+// construction, while the shared budget allows, and records whether any of them
+// carries the taint.
 func expandStructure(a *rules.Arg, def *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState, budget *int) {
 	ops := def.GetOperands()
 	if len(ops) == 0 || len(ops) > *budget {
@@ -440,8 +437,6 @@ func scalarArg(name string, v *ir.Value, def *ir.Instruction, defs map[string]*i
 			s, complete = sc, true
 		}
 	}
-	// Taint is read from the UNWRAPPED value: the kwarg marker stands in for
-	// the value in the argument list, so the taint belongs to what it wraps.
 	isTaint := false
 	if tainted != nil {
 		_, isTaint = isTainted(tainted, v)

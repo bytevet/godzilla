@@ -155,8 +155,8 @@ callees:                                  # dangerous-call
   was not reconstructed (see below).
 - `.Entries` — the same for a keyed container (`.Type == "map"`), indexed by its
   constant keys: `arg[0].Entries.mode`. An entry whose key is computed is absent,
-  since a rule cannot name it. Only the Python frontend currently produces
-  addressable container structure.
+  since a rule cannot name it. Only the Python frontend emits the keyed form, so
+  `.Entries` is empty elsewhere; `.Elems` is also populated for Rust.
 - `.TaintInChildren` — reading `.Elems`/`.Entries` will actually find the taint.
   A value can be `.Tainted` with this **false**: the container was mutated after
   it was built (`d = {}` then `d[k] = tainted`), the taint sits in a non-constant
@@ -175,19 +175,14 @@ the security-config rules are written:
 A keyword the call does not pass yields the zero argument, so the guard simply
 reads false; it is never an error.
 
-**Container structure is best-effort, so demand positive evidence.** The engine
-bounds how much of a container it rebuilds, and a container that does not fit
-contributes *no* structure rather than partial structure. Write the guard so an
-absent or unreachable structure keeps the finding — ask for `.TaintInChildren`
-and `.Complete` before concluding anything is safe:
+**Container structure is best-effort.** A container that does not fit the
+engine's budget contributes no structure at all, so demand positive evidence — a
+`len()` check, `.TaintInChildren`, `.Complete` — before concluding anything is
+safe.
 
-```yaml
-    when: 'not (arg[0].TaintInChildren and arg[0].Elems[0].Complete
-                and arg[0].Elems[0].String == "ls")'
-```
-
-The shipped rules are `rulepacks/py-command-injection.yaml` and the guard it
-shares with the JS and Rust packs, `rulepacks/_shell-argv.yaml`.
+The shipped rules are `rulepacks/py-command-injection.yaml`, which declares its
+own guard, and `rulepacks/_shell-argv.yaml`, the guard shared by the JS and Rust
+packs.
 
 
 Write the condition with expr's native operators/builtins — `startsWith`,
@@ -279,10 +274,9 @@ propagators: ["go:strings.Join"]
   sinks: ["go:*database/sql*.Query#0"]
 ```
 
-A fragment merges its pattern lists into the rule, and may also carry a `when:`
-guard — the one scalar it contributes — so packs sharing a predicate keep it in
-one file (`$_shell-argv.yaml` holds the argv-vs-shell test used by the JS and
-Rust command-injection packs). A rule declaring its own `when:` keeps it.
+A fragment merges its pattern lists into the rule and may carry a `when:` guard,
+so packs sharing a predicate keep it in one file (`$_shell-argv.yaml`, used by
+the JS and Rust command-injection packs).
 
 Builtin fragments are available to your `--rules` files too; a same-named fragment
 in your rules dir overrides one. Extending an unknown fragment is a load error.

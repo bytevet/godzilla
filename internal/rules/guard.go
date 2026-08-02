@@ -33,13 +33,11 @@ type Arg struct {
 	// distinguish the dangerous `shell=True` from an innocuous `check=True`.
 	// Rules read it through `kwargs`, which indexes arguments by this name.
 	Name string
-	// Tainted reports whether this argument carries taint at the call. It lets a
-	// rule ask WHICH argument the untrusted value arrived in, rather than the
-	// engine deciding on the rule's behalf: `subprocess.run(["ls", name])` is
-	// safe because the tainted value is an element of an argv list, and a rule
-	// can now say exactly that (see rulepacks/py-command-injection.yaml).
-	// Always false where there is no taint state — a dangerous-call guard has
-	// no flow behind it — so a rule keying on it simply never suppresses there.
+	// Tainted reports whether this argument carries taint at the call, so a rule
+	// can ask WHICH argument the untrusted value arrived in: in
+	// `subprocess.run(["ls", name])` it is an argv element, not the command.
+	// False where there is no taint state (a dangerous-call guard), so a rule
+	// keying on it never suppresses there.
 	Tainted bool
 	// Elems are an in-place container's elements in order (Type "aggregate"):
 	// `arg[0].Elems[0]` is argv[0] of `subprocess.run(["sh", "-c", cmd])`.
@@ -101,11 +99,8 @@ type guardEnv struct {
 }
 
 // kwargsOf indexes arguments by keyword name, skipping positional ones. The map
-// is allocated only once a keyword is actually seen: most guarded calls are
-// all-positional, and of the guards that ship only one reads `kwargs` at all, so
-// eagerly building it charged every `not hostFixed()` evaluation for an empty
-// map. A nil map is indistinguishable to a guard — expr yields the zero Arg for
-// any lookup — so the absent case needs no special handling.
+// is allocated lazily: most guarded calls are all-positional, so building an
+// empty one on every evaluation is pure waste.
 func kwargsOf(args []Arg) map[string]Arg {
 	var m map[string]Arg
 	for _, a := range args {
@@ -176,11 +171,9 @@ func CompileGuard(src string) (*Guard, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, nil
 	}
-	// Every sink and callee entry compiles its rule's guard, so one source is
-	// compiled once per entry: the shipped packs ask for 88 compiles of 10
-	// distinct sources, and a shared fragment makes that worse, not better. A
+	// Compiled once per sink/callee entry, so one source recurs across a pack. A
 	// Guard is immutable and an expr program is safe to Run concurrently, so
-	// they are shared. Errors are not cached — they fail `rules lint` at load.
+	// programs are shared. Errors are not cached — they fail `rules lint` at load.
 	if g, ok := guardCache.Load(src); ok {
 		return g.(*Guard), nil
 	}
@@ -193,7 +186,7 @@ func CompileGuard(src string) (*Guard, error) {
 	return g, nil
 }
 
-// guardCache memoizes CompileGuard by source; see the note there.
+// guardCache memoizes compiled guards by source.
 var guardCache sync.Map
 
 // Eval reports whether the guard holds for the call's arguments. A nil guard

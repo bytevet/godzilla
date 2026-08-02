@@ -12,5 +12,5 @@ app = Flask(__name__)
 @app.route("/ls")
 def ls():
     name = request.args.get("name")
-    subprocess.run(["ls", "-la", name], shell=True)  # shell: the list is joined
+    subprocess.run(["ls", "-la", name], shell=True)
     return "ok"

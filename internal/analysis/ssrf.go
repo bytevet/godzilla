@@ -26,8 +26,9 @@ import (
 // reads this marker instead of matching any language's format-callee name.
 const formatIntrinsic = "builtin.format"
 
-// identityIntrinsic is the language-neutral marker a frontend sets on a
-// string-valued conversion that forwards its operand's text unchanged
+// identityIntrinsic is the language-neutral marker a frontend sets on a value
+// that forwards its operand's text unchanged (a string conversion, or a value
+// standing in for its argument's text such as Rust's Command::new)
 // (to_string/as_str/clone/into/deref and the format! result wrappers). The
 // engine follows Args[0] one hop deeper to find the URL construction, without
 // matching any language's conversion-callee name.
