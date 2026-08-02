@@ -1,0 +1,26 @@
+# Shared argv-vs-shell guard, pulled in with `extend:`.
+#
+# A tainted value passed as ONE ARGV ELEMENT to a fixed program is not command
+# injection — it reaches execve as an argument, not as command text. It IS
+# injection when that program re-interprets its arguments, or when the program
+# itself is untrusted.
+#
+# Every clause is positive evidence, so anything unproven keeps firing: an
+# unresolved program, a command LINE (a shell-string sink lowers to its constant
+# fragments, whose first fragment carries spaces and flags and so is not a bare
+# program token), an unrecognised interpreter, or a call carrying extra
+# arguments we cannot read — a JS options object may set `shell: true`, and the
+# frontend lowers object literals as a PHI chain, so its contents are invisible.
+#
+# The program list is data on purpose: extending it is a YAML edit, and it is
+# best-effort by nature — a wrapper script or an unlisted interpreter is not
+# recognised, which is why this guard only ever SUPPRESSES.
+#
+# Inherited by any rule that declares no `when:` of its own. py-command-injection
+# does declare one: its tainted value is an element of a lowered container, so it
+# applies the same test to `.Elems[0]` instead of `arg[0]`.
+when: >-
+  not (len(arg) < 3
+       and arg[0].Complete
+       and arg[0].String matches "^[A-Za-z0-9_./-]+$"
+       and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$"))

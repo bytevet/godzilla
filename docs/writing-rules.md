@@ -283,6 +283,11 @@ propagators: ["go:strings.Join"]
   sinks: ["go:*database/sql*.Query#0"]
 ```
 
+A fragment merges its pattern lists into the rule, and may also carry a `when:`
+guard — the one scalar it contributes — so packs sharing a predicate keep it in
+one file (`$_shell-argv.yaml` holds the argv-vs-shell test used by the JS and
+Rust command-injection packs). A rule declaring its own `when:` keeps it.
+
 Builtin fragments are available to your `--rules` files too; a same-named fragment
 in your rules dir overrides one. Extending an unknown fragment is a load error.
 
@@ -291,7 +296,7 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 | Field | Kind | Meaning |
 |---|---|---|
 | `id` | all | Unique id; validation rejects an empty or duplicate id. |
-| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule. |
+| `extend` | all | One or more `$_fragment.yaml` refs merged into this rule: its pattern lists, plus its `when:` if the rule declares none. |
 | `languages` | all | Language tags (`[go]`, `[c, cpp]`, …). |
 | `severity` | all | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
 | `confidence` | dangerous-call, secret | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |

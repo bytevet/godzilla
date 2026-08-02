@@ -16,18 +16,12 @@ rules:
       std::process command, which may allow OS command injection. Validate or
       allow-list the program and arguments instead of passing user-controlled
       data to a shell.
-    extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml]
+    extend: [$_rust-sources.yaml, $_rust-propagators.yaml, $_rust-propagators-extra.yaml, $_shell-argv.yaml]
     # `Command` never invokes a shell, so an argv element is injection only when
-    # the program re-interprets it (`Command::new("sh").arg("-c").arg(x)`) or is
-    # itself untrusted (the Command::new#0 sink).
-    #
-    # The program lives in a different call from the argument, so the frontend
+    # the program re-interprets it, or is itself untrusted (Command::new#0). The
+    # program lives in a different call from the argument, so the frontend
     # forwards it down the builder chain — arg[0] carries it at every step. See
-    # rustCommandBuilder in converters/rust/mir.go.
-    when: >-
-      not (arg[0].Complete
-           and arg[0].String matches "^[A-Za-z0-9_./-]+$"
-           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$"))
+    # rustCommandBuilder in converters/rust/mir.go. Guard: $_shell-argv.yaml.
     sinks:
       - "rust:*Command::new#0"
       - "rust:*Command::arg#1"
