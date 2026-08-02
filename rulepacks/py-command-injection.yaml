@@ -11,6 +11,14 @@ rules:
       user input; if unavoidable, pass arguments as a list and never invoke
       a shell interpreter (shell=True).
     extend: $_py-sources.yaml
+    # Passing tainted data as an element of a direct argv LIST (no shell) is not
+    # command injection: the value reaches execve as one argument, never a shell
+    # interpreter. The Python frontend lowers container literals to
+    # builtin.aggregate so element taint survives into a later whole-container
+    # use, which would otherwise make the safe argv form fire; `argvList()` is
+    # the engine fact that tells the two apart (it also checks no truthy
+    # `shell=` keyword). See test/python/subprocess_argv_safe.
+    when: 'not argvList()'
     sinks:
       - "py:os.system"
       - "py:os.popen"

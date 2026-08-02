@@ -764,6 +764,29 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 	return regValue(inst.Name)
 }
 
+// emitAggregate builds a `builtin.aggregate` container-construction intrinsic
+// over the given element values, giving the container a REGISTER of its own.
+// The engine lists this intrinsic in intrinsicPropagators (see
+// internal/analysis/taint.go), so taint on any element flows to that register
+// and a later whole-container use — json.dumps(d), a template context, a
+// response body — observes it.
+//
+// Elements go in Operands, not Call.Args: visitIntrinsic propagates with
+// markTaintFromOperands, which reads Operands.
+//
+// Emitted even for an EMPTY container. The register is the point: `d = {}`
+// previously lowered to a constant, and a constant destination makes visitStore
+// early-return (it needs an address register), which is why `d[k] = tainted`
+// used to drop taint even before any element existed.
+func (fs *funcState) emitAggregate(elts []*ir.Value, n astNode) *ir.Value {
+	inst := fs.newValueInst(n)
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = "builtin.aggregate"
+	inst.Operands = elts
+	fs.emit(inst)
+	return regValue(inst.Name)
+}
+
 func regValue(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
@@ -1407,14 +1430,27 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerExpr(n.node("value"))
 
 	case "Sequence":
-		// List/tuple literal as a VALUE: lower each element so a source/sink
-		// inside it fires, but return an untainted placeholder — a freshly built
-		// container does not itself carry element taint (consistent with
-		// comprehensions and list literals; subprocess_argv_safe relies on this).
-		for _, e := range n.list("elts") {
-			fs.lowerExpr(e)
+		// List/tuple/set literal — and a flattened dict literal, whose keys and
+		// values pyast.py emits as one `elts` run — as a VALUE. Lower each
+		// element and build the container as a `builtin.aggregate`, so element
+		// taint reaches a later whole-container use (`json.dumps({"k": tainted})`
+		// into a response body: the label-studio CVE-2025-47783 shape).
+		//
+		// This previously returned an untainted constant, which left the
+		// container with no register identity and made EVERY Python container
+		// flow invisible — not just the literal, but `d[k] = tainted` too, since
+		// visitStore needs an address register. Command injection keeps its argv
+		// precision through the `argvList()` guard instead of by erasing the
+		// container; see rulepacks/py-command-injection.yaml and
+		// test/python/subprocess_argv_safe.
+		elts := n.list("elts")
+		vals := make([]*ir.Value, 0, len(elts))
+		for _, e := range elts {
+			if v := fs.lowerExpr(e); v != nil {
+				vals = append(vals, v)
+			}
 		}
-		return stringValue("")
+		return fs.emitAggregate(vals, n)
 
 	case "Starred":
 		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
@@ -1427,21 +1463,23 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// for-loop; lower filter conditions) then the element/key/value
 		// expression, so a source or sink INSIDE the comprehension
 		// (e.g. [cursor.execute(q) for q in ...]) is lowered and fires. The
-		// result is a freshly built container, so — like a list literal — it
-		// does not itself carry element taint (consistent, precise container
-		// handling; see subprocess_argv_safe).
+		// result is a container built from those element expressions, so — like
+		// a literal — it carries their taint via builtin.aggregate.
 		for _, g := range n.list("generators") {
 			fs.lowerIterTarget(g)
 			for _, cond := range g.list("ifs") {
 				fs.lowerExpr(cond)
 			}
 		}
+		vals := make([]*ir.Value, 0, 3)
 		for _, key := range []string{"elt", "key", "value"} {
 			if e := n.node(key); e != nil {
-				fs.lowerExpr(e)
+				if v := fs.lowerExpr(e); v != nil {
+					vals = append(vals, v)
+				}
 			}
 		}
-		return stringValue("")
+		return fs.emitAggregate(vals, n)
 
 	case "JoinedStr":
 		// f-string: fold parts left-to-right with BIN_OP_ADD (string

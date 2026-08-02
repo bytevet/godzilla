@@ -1447,8 +1447,10 @@ func analyzeFunc(
 				// never reported through a wrapper — documented in writing-rules.md.
 				// hostFixed() is the engine fact (see rules.EvalHostFixed); expr calls
 				// it only if the rule mentions it, so an unrelated guard pays nothing.
-				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs),
-					func() bool { return !urlHostControllable(inj, tainted, defs) }) {
+				if sinkGuard != nil && !sinkGuard.EvalWith(argVals(inst.Call, defs), rules.Facts{
+					HostFixed: func() bool { return !urlHostControllable(inj, tainted, defs) },
+					ArgvList:  func() bool { return argvListSafe(inj, tainted, defs, inst.Call) },
+				}) {
 					break
 				}
 				// ENG-9: suppress when a validator guard on this flow's source

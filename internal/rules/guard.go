@@ -61,6 +61,9 @@ type guardEnv struct {
 	// hostFixed() with no argument asks about the sink's own injection points;
 	// hostFixed(arg[i]) asks about one specific argument. See EvalHostFixed.
 	HostFixed func(...Arg) bool `expr:"hostFixed"`
+	// argvList() answers whether the tainted injection point arrives as an
+	// in-place argument LIST with no shell interpreter. See EvalArgvList.
+	ArgvList func() bool `expr:"argvList"`
 }
 
 // hostFixedRe matches a constant prefix that already pins a complete
@@ -108,6 +111,32 @@ type EvalHostFixed func() bool
 // suppressing.
 func alwaysControllable() bool { return false }
 
+// EvalArgvList is the engine-supplied fact behind the `argvList()` guard
+// builtin: the tainted value reaches the sink's injection point as a container
+// CONSTRUCTED IN PLACE (builtin.aggregate) and the call passes no truthy
+// `shell=` keyword -- i.e. `subprocess.run(["ls", "-la", name])`, where the
+// tainted element is an argv entry handed to execve, not shell-interpreted.
+//
+// Like hostFixed, it is a fact the guard layer cannot compute for itself: it
+// needs the injection-point arguments, the taint state and the IR def map. The
+// POLICY -- that command injection should suppress on it -- stays in the rule's
+// `when:` rather than the engine branching on a CWE string.
+//
+// Python's frontend lowers every container literal to builtin.aggregate so that
+// element taint survives into a later whole-container use; this fact is what
+// keeps that from turning the safe argv form into a false positive.
+type EvalArgvList func() bool
+
+// Facts are the engine-supplied answers a `when:` expression may consult. A nil
+// field fails OPEN -- the fact reads as "dangerous", so the entry still fires
+// rather than being silently suppressed. Named fields (rather than positional
+// func() bool parameters) keep two same-typed facts from being swapped at a
+// call site.
+type Facts struct {
+	HostFixed EvalHostFixed
+	ArgvList  EvalArgvList
+}
+
 // CompileGuard parses, type-checks, and compiles a `when:` expression. It returns
 // an error for a syntax error, an unknown name, a non-boolean result, or an
 // invalid constant regexp in `matches` (expr validates all of these at compile),
@@ -127,11 +156,12 @@ func CompileGuard(src string) (*Guard, error) {
 // Eval reports whether the guard holds for the call's arguments. A nil guard
 // (no `when:`) always fires; DenyGuard never does; a run error (e.g. an
 // out-of-range arg index) is unconfirmed -> false (suppress).
-func (g *Guard) Eval(args []Arg) bool { return g.EvalWith(args, nil) }
+func (g *Guard) Eval(args []Arg) bool { return g.EvalWith(args, Facts{}) }
 
-// EvalWith is Eval with the engine's optional facts supplied. hostFixed may be
-// nil, in which case the guard sees a not-host-fixed answer (fail open).
-func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
+// EvalWith is Eval with the engine's optional facts supplied. Any nil fact fails
+// open: hostFixed reads as not-host-fixed and argvList as not-an-argv-list, so a
+// missing fact never silently suppresses an entry.
+func (g *Guard) EvalWith(args []Arg, facts Facts) bool {
 	if g == nil {
 		return true
 	}
@@ -142,10 +172,10 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 	// answered from the skeletons alone and must ALL be host-fixed.
 	fn := func(as ...Arg) bool {
 		if len(as) == 0 {
-			if hostFixed == nil {
+			if facts.HostFixed == nil {
 				return alwaysControllable()
 			}
-			return hostFixed()
+			return facts.HostFixed()
 		}
 		for _, a := range as {
 			if !ArgHostFixed(a) {
@@ -154,7 +184,13 @@ func (g *Guard) EvalWith(args []Arg, hostFixed EvalHostFixed) bool {
 		}
 		return true
 	}
-	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: fn})
+	argv := func() bool {
+		if facts.ArgvList == nil {
+			return false // fail open: not an argv list, so the entry still fires
+		}
+		return facts.ArgvList()
+	}
+	out, err := expr.Run(g.prog, guardEnv{Arg: args, HostFixed: fn, ArgvList: argv})
 	if err != nil {
 		return false
 	}

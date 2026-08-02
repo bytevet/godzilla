@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Reflected-JSON XSS through a CONTAINER: request.POST.get -> dict literal ->
+# json.dumps -> HttpResponse. The container variant of xss_json, and the shape
+# behind label-studio CVE-2025-47783.
+findings:
+    - rule: py-xss
+      min: 1
+      line: 20
+      sink: HttpResponse
