@@ -19,7 +19,8 @@ const DynMarker = "<DYN>"
 // Arg is a call argument as a guard sees it: String is the argument's statically
 // reconstructed value (constant runs verbatim, DynMarker for dynamic runs),
 // Complete is true when the WHOLE argument is a compile-time constant, and Type
-// is its static type ("string"/"int"/"float"/"bool", or "" if unknown).
+// is its static type ("string"/"int"/"float"/"bool", the container kinds
+// "aggregate"/"map", or "" if unknown).
 type Arg struct {
 	String   string
 	Complete bool
@@ -28,8 +29,8 @@ type Arg struct {
 	// ("shell" for `subprocess.run(cmd, shell=True)`), or "" for a positional
 	// argument or a language/frontend that does not record names. Without it a
 	// guard can only see that SOME boolean argument is true, which cannot
-	// distinguish the dangerous `shell=True` from an innocuous `check=True` —
-	// so a config-flag rule matches on `.Name` together with `.String`.
+	// distinguish the dangerous `shell=True` from an innocuous `check=True`.
+	// Rules read it through `kwargs`, which indexes arguments by this name.
 	Name string
 	// Tainted reports whether this argument carries taint at the call. It lets a
 	// rule ask WHICH argument the untrusted value arrived in, rather than the

@@ -464,7 +464,7 @@ func scalarArg(name string, v *ir.Value, def *ir.Instruction, defs map[string]*i
 	if tainted != nil {
 		_, isTaint = isTainted(tainted, v)
 	}
-	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, def, defs), Name: name, Tainted: isTaint}
+	return rules.Arg{String: s, Complete: complete, Type: argType(v, s, def), Name: name, Tainted: isTaint}
 }
 
 // constScalar renders a non-string constant (bool/int/float) as its literal text,
@@ -494,7 +494,7 @@ func constScalar(v *ir.Value) (string, bool) {
 // instruction is string-typed, else "" (unknown). The IR-type fallback matters:
 // without it a fully tainted string — the common guarded case — would report "".
 // def is v's defining instruction, already resolved by the caller.
-func argType(v *ir.Value, skeleton string, def *ir.Instruction, defs map[string]*ir.Instruction) string {
+func argType(v *ir.Value, skeleton string, def *ir.Instruction) string {
 	// A container CONSTRUCTED IN PLACE — a Python list/dict/set literal or
 	// comprehension — reports "aggregate". This is what lets a rule tell the
 	// safe argv form apart from a shell string: in
@@ -522,7 +522,7 @@ func argType(v *ir.Value, skeleton string, def *ir.Instruction, defs map[string]
 	if skeleton != rules.DynMarker {
 		return "string" // recovered constant text => string-valued
 	}
-	if isStringType(defs[v.GetRegName()].GetType()) {
+	if isStringType(def.GetType()) {
 		return "string"
 	}
 	return ""

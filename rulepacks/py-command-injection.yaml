@@ -24,21 +24,22 @@ rules:
     # argv list is only safe if the program it launches does not re-interpret its
     # arguments.
     #
-    # Every clause demands positive evidence, so anything unproven fires: a
-    # tainted plain string, `shell=True` (which joins the list into one shell
-    # string), an argv[0] that is not a compile-time constant, or a container
-    # whose structure the engine did not reconstruct all leave .Elems empty or
-    # the match false. `kwargs.shell` is the zero Arg when no `shell=` is passed.
-    # See test/python/subprocess_argv_safe, subprocess_argv_shell and
-    # subprocess_argv_shell_program.
+    # Every clause demands positive evidence, so anything unproven fires. That
+    # includes `shell=`: absent (the zero Arg, "") or a literal false clears it,
+    # while `shell=1` does not. A NON-CONSTANT `shell=flag` records no keyword
+    # name at all (the frontend marks constants only), so it would read as
+    # absent — hence every non-tainted argument must be a keyword we can name.
+    # The program list is best-effort: it covers interpreters known to
+    # re-interpret their arguments, not every possible one.
     when: >-
-      not (kwargs.shell.String != "true"
+      not ((kwargs.shell.String == "" or kwargs.shell.String == "false")
+           and all(filter(arg, not .Tainted), .Name != "")
            and any(arg, .Tainted)
            and all(filter(arg, .Tainted),
                    .Type == "aggregate"
                    and .TaintInChildren
                    and .Elems[0].Complete
-                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$")))
+                   and not (.Elems[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$")))
     sinks:
       - "py:os.system"
       - "py:os.popen"

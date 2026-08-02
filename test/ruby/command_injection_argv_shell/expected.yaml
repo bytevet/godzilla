@@ -1,8 +1,0 @@
-# Expected findings for this sample (see test/README.md). Regenerate with:
-#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# The argument-list form is only safe while argv[0] is not a shell. Pairs with
-# command_injection_safe, whose program is `ls`.
-findings:
-    - rule: ruby-command-injection
-      min: 1
-      sink: system

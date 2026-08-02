@@ -10,16 +10,6 @@ rules:
       command injection. Avoid passing user-controlled data to a shell; use a
       fixed argument list and validate inputs.
     extend: $_java-sources.yaml
-    # An explicit program plus separate arguments never reaches a shell, so a
-    # tainted argument is injection only when the program re-interprets it
-    # (`"sh", "-c", x`) or is itself untrusted. Suppression needs a recognised
-    # non-shell program named by a bare TOKEN, so a command string (one argument,
-    # or fragments with spaces) keeps firing.
-    when: >-
-      not (len(arg) > 1
-           and arg[0].Complete
-           and arg[0].String matches "^[A-Za-z0-9_./-]+$"
-           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
     sinks:
       - "java:*Runtime.exec"
       - "java:*ProcessBuilder.command"

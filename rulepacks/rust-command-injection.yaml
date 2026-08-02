@@ -27,7 +27,7 @@ rules:
     when: >-
       not (arg[0].Complete
            and arg[0].String matches "^[A-Za-z0-9_./-]+$"
-           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
+           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$"))
     sinks:
       - "rust:*Command::new#0"
       - "rust:*Command::arg#1"

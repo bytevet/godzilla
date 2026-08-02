@@ -21,11 +21,10 @@ rules:
     # call carrying any options object keeps firing. arg[0] must be a bare
     # program TOKEN, which a shell command line is not.
     when: >-
-      not (len(arg) > 1
-           and len(arg) < 3
+      not (len(arg) == 2
            and arg[0].Complete
            and arg[0].String matches "^[A-Za-z0-9_./-]+$"
-           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs)$"))
+           and not (arg[0].String matches "(^|/)(sh|bash|dash|zsh|ksh|csh|tcsh|fish|ash|busybox|env|xargs|sudo|node|nodejs|deno|bun|python[0-9.]*|perl|ruby|php|awk|gawk|mawk|find|ssh|cmd|powershell|pwsh|wscript|cscript)([.]exe)?$"))
     # A bare "js:*.exec" sink is deliberately NOT used: it matches
     # RegExp.prototype.exec (regex.exec(userInput)), an extremely common,
     # benign validation call, producing a critical false positive. child_process

@@ -49,13 +49,8 @@ const aggregateMapIntrinsic = "builtin.aggregate_map"
 // intrinsicPropagators is the set of language-specific OP_CODE_INTRINSIC
 // operations that pass taint from operand to result register.
 var intrinsicPropagators = map[string]bool{
-	"builtin.slice": true,
-	// builtin.aggregate models a tuple/array/struct/enum-variant construction
-	// (used by the Rust frontend): taint on any constructed element flows to the
-	// aggregate value, so a later whole-aggregate use (e.g. a format! argument
-	// pack) observes it. Field-precise reads are folded at lowering time.
-	aggregateIntrinsic: true,
-	// The keyed form (a dict literal): same element-taint semantics.
+	"builtin.slice":       true,
+	aggregateIntrinsic:    true,
 	aggregateMapIntrinsic: true,
 	"go.map.lookup":       true,
 	"go.next":             true,
