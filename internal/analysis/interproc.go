@@ -1426,6 +1426,9 @@ func (fa *funcAnalysis) addEffect(callee string, param int, origin *ir.Position)
 	if fa.effectSeen[key] {
 		return
 	}
+	if fa.effectSeen == nil {
+		fa.effectSeen = map[funcParamRef]bool{}
+	}
 	fa.effectSeen[key] = true
 	fa.res.callEffects = append(fa.res.callEffects, callEffect{callee: callee, param: param, origin: origin})
 }
@@ -1444,6 +1447,9 @@ func (fa *funcAnalysis) addFuncEffect(callee string, param int, target string) {
 	if fa.funcEffectSeen[fe] {
 		return
 	}
+	if fa.funcEffectSeen == nil {
+		fa.funcEffectSeen = map[funcValEffect]bool{}
+	}
 	fa.funcEffectSeen[fe] = true
 	fa.res.funcEffects = append(fa.res.funcEffects, fe)
 }
@@ -1458,6 +1464,9 @@ func (fa *funcAnalysis) addFuncOpaque(callee string, param int) {
 	k := funcParamRef{callee: callee, param: param}
 	if fa.funcOpaqueSeen[k] {
 		return
+	}
+	if fa.funcOpaqueSeen == nil {
+		fa.funcOpaqueSeen = map[funcParamRef]bool{}
 	}
 	fa.funcOpaqueSeen[k] = true
 	fa.res.funcOpaque = append(fa.res.funcOpaque, k)
@@ -1506,6 +1515,9 @@ func (fa *funcAnalysis) recordGlobalStore(inst *ir.Instruction) {
 	if fa.globalSeen[g] {
 		return
 	}
+	if fa.globalSeen == nil {
+		fa.globalSeen = map[string]bool{}
+	}
 	fa.globalSeen[g] = true
 	fa.res.globalEffects = append(fa.res.globalEffects, globalEffect{name: g, origin: pos})
 }
@@ -1519,6 +1531,17 @@ func (fa *funcAnalysis) recordGlobalStore(inst *ir.Instruction) {
 // fresh local in SSA, not a store target), so this does not falsely taint
 // by-value arguments.
 func (fa *funcAnalysis) recordParamMemoryTaint(inst *ir.Instruction) {
+	if !fa.paramRegBuilt {
+		fa.paramRegBuilt = true
+		for i, p := range fa.fn.Params {
+			if r := p.GetRegName(); r != "" {
+				if fa.paramReg == nil {
+					fa.paramReg = make(map[string]int, len(fa.fn.Params))
+				}
+				fa.paramReg[r] = i
+			}
+		}
+	}
 	if len(fa.paramReg) == 0 {
 		return
 	}
@@ -1643,7 +1666,7 @@ func (fa *funcAnalysis) seedInvokeArgs(cc *ir.CallCommon, target string) {
 func (fa *funcAnalysis) pullReturnTaint(inst *ir.Instruction, target string) {
 	if ro := fa.returnTaint[target]; ro != nil && inst.Name != "" {
 		markTainted(fa.tainted, inst.Name, ro)
-		fa.interprocOrigins[ro] = true
+		fa.markInterproc(ro)
 	}
 }
 
@@ -1690,6 +1713,9 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	// registers so a later RET of one of them in this same straight-line block
 	// is treated as validated. Cheap and gated on the rule declaring validators.
 	if fa.linearFn && fa.rule.HasValidators() && fa.rule.IsValidator(callee) {
+		if fa.validated == nil {
+			fa.validated = map[string]bool{}
+		}
 		if v := inst.Call.GetValue(); v != nil {
 			if r := v.GetRegName(); r != "" {
 				fa.validated[r] = true
