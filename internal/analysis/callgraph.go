@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"godzilla/internal/irwalk"
 	"maps"
 	"slices"
 	"strings"
@@ -75,7 +76,7 @@ func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]stri
 
 	for _, fn := range byKey {
 		caller := fn.CanonicalName
-		for inst := range instrs(fn) {
+		for inst := range irwalk.Instrs(fn) {
 			if inst.Call == nil {
 				continue
 			}

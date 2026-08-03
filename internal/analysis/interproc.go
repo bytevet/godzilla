@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"fmt"
+	"godzilla/internal/irwalk"
 	"maps"
 	"runtime"
 	"slices"
@@ -546,7 +547,7 @@ func buildFuncIndex(prog *ir.Program) (map[string]*ir.Function, map[string]*ir.M
 	byKey := map[string]*ir.Function{}
 	modByKey := map[string]*ir.Module{}
 	local := 0
-	for mod, fn := range funcs(prog) {
+	for mod, fn := range irwalk.Funcs(prog) {
 		key := fn.CanonicalName
 		if key == "" {
 			key = fmt.Sprintf("__local%d", local)

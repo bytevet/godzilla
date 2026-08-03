@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"godzilla/internal/irwalk"
 	"regexp"
 
 	"godzilla/internal/rules"
@@ -68,7 +69,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 
 	var findings []Finding
 	seen := map[string]bool{}
-	for mod, fn := range funcs(prog) {
+	for mod, fn := range irwalk.Funcs(prog) {
 		lang := mod.GetLanguage()
 		langDcs := forLang(lang)
 		if len(langDcs) == 0 {
@@ -89,7 +90,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			}
 			return defs
 		}
-		for inst := range instrs(fn) {
+		for inst := range irwalk.Instrs(fn) {
 			if inst.Call == nil {
 				continue
 			}

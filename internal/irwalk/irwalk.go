@@ -11,7 +11,7 @@
 // runs ONCE per scan (Analyze's function index, the call graph, the
 // dangerous-call and secret passes, the frontends' cross-module callee
 // rewrites), so the per-element closure call is not on a hot path — the
-// per-(function × rule) inner loops in the engine's analyzeFunc are
+// per-(function × rule) inner loops in the engine's funcAnalysis methods are
 // deliberately left on hand-written loops.
 package irwalk
 
