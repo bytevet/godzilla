@@ -2,24 +2,20 @@ package py_converter
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"godzilla/converters/ssabuild"
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
 // requirePython3 skips the test if python3 is not on PATH, since ConvertFile
 // shells out to it (there is no pure-Go fallback yet).
-func requirePython3(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not found on PATH; skipping")
-	}
-}
+func requirePython3(t *testing.T) { testsupport.RequireTool(t, "python3") }
 
 func TestConvertFile_SQLInjectionSample(t *testing.T) {
 	requirePython3(t)
@@ -325,7 +321,7 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 
 	t.Run("function parameter root is opaque", func(t *testing.T) {
 		fs := newFuncState("test.py")
-		fs.write("req", regValue("req"))
+		fs.write("req", ssabuild.Reg("req"))
 		fs.paramRegs["req"] = true
 		// req.args["cmd"], where `req` is this function's own parameter.
 		sub := subscriptNode(attrNode(nameNode("req"), "args"), strConst("cmd"))
@@ -355,7 +351,7 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 
 	t.Run("direct parameter subscript is a member_read call", func(t *testing.T) {
 		fs := newFuncState("test.py")
-		fs.write("details", regValue("details"))
+		fs.write("details", ssabuild.Reg("details"))
 		fs.paramRegs["details"] = true
 		// details["path"], where `details` is this function's own parameter
 		// (the CVE-2025-47782 motioneye helper shape). One synthetic CALL,
@@ -405,7 +401,7 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 		// items = get_items(); items[0] -- `items` is bound to a
 		// locally-computed register (not a param, not unbound), so it must
 		// NOT be treated as an opaque source.
-		fs.write("items", regValue("t0"))
+		fs.write("items", ssabuild.Reg("t0"))
 		sub := subscriptNode(nameNode("items"), strConst("0"))
 
 		fs.lowerExpr(sub)

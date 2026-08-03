@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	"godzilla/converters/frontend"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -172,29 +173,16 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		}
 	}
 
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			for _, b := range fn.Blocks {
-				for _, inst := range b.Instrs {
-					cc := inst.GetCall()
-					if cc == nil {
-						continue
-					}
-					callee := cc.GetCallee()
-					if callee == "" || rawSet[callee] {
-						continue // unset, or already resolves by exact name
-					}
-					raw := resolve(logical(callee))
-					if raw == "" {
-						continue
-					}
-					cc.Callee = raw
-					if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
-						fnv.Kind = &ir.Value_FuncName{FuncName: raw}
-					}
-				}
-			}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if callee == "" || rawSet[callee] {
+			continue // unset, or already resolves by exact name
 		}
+		raw := resolve(logical(callee))
+		if raw == "" {
+			continue
+		}
+		irwalk.SetCallee(cc, raw)
 	}
 }
 

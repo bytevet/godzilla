@@ -221,7 +221,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 	}
 	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	for _, p := range paramNames(at(defNode, 2)) {
-		v := regValue(p)
+		v := ssabuild.Reg(p)
 		fn.Params = append(fn.Params, v)
 		fs.write(p, v)
 		fs.paramNames[p] = true
@@ -260,9 +260,9 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 	}
 	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	// Synthetic receiver at slot 0 (the class / relation); never referenced.
-	fn.Params = append(fn.Params, regValue("self"))
+	fn.Params = append(fn.Params, ssabuild.Reg("self"))
 	for _, p := range paramNames(at(defNode, 4)) {
-		v := regValue(p)
+		v := ssabuild.Reg(p)
 		fn.Params = append(fn.Params, v)
 		fs.write(p, v)
 		fs.paramNames[p] = true
@@ -387,18 +387,6 @@ func (fs *funcState) newValueInst(n interface{}) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posFrom(fs.filename, n)}
 }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func constString(s string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
-}
-
-func globalValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
-}
-
 // ivarGlobal returns the synthetic global key for an instance variable `@f`
 // inside a class method, or "" outside a class. It is the cross-method channel
 // for instance-variable taint: keyed per (module, class, @ivar), `@f = tainted`
@@ -452,7 +440,7 @@ func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
 		last = fs.lowerExpr(e)
 	}
 	if last == nil {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return last
 }
@@ -471,7 +459,7 @@ func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
 		if g := fs.ivarGlobal(name); g != "" {
 			fs.emit(&ir.Instruction{
 				Op:       ir.OpCode_OP_CODE_STORE,
-				Operands: []*ir.Value{globalValue(g), val},
+				Operands: []*ir.Value{ssabuild.Global(g), val},
 				Pos:      posFrom(fs.filename, target),
 			})
 		}
@@ -508,7 +496,7 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		// bare `return` (Ripper tags an argument-less return "return0") — returns
 		// nil. Emit the RET (so the block terminates, no fall-through edge) rather
 		// than falling through to a ruby.unsupported intrinsic.
-		v := constString("")
+		v := ssabuild.Str("")
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true
 		return v
@@ -526,7 +514,7 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	switch tag(n) {
 	case "":
-		return constString("")
+		return ssabuild.Str("")
 	case "string_literal":
 		return fs.lowerStringLiteral(n)
 	case "string_content":
@@ -534,7 +522,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	case "xstring_literal":
 		return fs.lowerBacktick(n)
 	case "@tstring_content", "@int", "@float", "@CHAR":
-		return constString(scalarText(n))
+		return ssabuild.Str(scalarText(n))
 	case "string_embexpr":
 		// `#{ stmts }` — lower the inner statements, return the last value.
 		inner, _ := asList(at(n, 1))
@@ -543,11 +531,11 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		// A namespaced constant (`Net::HTTP`, `ERB::Util`). It carries no taint;
 		// return its flattened name so lowering the receiver of `Net::HTTP.get`
 		// does not fall through to a `ruby.unsupported` intrinsic.
-		return constString(constPathName(n))
+		return ssabuild.Str(constPathName(n))
 	case "symbol_literal":
-		return constString(identName(at(at(n, 1), 1)))
+		return ssabuild.Str(identName(at(at(n, 1), 1)))
 	case "dyna_symbol":
-		return constString("")
+		return ssabuild.Str("")
 	case "var_ref":
 		inner := at(n, 1)
 		switch tag(inner) {
@@ -564,13 +552,13 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 			if g := fs.ivarGlobal(name); g != "" {
 				ld := fs.newValueInst(n)
 				ld.Op = ir.OpCode_OP_CODE_LOAD
-				ld.Operands = []*ir.Value{globalValue(g)}
+				ld.Operands = []*ir.Value{ssabuild.Global(g)}
 				fs.emit(ld)
-				return regValue(ld.Name)
+				return ssabuild.Reg(ld.Name)
 			}
-			return constString(scalarText(inner))
+			return ssabuild.Str(scalarText(inner))
 		}
-		return constString(scalarText(inner)) // @const / @kw / @gvar
+		return ssabuild.Str(scalarText(inner)) // @const / @kw / @gvar
 	case "vcall":
 		// A bare name: a local variable read if bound; else, if it names a known
 		// method (same-class or top-level def), a 0-arg method call — lower it as a
@@ -626,14 +614,14 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 				fs.lowerExpr(e)
 			}
 		}
-		return constString("")
+		return ssabuild.Str("")
 	}
 	// Unhandled: emit a visible intrinsic placeholder.
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 	inst.Intrinsic = "ruby.unsupported"
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerStringLiteral lowers `"...#{x}..."`. Interpolation parts are folded with
@@ -646,7 +634,7 @@ func (fs *funcState) lowerStringLiteral(n interface{}) *ir.Value {
 func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 	l, ok := asList(content)
 	if !ok || len(l) < 2 {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	var acc *ir.Value
 	for _, part := range l[1:] { // l[0] == "string_content"
@@ -692,7 +680,7 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 		}
 	}
 	if last == nil {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return last
 }
@@ -749,7 +737,7 @@ func (fs *funcState) branchResult(a, b *ir.Value, thenEnd, elseEnd, merge ssabui
 	case b != nil:
 		return b
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // lowerElseTail lowers the tail of an if/unless chain in the current (else)
@@ -775,7 +763,7 @@ func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value 
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
 		func() *ir.Value { return fs.lowerExpr(cond) },
 		lowerBody)
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // lowerWhile lowers `while`/`until cond; body; end` into the shared loop CFG.
@@ -862,7 +850,7 @@ func (fs *funcState) lowerBinary(n interface{}) *ir.Value {
 		inst.Intrinsic = "builtin.compare"
 		inst.Operands = []*ir.Value{left, right}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 	}
 	return fs.emitBinOp(binOpKind(op), left, right, n)
 }
@@ -922,7 +910,7 @@ func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n inter
 	inst.BinOp = kind
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // isOpaqueBase reports whether a receiver/base node refers to a value whose
@@ -979,7 +967,7 @@ func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{baseVal}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerDotCall lowers `recv.method(args?)`. args is nil for the no-arg `call`
@@ -1106,7 +1094,7 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 	case "call":
 		return fs.lowerDotCall(head, args)
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
@@ -1166,14 +1154,14 @@ func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interf
 		Args:   args,
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 func (fs *funcState) lookup(name string) *ir.Value {
 	if fs.assigned[name] {
 		return fs.read(name)
 	}
-	return constString(name)
+	return ssabuild.Str(name)
 }
 
 // scalarText returns a token/scalar node's text for a constant value.

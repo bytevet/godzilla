@@ -52,7 +52,7 @@ func NewConverter() *Converter { return &Converter{} }
 // .rs file is compiled standalone with rustc.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		if fileExists(filepath.Join(path, "Cargo.toml")) {
+		if proc.FileExists(filepath.Join(path, "Cargo.toml")) {
 			// `cargo` executes arbitrary code from the scanned repo (build.rs,
 			// proc-macros, and every dependency crate's build script). Off by
 			// default; without opt-in, fall through to per-file rustc, which
@@ -143,11 +143,6 @@ func runMIR(cmd *exec.Cmd, outPath, label string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }
 
 // convertCargo builds a Cargo project with `cargo rustc -- --emit=mir` so its

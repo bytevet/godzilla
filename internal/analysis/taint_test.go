@@ -6,6 +6,7 @@ import (
 
 	go_converter "godzilla/converters/go"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -57,21 +58,11 @@ func distinctCallees(prog *ir.Program) []string {
 // TestLogSQLInjectionCallees for how these were confirmed against the Go
 // converter's actual naming scheme ("go:" + ssa.Function.String() /
 // ssa.CallCommon.Method.FullName()).
-func sqlInjectionRuleSet() *rules.RuleSet {
-	return &rules.RuleSet{
-		Rules: []rules.Rule{
-			{
-				ID:          "GO-SQLI-001",
-				Languages:   []string{"go"},
-				Severity:    rules.SeverityHigh,
-				CWE:         "CWE-89",
-				Message:     "Untrusted HTTP query parameter flows into a SQL query without sanitization",
-				Sources:     []string{"go:*Values*.Get"},
-				Sinks:       rules.SinksOf("go:*database/sql*.Query*"),
-				Propagators: []string{"go:fmt.Sprintf"},
-			},
-		},
-	}
+func sqlInjectionRuleSet(t testing.TB) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, "GO-SQLI-001", "go", "CWE-89",
+		[]string{"go:*Values*.Get"}, []string{"go:*database/sql*.Query*"},
+		testsupport.Message("Untrusted HTTP query parameter flows into a SQL query without sanitization"),
+		testsupport.Propagators("go:fmt.Sprintf"))
 }
 
 // TestLogSQLInjectionCallees is a diagnostic test: it converts the real
@@ -102,7 +93,7 @@ func TestLogSQLInjectionCallees(t *testing.T) {
 // end-to-end.
 func TestAnalyze_SQLInjection_RealConversion(t *testing.T) {
 	prog := convertSQLInjectionSample(t)
-	engine := NewEngine(sqlInjectionRuleSet())
+	engine := NewEngine(sqlInjectionRuleSet(t))
 	findings := engine.Analyze(prog)
 
 	var sqli *Finding
@@ -202,7 +193,7 @@ func TestAnalyze_SQLInjection_HandlerClosure(t *testing.T) {
 		},
 	}
 
-	engine := NewEngine(sqlInjectionRuleSet())
+	engine := NewEngine(sqlInjectionRuleSet(t))
 	findings := engine.Analyze(prog)
 
 	if len(findings) == 0 {

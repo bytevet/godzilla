@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -111,7 +112,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 	// no span, so firstPos is only known then).
 	var synthSources []*ir.Instruction
 	for i, p := range params {
-		v := regValue(fmt.Sprintf("p%d", i))
+		v := ssabuild.Reg(fmt.Sprintf("p%d", i))
 		fn.Params = append(fn.Params, v) // preserve arity for interproc arg->param mapping
 		if src, ok := axumExtractorSource(p.typ); ok {
 			// An axum handler receives already-extracted, attacker-controlled data
@@ -125,7 +126,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 			}
 			st.instrs = append(st.instrs, inst)
 			synthSources = append(synthSources, inst)
-			st.env[p.local] = regValue(reg)
+			st.env[p.local] = ssabuild.Reg(reg)
 			continue
 		}
 		st.env[p.local] = v
@@ -438,7 +439,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 			st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_UN_OP, st.operands(args), pos)
 			return
 		case op == "Len" || op == "discriminant" || op == "NullaryOp":
-			st.env[dst] = constString("")
+			st.env[dst] = ssabuild.Str("")
 			return
 		default: // enum-variant / tuple-struct constructor: taint if any field is
 			st.setAgg(dst, args, "builtin.aggregate", pos)
@@ -453,7 +454,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 		st.setAgg(dst, structFields(expr[brace:]), "builtin.aggregate", pos)
 		return
 	}
-	st.env[dst] = constString("")
+	st.env[dst] = ssabuild.Str("")
 }
 
 // emitCall lowers a MIR call terminator. Method and free-function calls alike
@@ -464,7 +465,7 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	callee, argStr, ok := callShape(expr)
 	name := st.reg()
 	if !ok { // indirect call through a fn-pointer local: `(move _f)(args)`
-		st.env[dst] = regValue(name)
+		st.env[dst] = ssabuild.Reg(name)
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{}, Pos: pos})
 		return
 	}
@@ -477,7 +478,7 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	if norm == "add" {
 		operands := st.operands(splitTop(argStr, ','))
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: operands, Pos: pos})
-		st.env[dst] = regValue(name)
+		st.env[dst] = ssabuild.Reg(name)
 		return
 	}
 	canonical := "rust:" + norm
@@ -508,7 +509,7 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		st.intr[name] = inst.Intrinsic
 	}
 	st.instrs = append(st.instrs, inst)
-	st.env[dst] = regValue(name)
+	st.env[dst] = ssabuild.Reg(name)
 	// A Command builder step returns its receiver, so bind the result to the
 	// RECEIVER's value: arg[0] then resolves to Command::new's result at every
 	// step, which is what lets a rule see the program at the `.arg` sink where
@@ -675,7 +676,7 @@ func (st *lowerState) setAgg(dst string, operandToks []string, intrinsic string,
 	vals := st.operands(operandToks)
 	name := st.reg()
 	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC, Intrinsic: intrinsic, Operands: vals, Pos: pos})
-	st.env[dst] = regValue(name)
+	st.env[dst] = ssabuild.Reg(name)
 	st.agg[dst] = vals
 }
 
@@ -699,7 +700,7 @@ func (st *lowerState) place(p string, pos *ir.Position) *ir.Value {
 	if localRe.MatchString(p) {
 		return st.local(p)
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // local returns the current gIR value bound to a MIR local, or an untainted
@@ -708,7 +709,7 @@ func (st *lowerState) local(name string) *ir.Value {
 	if v, ok := st.env[name]; ok {
 		return v
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 func (st *lowerState) operands(toks []string) []*ir.Value {
@@ -737,7 +738,7 @@ func (st *lowerState) emit(name string, op ir.OpCode, operands []*ir.Value, pos 
 	if name == "" {
 		return nil
 	}
-	return regValue(name)
+	return ssabuild.Reg(name)
 }
 
 func (st *lowerState) reg() string {
@@ -969,14 +970,6 @@ func valueSlice(v *ir.Value) []*ir.Value {
 
 func atoi(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func constString(v string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v}}}}
-}
-
 // constFromLiteral models a MIR constant. String literals are preserved (so the
 // secrets scanner can see them and taint stays constant-free); every other
 // constant becomes an empty string constant — untainted, which is correct since
@@ -985,7 +978,7 @@ func constFromLiteral(lit string) *ir.Value {
 	lit = strings.TrimSpace(lit)
 	if strings.HasPrefix(lit, `"`) {
 		if end := strings.LastIndexByte(lit, '"'); end > 0 {
-			return constString(lit[1:end])
+			return ssabuild.Str(lit[1:end])
 		}
 	}
 	// A byte-string literal `b"..."` is how MIR renders the packed template that
@@ -995,10 +988,10 @@ func constFromLiteral(lit string) *ir.Value {
 	// not a clean template stays an empty constant (unchanged behavior).
 	if strings.HasPrefix(lit, `b"`) {
 		if tmpl, ok := decodeFmtTemplate(lit); ok {
-			return constString(tmpl)
+			return ssabuild.Str(tmpl)
 		}
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // decodeFmtTemplate decodes the packed byte-string template that `format!` passes

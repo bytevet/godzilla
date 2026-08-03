@@ -84,6 +84,7 @@ import (
 	"github.com/go-sourcemap/sourcemap"
 
 	"godzilla/converters/frontend"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -169,38 +170,22 @@ const crossModuleMarker = "js:@mod:"
 // the marker -- so nothing downstream trips on the marker syntax. Only ADDS an
 // inter-procedural edge to an unambiguously-named exported function (FP-safe).
 func resolveJSCrossModuleCalls(prog *ir.Program, defaultExports map[string]string) {
-	setCallee := func(cc *ir.CallCommon, name string) {
-		cc.Callee = name
-		if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
-			fnv.Kind = &ir.Value_FuncName{FuncName: name}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if !strings.HasPrefix(callee, crossModuleMarker) {
+			continue
 		}
-	}
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			for _, b := range fn.Blocks {
-				for _, inst := range b.Instrs {
-					cc := inst.GetCall()
-					if cc == nil {
-						continue
-					}
-					callee := cc.GetCallee()
-					if !strings.HasPrefix(callee, crossModuleMarker) {
-						continue
-					}
-					modName := strings.TrimPrefix(callee, crossModuleMarker)
-					if target := defaultExports[modName]; target != "" {
-						setCallee(cc, target)
-						continue
-					}
-					// Unresolved/ambiguous: fall back to a plain bare name.
-					leaf := modName
-					if i := strings.LastIndexByte(leaf, '/'); i >= 0 {
-						leaf = leaf[i+1:]
-					}
-					setCallee(cc, "js:"+leaf)
-				}
-			}
+		modName := strings.TrimPrefix(callee, crossModuleMarker)
+		if target := defaultExports[modName]; target != "" {
+			irwalk.SetCallee(cc, target)
+			continue
 		}
+		// Unresolved/ambiguous: fall back to a plain bare name.
+		leaf := modName
+		if i := strings.LastIndexByte(leaf, '/'); i >= 0 {
+			leaf = leaf[i+1:]
+		}
+		irwalk.SetCallee(cc, "js:"+leaf)
 	}
 }
 

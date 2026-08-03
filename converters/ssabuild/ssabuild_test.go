@@ -166,7 +166,7 @@ func TestBuild(t *testing.T) {
 				inc := &ir.Instruction{Name: "t_inc", Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD,
 					Operands: []*ir.Value{iHdr, constInt(1)}}
 				b.AddInstr(body, inc)
-				b.WriteVariable("i", body, regValue("t_inc"))
+				b.WriteVariable("i", body, Reg("t_inc"))
 				b.SetJump(body, header)
 
 				b.Seal(header) // back-edge known -> fills incomplete PHI
@@ -240,13 +240,13 @@ func TestBuild(t *testing.T) {
 				t1 := &ir.Instruction{Name: "t1", Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD,
 					Operands: []*ir.Value{xh, constInt(1)}}
 				b.AddInstr(thenB, t1)
-				b.WriteVariable("x", thenB, regValue("t1"))
+				b.WriteVariable("x", thenB, Reg("t1"))
 				b.SetJump(thenB, join)
 
 				t2 := &ir.Instruction{Name: "t2", Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD,
 					Operands: []*ir.Value{xh, constInt(2)}}
 				b.AddInstr(elseB, t2)
-				b.WriteVariable("x", elseB, regValue("t2"))
+				b.WriteVariable("x", elseB, Reg("t2"))
 				b.SetJump(elseB, join)
 
 				b.Seal(join)

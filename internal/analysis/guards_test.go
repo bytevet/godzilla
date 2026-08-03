@@ -7,21 +7,16 @@ import (
 
 	go_converter "godzilla/converters/go"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 )
 
 // pathRule is a path-traversal rule with a filepath.IsLocal validator, matching
 // the built-in go-path-traversal pack's ENG-9 guard.
-func pathRule() *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
-		ID:         "GO-PT",
-		Languages:  []string{"go"},
-		Severity:   rules.SeverityHigh,
-		CWE:        "CWE-22",
-		Message:    "path traversal",
-		Sources:    []string{"go:*net/url*.Get"},
-		Sinks:      rules.SinksOf("go:os.ReadFile#0"),
-		Validators: []string{"go:*filepath.IsLocal"},
-	}}}
+func pathRule(t testing.TB) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, "GO-PT", "go", "CWE-22",
+		[]string{"go:*net/url*.Get"}, []string{"go:os.ReadFile#0"},
+		testsupport.Message("path traversal"),
+		testsupport.Validators("go:*filepath.IsLocal"))
 }
 
 func scanSource(t *testing.T, src string, rs *rules.RuleSet) []Finding {
@@ -63,7 +58,7 @@ func h(w http.ResponseWriter, r *http.Request) {
 
 func main() { http.HandleFunc("/f", h); _ = http.ListenAndServe(":0", nil) }
 `
-	findings := scanSource(t, src, pathRule())
+	findings := scanSource(t, src, pathRule(t))
 	for _, f := range findings {
 		if f.RuleID == "GO-PT" {
 			t.Errorf("false positive: sink guarded by filepath.IsLocal was flagged (sink %s at %v)", f.SinkCallee, f.SinkPos)
@@ -89,7 +84,7 @@ func h(w http.ResponseWriter, r *http.Request) {
 
 func main() { http.HandleFunc("/f", h); _ = http.ListenAndServe(":0", nil) }
 `
-	findings := scanSource(t, src, pathRule())
+	findings := scanSource(t, src, pathRule(t))
 	got := 0
 	for _, f := range findings {
 		if f.RuleID == "GO-PT" {
@@ -127,7 +122,7 @@ func h(w http.ResponseWriter, r *http.Request) {
 
 func main() { http.HandleFunc("/f", h); _ = http.ListenAndServe(":0", nil) }
 `
-	findings := scanSource(t, src, pathRule())
+	findings := scanSource(t, src, pathRule(t))
 	got := 0
 	for _, f := range findings {
 		if f.RuleID == "GO-PT" {

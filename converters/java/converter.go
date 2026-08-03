@@ -435,7 +435,7 @@ type buildSystem struct {
 
 // detectBuildSystem reports the build tool rooted at dir, if any.
 func detectBuildSystem(dir string) (buildSystem, bool) {
-	if fileExists(filepath.Join(dir, "pom.xml")) {
+	if proc.FileExists(filepath.Join(dir, "pom.xml")) {
 		return buildSystem{
 			name:        "maven",
 			wrapper:     "mvnw",
@@ -445,7 +445,7 @@ func detectBuildSystem(dir string) (buildSystem, bool) {
 		}, true
 	}
 	for _, f := range []string{"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"} {
-		if fileExists(filepath.Join(dir, f)) {
+		if proc.FileExists(filepath.Join(dir, f)) {
 			return buildSystem{
 				name:    "gradle",
 				wrapper: "gradlew",
@@ -468,7 +468,7 @@ func detectBuildSystem(dir string) (buildSystem, bool) {
 // module for a multi-module reactor).
 func buildProject(dir string, sys buildSystem) ([]string, error) {
 	var name string
-	if wp := filepath.Join(dir, sys.wrapper); fileExists(wp) {
+	if wp := filepath.Join(dir, sys.wrapper); proc.FileExists(wp) {
 		name = wp
 	} else if tool, err := exec.LookPath(sys.tool); err == nil {
 		name = tool
@@ -516,11 +516,6 @@ func classOutputDirs(root, suffix string) []string {
 		return nil
 	})
 	return dirs
-}
-
-func fileExists(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && !info.IsDir()
 }
 
 // tail returns the last n bytes of b, for truncating build output in an error.

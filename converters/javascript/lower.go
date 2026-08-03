@@ -162,18 +162,6 @@ func (fs *funcState) write(name string, val *ir.Value) {
 	fs.assigned[name] = true
 }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func stringValue(s string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
-}
-
-func nilValue() *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
-}
-
 // calleeCommon builds a CallCommon naming callee both as its FuncName value and
 // its Callee (the syntactic name the engine matches against rule globs).
 func calleeCommon(callee string) *ir.CallCommon {
@@ -187,7 +175,7 @@ func calleeCommon(callee string) *ir.CallCommon {
 // order, and returns its result register. Used by lowerNew; a method call goes
 // through emitCallRecvInst directly so lowerCall can reach the instruction.
 func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	return regValue(fs.emitCallRecvInst(callee, nil, args, idx).Name)
+	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, idx).Name)
 }
 
 // emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
@@ -265,7 +253,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 	inst.Intrinsic = "js.unsupported"
 	inst.Comment = comment
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // moduleCtx bundles the file-scoped state every function lowered from one JS
@@ -348,7 +336,7 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 // but the pattern's own bindings are not modeled.
 func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 	bind := func(name string) {
-		v := regValue(name)
+		v := ssabuild.Reg(name)
 		fn.Params = append(fn.Params, v)
 		fs.write(name, v)
 		fs.paramRegs[name] = true
@@ -510,7 +498,7 @@ func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, id
 		inst.Intrinsic = "builtin.member_read"
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBody lowers a statement list, building a REAL CFG (blocks + preds/succs +
@@ -609,7 +597,7 @@ func (fs *funcState) lowerFor(v *ast.ForStatement) {
 			if v.Test != nil {
 				return fs.lowerExpr(v.Test) // lowered in the (unsealed) header
 			}
-			return stringValue("")
+			return ssabuild.Str("")
 		},
 		func() {
 			fs.lowerBody(stmtList(v.Body))
@@ -629,7 +617,7 @@ func (fs *funcState) lowerFor(v *ast.ForStatement) {
 func (fs *funcState) lowerForRange(into ast.ForInto, source ast.Expression, bodyStmt ast.Statement) {
 	src := fs.lowerExpr(source) // evaluate the iterable in the pre-loop block
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
-		func() *ir.Value { return stringValue("") }, // opaque iteration condition
+		func() *ir.Value { return ssabuild.Str("") }, // opaque iteration condition
 		func() {
 			fs.bindForInto(into, src) // bind the loop variable each iteration
 			fs.lowerBody(stmtList(bodyStmt))
@@ -756,7 +744,7 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	if !bodyTerm {
 		// Exception edge: the body may branch into the handler, else fall through to
 		// the after block. The condition is opaque (both edges are traversed).
-		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+		fs.b.SetIf(bodyEnd, ssabuild.Str(""), handlerB, after)
 	}
 	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
 
@@ -864,7 +852,7 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 	name := bindingName(b.Target)
 	if b.Initializer == nil {
 		if name != "" {
-			fs.write(name, nilValue())
+			fs.write(name, ssabuild.Nil())
 		}
 		return
 	}
@@ -979,7 +967,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: string(v.Name)}}
 
 	case *ast.StringLiteral:
-		return stringValue(string(v.Value))
+		return ssabuild.Str(string(v.Value))
 
 	case *ast.NumberLiteral:
 		return numberValue(v.Value)
@@ -988,12 +976,12 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_BoolVal{BoolVal: v.Value}}}}
 
 	case *ast.NullLiteral:
-		return nilValue()
+		return ssabuild.Nil()
 
 	case *ast.RegExpLiteral:
 		// Best-effort string representation, mirroring converters/python's
 		// fallback for constants it does not model precisely.
-		return stringValue(v.Literal)
+		return ssabuild.Str(v.Literal)
 
 	case *ast.TemplateLiteral:
 		return fs.lowerTemplateLiteral(v)
@@ -1027,7 +1015,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{cv, av}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 
 	case *ast.CallExpression:
 		return fs.lowerCall(v)
@@ -1067,7 +1055,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		if v.Argument != nil {
 			return fs.lowerExpr(v.Argument)
 		}
-		return nilValue()
+		return ssabuild.Nil()
 
 	case *ast.AwaitExpression:
 		// Promises/async are not specially modeled: `await x` lowers to `x`.
@@ -1124,7 +1112,7 @@ func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *
 	inst.Operands = []*ir.Value{base}
 	inst.Comment = "field:" + field
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBracket lowers `a[i]`, the same way as lowerDot but for computed
@@ -1144,7 +1132,7 @@ func (fs *funcState) lowerBracket(v *ast.BracketExpression) *ir.Value {
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{base, idx}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 func bracketFieldName(m ast.Expression) string {
@@ -1172,10 +1160,10 @@ func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Va
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{acc, v}
 		fs.emit(inst)
-		acc = regValue(inst.Name)
+		acc = ssabuild.Reg(inst.Name)
 	}
 	if acc == nil {
-		acc = nilValue()
+		acc = ssabuild.Nil()
 	}
 	return acc
 }
@@ -1189,14 +1177,14 @@ func (fs *funcState) lowerTemplateLiteral(v *ast.TemplateLiteral) *ir.Value {
 	var acc *ir.Value
 	for i, el := range v.Elements {
 		if el != nil {
-			acc = fs.concat(acc, stringValue(string(el.Parsed)), v.Idx0())
+			acc = fs.concat(acc, ssabuild.Str(string(el.Parsed)), v.Idx0())
 		}
 		if i < len(v.Expressions) {
 			acc = fs.concat(acc, fs.lowerExpr(v.Expressions[i]), v.Idx0())
 		}
 	}
 	if acc == nil {
-		acc = stringValue("")
+		acc = ssabuild.Str("")
 	}
 	return acc
 }
@@ -1213,7 +1201,7 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	inst.BinOp = ir.BinOpKind_BIN_OP_ADD
 	inst.Operands = []*ir.Value{acc, val}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBinary lowers a binary expression (arithmetic, bitwise, or --
@@ -1233,7 +1221,7 @@ func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	}
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerUnary lowers a unary expression, including prefix/postfix ++/--,
@@ -1246,7 +1234,7 @@ func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
 	inst.UnOp = unOpKind(v.Operator)
 	inst.Operands = []*ir.Value{operand}
 	fs.emit(inst)
-	result := regValue(inst.Name)
+	result := ssabuild.Reg(inst.Name)
 
 	if v.Operator == token.INCREMENT || v.Operator == token.DECREMENT {
 		if id, ok := v.Operand.(*ast.Identifier); ok {
@@ -1271,7 +1259,7 @@ func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
 		inst.BinOp = binOpKindForCompoundAssign(a.Operator)
 		inst.Operands = []*ir.Value{cur, right}
 		fs.emit(inst)
-		rhs = regValue(inst.Name)
+		rhs = ssabuild.Reg(inst.Name)
 	}
 	fs.assignTo(a.Left, rhs)
 	return rhs
@@ -1358,7 +1346,7 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	}
 	call := fs.emitCallRecvInst(callee, receiver, v.ArgumentList, v.Idx0())
 	fs.emitPromiseContinuation(callee, receiver, call, v.Idx0())
-	return regValue(call.Name)
+	return ssabuild.Reg(call.Name)
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an

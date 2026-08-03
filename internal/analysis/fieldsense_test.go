@@ -6,18 +6,14 @@ import (
 
 	go_converter "godzilla/converters/go"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 )
 
 func cmdiRuleSet(t testing.TB, id string) *rules.RuleSet {
-	return &rules.RuleSet{DefaultPropagators: shippedDefaultPropagators(t), Rules: []rules.Rule{{
-		ID:        id,
-		Languages: []string{"go"},
-		Severity:  rules.SeverityCritical,
-		CWE:       "CWE-78",
-		Message:   "untrusted input reaches os/exec",
-		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
-	}}}
+	return testsupport.OneRuleSet(t, id, "go", "CWE-78",
+		[]string{"go:*net/url*.Get"}, []string{"go:*os/exec.Command*"},
+		testsupport.Severity(rules.SeverityCritical),
+		testsupport.Message("untrusted input reaches os/exec"))
 }
 
 func analyzeGo(t *testing.T, path string, rs *rules.RuleSet) []Finding {
@@ -52,15 +48,10 @@ func TestFieldSensitivity_TaintedFieldStillFlagged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert sql_injection: %v", err)
 	}
-	rs := &rules.RuleSet{DefaultPropagators: shippedDefaultPropagators(t), Rules: []rules.Rule{{
-		ID:        "GO-SQLI-FS",
-		Languages: []string{"go"},
-		Severity:  rules.SeverityHigh,
-		CWE:       "CWE-89",
-		Message:   "untrusted input reaches a SQL query",
-		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     rules.SinksOf("go:*database/sql*.QueryRow", "go:*database/sql*.Query"),
-	}}}
+	rs := testsupport.OneRuleSet(t, "GO-SQLI-FS", "go", "CWE-89",
+		[]string{"go:*net/url*.Get"},
+		[]string{"go:*database/sql*.QueryRow", "go:*database/sql*.Query"},
+		testsupport.Message("untrusted input reaches a SQL query"))
 	findings := NewEngine(rs).Analyze(prog)
 	// handler3: &User{ID: tainted} -> user.GetByID() -> u.ID -> QueryRow.
 	var crossFn bool

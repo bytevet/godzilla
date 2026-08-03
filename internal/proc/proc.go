@@ -19,6 +19,15 @@ import (
 	"time"
 )
 
+// FileExists reports whether p names an existing regular file (not a
+// directory) — the check the build-integrated frontends (Java, Rust) share for
+// deciding whether a project manifest or wrapper (pom.xml, Cargo.toml, mvnw)
+// is present before invoking its build tool.
+func FileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
 // WriteEmbeddedScript materializes an embedded helper script (e.g. the Python
 // ast dumper, the Ruby Ripper dumper) into a temp file named after pattern
 // (e.g. "godzilla-pyast-*.py") and returns its path plus a cleanup func the

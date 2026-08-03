@@ -440,14 +440,14 @@ func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Valu
 		Args:   args,
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // emitParamSource is emitRouteSource for a route-handler parameter. The param
 // is passed as the call's sole argument for readability only; taint lands on the
 // call RESULT, which convertFunction rebinds to the param name.
 func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
-	return fs.emitRouteSource(n, "route-param-source:"+param, regValue(param))
+	return fs.emitRouteSource(n, "route-param-source:"+param, ssabuild.Reg(param))
 }
 
 // emitHandlerSource emits a synthetic source CALL (routeParamSource) for a
@@ -758,10 +758,10 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 	inst.Intrinsic = "builtin.kwarg"
 	inst.Call = &ir.CallCommon{
 		Callee: "builtin.kwarg",
-		Args:   []*ir.Value{stringValue(name), v},
+		Args:   []*ir.Value{ssabuild.Str(name), v},
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // emitAggregate builds a `builtin.aggregate` container-construction intrinsic
@@ -784,7 +784,7 @@ func (fs *funcState) emitAggregate(intrinsic string, elts []*ir.Value, n astNode
 	inst.Intrinsic = intrinsic
 	inst.Operands = elts
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // Canonical container constructions. Both propagate taint identically; the map
@@ -805,10 +805,6 @@ func (fs *funcState) lowerAggregate(intrinsic string, elts []astNode, n astNode)
 		vals = append(vals, fs.lowerExpr(e))
 	}
 	return fs.emitAggregate(intrinsic, vals, n)
-}
-
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
 
 // selfFieldGlobal returns the synthetic global key for a one-level `self.<field>`
@@ -837,18 +833,6 @@ func (fs *funcState) selfFieldGlobal(node astNode) string {
 	return "pyfield:" + fs.moduleName + "." + fs.methodPrefix + attr
 }
 
-func globalValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
-}
-
-func stringValue(s string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
-}
-
-func nilValue() *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
-}
-
 // emitBinOp emits an OP_CODE_BIN_OP over (left, right) and returns its result
 // register. Positioned at node n.
 func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n astNode) *ir.Value {
@@ -857,7 +841,7 @@ func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n astNo
 	inst.BinOp = kind
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // foldBinOp accumulates val into acc with a BIN_OP of the given kind, seeding
@@ -1029,7 +1013,7 @@ func (fs *funcState) lowerTest(s astNode) *ir.Value {
 	if t := s.node("test"); t != nil {
 		return fs.lowerExpr(t)
 	}
-	return stringValue("")
+	return ssabuild.Str("")
 }
 
 // lowerWhile lowers `while cond: body [else: orelse]` into a REAL loop CFG via
@@ -1056,7 +1040,7 @@ func (fs *funcState) lowerFor(s astNode) {
 		iterVal = fs.lowerExpr(it) // evaluate the iterable in the pre-loop block
 	}
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
-		func() *ir.Value { return stringValue("") }, // opaque iteration condition
+		func() *ir.Value { return ssabuild.Str("") }, // opaque iteration condition
 		func() {
 			if tgt := s.node("target"); tgt != nil && iterVal != nil {
 				fs.assign(tgt, iterVal) // bind the loop variable each iteration
@@ -1104,7 +1088,7 @@ func (fs *funcState) lowerTry(s astNode) {
 	if !bodyTerm {
 		// Exception edge: the body may branch into the handler, else fall through
 		// to the after block. The condition is opaque (both edges are traversed).
-		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+		fs.b.SetIf(bodyEnd, ssabuild.Str(""), handlerB, after)
 	} else {
 		// The body ends in a return/raise, so its only non-terminating successor is
 		// the handler (the raise-before-return path) — an unconditional edge, not a
@@ -1203,7 +1187,7 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 		if g := fs.selfFieldGlobal(target); g != "" {
 			s := fs.newVoidInst(target)
 			s.Op = ir.OpCode_OP_CODE_STORE
-			s.Operands = []*ir.Value{globalValue(g), val}
+			s.Operands = []*ir.Value{ssabuild.Global(g), val}
 			fs.emit(s)
 		}
 	case "Sequence":
@@ -1255,10 +1239,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		// selfFieldGlobal). visitFieldRead keys on operand 0 (the base) only, so
 		// the extra operand is inert to intra-method field-sensitivity.
 		if g := fs.selfFieldGlobal(n); g != "" {
-			inst.Operands = append(inst.Operands, globalValue(g))
+			inst.Operands = append(inst.Operands, ssabuild.Global(g))
 		}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 
 	case "Subscript":
 		return fs.lowerSubscript(n)
@@ -1275,7 +1259,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		inst.UnOp = unOpKind(n.str("op"))
 		inst.Operands = []*ir.Value{operand}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 
 	case "BoolOp":
 		// `a or b` / `a and b`: the result is one of the operands, so taint from
@@ -1289,7 +1273,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_OR, acc, fs.lowerExpr(v), n)
 		}
 		if acc == nil {
-			return stringValue("")
+			return ssabuild.Str("")
 		}
 		return acc
 
@@ -1371,7 +1355,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(part), n)
 		}
 		if acc == nil {
-			acc = stringValue("")
+			acc = ssabuild.Str("")
 		}
 		return acc
 
@@ -1396,7 +1380,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		inst.Intrinsic = "builtin.compare"
 		inst.Operands = ops
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 
 	default:
 		inst := fs.newValueInst(n)
@@ -1404,7 +1388,7 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		inst.Intrinsic = "py.unsupported"
 		inst.Comment = "unsupported python expression: " + n.kind()
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 	}
 }
 
@@ -1446,7 +1430,7 @@ func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 	} else {
 		// a[i:j] slice: no single index expression: propagate taint
 		// through the base only via a nil-constant placeholder index.
-		idx = nilValue()
+		idx = ssabuild.Nil()
 	}
 
 	if root := rootName(baseNode); root != "" {
@@ -1470,7 +1454,7 @@ func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 				inst.Intrinsic = "builtin.member_read"
 			}
 			fs.emit(inst)
-			return regValue(inst.Name)
+			return ssabuild.Reg(inst.Name)
 		}
 	}
 
@@ -1479,7 +1463,7 @@ func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{base, idx}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerCall lowers a Call node. `"...".format(args)` is special-cased into a
@@ -1638,7 +1622,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	// worker object so `t = Thread(...); t.start()` stays inert and the forwarded
 	// args are not lowered a second time by the normal call path below.
 	if fs.emitDeferredDispatch(n, funcNode) {
-		return regValue(fs.newReg())
+		return ssabuild.Reg(fs.newReg())
 	}
 
 	c := fs.classifyCallee(funcNode)
@@ -1712,7 +1696,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	inst.Op = op
 	inst.Call = cc
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // callShape classifies a Call's callee into one of the four shapes lowerCall

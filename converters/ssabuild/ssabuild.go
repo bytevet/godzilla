@@ -114,7 +114,7 @@ type phi struct {
 
 func (p *phi) value() *ir.Value {
 	if p.val == nil {
-		p.val = regValue(p.name)
+		p.val = Reg(p.name)
 	}
 	return p.val
 }
@@ -452,15 +452,11 @@ func (b *Builder) livePhi(v *ir.Value) *phi {
 
 // --- value helpers -------------------------------------------------------
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
 // undefValue represents a read of an undefined variable (a value reaching a
 // point on no real path). Frontends are not expected to produce these for
 // well-formed input; documented for completeness.
 func undefValue() *ir.Value {
-	return regValue("__undef")
+	return Reg("__undef")
 }
 
 // blockLabel is the gIR label for a block ("b<index>"), naming a PHI's
