@@ -14,20 +14,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
-// Files walks root and calls fn for every FILE, pruning the directories SkipDir
-// names. A walk error on an entry skips it rather than aborting, since a scan
-// should not die on one unreadable path. fn's return value goes back to
-// filepath.WalkDir, so it may return fs.SkipDir or fs.SkipAll to steer the walk.
-//
-// This is the directory-walk primitive every caller wanted: the prune policy is
-// applied in ONE place, so teaching SkipDir about a new vendor directory reaches
-// the frontends, the config-file secret scan, language detection and the LLM
-// reviewer's grep at once, instead of five copies drifting apart.
-func Files(root string, fn func(path string, d fs.DirEntry) error) error {
+// walk is the shared pruned WalkDir loop behind Files and NewInventory: prune
+// the directories SkipDir names, report every surviving FILE to fn, and hand a
+// walk error on an entry to onErr instead of aborting — a scan should not die
+// on one unreadable path. fn's return value goes back to filepath.WalkDir, so
+// it may return fs.SkipDir or fs.SkipAll to steer the walk.
+func walk(root string, onErr func(error), fn func(path string, d fs.DirEntry) error) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			onErr(err)
 			return nil
 		}
 		if d.IsDir() {
@@ -40,40 +38,149 @@ func Files(root string, fn func(path string, d fs.DirEntry) error) error {
 	})
 }
 
-// CollectSources walks root and returns the sorted list of files for which
-// match(path) is true, applying the shared prune policy: skip ignored directories
-// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig).
-// Shared by the interpreted-language frontends (Python, JS, Ruby), whose
-// directory walks differ only in the file predicate.
+// Files walks root and calls fn for every FILE, pruning the directories SkipDir
+// names. A walk error on an entry skips it rather than aborting, since a scan
+// should not die on one unreadable path. fn's return value goes back to
+// filepath.WalkDir, so it may return fs.SkipDir or fs.SkipAll to steer the walk.
 //
-// Deliberately does NOT use Files: a walk error ABORTS here. A frontend that
-// could not read its own source tree must fail rather than silently report on a
-// subset, which is what Result.Coverage and -strict are built on.
-func CollectSources(root string, match func(path string) bool) ([]string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+// This is the directory-walk primitive every caller wanted: the prune policy is
+// applied in ONE place, so teaching SkipDir about a new vendor directory reaches
+// the frontends, the config-file secret scan, language detection and the LLM
+// reviewer's grep at once, instead of five copies drifting apart.
+func Files(root string, fn func(path string, d fs.DirEntry) error) error {
+	return walk(root, func(error) {}, fn)
+}
+
+// Inventory is the cached result of ONE pruned walk of a directory scan root:
+// every file that survives the SkipDir prune, in walk (lexical) order, with its
+// size. It exists so a directory scan stats/readdirs the tree exactly once —
+// language detection, each frontend's source selection, the config-file secrets
+// pass and the Java source index all read the same inventory instead of each
+// re-walking the identical tree (3–9 O(files) passes before).
+//
+// The walk itself never aborts: an unreadable entry is skipped and the FIRST
+// such error recorded. Consumers then get the error contract they had when each
+// walked on its own: Select (the frontend path, previously CollectSources)
+// FAILS with that error — a frontend that could not read its own source tree
+// must fail rather than silently report on a subset, which is what
+// Result.Coverage and -strict are built on — while Files/AbsFiles (the
+// detection/secrets/index path, previously the Files function) skip it.
+type Inventory struct {
+	root    string   // scan root exactly as the caller gave it
+	absRoot string   // filepath.Abs(root); the frontends' module root (CollectTarget contract)
+	rels    []string // walk-ordered file paths relative to root
+	sizes   []int64  // per-file size, index-aligned with rels (0 when stat failed)
+	err     error    // first walk error; surfaced by Select
+
+	// The two joined path spellings, each built lazily ONCE and then shared:
+	// several frontends read the inventory concurrently (internal/scan runs
+	// them in parallel goroutines) and re-joining root+rel per consumer was the
+	// dominant repeated cost. Consumers treat the returned slices as read-only.
+	absOnce   sync.Once
+	absFiles  []string // rels joined on absRoot (Select, AbsFiles)
+	rootOnce  sync.Once
+	rootFiles []string // rels joined on root as given (Files)
+}
+
+// NewInventory walks root once under the shared prune policy and returns the
+// resulting file inventory. It never fails: a missing or unreadable root simply
+// yields an empty inventory whose Select reports the error.
+func NewInventory(root string) *Inventory {
+	inv := &Inventory{root: root}
+	inv.absRoot, inv.err = filepath.Abs(root)
+	if inv.err != nil {
+		inv.absRoot = root
+	}
+	recordErr := func(err error) {
+		if inv.err == nil {
+			inv.err = err
 		}
-		if d.IsDir() {
-			if SkipDir(d.Name()) {
-				return filepath.SkipDir
-			}
+	}
+	_ = walk(root, recordErr, func(p string, d fs.DirEntry) error {
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			recordErr(rerr)
 			return nil
 		}
-		if match(p) && !SkipFile(d.Name()) {
-			if fi, e := d.Info(); e == nil && TooBig(fi.Size()) {
-				return nil
-			}
-			files = append(files, p)
+		var size int64
+		if fi, e := d.Info(); e == nil {
+			size = fi.Size()
 		}
+		inv.rels = append(inv.rels, rel)
+		inv.sizes = append(inv.sizes, size)
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	return inv
+}
+
+// Root returns the ABSOLUTE scan root — what CollectTarget hands a frontend as
+// its module root, so module names derived via ModuleName stay identical
+// whether the file list came from an inventory or a standalone walk.
+func (inv *Inventory) Root() string { return inv.absRoot }
+
+// Select returns the sorted absolute paths of the inventoried files for which
+// match(path) is true, applying the per-file source-selection policy: skip
+// generated/minified files (SkipFile) and oversized files (TooBig). A walk
+// error recorded at inventory time fails Select — the frontends'
+// abort-on-error contract (see the type comment).
+func (inv *Inventory) Select(match func(path string) bool) ([]string, error) {
+	if inv.err != nil {
+		return nil, inv.err
+	}
+	abs := inv.joinedAbs()
+	var files []string
+	for i, p := range abs {
+		if match(p) && !SkipFile(filepath.Base(inv.rels[i])) && !TooBig(inv.sizes[i]) {
+			files = append(files, p)
+		}
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// Files returns every inventoried file joined on the root AS GIVEN, in walk
+// order — the same paths, order and (no) filtering the Files function yields,
+// for consumers that count files (language detection) or report positions in
+// the user's own path spelling (the config-file secrets pass). SkipFile/TooBig
+// are deliberately NOT applied; those are source-selection policies. The
+// returned slice is the inventory's shared cache — read-only for callers.
+func (inv *Inventory) Files() []string {
+	return inv.joinedRoot()
+}
+
+// AbsFiles is Files rendered against the absolute root, for consumers that
+// anchor findings to resolved paths (the Java source index). Shared cache —
+// read-only for callers.
+func (inv *Inventory) AbsFiles() []string {
+	return inv.joinedAbs()
+}
+
+// joinedAbs and joinedRoot build (once, goroutine-safely — frontends read the
+// inventory from parallel goroutines) and return the cached joined spellings.
+func (inv *Inventory) joinedAbs() []string {
+	inv.absOnce.Do(func() {
+		inv.absFiles = joinAll(inv.absRoot, inv.rels)
+	})
+	return inv.absFiles
+}
+
+func (inv *Inventory) joinedRoot() []string {
+	inv.rootOnce.Do(func() {
+		if inv.root == inv.absRoot {
+			inv.rootFiles = inv.joinedAbs()
+			return
+		}
+		inv.rootFiles = joinAll(inv.root, inv.rels)
+	})
+	return inv.rootFiles
+}
+
+func joinAll(root string, rels []string) []string {
+	files := make([]string, len(rels))
+	for i, rel := range rels {
+		files[i] = filepath.Join(root, rel)
+	}
+	return files
 }
 
 // CollectTarget resolves a scan target — a single source file or a directory —
@@ -85,6 +192,15 @@ func CollectSources(root string, match func(path string) bool) ([]string, error)
 // ModuleName). isDir is returned because each frontend still branches on it —
 // a single-file scan surfaces a parse error immediately, a directory batch does
 // not let one bad file abort the rest.
+//
+// A directory is collected under the shared prune policy (one NewInventory walk
+// + Select): skip ignored directories (SkipDir), generated/minified files
+// (SkipFile), and oversized files (TooBig). A walk error FAILS the collection
+// rather than being skipped: a frontend that could not read its own source tree
+// must fail rather than silently report on a subset, which is what
+// Result.Coverage and -strict are built on. (The scan pipeline itself walks
+// once via NewInventory and hands each frontend the same Inventory instead;
+// this is the frontends' standalone entry point.)
 func CollectTarget(path string, match func(p string) bool) (root string, files []string, isDir bool, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -95,7 +211,7 @@ func CollectTarget(path string, match func(p string) bool) (root string, files [
 		return "", nil, false, err
 	}
 	if info.IsDir() {
-		files, err = CollectSources(abs, match)
+		files, err = NewInventory(abs).Select(match)
 		if err != nil {
 			return "", nil, true, err
 		}
@@ -111,10 +227,10 @@ func CollectTarget(path string, match func(p string) bool) (root string, files [
 //
 // This shape is a CROSS-FRONTEND CONTRACT: Python, JS and Ruby all name modules
 // this way so that same-named functions in different files get distinct
-// canonical names instead of colliding in the analyzer, and each frontend's
-// cross-module call resolution (resolveCrossModuleCalls) reconstructs a callee's
-// module from an import specifier the same way. Keep the three in lockstep by
-// calling this rather than re-deriving it.
+// canonical names instead of colliding in the analyzer, and the Python and JS
+// frontends' cross-module call resolution (resolveCrossModuleCalls)
+// reconstructs a callee's module from an import specifier the same way. Keep
+// the frontends in lockstep by calling this rather than re-deriving it.
 func ModuleName(root, file string) string {
 	rel, err := filepath.Rel(root, file)
 	if err != nil {

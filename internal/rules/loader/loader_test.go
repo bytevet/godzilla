@@ -413,3 +413,34 @@ rules:
 		t.Errorf("own When = %q, want %q (fragment must not override)", got, want)
 	}
 }
+
+// TestLoadDefault_Directory pins the `--rules <file-or-dir>` contract: a
+// directory argument loads every rulepack under it via LoadDir, merged after
+// the built-ins exactly like a single file would be.
+func TestLoadDefault_Directory(t *testing.T) {
+	dir := t.TempDir()
+	rule := []byte(`rules:
+  - id: user-dir-rule
+    severity: high
+    sinks: ["go:pkg.Sink"]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "user.yaml"), rule, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := LoadDefault(dir)
+	if err != nil {
+		t.Fatalf("LoadDefault(dir): %v", err)
+	}
+	found := false
+	for _, r := range rs.Rules {
+		if r.ID == "user-dir-rule" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("directory-loaded rule missing from the merged set")
+	}
+	if len(rs.DefaultPropagators) == 0 {
+		t.Error("builtin DefaultPropagators must survive the directory merge")
+	}
+}

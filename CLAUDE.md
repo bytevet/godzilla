@@ -91,8 +91,9 @@ changing one:
   and **no gIR/engine change**. Sinks use the mirror trick (the Vue/Svelte directives above).
 - Python, JS and Ruby share their scaffolding rather than re-implementing it: `internal/walkignore`
   (target resolution, pruned walk, and the scan-root-relative module names that stop same-named functions
-  in different files from colliding), `internal/proc.WriteEmbeddedScript`, `internal/chunks.Run`
-  (concurrent per-file lowering), and `converters/ssabuild` (the real-CFG builder with on-demand PHIs).
+  in different files from colliding), `internal/proc.WriteEmbeddedScript`, and `converters/ssabuild`
+  (the real-CFG builder with on-demand PHIs) — plus `converters/frontend`, the shared batch driver
+  every collecting frontend embeds (`frontend.Driver`, concurrent per-file lowering, skip accounting).
 
 **Analysis (`internal/analysis/`).** The engine's design and its precision guards — and the failures that
 motivated them — are documented in the package itself (`internal/analysis/doc.go`, `go doc ./internal/analysis`);
@@ -116,10 +117,11 @@ this is a file map.
   `String.format`, Rust `fmt::Arguments::new`, whose packed byte-template `mir.go` `decodeFmtTemplate` decodes)
   and **`builtin.identity`** (a forwarding string conversion: `to_string`/`as_str`/`clone`/…). Both markers are
   inert to taint propagation. Emitting either from a frontend is what opts that language into the reduction.
-- `callgraph.go` — `BuildCallGraph` (CHA for dynamic dispatch); the engine consumes its reverse edges
-  (`buildCallers`) to re-enqueue a callee's callers when the callee becomes taint-returning.
-- `walk.go` — the `funcs`/`instrs` gIR iterators the once-per-scan passes share instead of each
-  re-writing the nil-guarded module→function→block→instruction nest.
+- `callgraph.go` — `buildCallGraph` (CHA for dynamic dispatch, over the shared function/method index
+  built once in `Analyze`); the engine consumes its reverse edges (`buildCallers`) to re-enqueue a
+  callee's callers when the callee becomes taint-returning. Once-per-scan passes iterate the program
+  via `internal/irwalk` (`Funcs`/`Instrs`) instead of re-writing the nil-guarded
+  module→function→block→instruction nest.
 - `secrets.go` — `ScanSecrets`: applies the `kind: secret` rules' regexps to gIR string constants and to
   config files no frontend parses (CWE-798). The patterns are data in `rulepacks/secrets.yaml`, not Go.
 - `finding.go` — the `Finding` type shared across the pipeline.
@@ -155,7 +157,9 @@ secrets passes, and `scopeFindings` live in **`internal/scan`**, not `main.go`.
 NOT a clean scan, which `-strict` turns into a non-zero exit), `internal/triage` (baseline +
 `godzilla:ignore`), `internal/config` (`.godzilla.yaml`), `internal/buildpolicy` (the `-allow-build` gate on
 running a scanned project's build tool), `internal/ruletest` (backs `rules test`), plus the shared frontend
-scaffolding: `internal/chunks`, `internal/proc`, `internal/walkignore`, `internal/memlimit`.
+scaffolding: `converters/frontend`, `internal/proc`, `internal/walkignore`, `internal/memlimit`, plus the
+cross-cutting helpers `internal/irwalk` (nil-guarded gIR iterators), `internal/srclines` (source-line
+cache shared by report/LLM/triage), and `internal/testsupport` (test-only interpreter checks).
 
 ## Conventions
 

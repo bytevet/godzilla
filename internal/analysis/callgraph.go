@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"godzilla/internal/irwalk"
 	"maps"
 	"slices"
 	"strings"
@@ -13,7 +14,8 @@ import (
 // edges (see buildCallers): when a callee is discovered to return taint, every
 // caller that calls it is re-enqueued so the new return summary propagates.
 //
-// Build one with BuildCallGraph.
+// Build one with buildCallGraph, over the shared function/method indexes
+// (buildFuncIndex, buildMethodImpls).
 type CallGraph struct {
 	// Funcs indexes every function in the program by its CanonicalName
 	// (e.g. "go:net/http.HandleFunc" or
@@ -42,8 +44,12 @@ type CallGraph struct {
 	Callees map[string]bool
 }
 
-// BuildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
-// INTRINSIC-with-a-Call instruction (the latter covers go.defer/go.goroutine).
+// buildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
+// INTRINSIC-with-a-Call instruction (the latter covers go.defer/go.goroutine),
+// over a prebuilt function index (buildFuncIndex) and CHA method index
+// (buildMethodImpls). Analyze needs both indexes anyway, so it passes its
+// copies in here rather than letting the graph rebuild them — one index, one
+// policy, for both consumers.
 //
 //   - A direct call (not IsInvoke, no MethodName) resolves through Call.Callee,
 //     adding one edge if we have gIR for that function and dropping it otherwise
@@ -59,15 +65,6 @@ type CallGraph struct {
 //     a real edge beats precision, and a points-to analysis is out of scope.
 //
 // A call naming neither (an unresolved dynamic value) is dropped.
-func BuildCallGraph(prog *ir.Program) *CallGraph {
-	byKey, _ := buildFuncIndex(prog)
-	return buildCallGraph(byKey, buildMethodImpls(byKey))
-}
-
-// buildCallGraph builds the graph over a prebuilt function index
-// (buildFuncIndex) and CHA method index (buildMethodImpls). Analyze needs both
-// indexes anyway, so it passes its copies in here rather than letting the graph
-// rebuild them — one index, one policy, for both consumers.
 func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]string) *CallGraph {
 	g := &CallGraph{
 		Funcs:   byKey,
@@ -79,7 +76,7 @@ func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]stri
 
 	for _, fn := range byKey {
 		caller := fn.CanonicalName
-		for inst := range instrs(fn) {
+		for inst := range irwalk.Instrs(fn) {
 			if inst.Call == nil {
 				continue
 			}
@@ -106,7 +103,7 @@ func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]stri
 	return g
 }
 
-// resolveCall applies the resolution rules documented on BuildCallGraph for
+// resolveCall applies the resolution rules documented on buildCallGraph for
 // a single call site, recording resolved edges into edgeSets. Calls that
 // resolve to no known function are dropped.
 func resolveCall(

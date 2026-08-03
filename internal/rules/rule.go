@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -32,22 +31,22 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
-// Rank returns a comparable ordering for a severity (higher is worse).
+// Severities lists every recognized severity from worst to best. It is the
+// single authority for severity ordering: Rank derives from it, and display
+// surfaces (the HTML report's filter bar and summary ordering) iterate it —
+// so a newly added severity shows up everywhere by being added here once.
+var Severities = []Severity{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo}
+
+// Rank returns a comparable ordering for a severity (higher is worse):
+// info=1 up to critical=5, case-insensitively. Anything unrecognized ranks 0.
 func (s Severity) Rank() int {
-	switch Severity(strings.ToLower(string(s))) {
-	case SeverityInfo:
-		return 1
-	case SeverityLow:
-		return 2
-	case SeverityMedium:
-		return 3
-	case SeverityHigh:
-		return 4
-	case SeverityCritical:
-		return 5
-	default:
-		return 0
+	lower := Severity(strings.ToLower(string(s)))
+	for i, known := range Severities {
+		if lower == known {
+			return len(Severities) - i
+		}
 	}
+	return 0
 }
 
 // ValidConfidence reports whether s is a spelling a rule may declare in its
@@ -481,15 +480,16 @@ func (r *Rule) MatchesRe() *regexp.Regexp {
 // GlobSet is a set of canonical-name globs precompiled to shape-matchers, for a
 // caller that matches the same list against many subjects but does not own a
 // Rule (e.g. the engine's request-object host scan, which walks every
-// instruction of every lowered dependency function). Matching through MatchAny
-// instead would pay a mutexed globCache lookup per (subject × pattern).
+// instruction of every lowered dependency function). A Rule's own pattern lists
+// get the same treatment via its lazily-compiled matchers (ensure); GlobSet is
+// the standalone equivalent for a bare []string of patterns.
 type GlobSet struct{ gs []*compiledGlob }
 
 // NewGlobSet precompiles patterns into a GlobSet.
 func NewGlobSet(patterns []string) *GlobSet { return &GlobSet{gs: classifyAll(patterns)} }
 
 // Match reports whether s matches any pattern in the set. A nil or empty set
-// matches nothing, exactly like MatchAny over an empty list.
+// matches nothing.
 func (g *GlobSet) Match(s string) bool {
 	if g == nil {
 		return false
@@ -604,32 +604,6 @@ func (r *Rule) IsValidator(callee string) bool {
 // don't use the feature — keeping the common path free of extra work.
 func (r *Rule) HasValidators() bool { return len(r.Validators) > 0 }
 
-// MatchAny reports whether s matches any of the glob patterns.
-func MatchAny(patterns []string, s string) bool {
-	for _, p := range patterns {
-		if MatchGlob(p, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// MatchGlob reports whether s matches a canonical-name glob. The only
-// metacharacter is '*', which matches any run of characters including '/' and
-// '.'; everything else is matched literally. Matching is anchored (full string).
-//
-// The overwhelming majority of real canonical-name globs are pure literals
-// (`ruby:system`) or a single `*` prefix/suffix (`c*:strcpy`, `go:*request*`).
-// Running a backtracking regexp for those is wasteful — and glob matching is the
-// hottest CPU cost in the engine, run once per (call-site × rule pattern), so it
-// grows linearly with rule-pack size. compileGlob classifies each pattern by
-// shape once (cached) and matches with plain string primitives; only genuinely
-// multi-`*` patterns fall to the general segment walk. No regexp, no per-match
-// allocation, identical semantics.
-func MatchGlob(pattern, s string) bool {
-	return compileGlob(pattern).match(s)
-}
-
 type globKind int
 
 const (
@@ -704,25 +678,18 @@ func (g *compiledGlob) matchSegments(s string) bool {
 	return true
 }
 
-var (
-	globCacheMu sync.RWMutex
-	globCache   = map[string]*compiledGlob{}
-)
-
-func compileGlob(pattern string) *compiledGlob {
-	globCacheMu.RLock()
-	g, ok := globCache[pattern]
-	globCacheMu.RUnlock()
-	if ok {
-		return g
-	}
-	g = classifyGlob(pattern)
-	globCacheMu.Lock()
-	globCache[pattern] = g
-	globCacheMu.Unlock()
-	return g
-}
-
+// classifyGlob compiles a canonical-name glob to a shape-matcher. The only
+// metacharacter is '*', which matches any run of characters including '/' and
+// '.'; everything else is matched literally. Matching is anchored (full string).
+//
+// The overwhelming majority of real canonical-name globs are pure literals
+// (`ruby:system`) or a single `*` prefix/suffix (`c*:strcpy`, `go:*request*`).
+// Running a backtracking regexp for those is wasteful — and glob matching is the
+// hottest CPU cost in the engine, run once per (call-site × rule pattern), so it
+// grows linearly with rule-pack size. Classifying each pattern by shape once
+// (rules lazy-compile theirs via ensure; other callers hold a GlobSet) lets the
+// match use plain string primitives; only genuinely multi-`*` patterns fall to
+// the general segment walk. No regexp, no per-match allocation.
 func classifyGlob(pattern string) *compiledGlob {
 	// A pattern with invalid UTF-8 bytes matched nothing under the old regexp
 	// path (a fuzz-found DoS guard); preserve that exactly.

@@ -39,22 +39,10 @@ var reportCSS string
 //go:embed templates/report.js
 var reportJS string
 
-// severityOrder lists severities from worst to best; it drives both sort
-// order and the fixed ordering of the summary table.
-var severityOrder = []rules.Severity{
-	rules.SeverityCritical,
-	rules.SeverityHigh,
-	rules.SeverityMedium,
-	rules.SeverityLow,
-	rules.SeverityInfo,
-}
-
-// confidenceOrder lists confidences from most to least certain.
-var confidenceOrder = []analysis.Confidence{
-	analysis.ConfidenceHigh,
-	analysis.ConfidenceMedium,
-	analysis.ConfidenceLow,
-}
+// The filter bar, tiles and normalization iterate the canonical worst-first /
+// most-certain-first orders (rules.Severities, analysis.Confidences) rather
+// than a local restatement, so a newly added severity or confidence level
+// cannot silently vanish from the report's display surfaces.
 
 // snippetContext is how many lines of source to show before/after the
 // highlighted line when rendering best-effort code context.
@@ -95,29 +83,15 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	return reportTemplate.Execute(w, data)
 }
 
-// sortedFindings returns a copy of findings ordered worst-severity-first, then
-// by sink location. All three report writers (HTML, JSON, SARIF) share this
-// ordering so their output is deterministic and mutually consistent.
+// sortedFindings returns a copy of findings in the pipeline-wide display order
+// (analysis.CompareFindings: worst severity first, then sink location, unknown
+// locations last). All three report writers (HTML, JSON, SARIF) and the CLI's
+// console listing share this ordering, so their output is deterministic and
+// mutually consistent.
 func sortedFindings(findings []analysis.Finding) []analysis.Finding {
 	sorted := slices.Clone(findings)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		ri, rj := sorted[i].Severity.Rank(), sorted[j].Severity.Rank()
-		if ri != rj {
-			return ri > rj // worst (highest rank) first
-		}
-		return sinkSortKey(sorted[i]) < sinkSortKey(sorted[j])
-	})
+	slices.SortStableFunc(sorted, analysis.CompareFindings)
 	return sorted
-}
-
-// sinkSortKey builds a comparable string key for ordering findings by sink
-// location (filename, then line, then column) when severities tie.
-func sinkSortKey(f analysis.Finding) string {
-	p := f.SinkPos
-	if p == nil {
-		return "\xff\xff\xff" // sort unknown-location findings last within their severity
-	}
-	return fmt.Sprintf("%s:%09d:%09d", p.GetFilename(), p.GetLine(), p.GetColumn())
 }
 
 // reportData is the top-level structure fed to the HTML template.
@@ -170,8 +144,8 @@ type severityFilter struct {
 }
 
 func severityFilters() []severityFilter {
-	out := make([]severityFilter, 0, len(severityOrder))
-	for _, s := range severityOrder {
+	out := make([]severityFilter, 0, len(rules.Severities))
+	for _, s := range rules.Severities {
 		out = append(out, severityFilter{
 			Key:   string(s),
 			Label: strings.ToUpper(string(s)),
@@ -441,7 +415,7 @@ func displayPos(root string, pos *ir.Position) string {
 // still renders sensibly.
 func normalizeSeverity(s rules.Severity) rules.Severity {
 	lower := rules.Severity(strings.ToLower(string(s)))
-	for _, known := range severityOrder {
+	for _, known := range rules.Severities {
 		if lower == known {
 			return known
 		}
@@ -451,7 +425,7 @@ func normalizeSeverity(s rules.Severity) rules.Severity {
 
 func normalizeConfidence(c analysis.Confidence) analysis.Confidence {
 	lower := analysis.Confidence(strings.ToLower(string(c)))
-	for _, known := range confidenceOrder {
+	for _, known := range analysis.Confidences {
 		if lower == known {
 			return known
 		}

@@ -117,9 +117,9 @@ func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, erro
 const defaultPropagatorsFragment = "_default-propagators.yaml"
 
 // LoadDefault returns Godzilla's built-in rules merged with the user-supplied
-// rule file at userPath, if any (userPath == "" means "no user rules"). User
-// rules are appended after built-ins, so they take effect alongside (not
-// instead of) the defaults.
+// rule file — or rulepack directory — at userPath, if any (userPath == ""
+// means "no user rules"). User rules are appended after built-ins, so they
+// take effect alongside (not instead of) the defaults.
 func LoadDefault(userPath string) (*rules.RuleSet, error) {
 	builtin, err := Builtin()
 	if err != nil {
@@ -129,7 +129,14 @@ func LoadDefault(userPath string) (*rules.RuleSet, error) {
 		return builtin, nil
 	}
 
-	user, err := LoadFile(userPath)
+	// A directory loads every rulepack under it (LoadDir); anything else is a
+	// single rule file — the `--rules <file-or-dir>` contract in
+	// docs/writing-rules.md.
+	load := LoadFile
+	if fi, err := os.Stat(userPath); err == nil && fi.IsDir() {
+		load = LoadDir
+	}
+	user, err := load(userPath)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +349,7 @@ func validate(rs *rules.RuleSet) error {
 			problems = append(problems, fmt.Sprintf("rule %q has missing or unrecognized severity %q (want info|low|medium|high|critical)", r.ID, r.Severity))
 		}
 		// A misspelled confidence would silently fall back to the default AND be
-		// invisible to the LLM reviewer (confidenceRank ranks an unknown value 0, so
+		// invisible to the LLM reviewer (analysis.Confidence.Rank ranks an unknown value 0, so
 		// shouldReview never picks it up) — reject it at load, like an unrecognized
 		// severity, instead of shipping a rule that is quietly un-triageable.
 		if !rules.ValidConfidence(r.Confidence) {

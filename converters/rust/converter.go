@@ -32,48 +32,85 @@ import (
 	"godzilla/converters/frontend"
 	"godzilla/internal/buildpolicy"
 	"godzilla/internal/proc"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
+// Converter lowers Rust source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over Rust's
+// batch hooks (see batch), with a cargo pre-step wrapped around both entry
+// points for Cargo projects.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[rsFileResult]
 }
 
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
+func NewConverter() *Converter {
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
+}
 
-func NewConverter() *Converter { return &Converter{} }
+// IsRustFile reports whether path is a Rust source file this frontend lowers.
+// Exported so internal/scan's language detection and this frontend's own file
+// selection share ONE predicate instead of drifting copies.
+func IsRustFile(path string) bool { return strings.EqualFold(filepath.Ext(path), ".rs") }
 
 // ConvertFile lowers a single .rs file, a directory of standalone .rs files, or
 // a Cargo project. A directory with a Cargo.toml at its root is built with cargo
 // (so its dependency crates — a web framework, etc. — resolve); otherwise each
-// .rs file is compiled standalone with rustc.
+// .rs file is compiled standalone with rustc via the shared batch driver.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		if proc.FileExists(filepath.Join(path, "Cargo.toml")) {
-			// `cargo` executes arbitrary code from the scanned repo (build.rs,
-			// proc-macros, and every dependency crate's build script). Off by
-			// default; without opt-in, fall through to per-file rustc, which
-			// compiles the project's own sources with no dependency resolution
-			// and no build-script execution.
-			if buildpolicy.Allowed() {
-				return convertCargo(path)
-			}
-			fmt.Fprintf(os.Stderr, "warning: rust: cargo build not run under %s (set %s=1 or pass -allow-build to enable); lowering source files directly without dependency resolution\n", path, buildpolicy.EnvAllowBuild)
+		if prog, handled, err := tryCargo(path); handled {
+			return prog, err
 		}
 	}
+	return c.Driver.ConvertFile(path)
+}
 
-	// One `rustc --emit=mir` process per file, run concurrently by the shared
-	// frontend.Batch driver — the same shape the Python and Ruby frontends use
-	// for their interpreter invocations. Each emitMIR writes to its own temp
-	// output, so the compiles are independent.
-	b := frontend.Batch[rsFileResult]{
+// ConvertInventory lowers the Rust files of a pre-walked scan-root inventory
+// (see walkignore.Inventory), skipping the directory walk ConvertFile's
+// directory mode would repeat. A Cargo project at the inventory root still
+// takes the cargo path (which builds by target, not by walked file), exactly
+// as in ConvertFile.
+func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	if prog, handled, err := tryCargo(inv.Root()); handled {
+		return prog, err
+	}
+	return c.Driver.ConvertInventory(inv)
+}
+
+// tryCargo takes the cargo build path for a directory holding a Cargo.toml,
+// when the build policy allows running the repo's own build tool. handled
+// reports whether the cargo path was taken; when false the caller falls back
+// to per-file rustc.
+func tryCargo(dir string) (prog *ir.Program, handled bool, err error) {
+	if !proc.FileExists(filepath.Join(dir, "Cargo.toml")) {
+		return nil, false, nil
+	}
+	// `cargo` executes arbitrary code from the scanned repo (build.rs,
+	// proc-macros, and every dependency crate's build script). Off by
+	// default; without opt-in, fall through to per-file rustc, which
+	// compiles the project's own sources with no dependency resolution
+	// and no build-script execution.
+	if buildpolicy.Allowed() {
+		prog, err = convertCargo(dir)
+		return prog, true, err
+	}
+	fmt.Fprintf(os.Stderr, "warning: rust: cargo build not run under %s (set %s=1 or pass -allow-build to enable); lowering source files directly without dependency resolution\n", dir, buildpolicy.EnvAllowBuild)
+	return nil, false, nil
+}
+
+// batch builds the shared frontend.Batch driver with Rust's hooks: one `rustc
+// --emit=mir` process per file, run concurrently — the same shape the Python
+// and Ruby frontends use for their interpreter invocations. Each emitMIR
+// writes to its own temp output, so the compiles are independent.
+func (c *Converter) batch() *frontend.Batch[rsFileResult] {
+	return &frontend.Batch[rsFileResult]{
 		Label: "rust_converter",
 		Lang:  "Rust",
 		Mode:  "mir",
-		Match: func(p string) bool { return strings.EqualFold(filepath.Ext(p), ".rs") },
+		Match: IsRustFile,
 		Setup: func() (func(), error) {
 			// FE-10: verify (once) that this rustc's MIR still lowers to the shapes
 			// taint analysis needs, warning loudly on format drift rather than
@@ -90,9 +127,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		}),
 		Result: func(r *rsFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // rsFileResult is one file's outcome within a batch conversion.

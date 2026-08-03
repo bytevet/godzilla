@@ -52,38 +52,42 @@ import (
 //go:embed pyast.py
 var pyASTScript []byte
 
-// Converter lowers Python source files/directories into gIR.
+// Converter lowers Python source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over Python's
+// batch hooks (see batch). Requires python3 on PATH.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[pyFileResult]
 }
-
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
 
 // NewConverter returns a ready-to-use Python-to-gIR converter.
 func NewConverter() *Converter {
-	return &Converter{}
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
 }
 
-// ConvertFile lowers the Python source at path into gIR. path may be either a
-// single .py file or a directory (all *.py files under it are converted
-// recursively, one gIR Module per file). Requires python3 on PATH.
+// IsPythonFile reports whether path is a Python source file this frontend
+// lowers. Exported so internal/scan's language detection and this frontend's
+// own file selection share ONE predicate instead of drifting copies.
+func IsPythonFile(path string) bool { return strings.HasSuffix(path, ".py") }
+
+// batch builds the shared frontend.Batch driver with Python's hooks. A fresh
+// value per conversion: the Setup-resolved interpreter/helper paths are carried
+// in closure state private to this batch.
 //
-// The single-file/directory-batch skeleton is the shared frontend.Batch driver;
-// what is Python's alone: parsing is batched — one `python3 pyast.py --batch
+// The single-file/directory-batch skeleton is the shared driver; what is
+// Python's alone: parsing is batched — one `python3 pyast.py --batch
 // <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
 // not per file — lowering waits for every file to parse so the handler-class
 // set spans all files (lowerAll), and a directory scan gets cross-module call
 // resolution (resolveCrossModuleCalls).
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+func (c *Converter) batch() *frontend.Batch[pyFileResult] {
 	var pythonExe, scriptPath string
-	b := frontend.Batch[pyFileResult]{
+	return &frontend.Batch[pyFileResult]{
 		Label: "py_converter",
 		Lang:  "Python",
 		Mode:  "ast",
-		Match: func(p string) bool { return strings.HasSuffix(p, ".py") },
+		Match: IsPythonFile,
 		Setup: func() (func(), error) {
 			exe, err := exec.LookPath("python3")
 			if err != nil {
@@ -110,9 +114,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			}
 		},
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // resolveCrossModuleCalls rewrites CALL callees that reference a function in

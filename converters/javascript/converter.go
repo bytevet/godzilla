@@ -89,37 +89,36 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
-// Converter lowers JavaScript source files/directories into gIR.
+// Converter lowers JavaScript source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over
+// JavaScript's batch hooks (see batch). Directory scans skip any
+// "node_modules" directory (walkignore).
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[jsFileResult]
 }
-
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
 
 // NewConverter returns a ready-to-use JavaScript-to-gIR converter.
 func NewConverter() *Converter {
-	return &Converter{}
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
 }
 
-// ConvertFile lowers the JavaScript source at path into gIR. path may be
-// either a single .js file or a directory (all *.js files under it are
-// converted recursively, one gIR Module per file, skipping any
-// "node_modules" directory).
+// batch builds the shared frontend.Batch driver with JavaScript's hooks. A
+// fresh value per conversion: the default-export map is closure state private
+// to this batch.
 //
-// The single-file/directory-batch skeleton is the shared frontend.Batch driver.
-// Files convert concurrently — the parse (goja), esbuild transform, and
-// lowering are all pure per-file CPU work with no shared state (the Converter
-// is stateless). What is JavaScript's alone: each file's default export is
-// collected so resolveJSCrossModuleCalls can rewrite cross-module markers once
-// every file has been lowered.
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+// The single-file/directory-batch skeleton is the shared driver. Files convert
+// concurrently — the parse (goja), esbuild transform, and lowering are all
+// pure per-file CPU work with no shared state (the Converter is stateless).
+// What is JavaScript's alone: each file's default export is collected so
+// resolveJSCrossModuleCalls can rewrite cross-module markers once every file
+// has been lowered.
+func (c *Converter) batch() *frontend.Batch[jsFileResult] {
 	// defaultExports maps each module name to its default-export function
 	// canonical, filled after all files are parsed (Finish).
 	defaultExports := map[string]string{}
-	b := frontend.Batch[jsFileResult]{
+	return &frontend.Batch[jsFileResult]{
 		Label: "js_converter",
 		Lang:  "JavaScript",
 		Mode:  "ast",
@@ -140,9 +139,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			resolveJSCrossModuleCalls(prog, defaultExports)
 		},
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // jsFileResult is one file's outcome within a batch conversion.

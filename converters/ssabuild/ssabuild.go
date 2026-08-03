@@ -70,8 +70,7 @@ type BlockID int
 
 // blockData is the builder's per-block bookkeeping.
 type blockData struct {
-	id      BlockID
-	comment string
+	id BlockID
 
 	preds []BlockID // filled by SetIf/SetJump on predecessors, in edge order
 
@@ -153,12 +152,6 @@ func (b *Builder) NewBlock() BlockID {
 		incomplete: map[string]*phi{},
 	})
 	return id
-}
-
-// SetComment attaches a human-readable label (e.g. "cond.true") to a block.
-// Optional; purely cosmetic.
-func (b *Builder) SetComment(block BlockID, comment string) {
-	b.blocks[block].comment = comment
 }
 
 // AddInstr appends a caller-produced body instruction to a block, in order.
@@ -262,10 +255,7 @@ func (b *Builder) Seal(block BlockID) {
 func (b *Builder) Finish() []*ir.BasicBlock {
 	out := make([]*ir.BasicBlock, 0, len(b.blocks))
 	for _, bd := range b.blocks {
-		blk := &ir.BasicBlock{
-			Index:   int32(bd.id),
-			Comment: bd.comment,
-		}
+		blk := &ir.BasicBlock{Index: int32(bd.id)}
 		if n := len(bd.preds); n > 0 {
 			blk.Preds = make([]int32, n)
 			for i, p := range bd.preds {

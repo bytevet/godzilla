@@ -102,17 +102,31 @@ const (
 	defaultBuildTimeout = 600 * time.Second // whole-project builds: cargo, mvn/gradle (cold caches are slow)
 )
 
-// ParseTimeout is the deadline for a per-file parse/dump subprocess. Override
-// with GODZILLA_PARSE_TIMEOUT (a Go duration, e.g. "90s").
-func ParseTimeout() time.Duration {
-	return envDuration("GODZILLA_PARSE_TIMEOUT", defaultParseTimeout)
+var (
+	parseTimeout = defaultParseTimeout
+	buildTimeout = defaultBuildTimeout
+)
+
+// SetTimeouts overrides the parse and/or build subprocess deadlines (the CLI's
+// -parse-timeout / -build-timeout flags). A non-positive value leaves that
+// deadline unchanged. Call it once, before any conversion starts — it is a
+// process-wide setting, not synchronized against concurrent scans.
+func SetTimeouts(parse, build time.Duration) {
+	if parse > 0 {
+		parseTimeout = parse
+	}
+	if build > 0 {
+		buildTimeout = build
+	}
 }
 
-// BuildTimeout is the deadline for a whole-project build subprocess (opt-in via
-// -allow-build). Override with GODZILLA_BUILD_TIMEOUT.
-func BuildTimeout() time.Duration {
-	return envDuration("GODZILLA_BUILD_TIMEOUT", defaultBuildTimeout)
-}
+// ParseTimeout is the deadline for a per-file parse/dump subprocess
+// (default 120s; override with -parse-timeout).
+func ParseTimeout() time.Duration { return parseTimeout }
+
+// BuildTimeout is the deadline for a whole-project build subprocess, which only
+// runs opt-in via -allow-build (default 600s; override with -build-timeout).
+func BuildTimeout() time.Duration { return buildTimeout }
 
 // ParseContext returns a context with the parse timeout and its cancel func.
 // The caller MUST defer the cancel to release resources.
@@ -123,13 +137,4 @@ func ParseContext() (context.Context, context.CancelFunc) {
 // BuildContext returns a context with the build timeout and its cancel func.
 func BuildContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), BuildTimeout())
-}
-
-func envDuration(name string, def time.Duration) time.Duration {
-	if v := os.Getenv(name); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return def
 }

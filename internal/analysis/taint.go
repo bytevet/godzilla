@@ -169,6 +169,12 @@ func fieldAnyKey(base string) string {
 // stored directly into it). Field reads use isTainted (precise); only cross-call
 // seeding uses this broader check.
 func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
+	// The empty state is the overwhelmingly common case at call sites; bail
+	// before isTainted's lookup and, more importantly, before allocating the
+	// any-field key below for a guaranteed miss.
+	if len(tainted) == 0 {
+		return nil, false
+	}
 	if pos, ok := isTainted(tainted, v); ok {
 		return pos, true
 	}

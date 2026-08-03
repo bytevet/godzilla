@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"godzilla/internal/irwalk"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -55,17 +56,10 @@ func NewFileToolBox(prog *ir.Program, root string) *FileToolBox {
 		fnIndex: map[string]*ir.Function{},
 		fnMod:   map[string]*ir.Module{},
 	}
-	if prog != nil {
-		for _, mod := range prog.Modules {
-			if mod == nil {
-				continue
-			}
-			for _, fn := range mod.Functions {
-				if fn != nil && fn.CanonicalName != "" {
-					tb.fnIndex[fn.CanonicalName] = fn
-					tb.fnMod[fn.CanonicalName] = mod
-				}
-			}
+	for mod, fn := range irwalk.Funcs(prog) {
+		if fn.CanonicalName != "" {
+			tb.fnIndex[fn.CanonicalName] = fn
+			tb.fnMod[fn.CanonicalName] = mod
 		}
 	}
 	return tb

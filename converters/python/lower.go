@@ -172,7 +172,7 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 	fs.inHandlerClass = inHandlerClass
 	params := node.strList("params")
 	for _, p := range params {
-		v := &ir.Value{Kind: &ir.Value_RegName{RegName: p}}
+		v := ssabuild.Reg(p)
 		fn.Params = append(fn.Params, v)
 		fs.write(p, v)
 		fs.paramRegs[p] = true
@@ -1560,7 +1560,7 @@ func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	// receiver and dropping the real first argument.
 	if targetNode.kind() == "Attribute" && fs.selfName != "" {
 		if base := targetNode.node("value"); fs.isNameRef(base) {
-			cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
+			cc.Args = append(cc.Args, ssabuild.Reg(fs.selfName))
 		}
 	}
 	for _, a := range argNodes {
@@ -1659,7 +1659,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		// with the method's parameters (param[0] == self), matching how Go SSA
 		// passes a method receiver — without this the explicit args map one slot
 		// too low (x -> self) and taint is lost.
-		cc.Args = append(cc.Args, &ir.Value{Kind: &ir.Value_RegName{RegName: fs.selfName}})
+		cc.Args = append(cc.Args, ssabuild.Reg(fs.selfName))
 	case callDirect:
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: c.callee}}
 	}

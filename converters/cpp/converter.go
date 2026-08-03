@@ -20,35 +20,35 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
+// Converter lowers C/C++ sources into gIR: the shared frontend.Driver surface
+// (ConvertFile/ConvertInventory/Skipped) over C/C++'s batch hooks (see batch).
+// Per-file compile failures (e.g. missing headers) are tolerated in directory
+// mode, mirroring the Python/JS frontends.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[cppFileResult]
 }
 
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
+func NewConverter() *Converter {
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
+}
 
-func NewConverter() *Converter { return &Converter{} }
-
-// ConvertFile lowers the C/C++ at path (a file or directory) to gIR via the
-// shared frontend.Batch driver: per-file compile failures (e.g. missing
-// headers) are tolerated in directory mode, mirroring the Python/JS frontends.
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	b := frontend.Batch[cppFileResult]{
+// batch builds the shared frontend.Batch driver with C/C++'s hooks. The file
+// predicate is IsCppFile (lang.go, untagged) — the same one internal/scan uses
+// for language detection.
+func (c *Converter) batch() *frontend.Batch[cppFileResult] {
+	return &frontend.Batch[cppFileResult]{
 		Label: "cpp_converter",
 		Lang:  "C/C++",
 		Mode:  "llvm",
-		Match: isCppSource,
+		Match: IsCppFile,
 		Parse: frontend.PerFile(func(_, f string) cppFileResult {
 			mod, err := lowerOne(f)
 			return cppFileResult{mod: mod, err: err}
 		}),
 		Result: func(r *cppFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // cppFileResult is one file's outcome within a batch conversion.
@@ -56,14 +56,6 @@ type cppFileResult struct {
 	mod *ir.Module
 	err error
 }
-
-var cppExts = map[string]bool{".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".c++": true}
-
-// isCppSource reports whether p is a C/C++ translation unit this frontend
-// compiles (not a header — clang can't compile one to a standalone module).
-// internal/scan keeps its own equivalent (isCppFile) for language detection so
-// scan does not depend on this tag-gated package's file layout.
-func isCppSource(p string) bool { return cppExts[strings.ToLower(filepath.Ext(p))] }
 
 func lowerOne(src string) (*ir.Module, error) {
 	isCpp := strings.ToLower(filepath.Ext(src)) != ".c"

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 
+	"godzilla/internal/irwalk"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -29,29 +30,10 @@ const smokeSnippet = `pub fn __godzilla_smoke(key: &str) {
 // taint engine relies on: at least one CALL instruction that carries a source
 // position. It is the pure, testable core of the smoke check.
 func verifyMIRShape(prog *ir.Program) bool {
-	if prog == nil {
-		return false
-	}
-	for _, mod := range prog.Modules {
-		if mod == nil {
-			continue
-		}
-		for _, fn := range mod.Functions {
-			if fn == nil {
-				continue
-			}
-			for _, blk := range fn.Blocks {
-				if blk == nil {
-					continue
-				}
-				for _, inst := range blk.Instrs {
-					if inst == nil {
-						continue
-					}
-					if inst.Op == ir.OpCode_OP_CODE_CALL && inst.GetPos() != nil {
-						return true
-					}
-				}
+	for _, fn := range irwalk.Funcs(prog) {
+		for inst := range irwalk.Instrs(fn) {
+			if inst.Op == ir.OpCode_OP_CODE_CALL && inst.GetPos() != nil {
+				return true
 			}
 		}
 	}

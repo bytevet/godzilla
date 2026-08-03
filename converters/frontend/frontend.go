@@ -2,12 +2,16 @@
 // frontends (Python, JavaScript, Ruby, Rust, C/C++). Each of them starts a
 // ConvertFile the same way — resolve the target with walkignore.CollectTarget,
 // fail fast on a single file, tolerate per-file failures in a directory batch
-// run via internal/chunks, count skipped files, and error only when not a
-// single file converted — so that skeleton lives here ONCE (Batch.Convert)
-// and a frontend supplies only its language-specific pieces as fields/hooks.
-// Before this, the skeleton was copied per frontend and the copies drifted:
-// the Rust and C/C++ variants lacked the skipped-file accounting, so
-// scan.LangCoverage.Skipped silently read 0 for them.
+// run across worker goroutines (runChunks), count skipped files, and error only
+// when not a single file converted — so that skeleton lives here ONCE
+// (Batch.Convert) and a frontend supplies only its language-specific pieces as
+// fields/hooks. Before this, the skeleton was copied per frontend and the
+// copies drifted: the Rust and C/C++ variants lacked the skipped-file
+// accounting, so scan.LangCoverage.Skipped silently read 0 for them.
+//
+// Driver is the matching front half: the exported
+// ConvertFile/ConvertInventory/Skipped surface internal/scan consumes, which a
+// frontend gets by embedding instead of re-declaring.
 //
 // The Go and Java frontends do not fit this shape (Go lowers packages, not
 // files; Java resolves a build first) and keep their own drivers.
@@ -16,12 +20,52 @@ package frontend
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 
-	"godzilla/internal/chunks"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
+
+// Driver is the embeddable front half of a Batch-based Converter: the
+// skipped-file counter plus the ConvertFile/ConvertInventory entry points every
+// per-file frontend exposes to internal/scan. A frontend embeds it and supplies
+// only NewBatch, so its exported conversion surface is these promoted methods
+// rather than a per-frontend copy. A frontend with a pre-step that bypasses
+// batching entirely (Rust's cargo path) wraps the promoted methods with its
+// own and delegates.
+type Driver[R any] struct {
+	// NewBatch builds this frontend's Batch. It is invoked once per conversion,
+	// so state a Batch's Setup resolves (interpreter paths, per-run maps) stays
+	// in closure state private to that run.
+	NewBatch func() *Batch[R]
+
+	skipped int // files this Driver's runs could not lower; see Skipped
+}
+
+// Skipped reports how many source files this converter could not lower. The scan
+// layer surfaces it per language, so a run that dropped most of a project is
+// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
+func (d *Driver[R]) Skipped() int { return d.skipped }
+
+// ConvertFile lowers the source at path — a single file or a directory (all of
+// the frontend's files under it, recursively, one gIR Module per file) — via
+// the shared Batch skeleton (see Batch.Convert for the failure semantics).
+func (d *Driver[R]) ConvertFile(path string) (*ir.Program, error) {
+	prog, skipped, err := d.NewBatch().Convert(path)
+	d.skipped += skipped
+	return prog, err
+}
+
+// ConvertInventory lowers the frontend's files of a pre-walked scan-root
+// inventory (see walkignore.Inventory), skipping the directory walk
+// ConvertFile's directory mode would repeat.
+func (d *Driver[R]) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	prog, skipped, err := d.NewBatch().ConvertInventory(inv)
+	d.skipped += skipped
+	return prog, err
+}
 
 // Batch describes one frontend's per-file conversion for Convert. R is the
 // frontend's per-file result type; it must at least record the file's lowered
@@ -47,7 +91,7 @@ type Batch[R any] struct {
 
 	// Parse converts a contiguous chunk of files, writing one result per file
 	// into out (index-aligned with files). In directory mode chunks run
-	// concurrently (see chunks.Run), so Parse must write only its own slots.
+	// concurrently (see runChunks), so Parse must write only its own slots.
 	// root is the scan root, for module naming (walkignore.ModuleName).
 	Parse func(root string, files []string, out []R)
 
@@ -82,6 +126,27 @@ func (b *Batch[R]) Convert(path string) (*ir.Program, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	return b.run(root, files, isDir)
+}
+
+// ConvertInventory is Convert over a pre-walked directory inventory: the scan
+// pipeline walks the scan root ONCE (walkignore.NewInventory) and every present
+// frontend selects its files from that cache instead of re-walking the same
+// tree. Selection (Inventory.Select) applies exactly the per-file policy
+// Convert's own walk applies — same match predicate, same SkipFile/TooBig caps,
+// same abort-on-walk-error contract — so the two entry points lower identical
+// file sets.
+func (b *Batch[R]) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, int, error) {
+	files, err := inv.Select(b.Match)
+	if err != nil {
+		return nil, 0, err
+	}
+	return b.run(inv.Root(), files, true)
+}
+
+// run is the conversion skeleton shared by Convert and ConvertInventory, from
+// resolved (root, files) to assembled program.
+func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, int, error) {
 	if len(files) == 0 {
 		return nil, 0, fmt.Errorf("no %s files found under %s", b.Lang, root)
 	}
@@ -114,7 +179,7 @@ func (b *Batch[R]) Convert(path string) (*ir.Program, int, error) {
 
 	// Results land at fixed indices, so module order stays the sorted file
 	// order regardless of chunk completion order.
-	chunks.Run(len(files), func(start, end int) {
+	runChunks(len(files), func(start, end int) {
 		b.Parse(root, files[start:end], results[start:end])
 	})
 	if b.Finish != nil {
@@ -153,4 +218,19 @@ func PerFile[R any](fn func(root, file string) R) func(root string, files []stri
 			out[i] = fn(root, f)
 		}
 	}
+}
+
+// runChunks splits [0,n) into up to GOMAXPROCS contiguous chunks and calls
+// fn(start, end) for each on its own goroutine, waiting for all to finish. fn
+// must write only to index-aligned slots so results stay deterministic.
+func runChunks(n int, fn func(start, end int)) {
+	workers := max(min(runtime.GOMAXPROCS(0), n), 1)
+	size := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for start := 0; start < n; start += size {
+		end := min(start+size, n)
+		wg.Add(1)
+		go func(start, end int) { defer wg.Done(); fn(start, end) }(start, end)
+	}
+	wg.Wait()
 }

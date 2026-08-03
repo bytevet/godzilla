@@ -1,11 +1,11 @@
 package scan
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 
 	"godzilla/internal/rules/loader"
+	"godzilla/internal/testsupport"
 )
 
 // benchScanLang benchmarks a full-pipeline scan of one language's sample so
@@ -17,9 +17,7 @@ import (
 func benchScanLang(b *testing.B, dir, tool string) {
 	b.Helper()
 	if tool != "" {
-		if _, err := exec.LookPath(tool); err != nil {
-			b.Skipf("%s not installed", tool)
-		}
+		testsupport.RequireTool(b, tool)
 	}
 	rs, err := loader.Builtin()
 	if err != nil {

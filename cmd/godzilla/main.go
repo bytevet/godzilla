@@ -22,6 +22,7 @@ import (
 	"godzilla/internal/config"
 	"godzilla/internal/llm"
 	"godzilla/internal/memlimit"
+	"godzilla/internal/proc"
 	"godzilla/internal/report"
 	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
@@ -58,7 +59,7 @@ process with a single merged exit code and report — a changed-files entry poin
 for pre-commit hooks / CI diffs.
 
 flags:
-  -rules <file>     additional YAML rule file to load alongside the built-in rules
+  -rules <path>     additional YAML rule file — or directory of rulepacks — to load alongside the built-in rules
   -fail-on <sev>    minimum severity that fails the gate: info|low|medium|high|critical (default medium)
   -summary          also print a gIR summary (opcode histogram, intrinsics)
   -html <file>      write an HTML report to <file>
@@ -75,6 +76,8 @@ flags:
   -quiet            suppress console output; the exit code and report files still reflect findings
   -files <file>     changed-files mode: read newline-separated paths from <file> ('-' for stdin),
                     e.g. a pre-commit hook: git diff --name-only --cached | godzilla scan -files -
+  -parse-timeout <dur>  deadline per per-file parse/dump subprocess (default 2m0s)
+  -build-timeout <dur>  deadline for a whole-project build under -allow-build (default 10m0s)
 
 A .godzilla.yaml in the scan root can set fail-on, path include/exclude globs,
 and per-rule disable / severity-overrides; CLI flags override its values.
@@ -139,7 +142,7 @@ func readFileList(src string) ([]string, error) {
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	fs.Usage = usage
-	rulesPath := fs.String("rules", "", "additional YAML rule file")
+	rulesPath := fs.String("rules", "", "additional YAML rule file, or a directory of rulepacks")
 	failOn := fs.String("fail-on", "medium", "minimum severity that fails the gate")
 	showSummary := fs.Bool("summary", false, "also print a gIR summary")
 	htmlPath := fs.String("html", "", "write an HTML report to this file")
@@ -153,9 +156,12 @@ func runScan(args []string) {
 	configPath := fs.String("config", "", "path to a .godzilla.yaml (default: auto-loaded from the scan root)")
 	quiet := fs.Bool("quiet", false, "suppress coverage/summary/per-finding console output; the exit code and any report files still reflect findings")
 	filesList := fs.String("files", "", "changed-files mode: read newline-separated paths to scan from this file, or '-' for stdin (for pre-commit hooks / CI diffs)")
+	parseTimeout := fs.Duration("parse-timeout", proc.ParseTimeout(), "deadline for each per-file parse/dump subprocess (python3, JavaDump, rustc, clang)")
+	buildTimeout := fs.Duration("build-timeout", proc.BuildTimeout(), "deadline for a whole-project build subprocess (only runs with -allow-build)")
 	_ = fs.Parse(args)
 
 	buildpolicy.SetAllowed(*allowBuild)
+	proc.SetTimeouts(*parseTimeout, *buildTimeout)
 	report.Version = version // stamp the tool version into SARIF/JSON reports
 
 	// Collect scan targets: a `-files` list (stdin with '-'), one or more
@@ -398,12 +404,7 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
 func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
-	slices.SortStableFunc(findings, func(a, b analysis.Finding) int {
-		if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
-			return c // worst severity first
-		}
-		return cmp.Compare(analysis.PosString(a.SinkPos), analysis.PosString(b.SinkPos))
-	})
+	slices.SortStableFunc(findings, analysis.CompareFindings)
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
 	// retained for auditability but do not count toward the gate: partition them

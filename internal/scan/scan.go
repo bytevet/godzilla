@@ -7,10 +7,8 @@ package scan
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	cpp_converter "godzilla/converters/cpp"
@@ -79,11 +77,11 @@ func (r Result) Failed() []LangCoverage {
 // applies that optional stage. Result.Coverage records which frontends ran and
 // which failed.
 func Scan(path string, rs *rules.RuleSet) (Result, error) {
-	prog, coverage, targetPkgs, err := convert(path)
+	prog, coverage, targetPkgs, inv, err := convert(path)
 	if err != nil {
 		return Result{}, err
 	}
-	findings := scopeFindings(runAnalyses(prog, rs, path, targetPkgs), targetPkgs)
+	findings := scopeFindings(runAnalyses(prog, rs, path, inv, targetPkgs), targetPkgs)
 	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
 }
 
@@ -132,8 +130,10 @@ func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
 // but on smaller inputs the spare cores run the dangerous-call and secrets scans
 // in parallel instead of after it. The rule set is precompiled up front so the
 // engine and the dangerous-call pass don't race building per-rule matchers.
-// A nil filePath skips the raw-file secrets scan (callers that already did it).
-func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkgs map[string]bool) []analysis.Finding {
+// An empty filePath skips the raw-file secrets scan (callers that already did
+// it); a non-nil inv (directory scans) feeds that scan from the cached walk
+// instead of re-walking filePath.
+func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool) []analysis.Finding {
 	_ = rs.Compile() // guard-compile errors are already reported by the loader at load
 	var (
 		taint, danger, secrets, fileSecrets []analysis.Finding
@@ -152,9 +152,18 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, targetPkg
 	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
-		// language frontend parses — the dominant hardcoded-secret vector.
+		// language frontend parses — the dominant hardcoded-secret vector. A
+		// directory scan's file list comes from the shared inventory (one walk
+		// per scan); a single-file target is scanned directly as before.
 		wg.Add(1)
-		go func() { defer wg.Done(); fileSecrets = analysis.ScanSecretsInFiles(filePath, rs, isSourcePath) }()
+		go func() {
+			defer wg.Done()
+			if inv != nil {
+				fileSecrets = analysis.ScanSecretsInPaths(inv.Files(), rs, isSourcePath)
+			} else {
+				fileSecrets = analysis.ScanSecretsInFiles(filePath, rs, isSourcePath)
+			}
+		}()
 	}
 	wg.Wait()
 
@@ -219,18 +228,31 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	var findings []analysis.Finding
 	targetPkgs := map[string]bool{}
 	for _, p := range paths {
-		findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 		info, err := os.Stat(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
 			continue
 		}
 		if !info.IsDir() {
+			// A single file gets its secrets scan up front (source or not); only a
+			// path some frontend handles goes on to conversion.
+			findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 			if _, conv := fileFrontend(p); conv == nil {
 				continue // non-source file: secrets already scanned, no dataflow
 			}
 		}
-		prog, cov, tp, err := convert(p)
+		prog, cov, tp, inv, err := convert(p)
+		if info.IsDir() {
+			// A directory's secrets pass feeds off convert's single pruned walk
+			// (the shared inventory) instead of re-walking the same tree. When
+			// convert failed before yielding an inventory (e.g. a directory with no
+			// analyzable source), the config files it holds still get scanned.
+			if inv != nil {
+				findings = append(findings, analysis.ScanSecretsInPaths(inv.Files(), rs, isSourcePath)...)
+			} else {
+				findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
 			continue
@@ -243,38 +265,44 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	}
 	// The per-path raw-file secrets scan already ran in the loop above, so pass an
 	// empty path to skip it here.
-	findings = append(findings, scopeFindings(runAnalyses(merged, rs, "", targetPkgs), targetPkgs)...)
+	findings = append(findings, scopeFindings(runAnalyses(merged, rs, "", nil, targetPkgs), targetPkgs)...)
 	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
 }
 
 // convert lowers source at path into a single gIR program and reports per-
 // language coverage. For a single file it runs the matching frontend; for a
-// directory it runs every present-language frontend and merges their modules (a
-// repo may mix languages), tolerating a frontend that finds nothing as long as
-// one yields modules. A frontend that fails on present source is warned on
-// stderr AND recorded as a failed-coverage entry, so the caller can fail the
-// gate rather than report a false "clean".
-func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) {
+// directory it walks the tree ONCE into a walkignore.Inventory (also returned,
+// for the raw-file secrets pass) and runs every present-language frontend off
+// that cached file list, merging their modules (a repo may mix languages) and
+// tolerating a frontend that finds nothing as long as one yields modules. A
+// frontend that fails on present source is warned on stderr AND recorded as a
+// failed-coverage entry, so the caller can fail the gate rather than report a
+// false "clean".
+func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkignore.Inventory, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
+			return nil, nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
 		}
-		prog, targetPkgs, skipped, err := conv(path)
+		prog, targetPkgs, skipped, err := conv(path, nil)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		return prog, []LangCoverage{{
 			Language: lang, Detected: true, Converted: true, Files: 1, Skipped: skipped,
-		}}, targetPkgs, nil
+		}}, targetPkgs, nil, nil
 	}
 
-	present := detectLanguages(path)
+	// ONE pruned walk of the tree; language detection, every present frontend,
+	// and the config-file secrets pass all consume this inventory instead of
+	// each re-walking the identical tree.
+	inv := walkignore.NewInventory(path)
+	present := detectLanguages(inv)
 	merged := &ir.Program{}
 	var coverage []LangCoverage
 	frontends := languageFrontends
@@ -297,7 +325,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 		go func() {
 			defer wg.Done()
 			cov := LangCoverage{Language: fe.name, Detected: true, Files: present[fe.name]}
-			prog, targetPkgs, skipped, err := fe.convert(path)
+			prog, targetPkgs, skipped, err := fe.convert(path, inv)
 			cov.Skipped = skipped
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
@@ -326,19 +354,21 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, error) 
 	// Every launched frontend goroutine records a result on both its success and
 	// failure paths, so "no frontend ran" is exactly "coverage is empty".
 	if len(coverage) == 0 {
-		return nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Vue/Svelte/Java/Rust/Ruby/C/C++ source found under %s", path)
+		return nil, nil, nil, nil, fmt.Errorf("no analyzable Go/Python/JavaScript/Vue/Svelte/Java/Rust/Ruby/C/C++ source found under %s", path)
 	}
-	return merged, coverage, targetPkgs, nil
+	return merged, coverage, targetPkgs, inv, nil
 }
 
 // frontend pairs a language tag with the function that lowers a path to gIR and
 // the predicate that recognizes that language's single-file extensions. convert
-// returns the lowered program and, for frontends that lower dependency bodies
-// (Go), the set of user-authored package paths so findings inside lowered
-// dependencies can be scoped out; nil for frontends that don't lower deps.
+// takes the scan path plus, for directory scans, the shared file inventory (nil
+// for single files), and returns the lowered program and, for frontends that
+// lower dependency bodies (Go), the set of user-authored package paths so
+// findings inside lowered dependencies can be scoped out; nil for frontends
+// that don't lower deps.
 type frontend struct {
 	name    string
-	convert func(string) (*ir.Program, map[string]bool, int, error)
+	convert func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error)
 	matches func(path string) bool
 	// lowersDeps marks a frontend that lowers third-party dependency bodies: its
 	// convert returns a non-nil targetPkgs set, its modules are seeded
@@ -355,24 +385,26 @@ type frontend struct {
 // uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
 var languageFrontends = []frontend{
 	{name: "go", convert: goConvert, lowersDeps: true,
-		matches: func(p string) bool { return strings.HasSuffix(p, ".go") }},
+		matches: go_converter.IsGoFile},
 	{name: "python", convert: noDepConvert(py_converter.NewConverter),
-		matches: func(p string) bool { return strings.HasSuffix(p, ".py") }},
+		matches: py_converter.IsPythonFile},
 	{name: "javascript", convert: noDepConvert(js_converter.NewConverter),
 		matches: js_converter.IsJSFamily},
 	{name: "java", convert: noDepConvert(java_converter.NewConverter),
-		matches: func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
+		matches: java_converter.IsJavaFile},
 	{name: "cpp", convert: noDepConvert(cpp_converter.NewConverter),
-		matches: isCppFile},
+		matches: cpp_converter.IsCppFile},
 	{name: "rust", convert: noDepConvert(rust_converter.NewConverter),
-		matches: func(p string) bool { return strings.HasSuffix(p, ".rs") }},
+		matches: rust_converter.IsRustFile},
 	{name: "ruby", convert: noDepConvert(ruby_converter.NewConverter),
-		matches: func(p string) bool { return strings.HasSuffix(p, ".rb") }},
+		matches: ruby_converter.IsRubyFile},
 }
 
 // goConvert lowers a Go path and returns its target (user-authored) package set,
 // so scopeFindings can drop findings whose sink sits inside a lowered dependency.
-func goConvert(p string) (*ir.Program, map[string]bool, int, error) {
+// The inventory is unused: the Go frontend's unit of work is the package, and
+// go/packages does its own module-aware source discovery.
+func goConvert(p string, _ *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
 	c := go_converter.NewConverter()
 	prog, err := c.ConvertFile(p)
 	// 0 skipped: the Go frontend lowers packages, not files, so it has no
@@ -387,15 +419,30 @@ type fileConverter interface {
 	ConvertFile(string) (*ir.Program, error)
 }
 
+// inventoryConverter marks a converter that can lower a directory from the scan
+// pipeline's pre-walked file inventory instead of re-walking the tree itself.
+// Every non-Go frontend implements it (the per-file frontends select their
+// sources from it; Java derives its source index from it).
+type inventoryConverter interface {
+	ConvertInventory(*walkignore.Inventory) (*ir.Program, error)
+}
+
 // noDepConvert adapts a frontend that does not lower dependency bodies (every
 // frontend except Go) to the frontend.convert signature — it has no dependency
 // findings to scope, so it returns a nil target-package set. newC is the
 // frontend's NewConverter, called per conversion so each scan gets a fresh
-// converter.
-func noDepConvert[T fileConverter](newC func() T) func(string) (*ir.Program, map[string]bool, int, error) {
-	return func(p string) (*ir.Program, map[string]bool, int, error) {
+// converter. Directory scans (inv non-nil) hand the converter the shared
+// inventory; single-file scans keep the plain ConvertFile path.
+func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
+	return func(p string, inv *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
 		c := newC()
-		prog, err := c.ConvertFile(p)
+		var prog *ir.Program
+		var err error
+		if ic, ok := any(c).(inventoryConverter); ok && inv != nil {
+			prog, err = ic.ConvertInventory(inv)
+		} else {
+			prog, err = c.ConvertFile(p)
+		}
 		// A per-file frontend reports how many files it had to drop; one whose unit
 		// of work is not a file simply does not implement this.
 		skipped := 0
@@ -442,7 +489,7 @@ func isSourcePath(path string) bool {
 // fileFrontend returns the language tag and conversion function for a single
 // source file, or a nil function for an unsupported extension. It dispatches off
 // the shared languageFrontends table (first match wins, in table order).
-func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bool, int, error)) {
+func fileFrontend(path string) (string, func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error)) {
 	for _, fe := range languageFrontends {
 		if fe.matches(path) {
 			return fe.name, fe.convert
@@ -451,27 +498,18 @@ func fileFrontend(path string) (string, func(string) (*ir.Program, map[string]bo
 	return "", nil
 }
 
-// isCppFile reports whether path is a C or C++ translation unit (not a header,
-// which clang can't compile to a standalone module).
-func isCppFile(path string) bool {
-	return strings.HasSuffix(path, ".c") || strings.HasSuffix(path, ".cc") ||
-		strings.HasSuffix(path, ".cpp") || strings.HasSuffix(path, ".cxx") ||
-		strings.HasSuffix(path, ".c++")
-}
-
-// detectLanguages walks dir and reports which supported languages have source
-// files present (skipping vendor/node_modules/.git), so convert only runs the
-// relevant frontends.
-func detectLanguages(dir string) map[string]int {
+// detectLanguages reports which supported languages have source files present
+// in the scan root's inventory (already pruned of vendor/node_modules/.git),
+// so convert only runs the relevant frontends.
+func detectLanguages(inv *walkignore.Inventory) map[string]int {
 	present := map[string]int{}
-	_ = walkignore.Files(dir, func(p string, d fs.DirEntry) error {
+	for _, p := range inv.Files() {
 		for _, fe := range languageFrontends {
 			if fe.matches(p) {
 				present[fe.name]++
 				break
 			}
 		}
-		return nil
-	})
+	}
 	return present
 }

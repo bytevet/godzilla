@@ -156,3 +156,16 @@ func TestApplyRules_KeepsDefaultPropagators(t *testing.T) {
 		t.Errorf("DefaultPropagators lost across ApplyRules: %v", out.DefaultPropagators)
 	}
 }
+
+// TestLoadFile_RejectsBadSeverityOverride: a typo'd severity in
+// severity-overrides must fail the load, not be silently skipped at apply time.
+func TestLoadFile_RejectsBadSeverityOverride(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".godzilla.yaml")
+	doc := []byte("rules:\n  severity-overrides:\n    some-rule: hgih\n")
+	if err := os.WriteFile(p, doc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(p); err == nil {
+		t.Fatal("LoadFile must reject an unknown severity in severity-overrides")
+	}
+}
