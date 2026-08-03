@@ -82,6 +82,27 @@ func (b *Batch[R]) Convert(path string) (*ir.Program, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	return b.run(root, files, isDir)
+}
+
+// ConvertInventory is Convert over a pre-walked directory inventory: the scan
+// pipeline walks the scan root ONCE (walkignore.NewInventory) and every present
+// frontend selects its files from that cache instead of re-walking the same
+// tree. Selection (Inventory.Select) applies exactly the per-file policy
+// Convert's own walk applies — same match predicate, same SkipFile/TooBig caps,
+// same abort-on-walk-error contract — so the two entry points lower identical
+// file sets.
+func (b *Batch[R]) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, int, error) {
+	files, err := inv.Select(b.Match)
+	if err != nil {
+		return nil, 0, err
+	}
+	return b.run(inv.Root(), files, true)
+}
+
+// run is the conversion skeleton shared by Convert and ConvertInventory, from
+// resolved (root, files) to assembled program.
+func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, int, error) {
 	if len(files) == 0 {
 		return nil, 0, fmt.Errorf("no %s files found under %s", b.Lang, root)
 	}

@@ -39,10 +39,24 @@ import (
 var javaDumpSource []byte
 
 // Converter lowers Java source/bytecode into gIR.
-type Converter struct{}
+type Converter struct {
+	// inv, when set (ConvertInventory), is the scan pipeline's pre-walked file
+	// inventory; indexJavaSources reads it instead of re-walking the tree.
+	inv *walkignore.Inventory
+}
 
 // NewConverter returns a Java frontend.
 func NewConverter() *Converter { return &Converter{} }
+
+// ConvertInventory lowers the Java under a pre-walked scan root (see
+// walkignore.Inventory). The JavaDump helper still receives the root directory
+// — its unit of work is a compilation, not a file list — but the .java source
+// index that anchors findings to real paths is derived from the inventory
+// instead of a fresh walk.
+func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	c.inv = inv
+	return c.ConvertFile(inv.Root())
+}
 
 // dumpDoc mirrors the JSON emitted by JavaDump.java.
 type dumpDoc struct {
@@ -154,7 +168,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Resolve each class's SourceFile ("Login.java") to a real path under the
 	// scan root so findings anchor to the source file instead of the scan
 	// directory (FE-8). Fall back to the scan path when the source is unknown.
-	sourceIdx := indexJavaSources(abs)
+	sourceIdx := c.indexJavaSources(abs)
 	prog := &ir.Program{Mode: "bytecode"}
 	for _, cl := range doc.Classes {
 		prog.Modules = append(prog.Modules, convertClass(cl, resolveJavaSource(abs, sourceIdx, cl.Source)))
@@ -164,18 +178,30 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 // indexJavaSources maps each .java file's base name to its path, under root (or
 // root's directory when root is a file). First match wins on a name collision.
-func indexJavaSources(root string) map[string]string {
+// With a scan-pipeline inventory attached (ConvertInventory) the index comes
+// from that cached walk — same pruned tree, same walk order, so the same
+// first-wins winner — instead of a fresh one.
+func (c *Converter) indexJavaSources(root string) map[string]string {
 	idx := map[string]string{}
+	add := func(p, name string) {
+		if strings.HasSuffix(name, ".java") {
+			if _, seen := idx[name]; !seen {
+				idx[name] = p
+			}
+		}
+	}
+	if c.inv != nil {
+		for _, p := range c.inv.AbsFiles() {
+			add(p, filepath.Base(p))
+		}
+		return idx
+	}
 	base := root
 	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
 		base = filepath.Dir(root)
 	}
 	_ = walkignore.Files(base, func(p string, d fs.DirEntry) error {
-		if strings.HasSuffix(d.Name(), ".java") {
-			if _, seen := idx[d.Name()]; !seen {
-				idx[d.Name()] = p
-			}
-		}
+		add(p, d.Name())
 		return nil
 	})
 	return idx

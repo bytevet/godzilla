@@ -52,6 +52,11 @@ func (c *Converter) Skipped() int { return c.skipped }
 // NewConverter returns a ready-to-use Ruby-to-gIR converter.
 func NewConverter() *Converter { return &Converter{} }
 
+// IsRubyFile reports whether path is a Ruby source file this frontend lowers.
+// Exported so internal/scan's language detection and this frontend's own file
+// selection share ONE predicate instead of drifting copies.
+func IsRubyFile(path string) bool { return strings.HasSuffix(path, ".rb") }
+
 // ConvertFile lowers the Ruby source at path into gIR. path may be a single
 // .rb file or a directory (all *.rb files under it are converted recursively,
 // one gIR Module per file). Requires `ruby` on PATH.
@@ -61,12 +66,32 @@ func NewConverter() *Converter { return &Converter{} }
 // <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
 // not per file.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+	b := c.batch()
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
+}
+
+// ConvertInventory lowers the Ruby files of a pre-walked scan-root inventory
+// (see walkignore.Inventory), skipping the directory walk ConvertFile's
+// directory mode would repeat.
+func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	b := c.batch()
+	prog, skipped, err := b.ConvertInventory(inv)
+	c.skipped += skipped
+	return prog, err
+}
+
+// batch builds the shared frontend.Batch driver with Ruby's hooks. A fresh
+// value per conversion: the Setup-resolved interpreter/helper paths are carried
+// in closure state private to this batch.
+func (c *Converter) batch() *frontend.Batch[rbFileResult] {
 	var rubyExe, scriptPath string
-	b := frontend.Batch[rbFileResult]{
+	return &frontend.Batch[rbFileResult]{
 		Label: "ruby_converter",
 		Lang:  "Ruby",
 		Mode:  "ast",
-		Match: func(p string) bool { return strings.HasSuffix(p, ".rb") },
+		Match: IsRubyFile,
 		Setup: func() (func(), error) {
 			exe, err := exec.LookPath("ruby")
 			if err != nil {
@@ -85,9 +110,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		},
 		Result: func(r *rbFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // rbFileResult is one file's outcome within a batch chunk.

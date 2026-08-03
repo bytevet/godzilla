@@ -206,49 +206,62 @@ func ScanSecretsInFiles(root string, rs *rules.RuleSet, isSource func(path strin
 	if len(s.dets) == 0 {
 		return nil
 	}
-	scannable := func(path string) bool {
-		if isSource != nil && isSource(path) {
-			return false
-		}
-		return isScannableConfigFile(path)
-	}
-	scanFile := func(path string) {
-		if s.pathExcluded(path) {
-			return
-		}
-		info, err := os.Stat(path)
-		if err != nil || info.Size() > secretFileMaxBytes {
-			return
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return
-		}
-		lineNo := 0
-		for line := range strings.SplitSeq(string(data), "\n") {
-			lineNo++
-			s.text(line, &ir.Position{Filename: path, Line: int32(lineNo), Column: 1}, "", "")
-		}
-	}
-
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil
 	}
 	if !info.IsDir() {
-		if scannable(root) {
-			scanFile(root)
-		}
+		s.scanConfigPath(root, isSource)
 		return s.findings
 	}
 
 	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
-		if scannable(path) {
-			scanFile(path)
-		}
+		s.scanConfigPath(path, isSource)
 		return nil
 	})
 	return s.findings
+}
+
+// ScanSecretsInPaths is ScanSecretsInFiles over an explicit, pre-walked file
+// list — the scan pipeline's cached directory inventory (walkignore.Inventory)
+// — so the config-file secrets pass adds no directory walk of its own. File
+// selection is identical: same scannable-config predicate, same isSource skip,
+// same excluded-path and size policies, applied per file by scanConfigPath.
+func ScanSecretsInPaths(paths []string, rs *rules.RuleSet, isSource func(path string) bool) []Finding {
+	s := newSecretScan(rs)
+	if len(s.dets) == 0 {
+		return nil
+	}
+	for _, p := range paths {
+		s.scanConfigPath(p, isSource)
+	}
+	return s.findings
+}
+
+// scanConfigPath applies the secret patterns line by line to one path, if it is
+// a scannable config file: not handled by a language frontend (isSource, when
+// non-nil, else the static sourceFileExts fallback), not in an excluded tree,
+// and under the size cap.
+func (s *secretScan) scanConfigPath(path string, isSource func(path string) bool) {
+	if isSource != nil && isSource(path) {
+		return
+	}
+	if !isScannableConfigFile(path) || s.pathExcluded(path) {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > secretFileMaxBytes {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lineNo := 0
+	for line := range strings.SplitSeq(string(data), "\n") {
+		lineNo++
+		s.text(line, &ir.Position{Filename: path, Line: int32(lineNo), Column: 1}, "", "")
+	}
 }
 
 // configFileExts and configFileNames enumerate the textual config/infra files

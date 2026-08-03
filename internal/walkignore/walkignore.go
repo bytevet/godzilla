@@ -40,20 +40,43 @@ func Files(root string, fn func(path string, d fs.DirEntry) error) error {
 	})
 }
 
-// CollectSources walks root and returns the sorted list of files for which
-// match(path) is true, applying the shared prune policy: skip ignored directories
-// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig).
-// Shared by the interpreted-language frontends (Python, JS, Ruby), whose
-// directory walks differ only in the file predicate.
+// Inventory is the cached result of ONE pruned walk of a directory scan root:
+// every file that survives the SkipDir prune, in walk (lexical) order, with its
+// size. It exists so a directory scan stats/readdirs the tree exactly once —
+// language detection, each frontend's source selection, the config-file secrets
+// pass and the Java source index all read the same inventory instead of each
+// re-walking the identical tree (3–9 O(files) passes before).
 //
-// Deliberately does NOT use Files: a walk error ABORTS here. A frontend that
-// could not read its own source tree must fail rather than silently report on a
-// subset, which is what Result.Coverage and -strict are built on.
-func CollectSources(root string, match func(path string) bool) ([]string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+// The walk itself never aborts: an unreadable entry is skipped and the FIRST
+// such error recorded. Consumers then get the error contract they had when each
+// walked on its own: Select (the frontend path, previously CollectSources)
+// FAILS with that error — a frontend that could not read its own source tree
+// must fail rather than silently report on a subset, which is what
+// Result.Coverage and -strict are built on — while Files/AbsFiles (the
+// detection/secrets/index path, previously the Files function) skip it.
+type Inventory struct {
+	root    string   // scan root exactly as the caller gave it
+	absRoot string   // filepath.Abs(root); the frontends' module root (CollectTarget contract)
+	rels    []string // walk-ordered file paths relative to root
+	sizes   []int64  // per-file size, index-aligned with rels (0 when stat failed)
+	err     error    // first walk error; surfaced by Select
+}
+
+// NewInventory walks root once under the shared prune policy and returns the
+// resulting file inventory. It never fails: a missing or unreadable root simply
+// yields an empty inventory whose Select reports the error.
+func NewInventory(root string) *Inventory {
+	inv := &Inventory{root: root}
+	inv.absRoot, inv.err = filepath.Abs(root)
+	if inv.err != nil {
+		inv.absRoot = root
+	}
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if inv.err == nil {
+				inv.err = err
+			}
+			return nil
 		}
 		if d.IsDir() {
 			if SkipDir(d.Name()) {
@@ -61,19 +84,86 @@ func CollectSources(root string, match func(path string) bool) ([]string, error)
 			}
 			return nil
 		}
-		if match(p) && !SkipFile(d.Name()) {
-			if fi, e := d.Info(); e == nil && TooBig(fi.Size()) {
-				return nil
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			if inv.err == nil {
+				inv.err = rerr
 			}
-			files = append(files, p)
+			return nil
 		}
+		var size int64
+		if fi, e := d.Info(); e == nil {
+			size = fi.Size()
+		}
+		inv.rels = append(inv.rels, rel)
+		inv.sizes = append(inv.sizes, size)
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	return inv
+}
+
+// Root returns the ABSOLUTE scan root — what CollectTarget hands a frontend as
+// its module root, so module names derived via ModuleName stay identical
+// whether the file list came from an inventory or a standalone walk.
+func (inv *Inventory) Root() string { return inv.absRoot }
+
+// Select returns the sorted absolute paths of the inventoried files for which
+// match(path) is true, applying the same per-file policy the walk-based
+// CollectSources applies: skip generated/minified files (SkipFile) and
+// oversized files (TooBig). A walk error recorded at inventory time fails
+// Select — the frontends' abort-on-error contract (see the type comment).
+func (inv *Inventory) Select(match func(path string) bool) ([]string, error) {
+	if inv.err != nil {
+		return nil, inv.err
+	}
+	var files []string
+	for i, rel := range inv.rels {
+		p := filepath.Join(inv.absRoot, rel)
+		if match(p) && !SkipFile(filepath.Base(rel)) && !TooBig(inv.sizes[i]) {
+			files = append(files, p)
+		}
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// Files returns every inventoried file joined on the root AS GIVEN, in walk
+// order — the same paths, order and (no) filtering the Files function yields,
+// for consumers that count files (language detection) or report positions in
+// the user's own path spelling (the config-file secrets pass). SkipFile/TooBig
+// are deliberately NOT applied; those are source-selection policies.
+func (inv *Inventory) Files() []string {
+	return inv.joined(inv.root)
+}
+
+// AbsFiles is Files rendered against the absolute root, for consumers that
+// anchor findings to resolved paths (the Java source index).
+func (inv *Inventory) AbsFiles() []string {
+	return inv.joined(inv.absRoot)
+}
+
+func (inv *Inventory) joined(root string) []string {
+	files := make([]string, len(inv.rels))
+	for i, rel := range inv.rels {
+		files[i] = filepath.Join(root, rel)
+	}
+	return files
+}
+
+// CollectSources walks root and returns the sorted list of files for which
+// match(path) is true, applying the shared prune policy: skip ignored directories
+// (SkipDir), generated/minified files (SkipFile), and oversized files (TooBig).
+// Shared by the frontends' standalone entry points (a converter's ConvertFile
+// called outside the scan pipeline), whose directory walks differ only in the
+// file predicate; the scan pipeline itself walks once via NewInventory and hands
+// each frontend the same Inventory instead.
+//
+// Root is resolved absolute (via NewInventory), and a walk error FAILS the
+// collection rather than being skipped: a frontend that could not read its own
+// source tree must fail rather than silently report on a subset, which is what
+// Result.Coverage and -strict are built on.
+func CollectSources(root string, match func(path string) bool) ([]string, error) {
+	return NewInventory(root).Select(match)
 }
 
 // CollectTarget resolves a scan target — a single source file or a directory —

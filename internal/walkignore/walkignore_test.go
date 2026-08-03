@@ -1,6 +1,78 @@
 package walkignore
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// TestInventory pins the one-walk cache's contracts: Select applies exactly the
+// CollectSources policy (match + SkipFile + TooBig, sorted, absolute), Files
+// keeps the caller's own path spelling with NO source-selection filtering (the
+// detection/secrets view), and a missing root fails Select but leaves
+// Files empty rather than erroring (the -strict/coverage split).
+func TestInventory(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel string, size int) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("app.js", 10)
+	write("sub/util.js", 10)
+	write("vendor.min.js", 10)             // SkipFile: excluded from Select, present in Files
+	write("huge.js", MaxSourceBytes+1)     // TooBig: excluded from Select, present in Files
+	write("node_modules/dep/index.js", 10) // pruned dir: absent everywhere
+	write(".env", 5)                       // non-JS: absent from Select, present in Files
+
+	inv := NewInventory(dir)
+	isJS := func(p string) bool { return strings.HasSuffix(p, ".js") }
+
+	got, err := inv.Select(isJS)
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	want, err := CollectSources(dir, isJS)
+	if err != nil {
+		t.Fatalf("CollectSources: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Select = %v, want CollectSources result %v", got, want)
+	}
+	abs, _ := filepath.Abs(dir)
+	if wantSel := []string{filepath.Join(abs, "app.js"), filepath.Join(abs, "sub", "util.js")}; !slices.Equal(got, wantSel) {
+		t.Errorf("Select = %v, want %v", got, wantSel)
+	}
+
+	files := inv.Files()
+	for _, rel := range []string{".env", "app.js", "huge.js", "vendor.min.js"} {
+		if !slices.Contains(files, filepath.Join(dir, rel)) {
+			t.Errorf("Files() missing %s (must be unfiltered, root as given): %v", rel, files)
+		}
+	}
+	for _, f := range files {
+		if strings.Contains(f, "node_modules") {
+			t.Errorf("Files() must honor the SkipDir prune, got %s", f)
+		}
+	}
+	if len(inv.AbsFiles()) != len(files) {
+		t.Errorf("AbsFiles/Files length mismatch: %d vs %d", len(inv.AbsFiles()), len(files))
+	}
+
+	missing := NewInventory(filepath.Join(dir, "does-not-exist"))
+	if _, err := missing.Select(isJS); err == nil {
+		t.Error("Select on a missing root must fail (frontend abort-on-error contract)")
+	}
+	if n := len(missing.Files()); n != 0 {
+		t.Errorf("Files on a missing root should be empty, got %d entries", n)
+	}
+}
 
 func TestSkipDir(t *testing.T) {
 	skip := []string{"node_modules", ".git", ".venv", "venv", "site-packages", "target", "dist", "build", "vendor", "__pycache__", ".gradle", ".next"}

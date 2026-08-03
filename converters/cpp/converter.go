@@ -17,6 +17,7 @@ import (
 	"godzilla/converters/frontend"
 	llvm_converter "godzilla/converters/llvm"
 	"godzilla/internal/proc"
+	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -35,20 +36,37 @@ func NewConverter() *Converter { return &Converter{} }
 // shared frontend.Batch driver: per-file compile failures (e.g. missing
 // headers) are tolerated in directory mode, mirroring the Python/JS frontends.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	b := frontend.Batch[cppFileResult]{
+	b := c.batch()
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
+}
+
+// ConvertInventory lowers the C/C++ files of a pre-walked scan-root inventory
+// (see walkignore.Inventory), skipping the directory walk ConvertFile's
+// directory mode would repeat.
+func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	b := c.batch()
+	prog, skipped, err := b.ConvertInventory(inv)
+	c.skipped += skipped
+	return prog, err
+}
+
+// batch builds the shared frontend.Batch driver with C/C++'s hooks. The file
+// predicate is IsCppFile (lang.go, untagged) — the same one internal/scan uses
+// for language detection.
+func (c *Converter) batch() *frontend.Batch[cppFileResult] {
+	return &frontend.Batch[cppFileResult]{
 		Label: "cpp_converter",
 		Lang:  "C/C++",
 		Mode:  "llvm",
-		Match: isCppSource,
+		Match: IsCppFile,
 		Parse: frontend.PerFile(func(_, f string) cppFileResult {
 			mod, err := lowerOne(f)
 			return cppFileResult{mod: mod, err: err}
 		}),
 		Result: func(r *cppFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // cppFileResult is one file's outcome within a batch conversion.
@@ -56,14 +74,6 @@ type cppFileResult struct {
 	mod *ir.Module
 	err error
 }
-
-var cppExts = map[string]bool{".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".c++": true}
-
-// isCppSource reports whether p is a C/C++ translation unit this frontend
-// compiles (not a header — clang can't compile one to a standalone module).
-// internal/scan keeps its own equivalent (isCppFile) for language detection so
-// scan does not depend on this tag-gated package's file layout.
-func isCppSource(p string) bool { return cppExts[strings.ToLower(filepath.Ext(p))] }
 
 func lowerOne(src string) (*ir.Module, error) {
 	isCpp := strings.ToLower(filepath.Ext(src)) != ".c"

@@ -116,10 +116,30 @@ func NewConverter() *Converter {
 // collected so resolveJSCrossModuleCalls can rewrite cross-module markers once
 // every file has been lowered.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+	b := c.batch()
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
+}
+
+// ConvertInventory lowers the JS-family files of a pre-walked scan-root
+// inventory (see walkignore.Inventory), skipping the directory walk
+// ConvertFile's directory mode would repeat.
+func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
+	b := c.batch()
+	prog, skipped, err := b.ConvertInventory(inv)
+	c.skipped += skipped
+	return prog, err
+}
+
+// batch builds the shared frontend.Batch driver with JavaScript's hooks. A
+// fresh value per conversion: the default-export map is closure state private
+// to this batch.
+func (c *Converter) batch() *frontend.Batch[jsFileResult] {
 	// defaultExports maps each module name to its default-export function
 	// canonical, filled after all files are parsed (Finish).
 	defaultExports := map[string]string{}
-	b := frontend.Batch[jsFileResult]{
+	return &frontend.Batch[jsFileResult]{
 		Label: "js_converter",
 		Lang:  "JavaScript",
 		Mode:  "ast",
@@ -140,9 +160,6 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 			resolveJSCrossModuleCalls(prog, defaultExports)
 		},
 	}
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
 }
 
 // jsFileResult is one file's outcome within a batch conversion.
