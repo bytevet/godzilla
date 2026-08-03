@@ -9,7 +9,7 @@ import (
 )
 
 // TestInventory pins the one-walk cache's contracts: Select applies exactly the
-// CollectSources policy (match + SkipFile + TooBig, sorted, absolute), Files
+// source-selection policy (match + SkipFile + TooBig, sorted, absolute), Files
 // keeps the caller's own path spelling with NO source-selection filtering (the
 // detection/secrets view), and a missing root fails Select but leaves
 // Files empty rather than erroring (the -strict/coverage split).
@@ -37,13 +37,6 @@ func TestInventory(t *testing.T) {
 	got, err := inv.Select(isJS)
 	if err != nil {
 		t.Fatalf("Select: %v", err)
-	}
-	want, err := CollectSources(dir, isJS)
-	if err != nil {
-		t.Fatalf("CollectSources: %v", err)
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("Select = %v, want CollectSources result %v", got, want)
 	}
 	abs, _ := filepath.Abs(dir)
 	if wantSel := []string{filepath.Join(abs, "app.js"), filepath.Join(abs, "sub", "util.js")}; !slices.Equal(got, wantSel) {

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"godzilla/internal/irwalk"
 	"godzilla/internal/rules"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -160,7 +161,7 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			}
 		}
 	}
-	for mod, fn := range funcs(prog) {
+	for mod, fn := range irwalk.Funcs(prog) {
 		// Exclusion is a property of the file, and a function has exactly one, so
 		// testing it here skips an excluded dependency's blocks and operands
 		// outright rather than re-testing per string constant. A function with no
@@ -169,7 +170,7 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			continue
 		}
 		lang, name := mod.GetLanguage(), fn.GetCanonicalName()
-		for inst := range instrs(fn) {
+		for inst := range irwalk.Instrs(fn) {
 			for _, op := range inst.GetOperands() {
 				s.text(op.GetConstant().GetStringVal(), inst.GetPos(), lang, name)
 			}
@@ -194,39 +195,35 @@ const secretFileMaxBytes = 5 << 20 // 5 MiB
 // secret-leak vector: a credential committed to a config file rather than
 // source code, which the gIR-constant scanner (ScanSecrets) cannot see. Source
 // files handled by a frontend are skipped here (their string literals are
-// already covered by ScanSecrets) to avoid double-reporting: isSource, when
-// non-nil, is the caller's authoritative "a language frontend handles this
-// path" predicate (internal/scan derives it from its frontend table, the single
-// source of truth for supported extensions); the static sourceFileExts fallback
-// additionally covers extensions no frontend claims but ScanSecrets-adjacent
-// tooling knows are source (C/C++ headers) and callers passing nil. root may be
-// a file or a directory; a non-existent path yields no findings.
+// already covered by ScanSecrets) to avoid double-reporting: isSource is the
+// caller's REQUIRED "a language frontend handles this path" predicate
+// (internal/scan derives it from its frontend table, the single source of
+// truth for supported extensions). root may be a file or a directory; a
+// non-existent path yields no findings. It gathers the pruned file list and
+// delegates to ScanSecretsInPaths; the scan pipeline calls that directly off
+// its cached inventory instead of walking here.
 func ScanSecretsInFiles(root string, rs *rules.RuleSet, isSource func(path string) bool) []Finding {
-	s := newSecretScan(rs)
-	if len(s.dets) == 0 {
-		return nil
-	}
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil
 	}
-	if !info.IsDir() {
-		s.scanConfigPath(root, isSource)
-		return s.findings
+	paths := []string{root}
+	if info.IsDir() {
+		paths = paths[:0]
+		_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
+			paths = append(paths, path)
+			return nil
+		})
 	}
-
-	_ = walkignore.Files(root, func(path string, d fs.DirEntry) error {
-		s.scanConfigPath(path, isSource)
-		return nil
-	})
-	return s.findings
+	return ScanSecretsInPaths(paths, rs, isSource)
 }
 
 // ScanSecretsInPaths is ScanSecretsInFiles over an explicit, pre-walked file
 // list — the scan pipeline's cached directory inventory (walkignore.Inventory)
 // — so the config-file secrets pass adds no directory walk of its own. File
-// selection is identical: same scannable-config predicate, same isSource skip,
-// same excluded-path and size policies, applied per file by scanConfigPath.
+// selection is identical: same scannable-config predicate, same (required)
+// isSource skip, same excluded-path and size policies, applied per file by
+// scanConfigPath.
 func ScanSecretsInPaths(paths []string, rs *rules.RuleSet, isSource func(path string) bool) []Finding {
 	s := newSecretScan(rs)
 	if len(s.dets) == 0 {
@@ -239,11 +236,10 @@ func ScanSecretsInPaths(paths []string, rs *rules.RuleSet, isSource func(path st
 }
 
 // scanConfigPath applies the secret patterns line by line to one path, if it is
-// a scannable config file: not handled by a language frontend (isSource, when
-// non-nil, else the static sourceFileExts fallback), not in an excluded tree,
-// and under the size cap.
+// a scannable config file: not handled by a language frontend (the caller's
+// isSource predicate), not in an excluded tree, and under the size cap.
 func (s *secretScan) scanConfigPath(path string, isSource func(path string) bool) {
-	if isSource != nil && isSource(path) {
+	if isSource(path) {
 		return
 	}
 	if !isScannableConfigFile(path) || s.pathExcluded(path) {
@@ -274,29 +270,12 @@ var configFileExts = map[string]bool{
 	".xml": true, ".txt": true, ".pem": true, ".key": true, ".npmrc": true, ".netrc": true,
 }
 
-// sourceFileExts are handled by a language frontend, whose string literals the
-// gIR-constant scanner already covers; skip them here to avoid double-reporting.
-// The authoritative predicate is the isSource callback ScanSecretsInFiles takes
-// (internal/scan derives it from its languageFrontends table); this static list
-// is the fallback for nil-predicate callers plus the source extensions no
-// frontend claims (C/C++ headers, which clang can't compile standalone). Keep it
-// in sync with internal/scan's frontend table.
-var sourceFileExts = map[string]bool{
-	".go": true, ".py": true,
-	".js": true, ".ts": true, ".tsx": true, ".jsx": true, ".mjs": true, ".cjs": true,
-	".vue": true, ".svelte": true,
-	".java": true, ".rs": true, ".rb": true,
-	".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".c++": true, ".h": true, ".hpp": true,
-}
-
 // isScannableConfigFile reports whether path is a textual config/infra file the
-// secret scanner should read.
+// secret scanner should read. Source files a frontend handles are already
+// filtered out by the caller's isSource predicate (scanConfigPath).
 func isScannableConfigFile(path string) bool {
 	base := filepath.Base(path)
 	ext := strings.ToLower(filepath.Ext(base))
-	if sourceFileExts[ext] {
-		return false
-	}
 	if configFileExts[ext] {
 		return true
 	}

@@ -2,9 +2,10 @@ package py_converter
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"godzilla/internal/testsupport"
 )
 
 // TestParseTimeoutKillsSubprocess is the PERF-4 guard: with a 1ms parse timeout,
@@ -12,9 +13,7 @@ import (
 // an error instead of hanging. Proves the subprocess actually runs under the
 // context deadline. Skips without python3.
 func TestParseTimeoutKillsSubprocess(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not on PATH")
-	}
+	testsupport.RequireTool(t, "python3")
 	dir := t.TempDir()
 	src := filepath.Join(dir, "app.py")
 	if err := os.WriteFile(src, []byte("x = 1\n"), 0o644); err != nil {

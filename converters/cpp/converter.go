@@ -17,39 +17,21 @@ import (
 	"godzilla/converters/frontend"
 	llvm_converter "godzilla/converters/llvm"
 	"godzilla/internal/proc"
-	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
 
+// Converter lowers C/C++ sources into gIR: the shared frontend.Driver surface
+// (ConvertFile/ConvertInventory/Skipped) over C/C++'s batch hooks (see batch).
+// Per-file compile failures (e.g. missing headers) are tolerated in directory
+// mode, mirroring the Python/JS frontends.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[cppFileResult]
 }
 
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
-
-func NewConverter() *Converter { return &Converter{} }
-
-// ConvertFile lowers the C/C++ at path (a file or directory) to gIR via the
-// shared frontend.Batch driver: per-file compile failures (e.g. missing
-// headers) are tolerated in directory mode, mirroring the Python/JS frontends.
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
-}
-
-// ConvertInventory lowers the C/C++ files of a pre-walked scan-root inventory
-// (see walkignore.Inventory), skipping the directory walk ConvertFile's
-// directory mode would repeat.
-func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.ConvertInventory(inv)
-	c.skipped += skipped
-	return prog, err
+func NewConverter() *Converter {
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
 }
 
 // batch builds the shared frontend.Batch driver with C/C++'s hooks. The file

@@ -515,27 +515,39 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	// step, which is what lets a rule see the program at the `.arg` sink where
 	// the taint lands. Aliasing here keeps builtin.identity meaning only "this
 	// value's text is Args[0]'s text" — ssrf.go reads that marker too.
-	if rustCommandStep(canonical) && len(cc.Args) > 0 {
+	if rustCommandStep(norm) && len(cc.Args) > 0 {
 		st.env[dst] = cc.Args[0]
 	}
 }
 
-// rustCommandStep reports whether a callee is a std::process::Command builder
-// step that returns its receiver. The list must cover every step the API offers:
-// the program is forwarded by aliasing, so one unlisted step breaks the chain and
-// the program stops resolving at every step after it.
-func rustCommandStep(callee string) bool {
-	for _, suffix := range []string{
-		"Command::arg", "Command::args", "Command::arg0",
-		"Command::env", "Command::envs", "Command::env_remove", "Command::env_clear",
-		"Command::current_dir", "Command::stdin", "Command::stdout", "Command::stderr",
-	} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
+// rustCommandStepCallees are the exact normalized callees (generics stripped by
+// normalizeName, no `rust:` prefix) of the std::process::Command builder steps
+// that return their receiver: every step method crossed with the std path forms
+// MIR prints, mirroring how rustIdentityCallees anchors Command::new. The method
+// list must cover every step the API offers: the program is forwarded by
+// aliasing, so one unlisted step breaks the chain and the program stops
+// resolving at every step after it.
+var rustCommandStepCallees = func() map[string]bool {
+	steps := []string{
+		"arg", "args", "arg0",
+		"env", "envs", "env_remove", "env_clear",
+		"current_dir", "stdin", "stdout", "stderr",
+	}
+	m := make(map[string]bool, 3*len(steps))
+	for _, s := range steps {
+		for _, prefix := range []string{"Command::", "process::Command::", "std::process::Command::"} {
+			m[prefix+s] = true
 		}
 	}
-	return false
-}
+	return m
+}()
+
+// rustCommandStep reports whether a normalized callee is a std::process::Command
+// builder step that returns its receiver. Matching is by EXACT name anchored to
+// the std path forms — never a name suffix, which a USER type merely named like
+// Command (`MyCommand::arg`) would trip, wrongly aliasing the call's result to
+// its receiver and dropping whatever taint the real return value carries.
+func rustCommandStep(norm string) bool { return rustCommandStepCallees[norm] }
 
 // rustFormatArgsNew reports whether a RAW MIR callee (generics still present)
 // is the fmt::Arguments constructor family `format!` lowers to, e.g.

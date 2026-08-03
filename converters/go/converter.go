@@ -86,6 +86,11 @@ func NewConverter() *Converter {
 	}
 }
 
+// IsGoFile reports whether path is a Go source file this frontend lowers.
+// Exported so internal/scan's language detection and dispatch share ONE
+// predicate with the frontend instead of drifting copies.
+func IsGoFile(path string) bool { return strings.HasSuffix(path, ".go") }
+
 // fnString returns f.String(), memoized per converter and backed by the parent
 // converter's already-built names on a worker (baseNames, read-only).
 func (c *Converter) fnString(f *ssa.Function) string {

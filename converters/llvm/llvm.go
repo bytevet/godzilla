@@ -68,7 +68,7 @@ func (fl *funcLowerer) lower(fn llvm.Value) *ir.Function {
 	}
 	for i := 0; i < fn.ParamsCount(); i++ {
 		p := fn.Param(i)
-		out.Params = append(out.Params, &ir.Value{Kind: &ir.Value_RegName{RegName: fl.reg(p)}})
+		out.Params = append(out.Params, ssabuild.Reg(fl.reg(p)))
 	}
 
 	// The command line is attacker-controlled input. For `main(int argc, char
@@ -253,7 +253,7 @@ func (fl *funcLowerer) val(v llvm.Value) *ir.Value {
 	if v.IsConstant() {
 		return ssabuild.Str("")
 	}
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: fl.reg(v)}}
+	return ssabuild.Reg(fl.reg(v))
 }
 
 func (fl *funcLowerer) reg(v llvm.Value) string {

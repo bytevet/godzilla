@@ -13,6 +13,6 @@ func FuzzMatchGlob(f *testing.F) {
 	f.Add("**", "anything")
 	f.Add("py:*.execute#0", "py:cur.execute")
 	f.Fuzz(func(t *testing.T, pattern, s string) {
-		_ = MatchGlob(pattern, s)
+		_ = matchGlob(pattern, s)
 	})
 }

@@ -3,6 +3,7 @@ package analysis
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,8 +36,10 @@ func TestScanSecretsInFiles_FindsConfigSecrets(t *testing.T) {
 	// source-literal secrets via gIR; scanning it again would double-report).
 	write("main.go", "package main\nconst k = \""+awsKey+"\"\n")
 
-	// nil isSource: this test exercises the static sourceFileExts fallback.
-	findings := ScanSecretsInFiles(dir, builtinRuleSet(t), nil)
+	// isSource stands in for internal/scan's frontend-table predicate (required
+	// by contract): it recognizes the one source file this test writes.
+	isSource := func(p string) bool { return strings.HasSuffix(p, ".go") }
+	findings := ScanSecretsInFiles(dir, builtinRuleSet(t), isSource)
 	got := map[string]int{}
 	for _, f := range findings {
 		got[f.RuleID]++

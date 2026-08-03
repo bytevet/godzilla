@@ -110,13 +110,20 @@ func TestInvalidSinkSpec(t *testing.T) {
 	}
 }
 
+// matchGlob is the tests' and fuzzer's uncached entry to the glob matcher:
+// production callers match through a Rule's lazily-compiled patterns or a
+// GlobSet, but the semantics tests want one pattern against one subject.
+func matchGlob(pattern, s string) bool {
+	return classifyGlob(pattern).match(s)
+}
+
 // TestMatchGlob_InvalidUTF8PatternDoesNotPanic guards the fuzz-found DoS: a
 // pattern with invalid UTF-8 bytes must not panic (it just never matches).
 func TestMatchGlob_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
-	if MatchGlob("\x80", "x") {
+	if matchGlob("\x80", "x") {
 		t.Error("an uncompilable pattern must match nothing, not panic")
 	}
-	if MatchGlob("go:*\xff", "go:anything") {
+	if matchGlob("go:*\xff", "go:anything") {
 		t.Error("invalid-byte pattern should not match")
 	}
 }
@@ -154,8 +161,8 @@ func TestMatchGlob_Semantics(t *testing.T) {
 		{"", "x", false},
 	}
 	for _, c := range cases {
-		if got := MatchGlob(c.pattern, c.s); got != c.want {
-			t.Errorf("MatchGlob(%q, %q) = %v, want %v", c.pattern, c.s, got, c.want)
+		if got := matchGlob(c.pattern, c.s); got != c.want {
+			t.Errorf("matchGlob(%q, %q) = %v, want %v", c.pattern, c.s, got, c.want)
 		}
 	}
 }
@@ -169,7 +176,7 @@ func BenchmarkMatchGlob(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for _, p := range pats {
 			for _, in := range ins {
-				_ = MatchGlob(p, in)
+				_ = matchGlob(p, in)
 			}
 		}
 	}

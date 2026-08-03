@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	cpp_converter "godzilla/converters/cpp"
@@ -229,18 +228,31 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	var findings []analysis.Finding
 	targetPkgs := map[string]bool{}
 	for _, p := range paths {
-		findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 		info, err := os.Stat(p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
 			continue
 		}
 		if !info.IsDir() {
+			// A single file gets its secrets scan up front (source or not); only a
+			// path some frontend handles goes on to conversion.
+			findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 			if _, conv := fileFrontend(p); conv == nil {
 				continue // non-source file: secrets already scanned, no dataflow
 			}
 		}
-		prog, cov, tp, _, err := convert(p)
+		prog, cov, tp, inv, err := convert(p)
+		if info.IsDir() {
+			// A directory's secrets pass feeds off convert's single pruned walk
+			// (the shared inventory) instead of re-walking the same tree. When
+			// convert failed before yielding an inventory (e.g. a directory with no
+			// analyzable source), the config files it holds still get scanned.
+			if inv != nil {
+				findings = append(findings, analysis.ScanSecretsInPaths(inv.Files(), rs, isSourcePath)...)
+			} else {
+				findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", p, err)
 			continue
@@ -373,13 +385,13 @@ type frontend struct {
 // uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
 var languageFrontends = []frontend{
 	{name: "go", convert: goConvert, lowersDeps: true,
-		matches: func(p string) bool { return strings.HasSuffix(p, ".go") }},
+		matches: go_converter.IsGoFile},
 	{name: "python", convert: noDepConvert(py_converter.NewConverter),
 		matches: py_converter.IsPythonFile},
 	{name: "javascript", convert: noDepConvert(js_converter.NewConverter),
 		matches: js_converter.IsJSFamily},
 	{name: "java", convert: noDepConvert(java_converter.NewConverter),
-		matches: func(p string) bool { return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".class") }},
+		matches: java_converter.IsJavaFile},
 	{name: "cpp", convert: noDepConvert(cpp_converter.NewConverter),
 		matches: cpp_converter.IsCppFile},
 	{name: "rust", convert: noDepConvert(rust_converter.NewConverter),

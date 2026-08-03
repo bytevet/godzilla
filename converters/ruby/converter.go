@@ -39,52 +39,32 @@ import (
 //go:embed rbdump.rb
 var rbDumpScript []byte
 
-// Converter lowers Ruby source files/directories into gIR.
+// Converter lowers Ruby source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over Ruby's
+// batch hooks (see batch). Requires `ruby` on PATH.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[rbFileResult]
 }
 
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
-
 // NewConverter returns a ready-to-use Ruby-to-gIR converter.
-func NewConverter() *Converter { return &Converter{} }
+func NewConverter() *Converter {
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
+}
 
 // IsRubyFile reports whether path is a Ruby source file this frontend lowers.
 // Exported so internal/scan's language detection and this frontend's own file
 // selection share ONE predicate instead of drifting copies.
 func IsRubyFile(path string) bool { return strings.HasSuffix(path, ".rb") }
 
-// ConvertFile lowers the Ruby source at path into gIR. path may be a single
-// .rb file or a directory (all *.rb files under it are converted recursively,
-// one gIR Module per file). Requires `ruby` on PATH.
-//
-// The single-file/directory-batch skeleton is the shared frontend.Batch driver;
-// what is Ruby's alone: parsing is chunked — one `ruby rbdump.rb --batch
-// <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
-// not per file.
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
-}
-
-// ConvertInventory lowers the Ruby files of a pre-walked scan-root inventory
-// (see walkignore.Inventory), skipping the directory walk ConvertFile's
-// directory mode would repeat.
-func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.ConvertInventory(inv)
-	c.skipped += skipped
-	return prog, err
-}
-
 // batch builds the shared frontend.Batch driver with Ruby's hooks. A fresh
 // value per conversion: the Setup-resolved interpreter/helper paths are carried
 // in closure state private to this batch.
+//
+// The single-file/directory-batch skeleton is the shared driver; what is
+// Ruby's alone: parsing is chunked — one `ruby rbdump.rb --batch <chunk...>`
+// invocation per chunk, so interpreter startup is paid per chunk, not per file.
 func (c *Converter) batch() *frontend.Batch[rbFileResult] {
 	var rubyExe, scriptPath string
 	return &frontend.Batch[rbFileResult]{

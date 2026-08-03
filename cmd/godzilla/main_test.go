@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"godzilla/internal/testsupport"
 )
 
 // runCLI builds and runs the godzilla CLI (via `go run .`) with args, returning
@@ -32,9 +34,7 @@ func runCLI(t *testing.T, args ...string) (int, string) {
 // (the gate cannot certify code it never analyzed), while the same scan without
 // -strict must not fail closed. Requires python3 (the fixture is broken Python).
 func TestStrict_FailsClosedOnCoverageFailure(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not on PATH; skipping strict-mode CLI test")
-	}
+	testsupport.RequireTool(t, "python3")
 	const dir = "../../internal/scan/testdata/broken_py"
 
 	// Without -strict: fail-open (no findings, clean exit), but coverage is shown.

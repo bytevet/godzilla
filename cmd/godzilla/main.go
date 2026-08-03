@@ -398,12 +398,7 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
 func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
-	slices.SortStableFunc(findings, func(a, b analysis.Finding) int {
-		if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
-			return c // worst severity first
-		}
-		return cmp.Compare(analysis.PosString(a.SinkPos), analysis.PosString(b.SinkPos))
-	})
+	slices.SortStableFunc(findings, analysis.CompareFindings)
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
 	// retained for auditability but do not count toward the gate: partition them

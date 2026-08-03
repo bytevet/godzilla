@@ -52,19 +52,18 @@ import (
 //go:embed pyast.py
 var pyASTScript []byte
 
-// Converter lowers Python source files/directories into gIR.
+// Converter lowers Python source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over Python's
+// batch hooks (see batch). Requires python3 on PATH.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[pyFileResult]
 }
-
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
 
 // NewConverter returns a ready-to-use Python-to-gIR converter.
 func NewConverter() *Converter {
-	return &Converter{}
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
 }
 
 // IsPythonFile reports whether path is a Python source file this frontend
@@ -72,36 +71,16 @@ func NewConverter() *Converter {
 // own file selection share ONE predicate instead of drifting copies.
 func IsPythonFile(path string) bool { return strings.HasSuffix(path, ".py") }
 
-// ConvertFile lowers the Python source at path into gIR. path may be either a
-// single .py file or a directory (all *.py files under it are converted
-// recursively, one gIR Module per file). Requires python3 on PATH.
+// batch builds the shared frontend.Batch driver with Python's hooks. A fresh
+// value per conversion: the Setup-resolved interpreter/helper paths are carried
+// in closure state private to this batch.
 //
-// The single-file/directory-batch skeleton is the shared frontend.Batch driver;
-// what is Python's alone: parsing is batched — one `python3 pyast.py --batch
+// The single-file/directory-batch skeleton is the shared driver; what is
+// Python's alone: parsing is batched — one `python3 pyast.py --batch
 // <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
 // not per file — lowering waits for every file to parse so the handler-class
 // set spans all files (lowerAll), and a directory scan gets cross-module call
 // resolution (resolveCrossModuleCalls).
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
-}
-
-// ConvertInventory lowers the Python files of a pre-walked scan-root inventory
-// (see walkignore.Inventory), skipping the directory walk ConvertFile's
-// directory mode would repeat.
-func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, error) {
-	b := c.batch()
-	prog, skipped, err := b.ConvertInventory(inv)
-	c.skipped += skipped
-	return prog, err
-}
-
-// batch builds the shared frontend.Batch driver with Python's hooks. A fresh
-// value per conversion: the Setup-resolved interpreter/helper paths are carried
-// in closure state private to this batch.
 func (c *Converter) batch() *frontend.Batch[pyFileResult] {
 	var pythonExe, scriptPath string
 	return &frontend.Batch[pyFileResult]{

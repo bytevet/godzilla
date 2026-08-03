@@ -308,3 +308,85 @@ func TestParseCargoTargets(t *testing.T) {
 		t.Errorf("invalid metadata should parse to nil")
 	}
 }
+
+// TestRustCommandStep_Anchoring covers the receiver-aliasing predicate: the
+// real std::process::Command builder steps match in every path form MIR
+// prints, while a user type merely named like Command — which the old
+// strings.HasSuffix("Command::arg") match wrongly tripped on — does not.
+func TestRustCommandStep_Anchoring(t *testing.T) {
+	for _, c := range []struct {
+		norm string
+		want bool
+	}{
+		{"Command::arg", true},
+		{"process::Command::args", true},
+		{"std::process::Command::env", true},
+		{"std::process::Command::current_dir", true},
+		{"MyCommand::arg", false},   // user type; old suffix match aliased it
+		{"my::Command::arg", false}, // user Command in a user module
+		{"Command::output", false},  // consumes the builder, not a step
+		{"Command::new", false},     // constructor, no receiver to alias
+	} {
+		if got := rustCommandStep(c.norm); got != c.want {
+			t.Errorf("rustCommandStep(%q) = %v, want %v", c.norm, got, c.want)
+		}
+	}
+}
+
+// TestLowerMIR_UserCommandLookalikeNotAliased proves (hermetically, no rustc)
+// the false-aliasing fix end to end: a call on a USER type with a Command-like
+// method name keeps its own result — the next call sees the fresh call
+// register — while a real std::process::Command step still aliases its result
+// to the receiver so the program string resolves at the sink.
+func TestLowerMIR_UserCommandLookalikeNotAliased(t *testing.T) {
+	lower := func(callee string) (argCall *ir.CallCommon, argCallReg string, sinkArg *ir.Value) {
+		mir := "fn f(_1: T) -> () {\n" +
+			"    bb0: {\n" +
+			"        _2 = " + callee + "(move _1, const \"x\") -> [return: bb1, unwind continue];\n" +
+			"    }\n" +
+			"    bb1: {\n" +
+			"        _0 = sink(move _2) -> [return: bb2, unwind continue];\n" +
+			"    }\n" +
+			"}\n"
+		prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "f.rs")}}
+		for _, fn := range irwalk.Funcs(prog) {
+			for inst := range irwalk.Instrs(fn) {
+				cc := inst.GetCall()
+				if cc == nil {
+					continue
+				}
+				switch cc.GetCallee() {
+				case "rust:" + callee:
+					argCall, argCallReg = cc, inst.Name
+				case "rust:sink":
+					if len(cc.Args) > 0 {
+						sinkArg = cc.Args[0]
+					}
+				}
+			}
+		}
+		return argCall, argCallReg, sinkArg
+	}
+
+	// User lookalike: _2 must stay bound to MyCommand::arg's own result.
+	argCall, argCallReg, sinkArg := lower("MyCommand::arg")
+	if argCall == nil || sinkArg == nil {
+		t.Fatalf("MyCommand chain did not lower to the two expected calls")
+	}
+	if got := sinkArg.GetRegName(); got != argCallReg {
+		t.Errorf("sink arg = %q, want the MyCommand::arg call result %q (user lookalike must NOT be receiver-aliased)", got, argCallReg)
+	}
+
+	// Real std builder step: _2 must alias the receiver (Command::new's chain),
+	// i.e. the sink sees the arg call's own first operand, not its result.
+	argCall, argCallReg, sinkArg = lower("Command::arg")
+	if argCall == nil || sinkArg == nil {
+		t.Fatalf("Command chain did not lower to the two expected calls")
+	}
+	if got := sinkArg.GetRegName(); got != argCall.Args[0].GetRegName() {
+		t.Errorf("sink arg = %q, want the receiver %q (std Command step must alias its result to the receiver)", got, argCall.Args[0].GetRegName())
+	}
+	if got := sinkArg.GetRegName(); got == argCallReg {
+		t.Errorf("sink arg = %q, the call's own result — std Command step lost its receiver aliasing", got)
+	}
+}

@@ -36,16 +36,19 @@ import (
 	ir "godzilla/pkg/ir/v1"
 )
 
+// Converter lowers Rust source files/directories into gIR: the shared
+// frontend.Driver surface (ConvertFile/ConvertInventory/Skipped) over Rust's
+// batch hooks (see batch), with a cargo pre-step wrapped around both entry
+// points for Cargo projects.
 type Converter struct {
-	skipped int // files this run could not lower; see Skipped
+	frontend.Driver[rsFileResult]
 }
 
-// Skipped reports how many source files this converter could not lower. The scan
-// layer surfaces it per language, so a run that dropped most of a project is
-// visible instead of reading as clean coverage (see scan.LangCoverage.Skipped).
-func (c *Converter) Skipped() int { return c.skipped }
-
-func NewConverter() *Converter { return &Converter{} }
+func NewConverter() *Converter {
+	c := &Converter{}
+	c.NewBatch = c.batch
+	return c
+}
 
 // IsRustFile reports whether path is a Rust source file this frontend lowers.
 // Exported so internal/scan's language detection and this frontend's own file
@@ -55,17 +58,14 @@ func IsRustFile(path string) bool { return strings.EqualFold(filepath.Ext(path),
 // ConvertFile lowers a single .rs file, a directory of standalone .rs files, or
 // a Cargo project. A directory with a Cargo.toml at its root is built with cargo
 // (so its dependency crates — a web framework, etc. — resolve); otherwise each
-// .rs file is compiled standalone with rustc.
+// .rs file is compiled standalone with rustc via the shared batch driver.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		if prog, handled, err := tryCargo(path); handled {
 			return prog, err
 		}
 	}
-	b := c.batch()
-	prog, skipped, err := b.Convert(path)
-	c.skipped += skipped
-	return prog, err
+	return c.Driver.ConvertFile(path)
 }
 
 // ConvertInventory lowers the Rust files of a pre-walked scan-root inventory
@@ -77,10 +77,7 @@ func (c *Converter) ConvertInventory(inv *walkignore.Inventory) (*ir.Program, er
 	if prog, handled, err := tryCargo(inv.Root()); handled {
 		return prog, err
 	}
-	b := c.batch()
-	prog, skipped, err := b.ConvertInventory(inv)
-	c.skipped += skipped
-	return prog, err
+	return c.Driver.ConvertInventory(inv)
 }
 
 // tryCargo takes the cargo build path for a directory holding a Cargo.toml,

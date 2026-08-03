@@ -41,7 +41,11 @@ func buildGuardIndex(fn *ir.Function, rule *rules.Rule, defs map[string]*ir.Inst
 	if !rule.HasValidators() || len(fn.Blocks) == 0 {
 		return nil
 	}
-	gi := &guardIndex{dom: computeDominators(fn)}
+	// Scan for validator-controlled IFs FIRST: most functions have none even
+	// under a validator-declaring rule, and the dominator computation is the
+	// expensive part (O(blocks²) set initialization alone), so it runs only
+	// once a guard is actually found.
+	gi := &guardIndex{}
 
 	for _, blk := range fn.Blocks {
 		if blk == nil {
@@ -76,6 +80,7 @@ func buildGuardIndex(fn *ir.Function, rule *rules.Rule, defs map[string]*ir.Inst
 	if len(gi.guards) == 0 {
 		return nil
 	}
+	gi.dom = computeDominators(fn)
 	return gi
 }
 

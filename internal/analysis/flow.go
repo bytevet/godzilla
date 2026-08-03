@@ -18,6 +18,51 @@ func statesEqual(a, b taintState) bool {
 	return maps.Equal(a, b)
 }
 
+// fnCFG is the multi-block flow-sensitive driver's structural inputs: the RPO
+// visit order plus the index->block and predecessor lookups and the entry
+// block's index. Purely structural (rule-independent), so it lives in the
+// per-function memo (fnIndex) and is built once per function per scan —
+// funcAnalysis.run used to rebuild all four per (function × rule × worklist
+// visit). nil for a linear (≤1 non-nil block) function, whose single-pass fast
+// path never consults it.
+type fnCFG struct {
+	rpo        []int32
+	idxToBlock map[int32]*ir.BasicBlock
+	preds      map[int32][]int32
+	entry      int32
+}
+
+// buildFnCFG assembles fn's fnCFG, or nil for a linear function (at most one
+// non-nil block) — the same predicate funcAnalysis.run uses for its fast path.
+func buildFnCFG(fn *ir.Function) *fnCFG {
+	nBlocks := 0
+	for _, blk := range fn.Blocks {
+		if blk != nil {
+			nBlocks++
+		}
+	}
+	if nBlocks <= 1 {
+		return nil
+	}
+	cfg := &fnCFG{
+		rpo:        reversePostOrder(fn),
+		idxToBlock: make(map[int32]*ir.BasicBlock, nBlocks),
+		preds:      make(map[int32][]int32, nBlocks),
+		entry:      -1,
+	}
+	for _, blk := range fn.Blocks {
+		if blk == nil {
+			continue
+		}
+		cfg.idxToBlock[blk.GetIndex()] = blk
+		cfg.preds[blk.GetIndex()] = blk.GetPreds()
+	}
+	if len(fn.Blocks) > 0 && fn.Blocks[0] != nil {
+		cfg.entry = fn.Blocks[0].GetIndex()
+	}
+	return cfg
+}
+
 // reversePostOrder returns fn's block indices in reverse post-order from the
 // entry block (fn.Blocks[0]) over the successor edges, followed by any blocks
 // unreachable from entry (so none are dropped). RPO visits a block before its

@@ -25,6 +25,13 @@ func convertSQLInjectionSampleForCallGraph(t *testing.T) *ir.Program {
 	return prog
 }
 
+// buildCallGraphForTest is the tests' convenience path onto buildCallGraph,
+// assembling the shared indexes the engine passes in production (Analyze).
+func buildCallGraphForTest(prog *ir.Program) *CallGraph {
+	byKey, _ := buildFuncIndex(prog)
+	return buildCallGraph(byKey, buildMethodImpls(byKey))
+}
+
 // findFuncByObjectName returns the first function in g.Funcs whose
 // ObjectName matches, or nil if none does.
 func findFuncByObjectName(g *CallGraph, objectName string) *ir.Function {
@@ -38,7 +45,7 @@ func findFuncByObjectName(g *CallGraph, objectName string) *ir.Function {
 
 func TestBuildCallGraph_SQLInjectionSample(t *testing.T) {
 	prog := convertSQLInjectionSampleForCallGraph(t)
-	g := BuildCallGraph(prog)
+	g := buildCallGraphForTest(prog)
 
 	if len(g.Funcs) == 0 {
 		t.Fatal("expected a non-empty Funcs map")
@@ -89,7 +96,7 @@ func TestCallGraph_CHA_DynamicDispatch(t *testing.T) {
 		Functions: []*ir.Function{caller, implA, implB, unrelated},
 	}}}
 
-	g := BuildCallGraph(prog)
+	g := buildCallGraphForTest(prog)
 	edges := g.Edges[caller.CanonicalName]
 	if len(edges) != 2 || edges[0] != implA.CanonicalName || edges[1] != implB.CanonicalName {
 		t.Fatalf("expected CHA edges to both Close implementations, got %v", edges)

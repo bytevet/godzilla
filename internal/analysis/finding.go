@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,12 @@ const (
 	ConfidenceLow    Confidence = "low"
 )
 
+// Confidences lists every recognized confidence from most to least certain.
+// It is the single authority for confidence ordering: Rank derives from it,
+// and display surfaces (the HTML report) iterate it, so a new confidence
+// level shows up everywhere by being added here once.
+var Confidences = []Confidence{ConfidenceHigh, ConfidenceMedium, ConfidenceLow}
+
 // Rank returns a comparable ordering for a confidence (higher is more
 // certain): low=1, medium=2, high=3. Anything else — including a
 // differently-cased spelling — ranks 0, which consumers treat as
@@ -28,13 +35,10 @@ const (
 // positive and at/below its threshold. That is why ParseConfidence returns
 // only the canonical lowercase constants.
 func (c Confidence) Rank() int {
-	switch c {
-	case ConfidenceLow:
-		return 1
-	case ConfidenceMedium:
-		return 2
-	case ConfidenceHigh:
-		return 3
+	for i, known := range Confidences {
+		if c == known {
+			return len(Confidences) - i
+		}
 	}
 	return 0
 }
@@ -122,4 +126,37 @@ func PosString(p *ir.Position) string {
 		return "<unknown>"
 	}
 	return fmt.Sprintf("%s:%d:%d", p.GetFilename(), p.GetLine(), p.GetColumn())
+}
+
+// CompareFindings is THE display order for findings: worst severity first,
+// ties broken by sink location — filename, then line, then column, compared
+// NUMERICALLY (line 9 before line 10) — with unknown (nil) sink positions
+// last within their severity. The CLI's console listing and all three report
+// writers (HTML, JSON, SARIF) sort with this single comparator so their
+// output for the same scan always agrees. Suitable for slices.SortStableFunc.
+func CompareFindings(a, b Finding) int {
+	if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
+		return c // worst severity first
+	}
+	return comparePos(a.SinkPos, b.SinkPos)
+}
+
+// comparePos orders positions by filename, then line, then column, with nil
+// (unknown location) sorting after any known position.
+func comparePos(a, b *ir.Position) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return 1
+	case b == nil:
+		return -1
+	}
+	if c := cmp.Compare(a.GetFilename(), b.GetFilename()); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.GetLine(), b.GetLine()); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.GetColumn(), b.GetColumn())
 }

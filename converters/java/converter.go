@@ -48,6 +48,15 @@ type Converter struct {
 // NewConverter returns a Java frontend.
 func NewConverter() *Converter { return &Converter{} }
 
+// IsJavaFile reports whether path is an input this frontend lowers: a .java
+// source file or a compiled .class file (bytecode is the frontend's native
+// unit — see the package comment). Exported so internal/scan's language
+// detection and dispatch share ONE predicate with the frontend instead of
+// drifting copies.
+func IsJavaFile(path string) bool {
+	return strings.HasSuffix(path, ".java") || strings.HasSuffix(path, ".class")
+}
+
 // ConvertInventory lowers the Java under a pre-walked scan root (see
 // walkignore.Inventory). The JavaDump helper still receives the root directory
 // — its unit of work is a compilation, not a file list — but the .java source

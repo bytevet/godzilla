@@ -2,7 +2,6 @@ package scan
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -10,6 +9,7 @@ import (
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
 	"godzilla/internal/rules/loader"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -107,9 +107,7 @@ func TestScanFiles_DocsOnlyIsClean(t *testing.T) {
 // silently dropped so the scan looks clean. (Before the fix, Scan only warned
 // on stderr and returned success with no failure signal.)
 func TestScanCoverageFrontendFailure(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not on PATH; skipping frontend-failure coverage test")
-	}
+	testsupport.RequireTool(t, "python3")
 	rs, err := loader.Builtin()
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
