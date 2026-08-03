@@ -17,26 +17,28 @@ import (
 type CallGraph struct {
 	// Funcs indexes every function in the program by its CanonicalName
 	// (e.g. "go:net/http.HandleFunc" or
-	// "go:godzilla/test/go/sql_injection.main$1"). Functions with an empty
-	// CanonicalName cannot be addressed by callers (gIR always sets it for
-	// real converter output) and are skipped.
+	// "go:godzilla/test/go/sql_injection.main$1"). A function with an empty
+	// CanonicalName (gIR always sets it for real converter output) gets a
+	// unique "__local<N>" fallback key, so it is still analyzed
+	// intra-procedurally — this is the ONE name->function index, shared with
+	// Analyze (see buildFuncIndex).
 	Funcs map[string]*ir.Function
 
 	// Edges maps a caller's CanonicalName to a sorted, de-duplicated list
-	// of callee CanonicalNames. Every name appearing in Edges is guaranteed
-	// to be a key in Funcs -- calls we could not resolve to a known function
+	// of callee names. Every name appearing in Edges is guaranteed to be a
+	// key in Funcs -- calls we could not resolve to a known function
 	// (stdlib/external code that was never lowered to gIR, or a dynamic
 	// dispatch with no known implementation) are simply dropped, so Edges
-	// never dangles.
+	// never dangles. A "__local<N>"-keyed function is not addressable by
+	// callers, so it never appears as an Edges key.
 	Edges map[string][]string
 
 	// Callees is the set of DISTINCT callee names this program calls, including
-	// the unresolved ones Edges drops (unlowered stdlib, dynamic dispatch) and
-	// those in functions with no CanonicalName, which Funcs skips. It is collected
-	// here rather than by a separate walk because this pass already visits every
-	// instruction — the engine uses it to skip a rule whose sink globs match
-	// nothing the program calls, and a second walk to build it cost more on a
-	// dependency-heavy scan than the skipping saved.
+	// the unresolved ones Edges drops (unlowered stdlib, dynamic dispatch). It is
+	// collected here rather than by a separate walk because this pass already
+	// visits every instruction — the engine uses it to skip a rule whose sink
+	// globs match nothing the program calls, and a second walk to build it cost
+	// more on a dependency-heavy scan than the skipping saved.
 	Callees map[string]bool
 }
 
@@ -49,57 +51,43 @@ type CallGraph struct {
 //
 //   - Dynamic dispatch (IsInvoke, or MethodName set as a defensive fallback for
 //     IR that records a method call without the flag) resolves by Class
-//     Hierarchy Analysis: an edge to every known function whose bare name — its
-//     MethodName, else the tail of its CanonicalName after the final '.' —
-//     equals the call's method name. This over-approximates on purpose, linking
-//     types that share a method name without sharing an interface: for a
-//     caller-index primitive, never missing a real edge beats precision, and a
-//     points-to analysis is out of scope.
+//     Hierarchy Analysis over the same bare-method-name index the engine's
+//     INVOKE dispatch uses (buildMethodImpls): an edge to every known function
+//     whose Function.method_name equals the call's method name. This
+//     over-approximates on purpose, linking types that share a method name
+//     without sharing an interface: for a caller-index primitive, never missing
+//     a real edge beats precision, and a points-to analysis is out of scope.
 //
 // A call naming neither (an unresolved dynamic value) is dropped.
 func BuildCallGraph(prog *ir.Program) *CallGraph {
+	byKey, _ := buildFuncIndex(prog)
+	return buildCallGraph(byKey, buildMethodImpls(byKey))
+}
+
+// buildCallGraph builds the graph over a prebuilt function index
+// (buildFuncIndex) and CHA method index (buildMethodImpls). Analyze needs both
+// indexes anyway, so it passes its copies in here rather than letting the graph
+// rebuild them — one index, one policy, for both consumers.
+func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]string) *CallGraph {
 	g := &CallGraph{
-		Funcs:   map[string]*ir.Function{},
+		Funcs:   byKey,
 		Edges:   map[string][]string{},
 		Callees: map[string]bool{},
-	}
-	if prog == nil {
-		return g
-	}
-
-	var allFuncs []*ir.Function
-	for _, fn := range funcs(prog) {
-		// Collect callees for EVERY function, including the unnamed ones skipped
-		// below: they are still analyzed (Analyze keys them as __localN), so a sink
-		// inside one must keep its rule from being prefiltered away.
-		for inst := range instrs(fn) {
-			if inst.Call != nil {
-				g.Callees[inst.Call.GetCallee()] = true
-			}
-		}
-		if fn.CanonicalName == "" {
-			continue
-		}
-		g.Funcs[fn.CanonicalName] = fn
-		allFuncs = append(allFuncs, fn)
-	}
-
-	// CHA index: bare method/function name -> known functions exposing it.
-	methodIndex := map[string][]string{}
-	for _, fn := range allFuncs {
-		name := bareMethodName(fn)
-		if name == "" {
-			continue
-		}
-		methodIndex[name] = append(methodIndex[name], fn.CanonicalName)
 	}
 
 	edgeSets := map[string]map[string]bool{}
 
-	for _, fn := range allFuncs {
+	for _, fn := range byKey {
 		caller := fn.CanonicalName
 		for inst := range instrs(fn) {
 			if inst.Call == nil {
+				continue
+			}
+			// Collect callees for EVERY function, including the "__local<N>"-keyed
+			// ones excluded as callers below: they are still analyzed, so a sink
+			// inside one must keep its rule from being prefiltered away.
+			g.Callees[inst.Call.GetCallee()] = true
+			if caller == "" {
 				continue
 			}
 			switch inst.Op {
@@ -107,7 +95,7 @@ func BuildCallGraph(prog *ir.Program) *CallGraph {
 			default:
 				continue
 			}
-			resolveCall(g, caller, inst.Call, methodIndex, edgeSets)
+			resolveCall(g, caller, inst.Call, methodImpls, edgeSets)
 		}
 	}
 
@@ -125,14 +113,14 @@ func resolveCall(
 	g *CallGraph,
 	caller string,
 	call *ir.CallCommon,
-	methodIndex map[string][]string,
+	methodImpls map[string][]string,
 	edgeSets map[string]map[string]bool,
 ) {
 	// Dynamic dispatch is signalled by the converter (IsInvoke). A statically
 	// resolved method call also names its method (MethodName set) but resolves to
 	// a precise callee, so it is NOT dynamic — routing it through CHA would add
-	// spurious edges. (Method-bearing Functions still enter methodIndex via
-	// bareMethodName below, which is how a real INVOKE finds its implementers.)
+	// spurious edges. (Method-bearing Functions still enter methodImpls, which is
+	// how a real INVOKE finds its implementers.)
 	if call.GetIsInvoke() {
 		method := call.GetMethodName()
 		if method == "" {
@@ -141,7 +129,7 @@ func resolveCall(
 		if method == "" {
 			return
 		}
-		for _, t := range methodIndex[method] {
+		for _, t := range methodImpls[method] {
 			addToSet(edgeSets, caller, t)
 		}
 		return
@@ -156,19 +144,12 @@ func resolveCall(
 	}
 }
 
-// bareMethodName returns the name a call site would need to match to treat
-// fn as a CHA candidate: its MethodName if the frontend set one, otherwise
-// the trailing "<Name>" segment of its CanonicalName.
-func bareMethodName(fn *ir.Function) string {
-	if fn.GetMethodName() != "" {
-		return fn.GetMethodName()
-	}
-	return trailingName(fn.GetCanonicalName())
-}
-
 // trailingName returns the substring of name after the final '.', or name
-// itself if there is no '.'. Used to derive a bare method/function name
-// from a canonical name like "go:(*database/sql.DB).Query" -> "Query".
+// itself if there is no '.'. Used to derive a bare method name from an INVOKE
+// call site whose converter set a Callee like "go:(io.Closer).Close" but no
+// MethodName — a call-site fallback only. The FUNCTION side of the CHA index
+// never parses a canonical name: a frontend marks its methods with
+// Function.method_name, the engine contract (see buildMethodImpls).
 func trailingName(name string) string {
 	if idx := strings.LastIndexByte(name, '.'); idx >= 0 {
 		return name[idx+1:]

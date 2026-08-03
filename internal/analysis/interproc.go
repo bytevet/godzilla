@@ -25,28 +25,17 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		return findings
 	}
 
-	cg := BuildCallGraph(prog)
-
-	// Key every function by its canonical name (with a unique fallback for
-	// functions that lack one, so they are still analyzed intra-procedurally).
-	byKey := map[string]*ir.Function{}
-	modByKey := map[string]*ir.Module{}
-	local := 0
-	for mod, fn := range funcs(prog) {
-		key := fn.CanonicalName
-		if key == "" {
-			key = fmt.Sprintf("__local%d", local)
-			local++
-		}
-		byKey[key] = fn
-		modByKey[key] = mod
-	}
-
-	// Class-hierarchy index for interface dynamic dispatch, built ONCE and shared
-	// by every rule: a Go bare method name -> every lowered concrete method that
-	// implements it. It depends only on the immutable function index, so rebuilding
-	// it per rule (as before) wasted O(rules x functions) work.
+	// The name->function index (see buildFuncIndex) and the class-hierarchy
+	// method index for interface dynamic dispatch (a bare method name -> every
+	// lowered concrete method that implements it, see buildMethodImpls). Both
+	// depend only on the immutable program, so each is built ONCE and shared by
+	// every rule AND by the call graph — rebuilding either per rule (as before)
+	// wasted O(rules x functions) work, and the call graph keeping near-duplicate
+	// private copies invited the two policies to drift.
+	byKey, modByKey := buildFuncIndex(prog)
 	methodImpls := buildMethodImpls(byKey)
+
+	cg := buildCallGraph(byKey, methodImpls)
 
 	// These three indexes are likewise rule-independent (derived only from the
 	// immutable call graph / function set), so build them ONCE here and share them
@@ -543,12 +532,34 @@ func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
 	return has
 }
 
+// buildFuncIndex keys every function by its canonical name — with a unique
+// "__local<N>" fallback for functions that lack one, so they are still analyzed
+// intra-procedurally — and records each key's owning module. It is the ONE
+// place the __localN augmentation lives; Analyze and BuildCallGraph both
+// consume its function index (CallGraph.Funcs IS this index).
+func buildFuncIndex(prog *ir.Program) (map[string]*ir.Function, map[string]*ir.Module) {
+	byKey := map[string]*ir.Function{}
+	modByKey := map[string]*ir.Module{}
+	local := 0
+	for mod, fn := range funcs(prog) {
+		key := fn.CanonicalName
+		if key == "" {
+			key = fmt.Sprintf("__local%d", local)
+			local++
+		}
+		byKey[key] = fn
+		modByKey[key] = mod
+	}
+	return byKey, modByKey
+}
+
 // buildMethodImpls builds the class-hierarchy index for dynamic dispatch: a bare
 // method name -> every lowered concrete method exposing it. An INVOKE call names
 // a method abstractly (not a concrete function), so this lets taint flow into the
 // implementations. It over-approximates (any same-named method matches), which is
 // why such findings stay Medium confidence. It depends only on the immutable
-// function index, so it is built once and shared by every rule.
+// function index, so it is built once and shared by every rule and by the call
+// graph's CHA edge resolution (buildCallGraph) — one index, one policy.
 //
 // A frontend marks every method — Go, Python, … — with Function.method_name, so
 // the engine identifies methods and their bare name from IR alone, parsing no
