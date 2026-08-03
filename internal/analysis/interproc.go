@@ -820,7 +820,10 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	// call site (context-insensitive). An indirect call on that param binds only
 	// when the set is a singleton (see the resolution branch in handleCall), the
 	// same unambiguous-only discipline untyped_dispatch uses. Higher-order channel.
-	paramFuncVal := map[string]map[int]map[string]bool{}
+	// Each set is a small SORTED slice (near-always size 1), kept sorted on insert,
+	// so targetsOf reads it allocation-free instead of re-sorting map keys on every
+	// revisit of every indirect call site.
+	paramFuncVal := map[string]map[int][]string{}
 	// paramFuncOpaque[callee][param] is set when some call site passed an
 	// unresolvable value into that function-value slot, so its points-to set is
 	// incomplete and the singleton gate must not fire for it (see funcParamRef).
@@ -916,7 +919,27 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			guards = buildGuardIndex(fn, rule, fx.defs)
 			guardMemo[fn] = guards
 		}
-		res := analyzeFunc(fx, mod, fn, rule, guards, paramTaint[name], paramFuncVal[name], paramFuncOpaque[name], returnTaint, globalTaint, paramMemTaint, paramSinkTaint, byKey, methodImpls, indirectCallees, reported, funcReportable)
+		fa := funcAnalysis{
+			mod:             mod,
+			fn:              fn,
+			rule:            rule,
+			guards:          guards,
+			seeds:           paramTaint[name],
+			funcSeeds:       paramFuncVal[name],
+			opaqueSeeds:     paramFuncOpaque[name],
+			returnTaint:     returnTaint,
+			globalTaint:     globalTaint,
+			paramMemTaint:   paramMemTaint,
+			paramSinkTaint:  paramSinkTaint,
+			byKey:           byKey,
+			methodImpls:     methodImpls,
+			indirectCallees: indirectCallees,
+			reported:        reported,
+			funcReportable:  funcReportable,
+			defs:            fx.defs,
+			nonEscaping:     fx.nonEscaping,
+		}
+		res := fa.run()
 		findings = append(findings, res.findings...)
 
 		if res.returnsOrigin != nil && returnTaint[name] == nil {
@@ -948,16 +971,12 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		for _, fe := range res.funcEffects {
 			m := paramFuncVal[fe.callee]
 			if m == nil {
-				m = map[int]map[string]bool{}
+				m = map[int][]string{}
 				paramFuncVal[fe.callee] = m
 			}
 			set := m[fe.param]
-			if set == nil {
-				set = map[string]bool{}
-				m[fe.param] = set
-			}
-			if !set[fe.target] {
-				set[fe.target] = true
+			if at, found := slices.BinarySearch(set, fe.target); !found {
+				m[fe.param] = slices.Insert(set, at, fe.target)
 				enqueue(fe.callee)
 			}
 		}
@@ -1126,7 +1145,7 @@ func analyzeFunc(
 	rule *rules.Rule,
 	guards *guardIndex,
 	seeds paramPositions,
-	funcSeeds map[int]map[string]bool,
+	funcSeeds map[int][]string,
 	opaqueSeeds map[int]bool,
 	returnTaint map[string]*ir.Position,
 	globalTaint map[string]*ir.Position,
@@ -1198,12 +1217,14 @@ func analyzeFunc(
 	// a property of the value, not a per-block fact — so it is NOT
 	// reset by the flow-sensitive block driver. Seeded from the caller-supplied
 	// funcSeeds (which param holds which callback), so an indirect call on a
-	// parameter can be resolved to the function value the caller passed in.
-	funcVal := map[string]map[string]bool{}
+	// parameter can be resolved to the function value the caller passed in. Each
+	// set is the orchestrator's sorted slice, shared READ-ONLY: nothing here
+	// mutates it, and the orchestrator only merges between visits, so no clone.
+	funcVal := map[string][]string{}
 	for idx, targets := range funcSeeds {
 		if idx >= 0 && idx < len(fn.Params) {
 			if reg := fn.Params[idx].GetRegName(); reg != "" {
-				funcVal[reg] = maps.Clone(targets)
+				funcVal[reg] = targets
 			}
 		}
 	}
@@ -1227,7 +1248,8 @@ func analyzeFunc(
 	// resolved through the function-scoped funcVal points-to set (a callback
 	// received as a parameter). Anything else — an opaque/foreign callable we did
 	// not lower — yields nil, so an unresolvable value binds nothing (a false
-	// negative, never a false positive). Keys are sorted for determinism.
+	// negative, never a false positive). The funcVal sets are already sorted (see
+	// paramFuncVal), so a register lookup is allocation-free and deterministic.
 	targetsOf := func(v *ir.Value) []string {
 		if v == nil {
 			return nil
@@ -1239,9 +1261,7 @@ func analyzeFunc(
 			return nil
 		}
 		if reg := v.GetRegName(); reg != "" {
-			if set := funcVal[reg]; len(set) > 0 {
-				return slices.Sorted(maps.Keys(set))
-			}
+			return funcVal[reg]
 		}
 		return nil
 	}

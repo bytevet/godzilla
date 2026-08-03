@@ -1,7 +1,9 @@
 package py_converter
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -338,6 +340,64 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 		if instrs[0].Call == nil || instrs[0].Call.Callee != wantCallee {
 			t.Fatalf("callee = %v, want %q", instrs[0].Call, wantCallee)
 		}
+		// A parameter-rooted read must ALSO carry the parameter register in
+		// Call.Value and be tagged builtin.member_read (the cross-frontend
+		// contract, see internal/analysis memberReadIntrinsic), so incoming
+		// inter-procedural taint on `req` reaches the result instead of
+		// dropping at the synthetic source call.
+		if got := instrs[0].Call.GetValue().GetRegName(); got != "req" {
+			t.Fatalf("Call.Value = %v, want the req parameter register", instrs[0].Call.GetValue())
+		}
+		if instrs[0].Intrinsic != "builtin.member_read" {
+			t.Fatalf("Intrinsic = %q, want builtin.member_read", instrs[0].Intrinsic)
+		}
+	})
+
+	t.Run("direct parameter subscript is a member_read call", func(t *testing.T) {
+		fs := newFuncState("test.py")
+		fs.write("details", regValue("details"))
+		fs.paramRegs["details"] = true
+		// details["path"], where `details` is this function's own parameter
+		// (the CVE-2025-47782 motioneye helper shape). One synthetic CALL,
+		// base in Call.Value, tagged builtin.member_read -- no INDEX/BIN_OP_OR
+		// merge.
+		sub := subscriptNode(nameNode("details"), strConst("path"))
+
+		fs.lowerExpr(sub)
+
+		instrs := curInstrs(fs)
+		if len(instrs) != 1 || instrs[0].Op != ir.OpCode_OP_CODE_CALL {
+			t.Fatalf("expected a single OP_CODE_CALL instruction, got %+v", instrs)
+		}
+		if got := instrs[0].Call.GetCallee(); got != "py:details.__getitem__" {
+			t.Fatalf("callee = %q, want py:details.__getitem__", got)
+		}
+		if got := instrs[0].Call.GetValue().GetRegName(); got != "details" {
+			t.Fatalf("Call.Value = %v, want the details parameter register", instrs[0].Call.GetValue())
+		}
+		if instrs[0].Intrinsic != "builtin.member_read" {
+			t.Fatalf("Intrinsic = %q, want builtin.member_read", instrs[0].Intrinsic)
+		}
+	})
+
+	t.Run("global root keeps the plain FuncName form", func(t *testing.T) {
+		fs := newFuncState("test.py")
+		// request.args["cmd"] rooted at an unbound global: there is no
+		// register whose taint could be carried, so no member_read tag.
+		sub := subscriptNode(attrNode(nameNode("request"), "args"), strConst("cmd"))
+
+		fs.lowerExpr(sub)
+
+		instrs := curInstrs(fs)
+		if len(instrs) != 1 || instrs[0].Op != ir.OpCode_OP_CODE_CALL {
+			t.Fatalf("expected a single OP_CODE_CALL instruction, got %+v", instrs)
+		}
+		if instrs[0].Intrinsic != "" {
+			t.Fatalf("Intrinsic = %q, want none for a global-rooted read", instrs[0].Intrinsic)
+		}
+		if got := instrs[0].Call.GetValue().GetFuncName(); got != "py:request.args.__getitem__" {
+			t.Fatalf("Call.Value = %v, want the callee FuncName", instrs[0].Call.GetValue())
+		}
 	})
 
 	t.Run("local variable root stays OP_CODE_INDEX", func(t *testing.T) {
@@ -358,6 +418,56 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 			t.Fatalf("Op = %v, want OP_CODE_INDEX for a local-variable base", instrs[0].Op)
 		}
 	})
+}
+
+// TestSubscript_TaintedParamMemberRead proves the flow the builtin.member_read
+// tag exists for: a helper's PARAMETER arrives tainted from its caller and the
+// helper reads a member chain off it with a subscript (`d.args["k"]` --
+// param.attr[key], not a plain param[key]). Before the member_read lowering
+// this dropped the incoming taint: the synthetic __getitem__ source call only
+// INTRODUCES taint when its dotted name matches a source glob, and the old
+// INDEX+BIN_OP_OR fallback was gated to plain-Name parameter bases only.
+func TestSubscript_TaintedParamMemberRead(t *testing.T) {
+	requirePython3(t)
+
+	dir := t.TempDir()
+	src := `from flask import Flask, request
+import os
+
+app = Flask(__name__)
+
+def helper(d):
+    os.system(d.args["k"])
+
+@app.route("/run")
+def handler():
+    helper(request.args.get("x"))
+    return "ok"
+`
+	path := filepath.Join(dir, "app.py")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prog, err := NewConverter().ConvertFile(path)
+	if err != nil {
+		t.Fatalf("failed to convert file: %v", err)
+	}
+
+	rs := &rules.RuleSet{Rules: []rules.Rule{{
+		ID:        "PY-MEMBER-READ-TEST",
+		Languages: []string{"python"},
+		Severity:  rules.SeverityCritical,
+		CWE:       "CWE-78",
+		Message:   "tainted parameter member read reaches os.system",
+		Sources:   []string{"py:*request.args.get"},
+		Sinks:     rules.SinksOf("py:os.system"),
+	}}}
+
+	findings := analysis.NewEngine(rs).Analyze(prog)
+	if len(findings) < 1 {
+		t.Fatal("expected the tainted-param member read to reach os.system, got 0 findings")
+	}
 }
 
 // TestConvertFile_DirectorySkipsUnparseableFile proves that a directory
