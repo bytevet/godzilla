@@ -67,6 +67,7 @@ type lowerState struct {
 	counter  int
 	env      map[string]*ir.Value   // MIR local ("_5") -> current gIR value
 	agg      map[string][]*ir.Value // MIR local -> aggregate element values (for field folding)
+	intr     map[string]string      // gIR reg name -> builtin.* marker its defining call carries
 	instrs   []*ir.Instruction
 	firstPos *ir.Position
 }
@@ -99,7 +100,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 	if name == "" {
 		return nil
 	}
-	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}}
+	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{}}
 	fn := &ir.Function{
 		Name:          name,
 		ObjectName:    name,
@@ -492,12 +493,19 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	// intrinsic-propagator table — so taint still flows via the existing rules):
 	//   - format!  -> fmt::Arguments::new(<decoded template>, args): builtin.format
 	//   - identity string conversions that forward their operand's text unchanged
-	//     (to_string/as_str/into/clone/deref/format-result wrappers): builtin.identity
+	//     (std conversion traits / format-result wrappers): builtin.identity
+	// The matches are anchored to the std paths and MIR's trait-qualified call
+	// form — never a name suffix, which a user function merely named like a
+	// conversion (my_into, W::clone) could trip, wrongly proving a fixed host and
+	// suppressing a real SSRF finding.
 	switch {
-	case strings.Contains(canonical, "Arguments::new"):
+	case rustFormatArgsNew(callee):
 		inst.Intrinsic = "builtin.format"
-	case rustIdentityConv(canonical):
+	case rustIdentityConv(callee, norm) || st.forwardsFormatResult(norm, cc.Args):
 		inst.Intrinsic = "builtin.identity"
+	}
+	if inst.Intrinsic != "" {
+		st.intr[name] = inst.Intrinsic
 	}
 	st.instrs = append(st.instrs, inst)
 	st.env[dst] = regValue(name)
@@ -528,23 +536,135 @@ func rustCommandStep(callee string) bool {
 	return false
 }
 
+// rustFormatArgsNew reports whether a RAW MIR callee (generics still present)
+// is the fmt::Arguments constructor family `format!` lowers to, e.g.
+// `Arguments::<'_>::new::<15, 1>`. The raw text is matched — not the
+// normalized name — because the `::<'_>::` lifetime instantiation is exactly
+// what a plain user type named `Arguments` (printed `Arguments::new`, no
+// lifetime group) cannot produce.
+func rustFormatArgsNew(raw string) bool {
+	for _, p := range []string{"core::fmt::", "std::fmt::", "fmt::"} {
+		raw = strings.TrimPrefix(raw, p) // at most one applies
+	}
+	return strings.HasPrefix(raw, "Arguments::<'_>::new")
+}
+
+// rustIdentityTraitMethods maps a std conversion/formatting trait to its
+// forwarding method: a callee printed in MIR's qualified form
+// `<T as Trait<..>>::method` is an identity string conversion when
+// (trait, method) is listed here. Matching that trait-qualified RAW form —
+// never a suffix of the normalized name — is what keeps a plain user function
+// `my_into` or a user inherent method `W::into` (both printed without the
+// `<.. as ..>` qualifier) from acquiring identity semantics.
+var rustIdentityTraitMethods = map[string]string{
+	"ToString": "to_string",
+	"ToOwned":  "to_owned",
+	"AsRef":    "as_ref",
+	"Into":     "into",
+	"Clone":    "clone",
+	"Deref":    "deref",
+	"Borrow":   "borrow",
+}
+
+// rustIdentityCallees are exact normalized callees (generics stripped by
+// normalizeName, no `rust:` prefix) of inherent std methods that forward their
+// operand's text unchanged. Command::new(p) is included because the value's
+// text is the program it will run (see the aliasing note in emitCall).
+// String::from is listed for older toolchains that print it inherently; current
+// rustc prints the trait form `<String as From<&str>>::from`, which normalizes
+// to bare `from` and is deliberately NOT matched (From is implemented for far
+// more than string-identity conversions).
+var rustIdentityCallees = map[string]bool{
+	"String::as_str":              true,
+	"std::string::String::as_str": true,
+	"string::String::as_str":      true,
+	"String::from":                true,
+	"std::string::String::from":   true,
+	"Command::new":                true,
+	"std::process::Command::new":  true,
+	"process::Command::new":       true,
+}
+
 // rustIdentityConv reports whether a Rust callee is a string-valued conversion
-// that forwards its operand's text unchanged, so the SSRF prefix reconstruction
-// can look one hop deeper. Covers the `format!` result wrappers (format ->
-// must_use -> deref) and the common owned/borrowed conversions. The suffix set
-// mirrors the engine's former isPassthroughCallee so behavior is unchanged.
-func rustIdentityConv(callee string) bool {
-	for _, suffix := range []string{
-		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
-		"String::from", "borrow", "must_use", "format",
-		// Command::new(p): the value's text is the program it will run.
-		"Command::new",
-	} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
-		}
+// that forwards its operand's text unchanged, so the SSRF prefix
+// reconstruction can look one hop deeper (builtin.identity — see
+// internal/analysis/ssrf.go). raw is the MIR callee text before
+// generic-stripping (the trait-qualified form lives only there), norm its
+// normalizeName form (for the inherent-method table).
+func rustIdentityConv(raw, norm string) bool {
+	if rustIdentityCallees[norm] {
+		return true
+	}
+	trait, method, ok := traitCall(raw)
+	return ok && rustIdentityTraitMethods[trait] == method
+}
+
+// forwardsFormatResult reports whether a call is the `format!` expansion's
+// result plumbing — alloc's `format(Arguments) -> String` and hint::must_use —
+// which forwards its argument's text unchanged. These print as bare names
+// (`format(move _7)`), so the name alone cannot be anchored; instead the single
+// argument must itself be the result of an already-marker-tagged call (the
+// Arguments::new / format chain), which a user function merely named `format`
+// or `must_use` is never handed.
+func (st *lowerState) forwardsFormatResult(norm string, args []*ir.Value) bool {
+	switch norm {
+	case "format", "fmt::format", "alloc::fmt::format", "std::fmt::format",
+		"must_use", "hint::must_use", "core::hint::must_use", "std::hint::must_use":
+	default:
+		return false
+	}
+	if len(args) != 1 {
+		return false
+	}
+	switch st.intr[args[0].GetRegName()] {
+	case "builtin.format", "builtin.identity":
+		return true
 	}
 	return false
+}
+
+// traitCall parses MIR's qualified-call form `<Type as Trait<..>>::method`,
+// returning the trait path's LAST segment (generic args dropped) and the
+// method name. ok=false for any other callee shape — in particular a plain
+// path call, which is how every user free function and inherent method prints.
+func traitCall(raw string) (trait, method string, ok bool) {
+	if !strings.HasPrefix(raw, "<") {
+		return "", "", false
+	}
+	end := matchDelim(raw, 0, '<', '>')
+	if end < 0 || !strings.HasPrefix(raw[end+1:], "::") {
+		return "", "", false
+	}
+	qual := raw[1:end] // `Type as Trait<..>`
+	// Find the type/trait separator: the first ` as ` outside any nested <...>
+	// group (a nested qualified type like `<<T as A>::B as C>` keeps its inner
+	// ` as ` behind an angle bracket).
+	as, depth := -1, 0
+	for i := 0; i+4 <= len(qual) && as < 0; i++ {
+		switch qual[i] {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && qual[i:i+4] == " as " {
+			as = i
+		}
+	}
+	if as < 0 {
+		return "", "", false
+	}
+	trait = normalizeName(qual[as+4:])
+	if j := strings.LastIndex(trait, "::"); j >= 0 {
+		trait = trait[j+2:]
+	}
+	method = normalizeName(raw[end+3:])
+	if strings.Contains(method, "::") { // deeper assoc path, not a method call
+		return "", "", false
+	}
+	return trait, method, true
 }
 
 // setAgg records an aggregate construction: it both emits a builtin.aggregate
