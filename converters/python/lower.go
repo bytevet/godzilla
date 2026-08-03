@@ -341,34 +341,48 @@ func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 // (see authDecorators).
 func hasRouteDecorator(node astNode) bool {
 	decorators := node.strList("decorators")
-	bareVerb := false
 	for _, d := range decorators {
-		name, dotted := d, false
-		if i := strings.LastIndex(d, "."); i >= 0 {
-			name, dotted = d[i+1:], true
-		}
-		if bare, ok := routeDecorators[name]; ok {
-			if dotted || bare {
-				return true
-			}
-			bareVerb = true
+		name, dotted := simpleName(d)
+		if bare, ok := routeDecorators[name]; ok && (dotted || bare) {
+			return true
 		}
 	}
-	return bareVerb && hasAuthDecorator(decorators)
+	return hasBareVerb(decorators) && hasAuthDecorator(decorators)
 }
 
-// hasAuthDecorator reports whether any decorator is an access-control one,
-// matching a dotted decorator on its last component (`@api.permission`).
+// hasBareVerb and hasAuthDecorator are the two halves of the bare-verb rule, and
+// read as a pair: an HTTP verb written without a receiver, and the access-control
+// decorator that makes it a route rather than a helper.
+func hasBareVerb(decorators []string) bool {
+	return anyDecorator(decorators, func(name string, dotted bool) bool {
+		bare, ok := routeDecorators[name]
+		return ok && !dotted && !bare
+	})
+}
+
 func hasAuthDecorator(decorators []string) bool {
+	return anyDecorator(decorators, func(name string, _ bool) bool { return authDecorators[name] })
+}
+
+// anyDecorator reports whether any decorator satisfies pred, which receives the
+// decorator's simple name and whether it was written dotted.
+func anyDecorator(decorators []string, pred func(name string, dotted bool) bool) bool {
 	for _, d := range decorators {
-		if i := strings.LastIndex(d, "."); i >= 0 {
-			d = d[i+1:]
-		}
-		if authDecorators[d] {
+		if pred(simpleName(d)) {
 			return true
 		}
 	}
 	return false
+}
+
+// simpleName splits a dotted name into its last component and reports whether it
+// was dotted at all — the match rule for every decorator and base-class table in
+// this file, which key on the simple name.
+func simpleName(s string) (string, bool) {
+	if i := strings.LastIndex(s, "."); i >= 0 {
+		return s[i+1:], true
+	}
+	return s, false
 }
 
 // decoratedRouteParams filters a decorated route function's params down to the
@@ -444,10 +458,7 @@ func handlerClasses(classBases map[string][]string, targetBases map[string]bool)
 				continue
 			}
 			for _, b := range bases {
-				simple := b
-				if i := strings.LastIndex(b, "."); i >= 0 {
-					simple = b[i+1:]
-				}
+				simple, _ := simpleName(b)
 				if targetBases[simple] || result[simple] {
 					result[cls] = true
 					changed = true

@@ -30,13 +30,13 @@ func erbToRuby(src []byte) []byte {
 			break
 		}
 		open += i
-		close := bytes.Index(src[open:], []byte("%>"))
-		if close < 0 {
+		tagEnd := bytes.Index(src[open:], []byte("%>"))
+		if tagEnd < 0 {
 			break // unterminated tag: the rest stays blank
 		}
-		close += open
-		i = close + 2
-		copyERBTag(src, out, open, close)
+		tagEnd += open
+		i = tagEnd + 2
+		copyERBTag(src, out, open, tagEnd)
 	}
 	return out
 }
@@ -44,52 +44,49 @@ func erbToRuby(src []byte) []byte {
 // blankAll returns a copy of src with every byte replaced by a space except
 // newlines and carriage returns, which are kept so line numbers survive.
 func blankAll(src []byte) []byte {
-	out := make([]byte, len(src))
+	out := bytes.Repeat([]byte{' '}, len(src))
 	for i, b := range src {
 		if b == '\n' || b == '\r' {
 			out[i] = b
-			continue
 		}
-		out[i] = ' '
 	}
 	return out
 }
 
 // copyERBTag copies one ERB tag's Ruby into out. open points at "<%", close at
 // the "%>" that ends it. Everything outside the tag is already blank.
-func copyERBTag(src, out []byte, open, close int) {
+func copyERBTag(src, out []byte, open, tagEnd int) {
 	body := open + 2 // first byte after "<%"
-	end := close     // one past the last body byte
+	end := tagEnd    // one past the last body byte
+	if body > tagEnd {
+		return // degenerate `<%>` — nothing between the delimiters
+	}
+	if src[body] == '#' {
+		return // <%# comment %> — no Ruby, leave it blank
+	}
 
 	// The closing `%>` becomes a statement separator. Two tags on one line
 	// (`style="<%= a %>;<%= b %>"`) would otherwise strip to two juxtaposed
 	// expressions on that line, which is a syntax error and loses the whole
 	// template — 11% of decidim's views. `%>` is two bytes, so the separator
-	// always fits after the raw() form's closing paren.
+	// still fits after the raw() form's closing paren.
+	out[tagEnd] = ';'
 	switch {
-	case body < len(src) && src[body] == '#':
-		return // <%# comment %> — no Ruby, leave it blank
-	case body+1 < len(src) && src[body] == '=' && src[body+1] == '=':
-		// <%== expr %> — unescaped output. Rewrite the delimiters into a raw()
-		// call, which ruby-xss.yaml already treats as an escape-bypassing sink.
-		// A trailing modifier (`<%== x if y %>`) cannot sit inside the parens, so
-		// it stays a plain expression: losing one tag's sink beats a syntax error
-		// losing the whole template.
+	case src[body] == '=' && src[body+1] == '=':
+		// <%== expr %> — unescaped output. A trailing modifier
+		// (`<%== x if y %>`) cannot sit inside raw()'s parens, so it stays a
+		// plain expression: losing one tag's sink beats a syntax error losing
+		// the whole template.
 		body += 2
-		if hasTrailingModifier(src[body:close]) {
-			out[close] = ';'
-			break
+		if !hasTrailingModifier(src[body:tagEnd]) {
+			copy(out[open:], []byte("raw("))
+			out[tagEnd], out[tagEnd+1] = ')', ';'
 		}
-		copy(out[open:], []byte("raw("))
-		out[close], out[close+1] = ')', ';'
-	case body < len(src) && src[body] == '=':
+	case src[body] == '=':
 		body++ // <%= expr %> — auto-escaped by Rails, emitted as a plain expression
-		out[close] = ';'
-	default:
-		out[close] = ';'
 	}
 	// `<%-` and `-%>` are whitespace-trim variants; the dashes are not Ruby.
-	if body < len(src) && src[body] == '-' {
+	if body < tagEnd && src[body] == '-' {
 		body++
 	}
 	if end-1 > body && src[end-1] == '-' {
@@ -97,13 +94,8 @@ func copyERBTag(src, out []byte, open, close int) {
 	}
 	if end > body {
 		copy(out[body:end], src[body:end])
-		blankYield(out[body:end])
+		renameYield(out[body:end])
 	}
-	// A tag's Ruby must not run into the next line's code once the markup around
-	// it is gone: `<% if x %>` is a statement, and the following `<% end %>` has
-	// to parse as its own. Blanking leaves them on separate lines already, so
-	// nothing more is needed -- but a tag whose body itself spans lines keeps its
-	// newlines from the copy above.
 }
 
 // IsERBFile reports whether path is an ERB template. Rails names them
@@ -125,25 +117,31 @@ func hasTrailingModifier(body []byte) bool {
 	return false
 }
 
-// blankYield rewrites the `yield` keyword to an ordinary identifier IN PLACE.
+// renameYield rewrites the `yield` keyword to an ordinary identifier IN PLACE.
 // A layout's `<%= yield %>` is the single most common ERB construct, and a bare
 // yield outside a method body is a Ruby syntax error, so leaving it costs the
 // whole layout. `_erb_` is the same five bytes, parses as a call, and is neither
-// a source nor a sink, so it is inert to the analysis.
-func blankYield(b []byte) {
-	for i := 0; i+5 <= len(b); i++ {
-		if !bytes.Equal(b[i:i+5], []byte("yield")) {
-			continue
+// a source nor a sink, so it is inert to the analysis. Whole-word only, so
+// `yielded_value` is untouched.
+func renameYield(b []byte) {
+	for off := 0; ; {
+		i := bytes.Index(b[off:], yieldKeyword)
+		if i < 0 {
+			return
 		}
+		i += off
+		off = i + len(yieldKeyword)
 		if i > 0 && isIdentByte(b[i-1]) {
 			continue
 		}
-		if i+5 < len(b) && isIdentByte(b[i+5]) {
+		if off < len(b) && isIdentByte(b[off]) {
 			continue
 		}
-		copy(b[i:i+5], []byte("_erb_"))
+		copy(b[i:off], []byte("_erb_"))
 	}
 }
+
+var yieldKeyword = []byte("yield")
 
 // isIdentByte reports whether c can appear inside a Ruby identifier, so `yield`
 // is only rewritten as a whole word (never inside `yielded`).

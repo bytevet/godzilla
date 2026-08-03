@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"godzilla/converters/frontend"
@@ -116,6 +117,11 @@ func convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rb
 	defer cleanup()
 	proc.RunBatchScript("ruby_converter", "rbdump.rb", rubyExe, scriptPath, parse, func(i int, doc any, err error) {
 		if err != nil {
+			// RunBatchScript names the path it was handed, which for a template is
+			// the stripped copy. Report the .erb the user actually has.
+			if parse[i] != files[i] {
+				err = fmt.Errorf("%s (stripped from %s)", err, files[i])
+			}
 			out[i].err = err
 			return
 		}
@@ -129,7 +135,7 @@ func convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rb
 // original path, so it fails as one file rather than taking the chunk down.
 func materializeERB(files []string, out []rbFileResult) ([]string, func()) {
 	var dir string
-	parse := files
+	parse := slices.Clone(files)
 	for i, f := range files {
 		if !IsERBFile(f) {
 			continue
@@ -139,12 +145,13 @@ func materializeERB(files []string, out []rbFileResult) ([]string, func()) {
 			out[i].err = fmt.Errorf("ruby_converter: reading %s: %w", f, err)
 			continue
 		}
+		// One temp dir per chunk, created only once a template is actually seen,
+		// so a pure-.rb scan makes no directory at all.
 		if dir == "" {
 			if dir, err = os.MkdirTemp("", "godzilla-erb-"); err != nil {
 				out[i].err = fmt.Errorf("ruby_converter: %w", err)
 				continue
 			}
-			parse = append([]string(nil), files...) // copy once, only if needed
 		}
 		tmp := filepath.Join(dir, fmt.Sprintf("%d.rb", i))
 		if err := os.WriteFile(tmp, erbToRuby(src), 0o600); err != nil {

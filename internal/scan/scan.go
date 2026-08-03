@@ -287,7 +287,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 	if !info.IsDir() {
 		lang, conv := fileFrontend(path)
 		if conv == nil {
-			return nil, nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb)", path)
+			return nil, nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb/.erb)", path)
 		}
 		prog, targetPkgs, skipped, err := conv(path, nil)
 		if err != nil {
