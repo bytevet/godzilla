@@ -1,0 +1,9 @@
+<%# A layout: bare `yield` is a syntax error outside a method, and two tags on
+    one line would strip to juxtaposed expressions. Both must survive, or the
+    whole template is lost. %>
+<%= yield %>
+<%= yield :head %>
+<div style="a:<%= params[:a] %>;b:<%== params[:b] %>">
+  <%== params[:c] if params[:d] %>
+  <p><%= yielded_value %></p>
+</div>
