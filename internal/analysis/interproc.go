@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -2025,6 +2026,13 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// type-bounded CHA over-approximation, so it fans out to every implementer.
 		impls := fa.idx.methodImpls[inst.Call.GetMethodName()]
 		if inst.Call.GetUntypedDispatch() {
+			// An ambiguous name is not always an unknown receiver: `h = C()` then
+			// `h.load(x)` names the class right there. Narrowing by it recovers the
+			// dispatch without the cross-object fan-out, and falls back to silence
+			// when the receiver is genuinely opaque.
+			if len(impls) > 1 {
+				impls = fa.receiverImpls(inst.Call, impls)
+			}
 			if len(impls) == 1 {
 				fa.seedInvokeArgs(inst.Call, impls[0])
 				fa.pullReturnTaint(inst, impls[0])
@@ -2036,6 +2044,62 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			}
 		}
 	}
+}
+
+// receiverImpls narrows an ambiguous untyped-dispatch INVOKE to the
+// implementations defined on the receiver's OWN class, when that class is named
+// by the receiver's construction in this same function (`h = C()` — and `with
+// C() as h`, which the frontends bind the same way).
+//
+// This is what separates "the name is ambiguous" from "the receiver is unknown".
+// A global-uniqueness test conflates them, and in real code the second is much
+// rarer than the first: a quarter of pyload's method call sites name a method
+// two or more classes define, so the taint stops at `h.load(...)` even though the
+// line above says exactly what `h` is.
+//
+// Returns nil when the receiver is not a locally-constructed value or its class
+// implements nothing by this name — the caller then dispatches nowhere, which is
+// the pre-existing conservative behavior for an opaque receiver.
+func (fa *funcAnalysis) receiverImpls(cc *ir.CallCommon, impls []string) []string {
+	def := fa.defs[cc.GetValue().GetRegName()]
+	ctor := def.GetCall()
+	// A constructor is a plain CALL. An INVOKE would be a method call whose
+	// return type we do not track, and an indirect call names no class at all.
+	if ctor == nil || ctor.GetIsInvoke() || ctor.GetCallee() == "" {
+		return nil
+	}
+	class := simpleTypeName(ctor.GetCallee())
+	var out []string
+	for _, impl := range impls {
+		if classOfMethodKey(impl) == class {
+			out = append(out, impl)
+		}
+	}
+	return out
+}
+
+// classOfMethodKey returns the class component of a method's canonical name --
+// "HTTPRequest" for "py:net.http_request.HTTPRequest.load". Compared by SIMPLE
+// name because a constructor's callee and its methods' keys are qualified by
+// different module paths (`py:http.http_request.HTTPRequest` vs
+// `py:http_request.HTTPRequest.load`), so only the class component is common.
+func classOfMethodKey(key string) string {
+	method := strings.LastIndexByte(key, '.')
+	if method <= 0 {
+		return ""
+	}
+	return simpleTypeName(key[:method])
+}
+
+// simpleTypeName strips both a module path and the `<lang>:` prefix, so an
+// unqualified constructor ("py:A") and a qualified method key's class component
+// ("py:min.A") reduce to the same "A". trailingName alone does not: it splits on
+// '.' only, and leaves "py:A" whole.
+func simpleTypeName(s string) string {
+	if i := strings.LastIndexAny(s, ".:"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
 }
 
 // handleMakeClosure flows taint through a builtin.make_closure intrinsic,
