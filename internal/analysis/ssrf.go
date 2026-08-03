@@ -53,8 +53,8 @@ const compareIntrinsic = "builtin.compare"
 //
 // It is a CROSS-FRONTEND contract, not a JS detail: any frontend that lowers a
 // member read as a synthetic call should set it rather than inventing another
-// mechanism (Python currently merges an extra INDEX through a BIN_OP_OR for the
-// same purpose — see converters/python/lower.go — and can retire onto this).
+// mechanism. JS (converters/javascript emitRootPropertyRead) and Python
+// (converters/python lowerSubscript) both emit it.
 const memberReadIntrinsic = "builtin.member_read"
 
 // kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
