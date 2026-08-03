@@ -12,15 +12,6 @@ import (
 // intra-procedural pass (ENG-2).
 type taintState = map[string]*ir.Position
 
-// cloneState returns a shallow copy of s (origin pointers are shared).
-func cloneState(s taintState) taintState {
-	c := make(taintState, len(s))
-	for k, v := range s {
-		c[k] = v
-	}
-	return c
-}
-
 // statesEqual reports whether two taint states are identical (same keys mapped
 // to the same origin pointers) — the block-dataflow fixpoint's stop condition.
 func statesEqual(a, b taintState) bool {

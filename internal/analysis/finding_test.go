@@ -23,7 +23,7 @@ func TestConfidenceRank(t *testing.T) {
 			t.Errorf("Confidence(%q).Rank() = %d, want %d", tt.c, got, tt.want)
 		}
 	}
-	if !(ConfidenceLow.Rank() < ConfidenceMedium.Rank() && ConfidenceMedium.Rank() < ConfidenceHigh.Rank()) {
+	if ConfidenceLow.Rank() >= ConfidenceMedium.Rank() || ConfidenceMedium.Rank() >= ConfidenceHigh.Rank() {
 		t.Error("confidence ranks are not strictly increasing low < medium < high")
 	}
 }
