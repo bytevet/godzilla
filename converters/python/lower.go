@@ -253,6 +253,18 @@ var (
 		"expose_api": true, // Flask-AppBuilder legacy alias
 		"action":     true, // Django REST Framework @action(detail=True) on a ViewSet
 	}
+	// authDecorators are access-control decorators. They are not routing markers
+	// on their own, but a bare HTTP verb sitting next to one is: an app with its
+	// own dispatch layer writes the route as `@permission(...)` + `@post`, never
+	// as `@app.post`. pyload's JSON API is 84 bare @get/@post with no dotted form
+	// anywhere, and 73 of them carry @permission -- so requiring the co-signal
+	// admits that whole dispatch style while a stray @post on some helper, which
+	// has no such neighbour, stays out.
+	authDecorators = map[string]bool{
+		"permission": true, "login_required": true, "requires_auth": true,
+		"authenticated": true, "require_auth": true, "auth_required": true,
+		"permission_required": true, "requires_authentication": true,
+	}
 	handlerMethodVerbs = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true, "head": true, "options": true}
 	handlerBaseClasses = map[string]bool{
 		"RequestHandler": true, // Tornado
@@ -325,13 +337,34 @@ func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 // hasRouteDecorator reports whether any decorator is a routing decorator. A
 // dotted decorator matches on its last component; a bare one matches only if
 // routeDecorators marks it as valid bare (see that map).
+// A bare HTTP verb additionally needs an access-control decorator alongside it
+// (see authDecorators).
 func hasRouteDecorator(node astNode) bool {
-	for _, d := range node.strList("decorators") {
+	decorators := node.strList("decorators")
+	bareVerb := false
+	for _, d := range decorators {
 		name, dotted := d, false
 		if i := strings.LastIndex(d, "."); i >= 0 {
 			name, dotted = d[i+1:], true
 		}
-		if bare, ok := routeDecorators[name]; ok && (dotted || bare) {
+		if bare, ok := routeDecorators[name]; ok {
+			if dotted || bare {
+				return true
+			}
+			bareVerb = true
+		}
+	}
+	return bareVerb && hasAuthDecorator(decorators)
+}
+
+// hasAuthDecorator reports whether any decorator is an access-control one,
+// matching a dotted decorator on its last component (`@api.permission`).
+func hasAuthDecorator(decorators []string) bool {
+	for _, d := range decorators {
+		if i := strings.LastIndex(d, "."); i >= 0 {
+			d = d[i+1:]
+		}
+		if authDecorators[d] {
 			return true
 		}
 	}
