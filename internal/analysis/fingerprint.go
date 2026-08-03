@@ -7,9 +7,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	ir "godzilla/pkg/ir/v1"
 )
+
+// fingerprintCwd memoizes os.Getwd for fingerprinting: the working directory
+// does not change during a scan, and fingerprintPath runs twice per finding on
+// every surface that fingerprints (baseline triage, HTML/JSON/SARIF reports).
+// Empty on Getwd failure, in which case absolute paths pass through unchanged
+// — exactly how a per-call Getwd failure degraded before.
+var fingerprintCwd = sync.OnceValue(func() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+})
 
 // Fingerprint returns a stable identifier for a finding, suitable for baseline
 // matching and diff-aware gating. It deliberately hashes only line-INDEPENDENT
@@ -46,7 +60,7 @@ func fingerprintPath(pos *ir.Position) string {
 	if name == "" || !filepath.IsAbs(name) {
 		return filepath.ToSlash(name)
 	}
-	if cwd, err := os.Getwd(); err == nil {
+	if cwd := fingerprintCwd(); cwd != "" {
 		if rel, err := filepath.Rel(cwd, name); err == nil && !strings.HasPrefix(rel, "..") {
 			return filepath.ToSlash(rel)
 		}

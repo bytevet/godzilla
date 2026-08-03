@@ -15,7 +15,6 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"slices"
 	"sort"
@@ -25,6 +24,7 @@ import (
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
+	"godzilla/internal/srclines"
 	ir "godzilla/pkg/ir/v1"
 
 	"html/template"
@@ -71,7 +71,7 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	// A per-call cache so a source file shared by many findings/steps is read
 	// off disk once. Kept call-scoped (not package-global) so a later scan or
 	// test never observes stale file contents.
-	cache := snippetCache{}
+	cache := srclines.Cache{}
 
 	// Positions are rendered relative to the common project root so the report
 	// shows "models/group.go:322" rather than an absolute scan path.
@@ -281,7 +281,7 @@ type flowStep struct {
 	Snippet  *codeSnippet
 }
 
-func newFindingView(cache snippetCache, root string, f analysis.Finding) findingView {
+func newFindingView(cache srclines.Cache, root string, f analysis.Finding) findingView {
 	flow, endpointsOnly := buildFlow(cache, root, f)
 	return findingView{
 		SeverityLabel:     strings.ToUpper(string(f.Severity)),
@@ -313,7 +313,7 @@ func newFindingView(cache snippetCache, root string, f analysis.Finding) finding
 // intra-procedural path (Finding.Steps), each step is a position along it;
 // otherwise it falls back to the source and sink endpoints and flags the flow
 // as endpoints-only.
-func buildFlow(cache snippetCache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
+func buildFlow(cache srclines.Cache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
 	// kinds[i] labels position i as source/sink/intermediate. The endpoints are
 	// expanded (Open) by default; intermediate steps stay collapsed.
 	var positions []*ir.Position
@@ -485,25 +485,6 @@ func confidenceClass(c analysis.Confidence) string {
 	}
 }
 
-// snippetCache memoizes source-file line reads across the many snippets a
-// single report renders. A nil entry records an unreadable file so we don't
-// retry it.
-type snippetCache map[string][]string
-
-func (c snippetCache) lines(filename string) ([]string, bool) {
-	if v, ok := c[filename]; ok {
-		return v, v != nil
-	}
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		c[filename] = nil
-		return nil, false
-	}
-	lines := strings.Split(string(data), "\n")
-	c[filename] = lines
-	return lines, true
-}
-
 // codeSnippet holds a small window of source lines around a finding position,
 // for best-effort inline display in the report.
 type codeSnippet struct {
@@ -551,7 +532,7 @@ func caretFor(line string, col int32) string {
 // line flagged for highlighting. It returns nil whenever the position is
 // missing/invalid or the file cannot be read — code context is a nice-to-have,
 // never a hard requirement.
-func buildSnippet(cache snippetCache, pos *ir.Position) *codeSnippet {
+func buildSnippet(cache srclines.Cache, pos *ir.Position) *codeSnippet {
 	if pos == nil {
 		return nil
 	}
@@ -561,7 +542,7 @@ func buildSnippet(cache snippetCache, pos *ir.Position) *codeSnippet {
 		return nil
 	}
 
-	allLines, ok := cache.lines(filename)
+	allLines, ok := cache.Lines(filename)
 	if !ok {
 		return nil
 	}

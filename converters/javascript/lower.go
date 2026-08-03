@@ -162,18 +162,6 @@ func (fs *funcState) write(name string, val *ir.Value) {
 	fs.assigned[name] = true
 }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func stringValue(s string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
-}
-
-func nilValue() *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
-}
-
 // calleeCommon builds a CallCommon naming callee both as its FuncName value and
 // its Callee (the syntactic name the engine matches against rule globs).
 func calleeCommon(callee string) *ir.CallCommon {
@@ -187,7 +175,7 @@ func calleeCommon(callee string) *ir.CallCommon {
 // order, and returns its result register. Used by lowerNew; a method call goes
 // through emitCallRecvInst directly so lowerCall can reach the instruction.
 func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	return regValue(fs.emitCallRecvInst(callee, nil, args, idx).Name)
+	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, idx).Name)
 }
 
 // emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
@@ -265,7 +253,7 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 	inst.Intrinsic = "js.unsupported"
 	inst.Comment = comment
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // moduleCtx bundles the file-scoped state every function lowered from one JS
@@ -348,7 +336,7 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 // but the pattern's own bindings are not modeled.
 func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 	bind := func(name string) {
-		v := regValue(name)
+		v := ssabuild.Reg(name)
 		fn.Params = append(fn.Params, v)
 		fs.write(name, v)
 		fs.paramRegs[name] = true
@@ -510,7 +498,7 @@ func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, id
 		inst.Intrinsic = "builtin.member_read"
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBody lowers a statement list, building a REAL CFG (blocks + preds/succs +
@@ -555,182 +543,85 @@ func (fs *funcState) lowerBody(stmts []ast.Statement) {
 	}
 }
 
-// lowerIf lowers `if (test) consequent [else alternate]` into a REAL CFG diamond
-// via the Builder: the condition is lowered in the current block, which ends in
-// an OP_CODE_IF to a fresh then-block and else-block; each arm is lowered in its
-// own block and jumps to a fresh merge block; the merge is sealed once both
-// arm-ends are its known predecessors, so any variable rebound on one or both
-// arms reconciles automatically via an on-demand ReadVariable PHI (retiring the
-// manual env-merge path — including the ubiquitous "default if empty" idiom
-// `if (!x) x = "d"`, whose pre-branch tainted value is now kept by the merge
-// PHI). An `else if` is an IfStatement in the parent's Alternate, so
-// an arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
+// lowerIf lowers `if (test) consequent [else alternate]` into a REAL CFG
+// diamond via the Builder's IfDiamond scaffold, so any variable rebound on one
+// or both arms reconciles automatically via an on-demand ReadVariable PHI
+// (retiring the manual env-merge path — including the ubiquitous "default if
+// empty" idiom `if (!x) x = "d"`, whose pre-branch tainted value is now kept
+// by the merge PHI). An `else if` is an IfStatement in the parent's Alternate,
+// so an arbitrarily long chain becomes nested diamonds via the recursive
+// lowerBody.
 func (fs *funcState) lowerIf(v *ast.IfStatement) {
 	cond := fs.lowerExpr(v.Test) // condition (also lowers any embedded source/sink)
-	thenB := fs.b.NewBlock()
-	elseB := fs.b.NewBlock()
-	merge := fs.b.NewBlock()
-	fs.b.SetIf(fs.cur, cond, thenB, elseB)
-	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
-	fs.b.Seal(elseB)
-
-	fs.cur = thenB
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Consequent))
-	thenTerm := fs.terminated
-	if !thenTerm { // a returning arm has no fall-through edge to the merge
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.cur = elseB
-	fs.terminated = false
-	if v.Alternate != nil {
-		fs.lowerBody(stmtList(v.Alternate))
-	}
-	elseTerm := fs.terminated
-	if !elseTerm {
-		fs.b.SetJump(fs.cur, merge)
-	}
-
-	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
-	fs.cur = merge
-	// The merge is dead only if BOTH arms returned; otherwise it falls through.
-	fs.terminated = thenTerm && elseTerm
+	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
+		func() { fs.lowerBody(stmtList(v.Consequent)) },
+		func() {
+			if v.Alternate != nil {
+				fs.lowerBody(stmtList(v.Alternate))
+			}
+		})
 }
 
-// lowerWhile lowers `while (test) body` into a REAL loop CFG: header/body/exit
-// blocks. The current block jumps to the header; the header lowers the condition
-// and branches (body, exit); the body is lowered and jumps BACK to the header
-// (the back-edge). The header is left UNSEALED while the body is built, so a
-// loop variable read in the condition or body parks an incomplete PHI filled
-// when the header is sealed after the back-edge is wired — this is what gives
-// loop-carried taint: a value written in the body and read at the top of the
-// next iteration flows through the header PHI (which the old single-block
-// lowering could not model).
+// lowerWhile lowers `while (test) body` into a REAL loop CFG via the Builder's
+// HeaderLoop scaffold (header/body/exit; the header PHI is what carries
+// loop-carried taint — see the scaffold's doc).
 func (fs *funcState) lowerWhile(v *ast.WhileStatement) {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header) // enter the loop
-	fs.cur = header
-	cond := fs.lowerExpr(v.Test) // condition, lowered in the (unsealed) header
-	fs.b.SetIf(header, cond, body, exit)
-
-	fs.b.Seal(body) // body's sole predecessor (header) is known
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if !fs.terminated { // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
-	}
-
-	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
-	fs.b.Seal(exit)   // exit's sole predecessor is the header
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return fs.lowerExpr(v.Test) }, // condition, lowered in the (unsealed) header
+		func() { fs.lowerBody(stmtList(v.Body)) })
 }
 
 // lowerDoWhile lowers `do body while (test)` — the body runs BEFORE the test —
-// into a loop CFG: the current block jumps into the body block; the body is the
-// loop header (its back-edge comes from the test block), so it is left UNSEALED
-// until the back-edge is wired; the test block re-enters the body when true, or
-// falls to exit. Loop-carried taint flows through the body-header PHI.
+// via the Builder's BodyLoop scaffold (the body is the loop header; its
+// back-edge comes from the test block). Loop-carried taint flows through the
+// body-header PHI.
 func (fs *funcState) lowerDoWhile(v *ast.DoWhileStatement) {
-	body := fs.b.NewBlock()
-	test := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, body) // the body always runs at least once
-	fs.cur = body              // body is the loop header (UNSEALED: has a back-edge)
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, test) // body end -> test
-	}
-
-	fs.b.Seal(test) // test's sole predecessor (the body end) is known
-	fs.cur = test
-	cond := fs.lowerExpr(v.Test)
-	fs.b.SetIf(test, cond, body, exit) // wire the back-edge test -> body
-
-	fs.b.Seal(body) // predecessors (entry-jump + back-edge) now known
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.BodyLoop(&fs.cur, &fs.terminated,
+		func() { fs.lowerBody(stmtList(v.Body)) },
+		func() *ir.Value { return fs.lowerExpr(v.Test) })
 }
 
-// lowerFor lowers a C-style `for (init; test; update) body` into a loop CFG. The
-// initializer runs once in the pre-loop (current) block; the header evaluates
-// the test (a missing test is an opaque always-true, so both body and exit are
-// traversed) and branches to body or exit; the update runs at the END of the
-// body block, before the back-edge to the header. Reassignments/accumulations in
-// the body or update flow through the header PHI, modeling loop-carried taint.
+// lowerFor lowers a C-style `for (init; test; update) body` into the HeaderLoop
+// CFG. The initializer runs once in the pre-loop (current) block; the header
+// evaluates the test (a missing test is an opaque always-true, so both body and
+// exit are traversed) and branches to body or exit; the update runs at the END
+// of the body block, before the back-edge to the header. Reassignments/
+// accumulations in the body or update flow through the header PHI, modeling
+// loop-carried taint.
 func (fs *funcState) lowerFor(v *ast.ForStatement) {
 	if v.Initializer != nil {
 		fs.lowerForInit(v.Initializer) // evaluated once in the pre-loop block
 	}
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	var cond *ir.Value
-	if v.Test != nil {
-		cond = fs.lowerExpr(v.Test) // lowered in the (unsealed) header
-	} else {
-		cond = stringValue("")
-	}
-	fs.b.SetIf(header, cond, body, exit)
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	fs.lowerBody(stmtList(v.Body))
-	if v.Update != nil {
-		fs.lowerExpr(v.Update) // the `i++` step, at the body's END block
-	}
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, header) // back-edge
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value {
+			if v.Test != nil {
+				return fs.lowerExpr(v.Test) // lowered in the (unsealed) header
+			}
+			return ssabuild.Str("")
+		},
+		func() {
+			fs.lowerBody(stmtList(v.Body))
+			if v.Update != nil {
+				fs.lowerExpr(v.Update) // the `i++` step, at the body's END block
+			}
+		})
 }
 
-// lowerForRange lowers `for (into in|of source) body` into the same
-// header/body/exit loop CFG as lowerWhile. The source is lowered once in the
-// pre-loop block; the loop variable (into) is bound to the source's value at the
-// top of the BODY block each iteration (element taint == container taint, so a
-// tainted iterable taints the loop variable, mirroring converters/python's
-// for-loop target binding). Reassignments/accumulations in the body flow through
-// the header PHI, modeling loop-carried taint.
+// lowerForRange lowers `for (into in|of source) body` into the same HeaderLoop
+// CFG as lowerWhile. The source is lowered once in the pre-loop block; the loop
+// variable (into) is bound to the source's value at the top of the BODY block
+// each iteration (element taint == container taint, so a tainted iterable
+// taints the loop variable, mirroring converters/python's for-loop target
+// binding). Reassignments/accumulations in the body flow through the header
+// PHI, modeling loop-carried taint.
 func (fs *funcState) lowerForRange(into ast.ForInto, source ast.Expression, bodyStmt ast.Statement) {
 	src := fs.lowerExpr(source) // evaluate the iterable in the pre-loop block
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header)
-	fs.cur = header
-	fs.b.SetIf(header, stringValue(""), body, exit) // opaque iteration condition
-
-	fs.b.Seal(body)
-	fs.cur = body
-	fs.terminated = false
-	fs.bindForInto(into, src) // bind the loop variable each iteration
-	fs.lowerBody(stmtList(bodyStmt))
-	if !fs.terminated {
-		fs.b.SetJump(fs.cur, header) // back-edge
-	}
-
-	fs.b.Seal(header)
-	fs.b.Seal(exit)
-	fs.cur = exit
-	fs.terminated = false
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return ssabuild.Str("") }, // opaque iteration condition
+		func() {
+			fs.bindForInto(into, src) // bind the loop variable each iteration
+			fs.lowerBody(stmtList(bodyStmt))
+		})
 }
 
 // bindForInto binds a for-in/for-of loop variable (the `x` in `for (x of it)` /
@@ -853,7 +744,7 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	if !bodyTerm {
 		// Exception edge: the body may branch into the handler, else fall through to
 		// the after block. The condition is opaque (both edges are traversed).
-		fs.b.SetIf(bodyEnd, stringValue(""), handlerB, after)
+		fs.b.SetIf(bodyEnd, ssabuild.Str(""), handlerB, after)
 	}
 	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
 
@@ -961,7 +852,7 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 	name := bindingName(b.Target)
 	if b.Initializer == nil {
 		if name != "" {
-			fs.write(name, nilValue())
+			fs.write(name, ssabuild.Nil())
 		}
 		return
 	}
@@ -1076,7 +967,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: string(v.Name)}}
 
 	case *ast.StringLiteral:
-		return stringValue(string(v.Value))
+		return ssabuild.Str(string(v.Value))
 
 	case *ast.NumberLiteral:
 		return numberValue(v.Value)
@@ -1085,12 +976,12 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_BoolVal{BoolVal: v.Value}}}}
 
 	case *ast.NullLiteral:
-		return nilValue()
+		return ssabuild.Nil()
 
 	case *ast.RegExpLiteral:
 		// Best-effort string representation, mirroring converters/python's
 		// fallback for constants it does not model precisely.
-		return stringValue(v.Literal)
+		return ssabuild.Str(v.Literal)
 
 	case *ast.TemplateLiteral:
 		return fs.lowerTemplateLiteral(v)
@@ -1124,7 +1015,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{cv, av}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 
 	case *ast.CallExpression:
 		return fs.lowerCall(v)
@@ -1164,7 +1055,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		if v.Argument != nil {
 			return fs.lowerExpr(v.Argument)
 		}
-		return nilValue()
+		return ssabuild.Nil()
 
 	case *ast.AwaitExpression:
 		// Promises/async are not specially modeled: `await x` lowers to `x`.
@@ -1221,7 +1112,7 @@ func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *
 	inst.Operands = []*ir.Value{base}
 	inst.Comment = "field:" + field
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBracket lowers `a[i]`, the same way as lowerDot but for computed
@@ -1241,7 +1132,7 @@ func (fs *funcState) lowerBracket(v *ast.BracketExpression) *ir.Value {
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{base, idx}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 func bracketFieldName(m ast.Expression) string {
@@ -1269,10 +1160,10 @@ func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Va
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{acc, v}
 		fs.emit(inst)
-		acc = regValue(inst.Name)
+		acc = ssabuild.Reg(inst.Name)
 	}
 	if acc == nil {
-		acc = nilValue()
+		acc = ssabuild.Nil()
 	}
 	return acc
 }
@@ -1286,14 +1177,14 @@ func (fs *funcState) lowerTemplateLiteral(v *ast.TemplateLiteral) *ir.Value {
 	var acc *ir.Value
 	for i, el := range v.Elements {
 		if el != nil {
-			acc = fs.concat(acc, stringValue(string(el.Parsed)), v.Idx0())
+			acc = fs.concat(acc, ssabuild.Str(string(el.Parsed)), v.Idx0())
 		}
 		if i < len(v.Expressions) {
 			acc = fs.concat(acc, fs.lowerExpr(v.Expressions[i]), v.Idx0())
 		}
 	}
 	if acc == nil {
-		acc = stringValue("")
+		acc = ssabuild.Str("")
 	}
 	return acc
 }
@@ -1310,7 +1201,7 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	inst.BinOp = ir.BinOpKind_BIN_OP_ADD
 	inst.Operands = []*ir.Value{acc, val}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerBinary lowers a binary expression (arithmetic, bitwise, or --
@@ -1330,7 +1221,7 @@ func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	}
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerUnary lowers a unary expression, including prefix/postfix ++/--,
@@ -1343,7 +1234,7 @@ func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
 	inst.UnOp = unOpKind(v.Operator)
 	inst.Operands = []*ir.Value{operand}
 	fs.emit(inst)
-	result := regValue(inst.Name)
+	result := ssabuild.Reg(inst.Name)
 
 	if v.Operator == token.INCREMENT || v.Operator == token.DECREMENT {
 		if id, ok := v.Operand.(*ast.Identifier); ok {
@@ -1368,7 +1259,7 @@ func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
 		inst.BinOp = binOpKindForCompoundAssign(a.Operator)
 		inst.Operands = []*ir.Value{cur, right}
 		fs.emit(inst)
-		rhs = regValue(inst.Name)
+		rhs = ssabuild.Reg(inst.Name)
 	}
 	fs.assignTo(a.Left, rhs)
 	return rhs
@@ -1455,7 +1346,7 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	}
 	call := fs.emitCallRecvInst(callee, receiver, v.ArgumentList, v.Idx0())
 	fs.emitPromiseContinuation(callee, receiver, call, v.Idx0())
-	return regValue(call.Name)
+	return ssabuild.Reg(call.Name)
 }
 
 // lowerNew lowers `new Foo(args)` the same way as a call (constructing an

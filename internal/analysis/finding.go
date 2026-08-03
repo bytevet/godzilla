@@ -21,14 +21,32 @@ const (
 	ConfidenceLow    Confidence = "low"
 )
 
+// Rank returns a comparable ordering for a confidence (higher is more
+// certain): low=1, medium=2, high=3. Anything else — including a
+// differently-cased spelling — ranks 0, which consumers treat as
+// un-triageable: the LLM reviewer only reviews findings whose rank is
+// positive and at/below its threshold. That is why ParseConfidence returns
+// only the canonical lowercase constants.
+func (c Confidence) Rank() int {
+	switch c {
+	case ConfidenceLow:
+		return 1
+	case ConfidenceMedium:
+		return 2
+	case ConfidenceHigh:
+		return 3
+	}
+	return 0
+}
+
 // ParseConfidence maps a rule's declared `confidence:` spelling onto a
 // Confidence, falling back to def for the empty (unset) string and for anything
 // unrecognized — the loader already rejects a typo (rules.ValidConfidence), so a
 // bad value here means a programmatically-built rule, and defaulting is safer
 // than reporting a finding at a confidence nothing downstream understands. It
-// deliberately returns only the canonical lowercase constants: internal/llm
-// ranks any other string 0 and then never reviews the finding, which would look
-// fine in the HTML report while being permanently un-triageable.
+// deliberately returns only the canonical lowercase constants: Rank ranks any
+// other string 0 and the LLM reviewer then never reviews the finding, which
+// would look fine in the HTML report while being permanently un-triageable.
 func ParseConfidence(s string, def Confidence) Confidence {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case string(ConfidenceLow):

@@ -14,6 +14,7 @@ package llvm_converter
 import (
 	"fmt"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 
 	"tinygo.org/x/go-llvm"
@@ -241,7 +242,7 @@ func (fl *funcLowerer) lowerCall(in llvm.Value, pos *ir.Position) *ir.Instructio
 // (instruction results, arguments) → the SSA register.
 func (fl *funcLowerer) val(v llvm.Value) *ir.Value {
 	if v.IsNil() {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	if !v.IsAFunction().IsNil() {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: fl.canonName(v.Name())}}
@@ -250,7 +251,7 @@ func (fl *funcLowerer) val(v llvm.Value) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: v.Name()}}
 	}
 	if v.IsConstant() {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: fl.reg(v)}}
 }
@@ -297,8 +298,4 @@ func (fl *funcLowerer) canon(sym string) string {
 // other instructions can reference.
 func hasResult(in llvm.Value) bool {
 	return in.Type().TypeKind() != llvm.VoidTypeKind
-}
-
-func constString(v string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v}}}}
 }

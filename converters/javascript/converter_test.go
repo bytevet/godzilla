@@ -10,7 +10,9 @@ import (
 	"github.com/dop251/goja/parser"
 
 	"godzilla/internal/analysis"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -20,40 +22,33 @@ var reqSources = []string{"js:*req.query*", "js:*req.params*", "js:*req.body*"}
 
 // jsRuleSet builds a one-rule RuleSet over reqSources, mirroring one of the
 // builtin internal/rules/loader/builtin/js-*.yaml packs.
-func jsRuleSet(id, cwe, msg string, sev rules.Severity, sinks ...string) *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
-		ID:        id,
-		Languages: []string{"javascript"},
-		Severity:  sev,
-		CWE:       cwe,
-		Message:   msg,
-		Sources:   reqSources,
-		Sinks:     rules.SinksOf(sinks...),
-	}}}
+func jsRuleSet(t testing.TB, id, cwe, msg string, sev rules.Severity, sinks ...string) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, id, "javascript", cwe, reqSources, sinks,
+		testsupport.Severity(sev), testsupport.Message(msg))
 }
 
-func xssRuleSet() *rules.RuleSet {
-	return jsRuleSet("js-xss", "CWE-79", "reflected XSS", rules.SeverityHigh,
+func xssRuleSet(t testing.TB) *rules.RuleSet {
+	return jsRuleSet(t, "js-xss", "CWE-79", "reflected XSS", rules.SeverityHigh,
 		"js:*res.send", "js:*res.write", "js:*res.end")
 }
 
-func commandInjectionRuleSet() *rules.RuleSet {
-	return jsRuleSet("js-command-injection", "CWE-78", "OS command injection", rules.SeverityCritical,
+func commandInjectionRuleSet(t testing.TB) *rules.RuleSet {
+	return jsRuleSet(t, "js-command-injection", "CWE-78", "OS command injection", rules.SeverityCritical,
 		"js:*child_process.exec*", "js:*.exec", "js:*.execSync", "js:*.spawn")
 }
 
-func sqliRuleSet() *rules.RuleSet {
-	return jsRuleSet("js-sqli", "CWE-89", "SQL injection", rules.SeverityHigh,
+func sqliRuleSet(t testing.TB) *rules.RuleSet {
+	return jsRuleSet(t, "js-sqli", "CWE-89", "SQL injection", rules.SeverityHigh,
 		"js:*.query", "js:*.execute")
 }
 
-func ssrfRuleSet() *rules.RuleSet {
-	return jsRuleSet("js-ssrf", "CWE-918", "server-side request forgery", rules.SeverityHigh,
+func ssrfRuleSet(t testing.TB) *rules.RuleSet {
+	return jsRuleSet(t, "js-ssrf", "CWE-918", "server-side request forgery", rules.SeverityHigh,
 		"js:*http.get", "js:*https.get", "js:*axios*", "js:*fetch")
 }
 
-func pathTraversalRuleSet() *rules.RuleSet {
-	return jsRuleSet("js-path-traversal", "CWE-22", "path traversal", rules.SeverityHigh,
+func pathTraversalRuleSet(t testing.TB) *rules.RuleSet {
+	return jsRuleSet(t, "js-path-traversal", "CWE-22", "path traversal", rules.SeverityHigh,
 		"js:*fs.readFile*", "js:*fs.createReadStream", "js:*.sendFile")
 }
 
@@ -114,7 +109,7 @@ func TestConvertXSSSample(t *testing.T) {
 		t.Errorf("CanonicalName = %q, want js:app.handleName", handler.CanonicalName)
 	}
 
-	engine := analysis.NewEngine(xssRuleSet())
+	engine := analysis.NewEngine(xssRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-xss")
 }
@@ -122,7 +117,7 @@ func TestConvertXSSSample(t *testing.T) {
 func TestConvertCommandInjectionSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/command_injection/app.js")
 
-	engine := analysis.NewEngine(commandInjectionRuleSet())
+	engine := analysis.NewEngine(commandInjectionRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-command-injection")
 }
@@ -136,7 +131,7 @@ func TestConvertCommandInjectionSample(t *testing.T) {
 func TestConvertBranchMergeDefault(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/branch_merge_default/app.js")
 
-	engine := analysis.NewEngine(commandInjectionRuleSet())
+	engine := analysis.NewEngine(commandInjectionRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-command-injection")
 }
@@ -144,7 +139,7 @@ func TestConvertBranchMergeDefault(t *testing.T) {
 func TestConvertSQLInjectionSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/sql_injection/app.js")
 
-	engine := analysis.NewEngine(sqliRuleSet())
+	engine := analysis.NewEngine(sqliRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-sqli")
 }
@@ -152,7 +147,7 @@ func TestConvertSQLInjectionSample(t *testing.T) {
 func TestConvertSSRFSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/ssrf/app.js")
 
-	engine := analysis.NewEngine(ssrfRuleSet())
+	engine := analysis.NewEngine(ssrfRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-ssrf")
 }
@@ -217,7 +212,7 @@ module.exports = app;
 func TestConvertPathTraversalSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/path_traversal/app.js")
 
-	engine := analysis.NewEngine(pathTraversalRuleSet())
+	engine := analysis.NewEngine(pathTraversalRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-path-traversal")
 }
@@ -229,11 +224,13 @@ func TestConvertPathTraversalSample(t *testing.T) {
 // i.e. the broad `js:*.<method>` sink globs stay isolated to their own
 // vulnerability class.
 func TestNewRulePacksDoNotCrossFire(t *testing.T) {
-	allRules := &rules.RuleSet{}
-	for _, rs := range []*rules.RuleSet{xssRuleSet(), commandInjectionRuleSet(), sqliRuleSet(), ssrfRuleSet(), pathTraversalRuleSet()} {
-		allRules.Rules = append(allRules.Rules, rs.Rules...)
+	sets := []*rules.RuleSet{xssRuleSet(t), commandInjectionRuleSet(t), sqliRuleSet(t), ssrfRuleSet(t), pathTraversalRuleSet(t)}
+	var all []rules.Rule
+	for _, rs := range sets {
+		all = append(all, rs.Rules...)
 	}
-	engine := analysis.NewEngine(allRules)
+	// WithRules keeps the set-wide DefaultPropagators the component sets carry.
+	engine := analysis.NewEngine(sets[0].WithRules(all))
 
 	cases := []struct {
 		path string
@@ -282,7 +279,7 @@ func TestConvertDirectorySkipsUnparseableFile(t *testing.T) {
 		t.Errorf("Modules[0].Name = %q, want %q", prog.Modules[0].Name, "app")
 	}
 
-	engine := analysis.NewEngine(xssRuleSet())
+	engine := analysis.NewEngine(xssRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-xss")
 }
@@ -301,8 +298,8 @@ func TestConvertSingleUnparseableFileErrors(t *testing.T) {
 
 func functionNamesForModules(prog *ir.Program) []string {
 	var names []string
-	for _, mod := range prog.Modules {
-		names = append(names, functionNames(mod)...)
+	for _, fn := range irwalk.Funcs(prog) {
+		names = append(names, fn.CanonicalName)
 	}
 	return names
 }

@@ -397,7 +397,7 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // and returns how many meet or exceed the gate threshold. When quiet, it still
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
-func printFindings(w *os.File, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
+func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
 	slices.SortStableFunc(findings, func(a, b analysis.Finding) int {
 		if c := cmp.Compare(b.Severity.Rank(), a.Severity.Rank()); c != 0 {
 			return c // worst severity first
@@ -514,7 +514,7 @@ func summarize(prog *ir.Program) summary {
 }
 
 // printSummary renders a human-readable report of s to w.
-func printSummary(w *os.File, s summary) {
+func printSummary(w io.Writer, s summary) {
 	fmt.Fprintf(w, "modules: %d\n", s.modules)
 	fmt.Fprintf(w, "functions: %d (%d synthetic)\n", s.functions, s.synthetic)
 	fmt.Fprintf(w, "basic blocks: %d\n", s.blocks)

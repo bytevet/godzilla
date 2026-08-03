@@ -4,32 +4,26 @@ import (
 	"testing"
 
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 )
 
 // ssrfRule is a minimal CWE-918 rule over net/http.Get for the ENG-8 tests.
-func ssrfRule() *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
-		ID:        "GO-SSRF",
-		Languages: []string{"go"},
-		Severity:  rules.SeverityHigh,
-		CWE:       "CWE-918",
-		Message:   "ssrf",
-		Sources:   []string{"go:*net/url*.Get"},
+func ssrfRule(t testing.TB) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, "GO-SSRF", "go", "CWE-918",
+		[]string{"go:*net/url*.Get"}, nil,
+		testsupport.Message("ssrf"),
 		// Host-fixedness is a RULE policy, not engine behaviour keyed on CWE-918,
 		// so this rule declares it the same way the shipped SSRF packs do. Without
 		// the guard the fixed-host request is reported, which is the correct new
 		// default: a rule that does not ask for the suppression does not get it.
-		Sinks: []rules.Sink{{Pattern: "go:*net/http.Get", When: "not hostFixed()"}},
-		Propagators: []string{
-			"go:fmt.Sprintf", "go:fmt.Sprint",
-		},
-	}}}
+		testsupport.Sinks(rules.Sink{Pattern: "go:*net/http.Get", When: "not hostFixed()"}),
+		testsupport.Propagators("go:fmt.Sprintf", "go:fmt.Sprint"))
 }
 
 func ssrfFindings(t *testing.T, src string) int {
 	t.Helper()
 	n := 0
-	for _, f := range scanSource(t, src, ssrfRule()) {
+	for _, f := range scanSource(t, src, ssrfRule(t)) {
 		if f.RuleID == "GO-SSRF" {
 			n++
 		}

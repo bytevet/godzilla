@@ -23,22 +23,9 @@ func builtinRuleSet(t testing.TB) *rules.RuleSet {
 	return rs
 }
 
-// shippedDefaultPropagators is the `_default-propagators.yaml` list. A test that
-// builds its own RuleSet must set RuleSet.DefaultPropagators from this to behave
-// like a real scan: the defaults are loader-supplied data, so a bare RuleSet
-// literal legitimately has none and taint dies at the first stdlib transform
-// (fmt.Sprintf, strings.ToLower, ...).
-func shippedDefaultPropagators(t testing.TB) []string {
-	t.Helper()
-	rs, err := loader.Builtin()
-	if err != nil {
-		t.Fatalf("loader.Builtin: %v", err)
-	}
-	if len(rs.DefaultPropagators) == 0 {
-		t.Fatal("no DefaultPropagators loaded from _default-propagators.yaml")
-	}
-	return rs.DefaultPropagators
-}
+// Tests that build their own one-rule RuleSet go through
+// testsupport.OneRuleSet, which always carries the shipped default
+// propagators (see testsupport.DefaultPropagators for why).
 
 // secretDets returns the compiled `kind: secret` detectors from the shipped packs.
 func secretDets(t testing.TB) []secretDetector {

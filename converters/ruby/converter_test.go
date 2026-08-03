@@ -1,31 +1,24 @@
 package ruby_converter
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 
 	"godzilla/internal/analysis"
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 )
 
-func requireRuby(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("ruby"); err != nil {
-		t.Skip("ruby not found on PATH; skipping")
-	}
-}
+// requireRuby skips when no ruby is on PATH (the frontend shells out to it for
+// the Ripper AST dump).
+func requireRuby(t *testing.T) { testsupport.RequireTool(t, "ruby") }
 
-func cmdiRules() *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
-		ID:        "ruby-cmdi",
-		Languages: []string{"ruby"},
-		Severity:  rules.SeverityCritical,
-		CWE:       "CWE-78",
-		Message:   "command injection",
-		Sources:   []string{"ruby:params", "ruby:request.*", "ruby:req.*"},
-		Sinks:     rules.SinksOf("ruby:system#0", "ruby:%x"),
-	}}}
+func cmdiRules(t testing.TB) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, "ruby-cmdi", "ruby", "CWE-78",
+		[]string{"ruby:params", "ruby:request.*", "ruby:req.*"},
+		[]string{"ruby:system#0", "ruby:%x"},
+		testsupport.Severity(rules.SeverityCritical),
+		testsupport.Message("command injection"))
 }
 
 // TestCommandInjection exercises the core taint paths for the cmdi rule:
@@ -50,7 +43,7 @@ func TestCommandInjection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConvertFile: %v", err)
 			}
-			findings := analysis.NewEngine(cmdiRules()).Analyze(prog)
+			findings := analysis.NewEngine(cmdiRules(t)).Analyze(prog)
 			if got := hasRule(findings, "ruby-cmdi"); got != tc.want {
 				t.Errorf("ruby-cmdi finding = %v, want %v (findings: %v)", got, tc.want, findings)
 			}

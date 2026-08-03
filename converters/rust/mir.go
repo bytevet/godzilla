@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -67,6 +68,7 @@ type lowerState struct {
 	counter  int
 	env      map[string]*ir.Value   // MIR local ("_5") -> current gIR value
 	agg      map[string][]*ir.Value // MIR local -> aggregate element values (for field folding)
+	intr     map[string]string      // gIR reg name -> builtin.* marker its defining call carries
 	instrs   []*ir.Instruction
 	firstPos *ir.Position
 }
@@ -99,7 +101,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 	if name == "" {
 		return nil
 	}
-	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}}
+	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{}}
 	fn := &ir.Function{
 		Name:          name,
 		ObjectName:    name,
@@ -110,7 +112,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 	// no span, so firstPos is only known then).
 	var synthSources []*ir.Instruction
 	for i, p := range params {
-		v := regValue(fmt.Sprintf("p%d", i))
+		v := ssabuild.Reg(fmt.Sprintf("p%d", i))
 		fn.Params = append(fn.Params, v) // preserve arity for interproc arg->param mapping
 		if src, ok := axumExtractorSource(p.typ); ok {
 			// An axum handler receives already-extracted, attacker-controlled data
@@ -124,7 +126,7 @@ func lowerFn(body []string, filename string) *ir.Function {
 			}
 			st.instrs = append(st.instrs, inst)
 			synthSources = append(synthSources, inst)
-			st.env[p.local] = regValue(reg)
+			st.env[p.local] = ssabuild.Reg(reg)
 			continue
 		}
 		st.env[p.local] = v
@@ -437,7 +439,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 			st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_UN_OP, st.operands(args), pos)
 			return
 		case op == "Len" || op == "discriminant" || op == "NullaryOp":
-			st.env[dst] = constString("")
+			st.env[dst] = ssabuild.Str("")
 			return
 		default: // enum-variant / tuple-struct constructor: taint if any field is
 			st.setAgg(dst, args, "builtin.aggregate", pos)
@@ -452,7 +454,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 		st.setAgg(dst, structFields(expr[brace:]), "builtin.aggregate", pos)
 		return
 	}
-	st.env[dst] = constString("")
+	st.env[dst] = ssabuild.Str("")
 }
 
 // emitCall lowers a MIR call terminator. Method and free-function calls alike
@@ -463,7 +465,7 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	callee, argStr, ok := callShape(expr)
 	name := st.reg()
 	if !ok { // indirect call through a fn-pointer local: `(move _f)(args)`
-		st.env[dst] = regValue(name)
+		st.env[dst] = ssabuild.Reg(name)
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: &ir.CallCommon{}, Pos: pos})
 		return
 	}
@@ -476,7 +478,7 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	if norm == "add" {
 		operands := st.operands(splitTop(argStr, ','))
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: operands, Pos: pos})
-		st.env[dst] = regValue(name)
+		st.env[dst] = ssabuild.Reg(name)
 		return
 	}
 	canonical := "rust:" + norm
@@ -492,15 +494,22 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	// intrinsic-propagator table — so taint still flows via the existing rules):
 	//   - format!  -> fmt::Arguments::new(<decoded template>, args): builtin.format
 	//   - identity string conversions that forward their operand's text unchanged
-	//     (to_string/as_str/into/clone/deref/format-result wrappers): builtin.identity
+	//     (std conversion traits / format-result wrappers): builtin.identity
+	// The matches are anchored to the std paths and MIR's trait-qualified call
+	// form — never a name suffix, which a user function merely named like a
+	// conversion (my_into, W::clone) could trip, wrongly proving a fixed host and
+	// suppressing a real SSRF finding.
 	switch {
-	case strings.Contains(canonical, "Arguments::new"):
+	case rustFormatArgsNew(callee):
 		inst.Intrinsic = "builtin.format"
-	case rustIdentityConv(canonical):
+	case rustIdentityConv(callee, norm) || st.forwardsFormatResult(norm, cc.Args):
 		inst.Intrinsic = "builtin.identity"
 	}
+	if inst.Intrinsic != "" {
+		st.intr[name] = inst.Intrinsic
+	}
 	st.instrs = append(st.instrs, inst)
-	st.env[dst] = regValue(name)
+	st.env[dst] = ssabuild.Reg(name)
 	// A Command builder step returns its receiver, so bind the result to the
 	// RECEIVER's value: arg[0] then resolves to Command::new's result at every
 	// step, which is what lets a rule see the program at the `.arg` sink where
@@ -528,23 +537,135 @@ func rustCommandStep(callee string) bool {
 	return false
 }
 
+// rustFormatArgsNew reports whether a RAW MIR callee (generics still present)
+// is the fmt::Arguments constructor family `format!` lowers to, e.g.
+// `Arguments::<'_>::new::<15, 1>`. The raw text is matched — not the
+// normalized name — because the `::<'_>::` lifetime instantiation is exactly
+// what a plain user type named `Arguments` (printed `Arguments::new`, no
+// lifetime group) cannot produce.
+func rustFormatArgsNew(raw string) bool {
+	for _, p := range []string{"core::fmt::", "std::fmt::", "fmt::"} {
+		raw = strings.TrimPrefix(raw, p) // at most one applies
+	}
+	return strings.HasPrefix(raw, "Arguments::<'_>::new")
+}
+
+// rustIdentityTraitMethods maps a std conversion/formatting trait to its
+// forwarding method: a callee printed in MIR's qualified form
+// `<T as Trait<..>>::method` is an identity string conversion when
+// (trait, method) is listed here. Matching that trait-qualified RAW form —
+// never a suffix of the normalized name — is what keeps a plain user function
+// `my_into` or a user inherent method `W::into` (both printed without the
+// `<.. as ..>` qualifier) from acquiring identity semantics.
+var rustIdentityTraitMethods = map[string]string{
+	"ToString": "to_string",
+	"ToOwned":  "to_owned",
+	"AsRef":    "as_ref",
+	"Into":     "into",
+	"Clone":    "clone",
+	"Deref":    "deref",
+	"Borrow":   "borrow",
+}
+
+// rustIdentityCallees are exact normalized callees (generics stripped by
+// normalizeName, no `rust:` prefix) of inherent std methods that forward their
+// operand's text unchanged. Command::new(p) is included because the value's
+// text is the program it will run (see the aliasing note in emitCall).
+// String::from is listed for older toolchains that print it inherently; current
+// rustc prints the trait form `<String as From<&str>>::from`, which normalizes
+// to bare `from` and is deliberately NOT matched (From is implemented for far
+// more than string-identity conversions).
+var rustIdentityCallees = map[string]bool{
+	"String::as_str":              true,
+	"std::string::String::as_str": true,
+	"string::String::as_str":      true,
+	"String::from":                true,
+	"std::string::String::from":   true,
+	"Command::new":                true,
+	"std::process::Command::new":  true,
+	"process::Command::new":       true,
+}
+
 // rustIdentityConv reports whether a Rust callee is a string-valued conversion
-// that forwards its operand's text unchanged, so the SSRF prefix reconstruction
-// can look one hop deeper. Covers the `format!` result wrappers (format ->
-// must_use -> deref) and the common owned/borrowed conversions. The suffix set
-// mirrors the engine's former isPassthroughCallee so behavior is unchanged.
-func rustIdentityConv(callee string) bool {
-	for _, suffix := range []string{
-		"to_string", "to_owned", "as_str", "as_ref", "into", "clone", "deref",
-		"String::from", "borrow", "must_use", "format",
-		// Command::new(p): the value's text is the program it will run.
-		"Command::new",
-	} {
-		if strings.HasSuffix(callee, suffix) {
-			return true
-		}
+// that forwards its operand's text unchanged, so the SSRF prefix
+// reconstruction can look one hop deeper (builtin.identity — see
+// internal/analysis/ssrf.go). raw is the MIR callee text before
+// generic-stripping (the trait-qualified form lives only there), norm its
+// normalizeName form (for the inherent-method table).
+func rustIdentityConv(raw, norm string) bool {
+	if rustIdentityCallees[norm] {
+		return true
+	}
+	trait, method, ok := traitCall(raw)
+	return ok && rustIdentityTraitMethods[trait] == method
+}
+
+// forwardsFormatResult reports whether a call is the `format!` expansion's
+// result plumbing — alloc's `format(Arguments) -> String` and hint::must_use —
+// which forwards its argument's text unchanged. These print as bare names
+// (`format(move _7)`), so the name alone cannot be anchored; instead the single
+// argument must itself be the result of an already-marker-tagged call (the
+// Arguments::new / format chain), which a user function merely named `format`
+// or `must_use` is never handed.
+func (st *lowerState) forwardsFormatResult(norm string, args []*ir.Value) bool {
+	switch norm {
+	case "format", "fmt::format", "alloc::fmt::format", "std::fmt::format",
+		"must_use", "hint::must_use", "core::hint::must_use", "std::hint::must_use":
+	default:
+		return false
+	}
+	if len(args) != 1 {
+		return false
+	}
+	switch st.intr[args[0].GetRegName()] {
+	case "builtin.format", "builtin.identity":
+		return true
 	}
 	return false
+}
+
+// traitCall parses MIR's qualified-call form `<Type as Trait<..>>::method`,
+// returning the trait path's LAST segment (generic args dropped) and the
+// method name. ok=false for any other callee shape — in particular a plain
+// path call, which is how every user free function and inherent method prints.
+func traitCall(raw string) (trait, method string, ok bool) {
+	if !strings.HasPrefix(raw, "<") {
+		return "", "", false
+	}
+	end := matchDelim(raw, 0, '<', '>')
+	if end < 0 || !strings.HasPrefix(raw[end+1:], "::") {
+		return "", "", false
+	}
+	qual := raw[1:end] // `Type as Trait<..>`
+	// Find the type/trait separator: the first ` as ` outside any nested <...>
+	// group (a nested qualified type like `<<T as A>::B as C>` keeps its inner
+	// ` as ` behind an angle bracket).
+	as, depth := -1, 0
+	for i := 0; i+4 <= len(qual) && as < 0; i++ {
+		switch qual[i] {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && qual[i:i+4] == " as " {
+			as = i
+		}
+	}
+	if as < 0 {
+		return "", "", false
+	}
+	trait = normalizeName(qual[as+4:])
+	if j := strings.LastIndex(trait, "::"); j >= 0 {
+		trait = trait[j+2:]
+	}
+	method = normalizeName(raw[end+3:])
+	if strings.Contains(method, "::") { // deeper assoc path, not a method call
+		return "", "", false
+	}
+	return trait, method, true
 }
 
 // setAgg records an aggregate construction: it both emits a builtin.aggregate
@@ -555,7 +676,7 @@ func (st *lowerState) setAgg(dst string, operandToks []string, intrinsic string,
 	vals := st.operands(operandToks)
 	name := st.reg()
 	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC, Intrinsic: intrinsic, Operands: vals, Pos: pos})
-	st.env[dst] = regValue(name)
+	st.env[dst] = ssabuild.Reg(name)
 	st.agg[dst] = vals
 }
 
@@ -579,7 +700,7 @@ func (st *lowerState) place(p string, pos *ir.Position) *ir.Value {
 	if localRe.MatchString(p) {
 		return st.local(p)
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // local returns the current gIR value bound to a MIR local, or an untainted
@@ -588,7 +709,7 @@ func (st *lowerState) local(name string) *ir.Value {
 	if v, ok := st.env[name]; ok {
 		return v
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 func (st *lowerState) operands(toks []string) []*ir.Value {
@@ -617,7 +738,7 @@ func (st *lowerState) emit(name string, op ir.OpCode, operands []*ir.Value, pos 
 	if name == "" {
 		return nil
 	}
-	return regValue(name)
+	return ssabuild.Reg(name)
 }
 
 func (st *lowerState) reg() string {
@@ -849,14 +970,6 @@ func valueSlice(v *ir.Value) []*ir.Value {
 
 func atoi(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func constString(v string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v}}}}
-}
-
 // constFromLiteral models a MIR constant. String literals are preserved (so the
 // secrets scanner can see them and taint stays constant-free); every other
 // constant becomes an empty string constant — untainted, which is correct since
@@ -865,7 +978,7 @@ func constFromLiteral(lit string) *ir.Value {
 	lit = strings.TrimSpace(lit)
 	if strings.HasPrefix(lit, `"`) {
 		if end := strings.LastIndexByte(lit, '"'); end > 0 {
-			return constString(lit[1:end])
+			return ssabuild.Str(lit[1:end])
 		}
 	}
 	// A byte-string literal `b"..."` is how MIR renders the packed template that
@@ -875,10 +988,10 @@ func constFromLiteral(lit string) *ir.Value {
 	// not a clean template stays an empty constant (unchanged behavior).
 	if strings.HasPrefix(lit, `b"`) {
 		if tmpl, ok := decodeFmtTemplate(lit); ok {
-			return constString(tmpl)
+			return ssabuild.Str(tmpl)
 		}
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // decodeFmtTemplate decodes the packed byte-string template that `format!` passes

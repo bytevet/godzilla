@@ -221,7 +221,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 	}
 	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	for _, p := range paramNames(at(defNode, 2)) {
-		v := regValue(p)
+		v := ssabuild.Reg(p)
 		fn.Params = append(fn.Params, v)
 		fs.write(p, v)
 		fs.paramNames[p] = true
@@ -260,9 +260,9 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 	}
 	fs := newFuncState(filename, moduleName, localFuncs, qualifiedFuncs, qualPrefix)
 	// Synthetic receiver at slot 0 (the class / relation); never referenced.
-	fn.Params = append(fn.Params, regValue("self"))
+	fn.Params = append(fn.Params, ssabuild.Reg("self"))
 	for _, p := range paramNames(at(defNode, 4)) {
-		v := regValue(p)
+		v := ssabuild.Reg(p)
 		fn.Params = append(fn.Params, v)
 		fs.write(p, v)
 		fs.paramNames[p] = true
@@ -387,18 +387,6 @@ func (fs *funcState) newValueInst(n interface{}) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posFrom(fs.filename, n)}
 }
 
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func constString(s string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
-}
-
-func globalValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
-}
-
 // ivarGlobal returns the synthetic global key for an instance variable `@f`
 // inside a class method, or "" outside a class. It is the cross-method channel
 // for instance-variable taint: keyed per (module, class, @ivar), `@f = tainted`
@@ -452,7 +440,7 @@ func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
 		last = fs.lowerExpr(e)
 	}
 	if last == nil {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return last
 }
@@ -471,7 +459,7 @@ func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
 		if g := fs.ivarGlobal(name); g != "" {
 			fs.emit(&ir.Instruction{
 				Op:       ir.OpCode_OP_CODE_STORE,
-				Operands: []*ir.Value{globalValue(g), val},
+				Operands: []*ir.Value{ssabuild.Global(g), val},
 				Pos:      posFrom(fs.filename, target),
 			})
 		}
@@ -508,7 +496,7 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		// bare `return` (Ripper tags an argument-less return "return0") — returns
 		// nil. Emit the RET (so the block terminates, no fall-through edge) rather
 		// than falling through to a ruby.unsupported intrinsic.
-		v := constString("")
+		v := ssabuild.Str("")
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true
 		return v
@@ -526,7 +514,7 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	switch tag(n) {
 	case "":
-		return constString("")
+		return ssabuild.Str("")
 	case "string_literal":
 		return fs.lowerStringLiteral(n)
 	case "string_content":
@@ -534,7 +522,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	case "xstring_literal":
 		return fs.lowerBacktick(n)
 	case "@tstring_content", "@int", "@float", "@CHAR":
-		return constString(scalarText(n))
+		return ssabuild.Str(scalarText(n))
 	case "string_embexpr":
 		// `#{ stmts }` — lower the inner statements, return the last value.
 		inner, _ := asList(at(n, 1))
@@ -543,11 +531,11 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		// A namespaced constant (`Net::HTTP`, `ERB::Util`). It carries no taint;
 		// return its flattened name so lowering the receiver of `Net::HTTP.get`
 		// does not fall through to a `ruby.unsupported` intrinsic.
-		return constString(constPathName(n))
+		return ssabuild.Str(constPathName(n))
 	case "symbol_literal":
-		return constString(identName(at(at(n, 1), 1)))
+		return ssabuild.Str(identName(at(at(n, 1), 1)))
 	case "dyna_symbol":
-		return constString("")
+		return ssabuild.Str("")
 	case "var_ref":
 		inner := at(n, 1)
 		switch tag(inner) {
@@ -564,13 +552,13 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 			if g := fs.ivarGlobal(name); g != "" {
 				ld := fs.newValueInst(n)
 				ld.Op = ir.OpCode_OP_CODE_LOAD
-				ld.Operands = []*ir.Value{globalValue(g)}
+				ld.Operands = []*ir.Value{ssabuild.Global(g)}
 				fs.emit(ld)
-				return regValue(ld.Name)
+				return ssabuild.Reg(ld.Name)
 			}
-			return constString(scalarText(inner))
+			return ssabuild.Str(scalarText(inner))
 		}
-		return constString(scalarText(inner)) // @const / @kw / @gvar
+		return ssabuild.Str(scalarText(inner)) // @const / @kw / @gvar
 	case "vcall":
 		// A bare name: a local variable read if bound; else, if it names a known
 		// method (same-class or top-level def), a 0-arg method call — lower it as a
@@ -626,14 +614,14 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 				fs.lowerExpr(e)
 			}
 		}
-		return constString("")
+		return ssabuild.Str("")
 	}
 	// Unhandled: emit a visible intrinsic placeholder.
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 	inst.Intrinsic = "ruby.unsupported"
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerStringLiteral lowers `"...#{x}..."`. Interpolation parts are folded with
@@ -646,7 +634,7 @@ func (fs *funcState) lowerStringLiteral(n interface{}) *ir.Value {
 func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 	l, ok := asList(content)
 	if !ok || len(l) < 2 {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	var acc *ir.Value
 	for _, part := range l[1:] { // l[0] == "string_content"
@@ -692,7 +680,7 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 		}
 	}
 	if last == nil {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return last
 }
@@ -711,50 +699,23 @@ func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 }
 
 // lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end` into a
-// REAL CFG diamond via the Builder: the condition is lowered in the current
-// block, which ends in an OP_CODE_IF to a fresh then-block and else-block; each
-// arm is lowered in its own block and jumps to a fresh merge block; the merge is
-// sealed once both arm-ends are its known predecessors, so any variable rebound
-// on one or both arms reconciles automatically via an on-demand ReadVariable PHI
-// (retiring the manual env-merge path). `if`, `unless`, and `elsif` share the
-// layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
+// REAL CFG diamond via the Builder's IfDiamond scaffold, so any variable
+// rebound on one or both arms reconciles automatically via an on-demand
+// ReadVariable PHI (retiring the manual env-merge path). `if`, `unless`, and
+// `elsif` share the layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
 // the polarity of `unless` is immaterial to taint (both arms are reachable), so
 // it is lowered like `if`. A nested `elsif` recurses into the else-block, so an
 // arbitrarily long chain becomes nested diamonds.
 func (fs *funcState) lowerIf(n interface{}) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
-	thenB := fs.b.NewBlock()
-	elseB := fs.b.NewBlock()
-	merge := fs.b.NewBlock()
-	fs.b.SetIf(fs.cur, cond, thenB, elseB)
-	fs.b.Seal(thenB) // sole predecessor (the branch block) is known
-	fs.b.Seal(elseB)
-
-	fs.cur = thenB
-	fs.terminated = false
-	var lastBody *ir.Value
-	if body, ok := asList(at(n, 2)); ok {
-		lastBody = fs.lowerStmtSeqLast(body)
-	}
-	thenEnd := fs.cur // the arm may itself have branched; jump from its END
-	thenTerm := fs.terminated
-	if !thenTerm { // a returning arm has no fall-through edge to the merge
-		fs.b.SetJump(thenEnd, merge)
-	}
-
-	fs.cur = elseB
-	fs.terminated = false
-	lastElse := fs.lowerElseTail(at(n, 3))
-	elseEnd := fs.cur
-	elseTerm := fs.terminated
-	if !elseTerm {
-		fs.b.SetJump(elseEnd, merge)
-	}
-
-	fs.b.Seal(merge) // predecessors (only the non-returning arms) now wired
-	fs.cur = merge
-	// The merge is dead only if BOTH arms returned; otherwise it falls through.
-	fs.terminated = thenTerm && elseTerm
+	var lastBody, lastElse *ir.Value
+	thenEnd, elseEnd, merge := fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
+		func() {
+			if body, ok := asList(at(n, 2)); ok {
+				lastBody = fs.lowerStmtSeqLast(body)
+			}
+		},
+		func() { lastElse = fs.lowerElseTail(at(n, 3)) })
 	return fs.branchResult(lastBody, lastElse, thenEnd, elseEnd, merge)
 }
 
@@ -776,7 +737,7 @@ func (fs *funcState) branchResult(a, b *ir.Value, thenEnd, elseEnd, merge ssabui
 	case b != nil:
 		return b
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 // lowerElseTail lowers the tail of an if/unless chain in the current (else)
@@ -794,40 +755,15 @@ func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
 }
 
 // lowerLoopCFG builds the REAL loop CFG shared by `while`/`until` and their
-// statement-modifier forms: header/body/exit blocks. The current block jumps to
-// the header; the header lowers cond and branches (body, exit); lowerBody fills
-// the body, which jumps BACK to the header (the back-edge). The header is left
-// UNSEALED while the body is built, so a loop variable read in the condition or
-// body parks an incomplete PHI that is filled when the header is sealed after
-// the back-edge is wired — this is what gives loop-carried taint: a value
-// written in the body and read at the top of the next iteration flows through
-// the header PHI (which the old single-block lowering could not model). The
-// header PHI over [pre-loop, back-edge] carries taint into and out of the loop.
-// The seal ORDER matters and is why both loop forms share this function rather
-// than each open-coding it.
+// statement-modifier forms via the Builder's HeaderLoop scaffold, which owns
+// the header/body/exit blocks and the seal order (the header PHI over
+// [pre-loop, back-edge] is what carries loop-carried taint — see the
+// scaffold's doc). cond is a Ruby AST node, lowered in the (unsealed) header.
 func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value {
-	header := fs.b.NewBlock()
-	body := fs.b.NewBlock()
-	exit := fs.b.NewBlock()
-
-	fs.b.SetJump(fs.cur, header) // enter the loop
-	fs.cur = header
-	c := fs.lowerExpr(cond) // condition, lowered in the (unsealed) header
-	fs.b.SetIf(header, c, body, exit)
-
-	fs.b.Seal(body) // body's sole predecessor (header) is known
-	fs.cur = body
-	fs.terminated = false
-	lowerBody()
-	if !fs.terminated { // a body that always returns has no back-edge
-		fs.b.SetJump(fs.cur, header) // back-edge from the body's END block
-	}
-
-	fs.b.Seal(header) // predecessors (entry-jump [+ back-edge]) now known
-	fs.b.Seal(exit)   // exit's sole predecessor is the header
-	fs.cur = exit
-	fs.terminated = false
-	return constString("")
+	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
+		func() *ir.Value { return fs.lowerExpr(cond) },
+		lowerBody)
+	return ssabuild.Str("")
 }
 
 // lowerWhile lowers `while`/`until cond; body; end` into the shared loop CFG.
@@ -914,7 +850,7 @@ func (fs *funcState) lowerBinary(n interface{}) *ir.Value {
 		inst.Intrinsic = "builtin.compare"
 		inst.Operands = []*ir.Value{left, right}
 		fs.emit(inst)
-		return regValue(inst.Name)
+		return ssabuild.Reg(inst.Name)
 	}
 	return fs.emitBinOp(binOpKind(op), left, right, n)
 }
@@ -974,7 +910,7 @@ func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n inter
 	inst.BinOp = kind
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // isOpaqueBase reports whether a receiver/base node refers to a value whose
@@ -1031,7 +967,7 @@ func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{baseVal}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 // lowerDotCall lowers `recv.method(args?)`. args is nil for the no-arg `call`
@@ -1158,7 +1094,7 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 	case "call":
 		return fs.lowerDotCall(head, args)
 	}
-	return constString("")
+	return ssabuild.Str("")
 }
 
 func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
@@ -1218,14 +1154,14 @@ func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interf
 		Args:   args,
 	}
 	fs.emit(inst)
-	return regValue(inst.Name)
+	return ssabuild.Reg(inst.Name)
 }
 
 func (fs *funcState) lookup(name string) *ir.Value {
 	if fs.assigned[name] {
 		return fs.read(name)
 	}
-	return constString(name)
+	return ssabuild.Str(name)
 }
 
 // scalarText returns a token/scalar node's text for a constant value.

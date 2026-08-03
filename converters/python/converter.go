@@ -37,15 +37,13 @@
 package py_converter
 
 import (
-	"bytes"
 	_ "embed"
-	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
-	"godzilla/internal/chunks"
+	"godzilla/converters/frontend"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/proc"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
@@ -72,81 +70,49 @@ func NewConverter() *Converter {
 // ConvertFile lowers the Python source at path into gIR. path may be either a
 // single .py file or a directory (all *.py files under it are converted
 // recursively, one gIR Module per file). Requires python3 on PATH.
+//
+// The single-file/directory-batch skeleton is the shared frontend.Batch driver;
+// what is Python's alone: parsing is batched — one `python3 pyast.py --batch
+// <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
+// not per file — lowering waits for every file to parse so the handler-class
+// set spans all files (lowerAll), and a directory scan gets cross-module call
+// resolution (resolveCrossModuleCalls).
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	// Module names are the file path relative to the scan root, so that
-	// same-named functions in different files (every sample is app.py) get
-	// distinct canonical names instead of colliding in the analyzer. For a
-	// single file the root is its own directory, so its module name stays the
-	// bare filename (see walkignore.CollectTarget).
-	root, files, isDir, err := walkignore.CollectTarget(path, func(p string) bool { return strings.HasSuffix(p, ".py") })
-	if err != nil {
-		return nil, err
+	var pythonExe, scriptPath string
+	b := frontend.Batch[pyFileResult]{
+		Label: "py_converter",
+		Lang:  "Python",
+		Mode:  "ast",
+		Match: func(p string) bool { return strings.HasSuffix(p, ".py") },
+		Setup: func() (func(), error) {
+			exe, err := exec.LookPath("python3")
+			if err != nil {
+				return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source): %w", err)
+			}
+			pythonExe = exe
+			sp, cleanup, err := writeHelperScript()
+			if err != nil {
+				return nil, err
+			}
+			scriptPath = sp
+			return cleanup, nil
+		},
+		Parse: func(root string, files []string, out []pyFileResult) {
+			convertPythonChunk(pythonExe, scriptPath, root, files, out)
+		},
+		// Lower after every file is parsed, so the handler-class set spans all files.
+		Finish: lowerAll,
+		Result: func(r *pyFileResult) (*ir.Module, error) { return r.mod, r.err },
+		PostProgram: func(prog *ir.Program, isDir bool) {
+			// Single-file scans have one module and nothing to cross-link.
+			if isDir {
+				resolveCrossModuleCalls(prog)
+			}
+		},
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no Python files found under %s", root)
-	}
-
-	pythonExe, err := exec.LookPath("python3")
-	if err != nil {
-		return nil, fmt.Errorf("py_converter: python3 not found on PATH (required to parse Python source): %w", err)
-	}
-
-	scriptPath, cleanup, err := writeHelperScript()
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-
-	// Single-file mode (path pointed directly at a .py file): a parse/read
-	// failure is the caller's only signal, so surface it immediately.
-	if !isDir {
-		results := make([]pyFileResult, 1)
-		c.convertPythonChunk(pythonExe, scriptPath, root, files, results)
-		if results[0].err != nil {
-			return nil, results[0].err
-		}
-		lowerAll(results)
-		return &ir.Program{Mode: "ast", Modules: []*ir.Module{results[0].mod}}, nil
-	}
-
-	// Directory batch mode: one unparseable .py file must not abort the whole
-	// batch (a single syntax error in an unrelated file shouldn't hide every
-	// other file's findings). Skip it, log a warning to stderr, and keep
-	// going; only fail if not a single file in the tree converted.
-	//
-	// Parsing is batched: the file list is split into contiguous chunks — one
-	// `python3 pyast.py --batch <chunk...>` invocation each, run concurrently —
-	// so interpreter startup is paid per chunk, not per file (the dominant cost
-	// of the old file-at-a-time loop). Results land at fixed indices, so module
-	// order stays the sorted file order regardless of chunk completion order.
-	results := make([]pyFileResult, len(files))
-	chunks.Run(len(files), func(start, end int) {
-		c.convertPythonChunk(pythonExe, scriptPath, root, files[start:end], results[start:end])
-	})
-
-	// Lower after every file is parsed, so the handler-class set spans all files.
-	lowerAll(results)
-
-	prog := &ir.Program{Mode: "ast"}
-	var convertErrs []string
-	for i, r := range results {
-		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "py_converter: skipping %s: %v\n", files[i], r.err)
-			c.skipped++
-			convertErrs = append(convertErrs, r.err.Error())
-			continue
-		}
-		prog.Modules = append(prog.Modules, r.mod)
-	}
-
-	if len(prog.Modules) == 0 {
-		return nil, fmt.Errorf("py_converter: no Python files under %s converted successfully (%d file(s) failed): %s",
-			root, len(convertErrs), strings.Join(convertErrs, "; "))
-	}
-
-	resolveCrossModuleCalls(prog)
-
-	return prog, nil
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
 }
 
 // resolveCrossModuleCalls rewrites CALL callees that reference a function in
@@ -207,29 +173,16 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		}
 	}
 
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			for _, b := range fn.Blocks {
-				for _, inst := range b.Instrs {
-					cc := inst.GetCall()
-					if cc == nil {
-						continue
-					}
-					callee := cc.GetCallee()
-					if callee == "" || rawSet[callee] {
-						continue // unset, or already resolves by exact name
-					}
-					raw := resolve(logical(callee))
-					if raw == "" {
-						continue
-					}
-					cc.Callee = raw
-					if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
-						fnv.Kind = &ir.Value_FuncName{FuncName: raw}
-					}
-				}
-			}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if callee == "" || rawSet[callee] {
+			continue // unset, or already resolves by exact name
 		}
+		raw := resolve(logical(callee))
+		if raw == "" {
+			continue
+		}
+		irwalk.SetCallee(cc, raw)
 	}
 }
 
@@ -246,44 +199,28 @@ type pyFileResult struct {
 }
 
 // convertPythonChunk parses a contiguous chunk of files with a single
-// `pyast.py --batch` invocation (one JSON document per file, argv order) and
-// lowers each, writing into out (index-aligned with files). A process-level
-// failure marks every file in the chunk; a per-file parse failure marks only
-// that file, mirroring the old file-at-a-time error semantics.
-func (c *Converter) convertPythonChunk(pythonExe, scriptPath, root string, files []string, out []pyFileResult) {
-	ctx, cancel := proc.ParseContext()
-	defer cancel()
-	args := append([]string{scriptPath, "--batch"}, files...)
-	cmd := exec.CommandContext(ctx, pythonExe, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if runErr := cmd.Run(); runErr != nil {
-		for i, f := range files {
-			out[i].err = fmt.Errorf("py_converter: python3 failed parsing %s: %v (stderr: %s)", f, runErr, strings.TrimSpace(stderr.String()))
+// `pyast.py --batch` invocation (one JSON document per file, argv order) via
+// proc.RunBatchScript, writing into out (index-aligned with files). A
+// process-level failure marks every file in the chunk; a per-file parse
+// failure marks only that file, mirroring the old file-at-a-time error
+// semantics.
+func convertPythonChunk(pythonExe, scriptPath, root string, files []string, out []pyFileResult) {
+	proc.RunBatchScript("py_converter", "pyast.py", pythonExe, scriptPath, files, func(i int, doc any, err error) {
+		if err != nil {
+			out[i].err = err
+			return
 		}
-		return
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	dec.UseNumber()
-	for i, f := range files {
-		var doc astNode
-		if err := dec.Decode(&doc); err != nil {
-			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: %w", f, err)
-			continue
-		}
-		if errMsg, ok := doc["error"]; ok {
-			out[i].err = fmt.Errorf("py_converter: failed to parse %s: %v", f, errMsg)
-			continue
+		m, ok := doc.(map[string]any)
+		if !ok {
+			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: unexpected JSON document type %T", files[i], doc)
+			return
 		}
 		// Parse phase only: keep the AST; lowering happens in lowerParsed after the
 		// global handler-class set is known (lowerAll).
-		out[i].doc = doc
-		out[i].file = f
-		out[i].module = moduleNameFor(root, f)
-	}
+		out[i].doc = astNode(m)
+		out[i].file = files[i]
+		out[i].module = moduleNameFor(root, files[i])
+	})
 }
 
 // lowerAll lowers every successfully-parsed result into a gIR Module. It first

@@ -53,8 +53,8 @@ const compareIntrinsic = "builtin.compare"
 //
 // It is a CROSS-FRONTEND contract, not a JS detail: any frontend that lowers a
 // member read as a synthetic call should set it rather than inventing another
-// mechanism (Python currently merges an extra INDEX through a BIN_OP_OR for the
-// same purpose — see converters/python/lower.go — and can retire onto this).
+// mechanism. JS (converters/javascript emitRootPropertyRead) and Python
+// (converters/python lowerSubscript) both emit it.
 const memberReadIntrinsic = "builtin.member_read"
 
 // kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
@@ -125,14 +125,19 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 	if !ok {
 		return rules.DynMarker, false
 	}
-	next := markSeen(seen, v)
+	// resolveDef guarantees a non-empty, unseen register here. Mark it for the
+	// recursive calls below and unmark on return (backtracking): the cycle guard
+	// is per-PATH, and mutating one map beats copying it at every level.
+	reg := v.GetRegName()
+	seen[reg] = true
+	defer delete(seen, reg)
 
 	switch {
 	case def.Op == ir.OpCode_OP_CODE_BIN_OP && def.GetBinOp() == ir.BinOpKind_BIN_OP_ADD:
 		var b strings.Builder
 		complete := true
 		for _, op := range def.GetOperands() {
-			s, c := constSkeleton(op, defs, next)
+			s, c := constSkeleton(op, defs, seen)
 			b.WriteString(s)
 			complete = complete && c
 		}
@@ -154,7 +159,7 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 			}
 		case def.GetIntrinsic() == identityIntrinsic:
 			if args := def.Call.GetArgs(); len(args) >= 1 {
-				return constSkeleton(args[0], defs, next)
+				return constSkeleton(args[0], defs, seen)
 			}
 		case def.GetIntrinsic() == kwargIntrinsic:
 			// A named-argument marker is pure annotation: reconstruct the value it
@@ -162,12 +167,12 @@ func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string
 			// contributes to look dynamic (which would, in the SSRF host analysis,
 			// lose a constant run).
 			if args := def.Call.GetArgs(); len(args) == 2 {
-				return constSkeleton(args[1], defs, next)
+				return constSkeleton(args[1], defs, seen)
 			}
 		}
 	case def.Op == ir.OpCode_OP_CODE_CONVERT || def.Op == ir.OpCode_OP_CODE_LOAD:
 		if ops := def.GetOperands(); len(ops) >= 1 {
-			return constSkeleton(ops[0], defs, next)
+			return constSkeleton(ops[0], defs, seen)
 		}
 	}
 	return rules.DynMarker, false
@@ -182,17 +187,6 @@ func resolveDef(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bo
 	}
 	def := defs[reg]
 	return def, def != nil
-}
-
-func markSeen(seen map[string]bool, v *ir.Value) map[string]bool {
-	next := make(map[string]bool, len(seen)+1)
-	for k := range seen {
-		next[k] = true
-	}
-	if reg := v.GetRegName(); reg != "" {
-		next[reg] = true
-	}
-	return next
 }
 
 // constStr reads an operand's literal string value verbatim — every frontend

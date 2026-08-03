@@ -1,35 +1,25 @@
 package rust_converter
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 
 	"godzilla/internal/analysis"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/rules/loader"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
 // requireRustc skips when no rustc is on PATH (the frontend shells out to it to
 // dump MIR).
-func requireRustc(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("rustc"); err != nil {
-		t.Skip("rustc not found on PATH; skipping")
-	}
-}
+func requireRustc(t *testing.T) { testsupport.RequireTool(t, "rustc") }
 
 func callees(prog *ir.Program) map[string]bool {
 	seen := map[string]bool{}
-	for _, mod := range prog.Modules {
-		for _, fn := range mod.Functions {
-			for _, blk := range fn.Blocks {
-				for _, inst := range blk.Instrs {
-					if inst.Call != nil && inst.Call.GetCallee() != "" {
-						seen[inst.Call.GetCallee()] = true
-					}
-				}
-			}
+	for cc := range irwalk.Calls(prog) {
+		if cc.GetCallee() != "" {
+			seen[cc.GetCallee()] = true
 		}
 	}
 	return seen

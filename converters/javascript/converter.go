@@ -83,7 +83,8 @@ import (
 	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
 
-	"godzilla/internal/chunks"
+	"godzilla/converters/frontend"
+	"godzilla/internal/irwalk"
 	"godzilla/internal/walkignore"
 	ir "godzilla/pkg/ir/v1"
 )
@@ -107,81 +108,48 @@ func NewConverter() *Converter {
 // either a single .js file or a directory (all *.js files under it are
 // converted recursively, one gIR Module per file, skipping any
 // "node_modules" directory).
+//
+// The single-file/directory-batch skeleton is the shared frontend.Batch driver.
+// Files convert concurrently — the parse (goja), esbuild transform, and
+// lowering are all pure per-file CPU work with no shared state (the Converter
+// is stateless). What is JavaScript's alone: each file's default export is
+// collected so resolveJSCrossModuleCalls can rewrite cross-module markers once
+// every file has been lowered.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
-	// Module names are the file path relative to the scan root, so same-named
-	// functions in different files get distinct canonical names instead of
-	// colliding in the analyzer. For a single file the root is its own
-	// directory, so its module name stays the bare filename (see
-	// walkignore.CollectTarget).
-	root, files, isDir, err := walkignore.CollectTarget(path, IsJSFamily)
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no JavaScript files found under %s", root)
-	}
-
-	// Single-file mode (path pointed directly at a .js file): a parse/read
-	// failure is the caller's only signal, so surface it immediately.
-	if !isDir {
-		mod, defaultExport, err := c.convertJSFile(files[0], moduleNameFor(root, files[0]))
-		if err != nil {
-			return nil, err
-		}
-		prog := &ir.Program{Mode: "ast", Modules: []*ir.Module{mod}}
-		resolveJSCrossModuleCalls(prog, map[string]string{mod.Name: defaultExport})
-		return prog, nil
-	}
-
-	// Directory batch mode: one unparseable .js file must not abort the whole
-	// batch (a single syntax error in an unrelated file shouldn't hide every
-	// other file's findings). Skip it, log a warning to stderr, and keep
-	// going; only fail if not a single file in the tree converted.
-	//
-	// Files are converted concurrently — the parse (goja), esbuild transform,
-	// and lowering are all pure per-file CPU work with no shared state (the
-	// Converter is stateless). Results land at fixed indices, so module order
-	// stays the sorted file order regardless of completion order.
-	type jsFileResult struct {
-		mod           *ir.Module
-		defaultExport string
-		err           error
-	}
-	results := make([]jsFileResult, len(files))
-	chunks.Run(len(files), func(start, end int) {
-		for i := start; i < end; i++ {
-			mod, defaultExport, err := c.convertJSFile(files[i], moduleNameFor(root, files[i]))
-			results[i] = jsFileResult{mod, defaultExport, err}
-		}
-	})
-
-	prog := &ir.Program{Mode: "ast"}
 	// defaultExports maps each module name to its default-export function
-	// canonical, so resolveJSCrossModuleCalls can rewrite cross-module markers
-	// once every file has been lowered.
+	// canonical, filled after all files are parsed (Finish).
 	defaultExports := map[string]string{}
-	var convertErrs []string
-	for i, r := range results {
-		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "js_converter: skipping %s: %v\n", files[i], r.err)
-			c.skipped++
-			convertErrs = append(convertErrs, r.err.Error())
-			continue
-		}
-		prog.Modules = append(prog.Modules, r.mod)
-		if r.defaultExport != "" {
-			defaultExports[r.mod.Name] = r.defaultExport
-		}
+	b := frontend.Batch[jsFileResult]{
+		Label: "js_converter",
+		Lang:  "JavaScript",
+		Mode:  "ast",
+		Match: IsJSFamily,
+		Parse: frontend.PerFile(func(root, f string) jsFileResult {
+			mod, defaultExport, err := c.convertJSFile(f, moduleNameFor(root, f))
+			return jsFileResult{mod, defaultExport, err}
+		}),
+		Finish: func(results []jsFileResult) {
+			for _, r := range results {
+				if r.err == nil && r.defaultExport != "" {
+					defaultExports[r.mod.Name] = r.defaultExport
+				}
+			}
+		},
+		Result: func(r *jsFileResult) (*ir.Module, error) { return r.mod, r.err },
+		PostProgram: func(prog *ir.Program, _ bool) {
+			resolveJSCrossModuleCalls(prog, defaultExports)
+		},
 	}
+	prog, skipped, err := b.Convert(path)
+	c.skipped += skipped
+	return prog, err
+}
 
-	if len(prog.Modules) == 0 {
-		return nil, fmt.Errorf("js_converter: no JavaScript files under %s converted successfully (%d file(s) failed): %s",
-			root, len(convertErrs), strings.Join(convertErrs, "; "))
-	}
-
-	resolveJSCrossModuleCalls(prog, defaultExports)
-
-	return prog, nil
+// jsFileResult is one file's outcome within a batch conversion.
+type jsFileResult struct {
+	mod           *ir.Module
+	defaultExport string
+	err           error
 }
 
 // crossModuleMarker prefixes a callee emitted for a bare call to a relative-
@@ -202,38 +170,22 @@ const crossModuleMarker = "js:@mod:"
 // the marker -- so nothing downstream trips on the marker syntax. Only ADDS an
 // inter-procedural edge to an unambiguously-named exported function (FP-safe).
 func resolveJSCrossModuleCalls(prog *ir.Program, defaultExports map[string]string) {
-	setCallee := func(cc *ir.CallCommon, name string) {
-		cc.Callee = name
-		if fnv := cc.GetValue(); fnv != nil && fnv.GetFuncName() != "" {
-			fnv.Kind = &ir.Value_FuncName{FuncName: name}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if !strings.HasPrefix(callee, crossModuleMarker) {
+			continue
 		}
-	}
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			for _, b := range fn.Blocks {
-				for _, inst := range b.Instrs {
-					cc := inst.GetCall()
-					if cc == nil {
-						continue
-					}
-					callee := cc.GetCallee()
-					if !strings.HasPrefix(callee, crossModuleMarker) {
-						continue
-					}
-					modName := strings.TrimPrefix(callee, crossModuleMarker)
-					if target := defaultExports[modName]; target != "" {
-						setCallee(cc, target)
-						continue
-					}
-					// Unresolved/ambiguous: fall back to a plain bare name.
-					leaf := modName
-					if i := strings.LastIndexByte(leaf, '/'); i >= 0 {
-						leaf = leaf[i+1:]
-					}
-					setCallee(cc, "js:"+leaf)
-				}
-			}
+		modName := strings.TrimPrefix(callee, crossModuleMarker)
+		if target := defaultExports[modName]; target != "" {
+			irwalk.SetCallee(cc, target)
+			continue
 		}
+		// Unresolved/ambiguous: fall back to a plain bare name.
+		leaf := modName
+		if i := strings.LastIndexByte(leaf, '/'); i >= 0 {
+			leaf = leaf[i+1:]
+		}
+		irwalk.SetCallee(cc, "js:"+leaf)
 	}
 }
 

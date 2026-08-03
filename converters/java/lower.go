@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"godzilla/converters/ssabuild"
 	ir "godzilla/pkg/ir/v1"
 )
 
@@ -51,14 +52,14 @@ func convertMethod(className string, m dumpMethod, filename string) *ir.Function
 	// below). Taint itself is width-agnostic — the width only affects slot index.
 	slot := 0
 	if !m.Static {
-		this := regValue("this")
+		this := ssabuild.Reg("this")
 		fn.Params = append(fn.Params, this)
 		s.locals[0] = this
 		slot = 1
 	}
 	for i, pt := range parseParams(m.Descriptor) {
 		name := fmt.Sprintf("p%d", i)
-		v := regValue(name)
+		v := ssabuild.Reg(name)
 		fn.Params = append(fn.Params, v)
 		s.locals[slot] = v
 		// A parameter carrying framework annotations (e.g. Spring's
@@ -99,14 +100,14 @@ func (s *methodState) annotatedParamSource(anns []string, pos *ir.Position) *ir.
 			},
 			Pos: pos,
 		})
-		results = append(results, regValue(r))
+		results = append(results, ssabuild.Reg(r))
 	}
 	if len(results) == 1 {
 		return results[0]
 	}
 	phi := s.reg()
 	s.instrs = append(s.instrs, &ir.Instruction{Name: phi, Op: ir.OpCode_OP_CODE_PHI, Operands: results, Pos: pos})
-	return regValue(phi)
+	return ssabuild.Reg(phi)
 }
 
 // entryLine returns the first source line recorded in a method's bytecode, used
@@ -153,7 +154,7 @@ func (s *methodState) step(in dumpInstr) {
 	case "CONST":
 		// Model every constant as a string: harmless for taint and lets the
 		// secrets scanner see string literals.
-		s.push(constString(in.Cst))
+		s.push(ssabuild.Str(in.Cst))
 	case "INVOKE":
 		s.invoke(in, pos)
 	case "INVOKEDYNAMIC":
@@ -186,7 +187,7 @@ func (s *methodState) step(in dumpInstr) {
 		// ref and pushes an int.
 		if in.Kind == "INSTANCEOF" {
 			s.pop()
-			s.push(constString("0"))
+			s.push(ssabuild.Str("0"))
 		}
 	case "RETURN":
 		s.ret(in, pos)
@@ -430,14 +431,14 @@ func (s *methodState) mergeStates(preds []int, exits []*simState, b block) simSt
 // iff any incoming edge is.
 func (s *methodState) mergeVals(vals []*ir.Value, pos *ir.Position) *ir.Value {
 	if len(vals) == 0 {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	if len(vals) == 1 {
 		return vals[0]
 	}
 	r := s.reg()
 	s.instrs = append(s.instrs, &ir.Instruction{Name: r, Op: ir.OpCode_OP_CODE_PHI, Operands: vals, Pos: pos})
-	return regValue(r)
+	return ssabuild.Reg(r)
 }
 
 func (s *methodState) blockPos(b block) *ir.Position {
@@ -451,6 +452,15 @@ func (s *methodState) blockPos(b block) *ir.Position {
 
 func cloneState(st simState) simState {
 	return simState{stack: slices.Clone(st.stack), locals: maps.Clone(st.locals)}
+}
+
+// javaFormatCallees are the exact canonical FQNs of the JDK formatters that
+// carry the builtin.format marker (template/value in Args[0]; see
+// internal/analysis/ssrf.go). Owners are bytecode internal names, hence the
+// slashed java/lang/String.
+var javaFormatCallees = map[string]bool{
+	"java:java/lang/String.format":  true,
+	"java:java/lang/String.valueOf": true,
 }
 
 // invoke lowers a method call. Calls with a receiver (virtual/interface/special)
@@ -481,13 +491,17 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	inst := &ir.Instruction{Name: name, Op: op, Call: cc, Pos: pos}
 	// Tag String.format / String.valueOf (template/value in Args[0]) with the
 	// language-neutral builtin.format marker so the engine's SSRF host
-	// reconstruction reads the marker, not a Java callee-name shape.
-	if strings.Contains(callee, "String.format") || strings.Contains(callee, "String.valueOf") {
+	// reconstruction reads the marker, not a Java callee-name shape. The match is
+	// exact canonical FQNs (the owner is the bytecode internal name, so
+	// java/lang/String): a substring match would let a user method on a class
+	// merely named like String (MyString.format) claim "Args[0] is the template"
+	// semantics and wrongly prove a fixed host, suppressing a real SSRF finding.
+	if javaFormatCallees[callee] {
 		inst.Intrinsic = "builtin.format"
 	}
 	s.instrs = append(s.instrs, inst)
 	if name != "" {
-		s.push(regValue(name))
+		s.push(ssabuild.Reg(name))
 	}
 }
 
@@ -501,7 +515,7 @@ func (s *methodState) invokeDynamic(in dumpInstr, pos *ir.Position) {
 	if strings.HasPrefix(in.Mname, "makeConcat") {
 		inst := &ir.Instruction{Name: s.reg(), Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: args, Pos: pos}
 		s.instrs = append(s.instrs, inst)
-		s.push(regValue(inst.Name))
+		s.push(ssabuild.Reg(inst.Name))
 		return
 	}
 	if returnsVoid(in.Mdesc) {
@@ -616,12 +630,12 @@ func (s *methodState) emit(name string, op ir.OpCode, operands []*ir.Value, pos 
 	if name == "" {
 		return nil
 	}
-	return regValue(name)
+	return ssabuild.Reg(name)
 }
 
 func (s *methodState) push(v *ir.Value) {
 	if v == nil {
-		v = constString("")
+		v = ssabuild.Str("")
 	}
 	s.stack = append(s.stack, v)
 }
@@ -629,7 +643,7 @@ func (s *methodState) push(v *ir.Value) {
 func (s *methodState) pop() *ir.Value {
 	n := len(s.stack)
 	if n == 0 {
-		return constString("") // defensive: unbalanced stack (unmodeled op)
+		return ssabuild.Str("") // defensive: unbalanced stack (unmodeled op)
 	}
 	v := s.stack[n-1]
 	s.stack = s.stack[:n-1]
@@ -646,7 +660,7 @@ func (s *methodState) popN(n int) []*ir.Value {
 
 func (s *methodState) peek() *ir.Value {
 	if len(s.stack) == 0 {
-		return constString("")
+		return ssabuild.Str("")
 	}
 	return s.stack[len(s.stack)-1]
 }
@@ -663,14 +677,6 @@ func (s *methodState) pos(line int) *ir.Position {
 		return nil
 	}
 	return &ir.Position{Filename: s.filename, Line: int32(line)}
-}
-
-func regValue(name string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
-}
-
-func constString(v string) *ir.Value {
-	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v}}}}
 }
 
 // --- JVM descriptor parsing ---

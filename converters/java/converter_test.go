@@ -2,43 +2,33 @@ package java_converter
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"godzilla/internal/irwalk"
+	"godzilla/internal/testsupport"
 	ir "godzilla/pkg/ir/v1"
 )
 
 // requireJava skips when no JDK `java` launcher is on PATH (the frontend runs
 // the embedded JavaDump.java single-file program via it).
-func requireJava(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("java"); err != nil {
-		t.Skip("java not found on PATH; skipping")
-	}
-}
+func requireJava(t *testing.T) { testsupport.RequireTool(t, "java") }
 
 // eachInstr visits every lowered instruction in a program.
-func eachInstr(prog *ir.Program, fn func(*ir.Instruction)) {
-	for _, mod := range prog.Modules {
-		for _, f := range mod.Functions {
-			for _, b := range f.Blocks {
-				for _, in := range b.Instrs {
-					fn(in)
-				}
-			}
+func eachInstr(prog *ir.Program, visit func(*ir.Instruction)) {
+	for _, fn := range irwalk.Funcs(prog) {
+		for in := range irwalk.Instrs(fn) {
+			visit(in)
 		}
 	}
 }
 
 // eachCallee visits the callee of every CALL/INVOKE instruction.
-func eachCallee(prog *ir.Program, fn func(callee string)) {
-	eachInstr(prog, func(in *ir.Instruction) {
-		if in.Call != nil {
-			fn(in.Call.GetCallee())
-		}
-	})
+func eachCallee(prog *ir.Program, visit func(callee string)) {
+	for cc := range irwalk.Calls(prog) {
+		visit(cc.GetCallee())
+	}
 }
 
 // TestConvertFile_CommandInjectionSample proves the bytecode pipeline recovers a

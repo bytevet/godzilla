@@ -4,25 +4,20 @@ import (
 	"testing"
 
 	"godzilla/internal/rules"
+	"godzilla/internal/testsupport"
 )
 
 // cmdiRule is a minimal command-injection rule for the flow-sensitivity tests.
-func cmdiRule() *rules.RuleSet {
-	return &rules.RuleSet{Rules: []rules.Rule{{
-		ID:        "GO-CMDI",
-		Languages: []string{"go"},
-		Severity:  rules.SeverityCritical,
-		CWE:       "CWE-78",
-		Message:   "command injection",
-		Sources:   []string{"go:*net/url*.Get"},
-		Sinks:     rules.SinksOf("go:*os/exec.Command*"),
-	}}}
+func cmdiRule(t testing.TB) *rules.RuleSet {
+	return testsupport.OneRuleSet(t, "GO-CMDI", "go", "CWE-78",
+		[]string{"go:*net/url*.Get"}, []string{"go:*os/exec.Command*"},
+		testsupport.Severity(rules.SeverityCritical), testsupport.Message("command injection"))
 }
 
 func cmdiFindings(t *testing.T, src string) int {
 	t.Helper()
 	n := 0
-	for _, f := range scanSource(t, src, cmdiRule()) {
+	for _, f := range scanSource(t, src, cmdiRule(t)) {
 		if f.RuleID == "GO-CMDI" {
 			n++
 		}
