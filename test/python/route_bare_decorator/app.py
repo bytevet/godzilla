@@ -1,8 +1,16 @@
-"""An app with its own dispatch layer: routes are a bare HTTP verb next to an
-access-control decorator, never `@app.post`. pyload's JSON API is this shape
-(CVE-2026-35187 — SSRF in parse_urls), and a bare verb alone is too weak a
-signal to route on, so the access-control decorator is what admits it."""
+"""An app with its own dispatch layer: routes are a bare HTTP verb, never
+`@app.post`. pyload's JSON API is this shape (CVE-2026-35187 — SSRF in
+parse_urls), 84 bare @get/@post with no dotted form anywhere.
+
+A bare verb alone is far too weak a marker — `post` is an ordinary word. The
+SET is not: a class whose methods carry two or more DISTINCT bare verbs is
+dispatching, because a one-off helper decorator does not come with a sibling
+named after a different verb."""
 import requests
+
+
+def get(fn):
+    return fn
 
 
 def post(fn):
@@ -22,11 +30,18 @@ class Api:
     def parse_urls(self, html=None, url=None):
         return requests.get(url)
 
+    # No access-control decorator. An earlier version of this rule keyed on one,
+    # which excluded exactly the UNAUTHENTICATED endpoints — the ones most worth
+    # seeding. The verb set does not care.
+    @get
+    def preview(self, url=None):
+        return requests.get(url)
+
 
 class Helper:
-    # A bare verb with no access-control decorator alongside it is NOT a route:
-    # `post` here is an ordinary helper decorator, and seeding its parameters
-    # would taint every such method in the program.
+    # One bare verb, no sibling verb: `post` here is an ordinary helper
+    # decorator, not a routing table. Seeding its params would taint every such
+    # method in the program.
     @post
     def fetch(self, url=None):
         return requests.get(url)

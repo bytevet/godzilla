@@ -230,26 +230,34 @@ func convertPythonChunk(pythonExe, scriptPath, root string, files []string, out 
 // with BaseHandler(RequestHandler) in another module), so a handler's request
 // accessors are seeded as taint sources regardless of where its base class lives.
 func lowerAll(results []pyFileResult) {
-	handlerSet := globalHandlerClasses(results)
+	classes := globalRouteClasses(results)
 	for i := range results {
 		if results[i].err != nil || results[i].doc == nil {
 			continue
 		}
-		results[i].mod = convertModule(results[i].doc, results[i].file, results[i].module, handlerSet)
+		results[i].mod = convertModule(results[i].doc, results[i].file, results[i].module, classes)
 	}
 }
 
-// globalHandlerClasses builds the transitive set of request-handler class names
-// (by simple name) across every parsed file, so cross-file subclassing resolves.
-func globalHandlerClasses(results []pyFileResult) map[string]bool {
+// globalRouteClasses builds both class sets the route tables need, across every
+// parsed file: request-handler classes (so cross-file subclassing resolves) and
+// dispatch classes (so a class whose methods are split across files still tallies
+// its full verb set).
+func globalRouteClasses(results []pyFileResult) routeClasses {
 	classBases := map[string][]string{}
+	verbs := map[string]map[string]bool{}
 	for i := range results {
 		if results[i].err != nil || results[i].doc == nil {
 			continue
 		}
-		collectClassBases(results[i].doc.list("body"), classBases)
+		body := results[i].doc.list("body")
+		collectClassBases(body, classBases)
+		collectDispatchVerbs(body, verbs)
 	}
-	return handlerClasses(classBases, handlerBaseClasses)
+	return routeClasses{
+		handler:  handlerClasses(classBases, handlerBaseClasses),
+		dispatch: dispatchClasses(verbs),
+	}
 }
 
 // writeHelperScript materializes the embedded pyast.py into a temp file so it
