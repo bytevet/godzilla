@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"godzilla/internal/rules"
 	ir "godzilla/pkg/ir/v1"
@@ -137,26 +138,58 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		return hasSinkCallee(r)
 	}
 
-	// Each rule's analysis is independent — it reads the shared, immutable call
-	// graph / function index and writes only its own local state — so run the
-	// rules concurrently (bounded by GOMAXPROCS). Results are collected per rule
-	// index and concatenated in rule order, so output stays deterministic.
+	// Phase 1: decide which rules can produce a finding at all. An inert rule
+	// must cost one boolean and NEVER a goroutine — with a pack of mostly-inert
+	// rules the per-rule spawn/semaphore overhead dominated the skip it bought
+	// (Engine_InertRules regressed 2x when this check briefly ran inside the
+	// per-rule goroutines). The check is |callees| × |sink patterns| per rule,
+	// so on a dependency-heavy scan (tens of thousands of distinct callees) the
+	// serial ramp in front of the workers is real — parallelize it across a
+	// small fixed pool, but only past a size threshold so small scans and
+	// microbenchmarks keep the zero-spawn serial path. Safe concurrently:
+	// every matcher was compiled by e.rs.Compile() above, so this only reads.
+	live := make([]bool, len(e.rs.Rules))
+	if len(e.rs.Rules)*len(cg.Callees) >= 1<<15 {
+		var pre sync.WaitGroup
+		var next atomic.Int64
+		for w := 0; w < min(runtime.GOMAXPROCS(0), len(e.rs.Rules)); w++ {
+			pre.Add(1)
+			go func() {
+				defer pre.Done()
+				for {
+					i := int(next.Add(1)) - 1
+					if i >= len(e.rs.Rules) {
+						return
+					}
+					live[i] = canProduceFinding(&e.rs.Rules[i])
+				}
+			}()
+		}
+		pre.Wait()
+	} else {
+		for i := range e.rs.Rules {
+			live[i] = canProduceFinding(&e.rs.Rules[i])
+		}
+	}
+
+	// Phase 2: each live rule's analysis is independent — it reads the shared,
+	// immutable call graph / function index and writes only its own local state —
+	// so run the rules concurrently (bounded by GOMAXPROCS). Results are
+	// collected per rule index and concatenated in rule order, so output stays
+	// deterministic; a skipped rule's nil slot is exactly what an empty worklist
+	// returns.
 	results := make([][]Finding, len(e.rs.Rules))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	for i := range e.rs.Rules {
+		if !live[i] {
+			continue
+		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			// The prefilter runs INSIDE the goroutine so its |callees| × |sink
-			// patterns| scan overlaps with other rules' real analysis instead of
-			// serializing in front of it. Safe concurrently: every matcher was
-			// compiled by e.rs.Compile() above, so this only reads.
-			if !canProduceFinding(&e.rs.Rules[i]) {
-				return // results[i] stays nil, exactly what an empty worklist returns
-			}
 			results[i] = analyzeInterproc(idx, &e.rs.Rules[i])
 		}(i)
 	}

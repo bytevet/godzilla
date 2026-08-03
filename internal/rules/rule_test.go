@@ -167,16 +167,24 @@ func TestMatchGlob_Semantics(t *testing.T) {
 	}
 }
 
-// BenchmarkMatchGlob exercises the matcher over a realistic mix of pattern
-// shapes and canonical callee names (the engine's hottest inner loop).
+// BenchmarkMatchGlob exercises the COMPILED matcher over a realistic mix of
+// pattern shapes and canonical callee names — the engine's hottest inner loop.
+// Patterns are classified once outside the loop, exactly as production compiles
+// them once at load: measuring per-call classification here would benchmark a
+// path no production caller runs.
 func BenchmarkMatchGlob(b *testing.B) {
 	pats := []string{"ruby:system", "c*:strcpy", "go:*request*", "py:*.execute", "go:(*database/sql.DB).Query#0", "ruby:Open3.*"}
+	compiled := make([]*compiledGlob, len(pats))
+	for i, p := range pats {
+		compiled[i] = classifyGlob(p)
+	}
 	ins := []string{"go:net/http.(*Request).FormValue", "ruby:system", "c:strcpy", "py:cursor.execute"}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for _, p := range pats {
+		for _, g := range compiled {
 			for _, in := range ins {
-				_ = matchGlob(p, in)
+				_ = g.match(in)
 			}
 		}
 	}
