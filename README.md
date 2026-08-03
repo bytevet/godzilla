@@ -101,6 +101,25 @@ $ godzilla scan ./test/go/sql_injection
 1 finding(s); 1 at/above "medium".
 ```
 
+### Environment variables
+
+Everything routine is a CLI flag (`godzilla scan -h`); the environment only
+carries operator concerns:
+
+| Variable | Effect |
+|---|---|
+| `GODZILLA_ALLOW_BUILD=1` | Same opt-in as `-allow-build`: lets a scan run the project's build tool (Maven/Gradle/Cargo). |
+| `GODZILLA_RUSTC`, `GODZILLA_CARGO` | Paths to the Rust toolchain binaries (default: `rustc`, `cargo` on `PATH`). |
+| `GODZILLA_CC`, `GODZILLA_CXX` | C/C++ compilers for the opt-in LLVM backend (default: `clang`, `clang++`). |
+| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5`). |
+| `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
+| `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
+
+Subprocess deadlines are flags, not environment: `-parse-timeout` (default
+`2m0s`, each per-file parse/dump) and `-build-timeout` (default `10m0s`, a
+whole-project build under `-allow-build`).
+
 ## Run with Docker
 
 Prebuilt images ship with the toolchains a scan needs, so you can gate a repo

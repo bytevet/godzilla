@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"godzilla/internal/proc"
 	"godzilla/internal/testsupport"
 )
 
@@ -20,7 +22,10 @@ func TestParseTimeoutKillsSubprocess(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 1ms is shorter than python3 process startup, so the deadline always fires.
-	t.Setenv("GODZILLA_PARSE_TIMEOUT", "1ms")
+	// SetTimeouts is process-wide, so restore the previous deadline afterwards.
+	old := proc.ParseTimeout()
+	proc.SetTimeouts(time.Millisecond, 0)
+	defer proc.SetTimeouts(old, 0)
 
 	if _, err := NewConverter().ConvertFile(src); err == nil {
 		t.Fatal("expected ConvertFile to fail under a 1ms parse timeout (subprocess should be killed)")

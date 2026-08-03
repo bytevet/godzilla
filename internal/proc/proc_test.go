@@ -6,6 +6,8 @@ import (
 )
 
 func TestTimeouts_DefaultsAndOverride(t *testing.T) {
+	defer SetTimeouts(defaultParseTimeout, defaultBuildTimeout)
+
 	if ParseTimeout() != defaultParseTimeout {
 		t.Errorf("default parse timeout = %v, want %v", ParseTimeout(), defaultParseTimeout)
 	}
@@ -13,19 +15,19 @@ func TestTimeouts_DefaultsAndOverride(t *testing.T) {
 		t.Errorf("default build timeout = %v, want %v", BuildTimeout(), defaultBuildTimeout)
 	}
 
-	t.Setenv("GODZILLA_PARSE_TIMEOUT", "5s")
+	SetTimeouts(5*time.Second, 42*time.Second)
 	if ParseTimeout() != 5*time.Second {
 		t.Errorf("override parse timeout = %v, want 5s", ParseTimeout())
 	}
-	t.Setenv("GODZILLA_BUILD_TIMEOUT", "42s")
 	if BuildTimeout() != 42*time.Second {
 		t.Errorf("override build timeout = %v, want 42s", BuildTimeout())
 	}
 
-	// A garbage / non-positive value falls back to the default.
-	t.Setenv("GODZILLA_PARSE_TIMEOUT", "nonsense")
-	if ParseTimeout() != defaultParseTimeout {
-		t.Errorf("garbage override should fall back to default, got %v", ParseTimeout())
+	// A non-positive value leaves the current deadline unchanged.
+	SetTimeouts(0, -1)
+	if ParseTimeout() != 5*time.Second || BuildTimeout() != 42*time.Second {
+		t.Errorf("non-positive override must be a no-op, got parse=%v build=%v",
+			ParseTimeout(), BuildTimeout())
 	}
 }
 

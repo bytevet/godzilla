@@ -45,7 +45,7 @@ func runRules(args []string) {
 // id, severity, CWE, languages, and source/sink counts.
 func runRulesList(args []string) {
 	fs := flag.NewFlagSet("rules list", flag.ExitOnError)
-	rulesPath := fs.String("rules", "", "additional YAML rule file to include")
+	rulesPath := fs.String("rules", "", "additional YAML rule file or rulepack directory to include")
 	_ = fs.Parse(args)
 
 	rs, err := loader.LoadDefault(*rulesPath)
@@ -101,7 +101,7 @@ func runRulesLint(args []string) {
 // the in-repo corpus test.
 func runRulesTest(args []string) {
 	fs := flag.NewFlagSet("rules test", flag.ExitOnError)
-	rulesPath := fs.String("rules", "", "additional YAML rule file to include")
+	rulesPath := fs.String("rules", "", "additional YAML rule file or rulepack directory to include")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: godzilla rules test <dir> [-rules <file>]")
