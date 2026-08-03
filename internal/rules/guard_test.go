@@ -98,10 +98,12 @@ func TestGuardFailsClosed(t *testing.T) {
 		t.Error("a guard that failed to compile must suppress, not fire")
 	}
 
-	// Same on the uncompiled fallback path (Compile never called).
+	// Without an explicit Compile the guard is compiled lazily on first match:
+	// the same real guard, the same verdicts.
 	u := &Rule{Sinks: []Sink{{Pattern: "go:*Sink", When: "arg[0].String startsWith 'x'"}}}
-	if _, g, ok := u.MatchSink("go:aSink"); !ok || g.Eval([]Arg{{String: "xyz", Complete: true}}) {
-		t.Error("uncompiled guarded sink must deny, not fire unguarded")
+	if _, g, ok := u.MatchSink("go:aSink"); !ok || g == nil ||
+		!g.Eval([]Arg{{String: "xyz", Complete: true}}) || g.Eval([]Arg{{String: "abc", Complete: true}}) {
+		t.Error("lazily-compiled guarded sink must evaluate its real guard")
 	}
 }
 

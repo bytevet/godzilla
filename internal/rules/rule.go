@@ -332,17 +332,9 @@ func (r *Rule) IsDangerousCall() bool { return strings.EqualFold(r.Kind, "danger
 // MatchDangerousCallee reports whether callee matches one of the rule's
 // dangerous-call globs, returning that entry's optional dynamic guard.
 func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
-	if r.matchers != nil {
-		for _, c := range r.matchers.callees {
-			if c.g.match(callee) {
-				return c.guard, true
-			}
-		}
-		return nil, false
-	}
-	for _, c := range r.Callees {
-		if MatchGlob(c.Pattern, callee) {
-			return uncompiledGuard(r.effectiveWhen(c.When)), true
+	for _, c := range r.ensure().callees {
+		if c.g.match(callee) {
+			return c.guard, true
 		}
 	}
 	return nil, false
@@ -350,24 +342,13 @@ func (r *Rule) MatchDangerousCallee(callee string) (guard *Guard, ok bool) {
 
 // effectiveWhen resolves an entry's guard expression against the rule's default:
 // the entry's own `when:` if it has one, else the rule-level When. The single
-// place inheritance is applied — Compile and both uncompiled fallback paths call
-// it, so a sink cannot be guarded on one path and unguarded on the other.
+// place inheritance is applied — only Compile calls it, so a sink cannot be
+// guarded on one path and unguarded on another.
 func (r *Rule) effectiveWhen(when string) string {
 	if strings.TrimSpace(when) != "" {
 		return when
 	}
 	return r.When
-}
-
-// uncompiledGuard is the guard for a match found on the uncompiled fallback path
-// (Compile was never called, so no program exists). A guarded entry cannot be
-// evaluated there, so it DENIES rather than degrading to an unguarded entry that
-// fires on everything.
-func uncompiledGuard(when string) *Guard {
-	if strings.TrimSpace(when) == "" {
-		return nil
-	}
-	return DenyGuard
 }
 
 // AppliesTo reports whether the rule is active for the given source language
@@ -384,9 +365,8 @@ func (r *Rule) AppliesTo(language string) bool {
 // ruleMatchers holds a rule's pattern lists precompiled into shape-matchers, so
 // the hot matching path (once per call-site × rule) is a plain slice walk with
 // no per-call cache lookup, mutex, or "#idx" re-parse. Built once by Compile;
-// nil until then, in which case the matching methods fall back to the
-// package-level cached path (correct, just slower — used by tests and the
-// non-hot dangerous-call scan).
+// nil until then, in which case the matching methods compile lazily via ensure —
+// ONE matching semantics, whether or not the caller compiled first.
 type ruleMatchers struct {
 	sources     []*compiledGlob
 	sinks       []compiledSink
@@ -463,15 +443,27 @@ func (r *Rule) Compile() error {
 	return errors.Join(errs...)
 }
 
-// ConstArgRe returns the rule's compiled const_arg.matches regexp, or nil when
-// the rule declares no const_arg, was never compiled, or its regexp is invalid.
-// A rule that declares a const_arg it cannot compile must never fire, so callers
-// treat "ConstArg != nil but ConstArgRe() == nil" as "matches nothing".
-func (r *Rule) ConstArgRe() *regexp.Regexp {
+// ensure returns the rule's compiled matchers, compiling them on first use.
+// Production paths compile eagerly and single-threaded before matching (the
+// loader at load time, and every analysis pass via RuleSet.Compile — see
+// Compile's doc); this lazy fallback exists so a hand-built Rule (tests,
+// embedding tools) matches with the SAME semantics instead of a divergent
+// uncompiled path. A compile error degrades exactly as Compile documents:
+// fail-closed guards, nil regexps. Not safe for a FIRST call from concurrent
+// goroutines — concurrency is only supported behind an eager Compile.
+func (r *Rule) ensure() *ruleMatchers {
 	if r.matchers == nil {
-		return nil
+		_ = r.Compile()
 	}
-	return r.matchers.constArg
+	return r.matchers
+}
+
+// ConstArgRe returns the rule's compiled const_arg.matches regexp, or nil when
+// the rule declares no const_arg or its regexp is invalid. A rule that declares
+// a const_arg it cannot compile must never fire, so callers treat
+// "ConstArg != nil but ConstArgRe() == nil" as "matches nothing".
+func (r *Rule) ConstArgRe() *regexp.Regexp {
+	return r.ensure().constArg
 }
 
 // IsSecret reports whether the rule is a non-dataflow, pattern-over-constants
@@ -479,14 +471,11 @@ func (r *Rule) ConstArgRe() *regexp.Regexp {
 func (r *Rule) IsSecret() bool { return strings.EqualFold(r.Kind, "secret") }
 
 // MatchesRe returns the rule's compiled `matches` regexp, or nil when it
-// declares none, was never compiled, or its regexp was invalid. As with
-// ConstArgRe, a declared-but-uncompilable detector must never fire, so nil means
+// declares none or its regexp was invalid. As with ConstArgRe, a
+// declared-but-uncompilable detector must never fire, so nil means
 // "matches nothing".
 func (r *Rule) MatchesRe() *regexp.Regexp {
-	if r.matchers == nil {
-		return nil
-	}
-	return r.matchers.matches
+	return r.ensure().matches
 }
 
 // GlobSet is a set of canonical-name globs precompiled to shape-matchers, for a
@@ -527,10 +516,7 @@ func matchAnyCompiled(gs []*compiledGlob, s string) bool {
 
 // IsSource reports whether callee matches any of the rule's source patterns.
 func (r *Rule) IsSource(callee string) bool {
-	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.sources, callee)
-	}
-	return MatchAny(r.Sources, callee)
+	return matchAnyCompiled(r.ensure().sources, callee)
 }
 
 // IsSink reports whether callee matches any of the rule's sink patterns.
@@ -544,18 +530,9 @@ func (r *Rule) IsSink(callee string) bool {
 // dynamic guard. nil/empty args with ok==true means every argument is an
 // injection point.
 func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
-	if r.matchers != nil {
-		for _, s := range r.matchers.sinks {
-			if s.g.match(callee) {
-				return s.args, s.guard, true
-			}
-		}
-		return nil, nil, false
-	}
-	for _, s := range r.Sinks {
-		pattern, idx := parseSink(s.Pattern)
-		if MatchGlob(pattern, callee) {
-			return idx, uncompiledGuard(r.effectiveWhen(s.When)), true
+	for _, s := range r.ensure().sinks {
+		if s.g.match(callee) {
+			return s.args, s.guard, true
 		}
 	}
 	return nil, nil, false
@@ -606,29 +583,20 @@ func parseSinkSpec(entry string) (pattern string, args []int32, valid bool) {
 
 // IsSanitizer reports whether callee matches any of the rule's sanitizer patterns.
 func (r *Rule) IsSanitizer(callee string) bool {
-	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.sanitizers, callee)
-	}
-	return MatchAny(r.Sanitizers, callee)
+	return matchAnyCompiled(r.ensure().sanitizers, callee)
 }
 
 // IsPropagator reports whether callee matches one of the rule's propagator
 // patterns or one of the set-wide defaults (see RuleSet.DefaultPropagators).
 func (r *Rule) IsPropagator(callee string) bool {
-	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.propagators, callee) ||
-			matchAnyCompiled(r.defaultProps, callee)
-	}
-	return MatchAny(r.Propagators, callee)
+	return matchAnyCompiled(r.ensure().propagators, callee) ||
+		matchAnyCompiled(r.defaultProps, callee)
 }
 
 // IsValidator reports whether callee matches any of the rule's validator (guard)
 // patterns.
 func (r *Rule) IsValidator(callee string) bool {
-	if r.matchers != nil {
-		return matchAnyCompiled(r.matchers.validators, callee)
-	}
-	return MatchAny(r.Validators, callee)
+	return matchAnyCompiled(r.ensure().validators, callee)
 }
 
 // HasValidators reports whether the rule declares any guard/barrier validators,

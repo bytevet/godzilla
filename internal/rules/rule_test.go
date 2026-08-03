@@ -177,9 +177,8 @@ func BenchmarkMatchGlob(b *testing.B) {
 
 // TestRuleLevelWhenInherited: a rule-level `when:` is the DEFAULT guard for
 // every sink/callee that declares none of its own, an entry's own `when:` wins,
-// and both the compiled and the uncompiled matching paths agree — a sink that is
-// guarded on one path and unguarded on the other would fire unguarded wherever
-// Compile had not been called.
+// and matching without an explicit Compile (the lazy path) agrees with the
+// compiled path — there is exactly one matching semantics.
 func TestRuleLevelWhenInherited(t *testing.T) {
 	newRule := func() *Rule {
 		return &Rule{
@@ -193,14 +192,16 @@ func TestRuleLevelWhenInherited(t *testing.T) {
 		}
 	}
 
-	// Uncompiled fallback: an inherited guard must DENY (it cannot be evaluated
-	// there), exactly as an entry's own guard does.
+	// Lazy path (no explicit Compile): matching compiles on first use, so the
+	// inherited guard is the rule's REAL expression — identical to the compiled
+	// path below, not a divergent fallback.
 	r := newRule()
-	if _, g, ok := r.MatchSink("go:pkg.Inherits"); !ok || g != DenyGuard {
-		t.Errorf("uncompiled inherited sink guard = %v (ok=%v), want DenyGuard", g, ok)
+	if _, g, ok := r.MatchSink("go:pkg.Inherits"); !ok || g == nil ||
+		g.Eval([]Arg{{String: "xyz"}}) != true || g.Eval([]Arg{{String: "abc"}}) != false {
+		t.Errorf("lazy inherited sink guard: ok=%v guard=%v, want the rule-level expression", ok, g)
 	}
-	if g, ok := r.MatchDangerousCallee("go:pkg.Callee"); !ok || g != DenyGuard {
-		t.Errorf("uncompiled inherited callee guard = %v (ok=%v), want DenyGuard", g, ok)
+	if g, ok := r.MatchDangerousCallee("go:pkg.Callee"); !ok || g == nil {
+		t.Errorf("lazy inherited callee guard = %v (ok=%v), want a real guard", g, ok)
 	}
 
 	// Compiled path: the inherited guard is the rule's expression; the opted-out
