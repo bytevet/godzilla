@@ -35,6 +35,20 @@ rules:
       - "py:*client.stream#1"
       - "py:*client.request#1"
       - "py:*urlopen"
+      # pycurl: the request URL is set as an OPTION, `c.setopt(pycurl.URL, url)`,
+      # so the sink is setopt's value argument (#1) rather than a URL-named call.
+      # This is what an app with its own HTTP layer bottoms out at — pyload's
+      # get_url -> RequestFactory.get_url -> HTTPRequest.load -> set_request_context
+      # chain (CVE-2026-35187) ends here, and with no pycurl sink the whole class
+      # fired zero times across the project.
+      #
+      # The option in arg #0 is a module attribute, not a string literal, so it
+      # does not reconstruct and no guard can tell pycurl.URL from
+      # pycurl.POSTFIELDS. Pinning #1 is therefore as narrow as this gets:
+      # untrusted data reaching a NON-URL curl option is a known false positive,
+      # accepted because taint is still required and a tainted curl option is
+      # worth a look either way.
+      - "py:*.setopt#1"
     # No built-in sanitizer neutralizes tainted input for a request URL;
     # the fix is allow-listing the destination host, not escaping.
     sanitizers: []
