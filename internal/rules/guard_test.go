@@ -144,21 +144,43 @@ func TestArgHostFixed(t *testing.T) {
 // false negative. This pins expr's map semantics so a dependency bump that
 // changed them would fail here rather than quietly weakening the rule.
 func TestGuardKWArgsAndTainted(t *testing.T) {
-	shellOn := []Arg{
-		{String: DynMarker, Tainted: true, Type: "aggregate"},
-		{String: "true", Complete: true, Type: "bool", Name: "shell"},
+	// `["ls", tainted]` — a safe argv: a fixed program with the untrusted value
+	// as one ELEMENT. The structure is what the policy reads, so the fixtures
+	// carry real Elems rather than only a container type name.
+	argv := Arg{
+		String: DynMarker, Tainted: true, Type: "aggregate", TaintInChildren: true,
+		Elems: []Arg{
+			{String: "ls", Complete: true, Type: "string"},
+			{String: DynMarker, Tainted: true, Type: "string"},
+		},
 	}
-	shellOff := []Arg{
-		{String: DynMarker, Tainted: true, Type: "aggregate"},
-	}
+	shellOn := []Arg{argv, {String: "true", Complete: true, Type: "bool", Name: "shell"}}
+	shellOff := []Arg{argv}
+	// `shell=flag` — a non-constant flag. It reconstructs to neither "" nor
+	// "false", so the sink must keep firing; the `!= "true"` form this test used
+	// to carry would have cleared it and dropped the finding.
+	shellDyn := []Arg{argv, {String: DynMarker, Type: "bool", Name: "shell"}}
+	// An extra POSITIONAL argument we cannot name. `shell=flag` records no name
+	// at all, so an unnameable non-tainted argument must keep the sink armed.
+	unnamedExtra := []Arg{argv, {String: DynMarker, Type: "bool"}}
 	taintedStr := []Arg{
 		{String: DynMarker, Tainted: true, Type: "string"},
 	}
-	// The real py-command-injection guard: fire unless no shell was requested
-	// AND every tainted argument arrived as an in-place container.
-	const argvPolicy = `not (kwargs.shell.String != "true" ` +
-		`and len(filter(arg, .Tainted)) > 0 ` +
-		`and all(filter(arg, .Tainted), .Type == "aggregate"))`
+	// The shipped py-command-injection policy, kept in the same SHAPE as
+	// rulepacks/py-command-injection.yaml (minus its interpreter-name list, which
+	// is exercised by the corpus, not here). Two details are load-bearing and are
+	// why this is not written the obvious way:
+	//
+	//   - `shell` is cleared by evidence of ABSENCE (== "" or == "false"), never
+	//     by `!= "true"`. A non-constant `shell=flag` reconstructs to neither, so
+	//     the lazy form would clear it and silently drop a real finding.
+	//   - a non-tainted argument must carry a keyword we can NAME, because
+	//     `shell=flag` records no name at all — so an unnameable extra argument
+	//     keeps the sink firing rather than being assumed harmless.
+	const argvPolicy = `not ((kwargs.shell.String == "" or kwargs.shell.String == "false") ` +
+		`and all(filter(arg, not .Tainted), .Name != "") ` +
+		`and any(arg, .Tainted) ` +
+		`and all(filter(arg, .Tainted), len(.Elems) > 0 and .TaintInChildren and .Elems[0].Complete))`
 
 	cases := []struct {
 		name string
@@ -174,6 +196,8 @@ func TestGuardKWArgsAndTainted(t *testing.T) {
 		{"argv policy: shell=True re-arms", argvPolicy, shellOn, true},
 		{"argv policy: tainted string fires", argvPolicy, taintedStr, true},
 		{"argv policy: no taint at all fires", argvPolicy, []Arg{{String: "ls", Complete: true}}, true},
+		{"argv policy: non-constant shell= re-arms", argvPolicy, shellDyn, true},
+		{"argv policy: unnameable extra arg re-arms", argvPolicy, unnamedExtra, true},
 	}
 	for _, tc := range cases {
 		g, err := CompileGuard(tc.src)

@@ -46,9 +46,12 @@ func TestERBToRubyLowersTags(t *testing.T) {
 		{"unescaped output becomes raw()", "<%== params[:a] %>", []string{"raw(", "params[:a]"}, nil},
 		{"comment contributes nothing", "<%# params[:a] %>", nil, []string{"params"}},
 		{"two tags on one line are separated", "<%= a %><%= b %>", []string{"a", ";", "b"}, nil},
-		// A modifier cannot sit inside raw()'s parens, so the tag keeps its
-		// expression and loses only its sink.
-		{"modifier form drops the raw wrap", "<%== a if b %>", []string{"a if b"}, []string{"raw("}},
+		// A modifier cannot sit directly inside raw()'s parens, but it fits in a
+		// nested pair, and `<%== `/`raw((` are the same width.
+		{"modifier form keeps its sink", "<%== a if b %>", []string{"raw((", "a if b", "))"}, nil},
+		// Unspaced leaves no room for the nesting, so the sink is dropped rather
+		// than emitting a syntax error that would lose the whole template.
+		{"unspaced modifier falls back to plain", "<%==a if b%>", []string{"a if b"}, []string{"raw("}},
 		{"bare yield is renamed", "<%= yield %>", []string{"_erb_"}, []string{"yield"}},
 		{"yield is whole-word only", "<%= yielded %>", []string{"yielded"}, []string{"_erb_"}},
 	} {

@@ -138,9 +138,25 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		return strings.ReplaceAll(strings.TrimPrefix(canon, "py:"), "/", ".")
 	}
 
-	// Index every lowered function by its logical dotted path. A path shared by
-	// two functions is ambiguous and never used as a rewrite target.
-	rawByLogical := map[string]string{} // logical path -> raw canonical
+	// Index every lowered function by its logical dotted path AND by every
+	// dot-aligned suffix of it. A path shared by two functions is ambiguous and
+	// never used as a rewrite target.
+	//
+	// Indexing suffixes is what makes resolution independent of WHERE the scan
+	// root sits. A module name is relative to the scan root, so scanning a repo
+	// whose package lives under `src/` gives functions the logical path
+	// `pyload.core.network.request_factory.get_url`, while the import inside that
+	// package writes `network.request_factory.get_url`. Matching only full paths
+	// against callee suffixes can never bridge that: no suffix of the callee
+	// equals the longer function path. Scanning `src/pyload/core` happened to
+	// line the two up, so the same code resolved from one root and silently
+	// dropped every cross-module call from the other.
+	//
+	// The suffix walk deliberately stops before the LAST component, so a bare
+	// name is never indexed. That preserves the property the resolver relies on:
+	// a single-component method callee (`x.execute`) cannot match a function,
+	// since every indexed key still carries at least `module.name`.
+	rawByLogical := map[string]string{} // logical path (or suffix) -> raw canonical
 	ambiguous := map[string]bool{}
 	rawSet := map[string]bool{} // every function's raw canonical (exact-resolvable already)
 	for _, m := range prog.Modules {
@@ -149,12 +165,14 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 				continue
 			}
 			rawSet[fn.CanonicalName] = true
-			lp := logical(fn.CanonicalName)
-			if _, seen := rawByLogical[lp]; seen {
-				ambiguous[lp] = true
-				continue
+			for s := logical(fn.CanonicalName); strings.IndexByte(s, '.') >= 0; {
+				if prev, seen := rawByLogical[s]; seen && prev != fn.CanonicalName {
+					ambiguous[s] = true
+				} else {
+					rawByLogical[s] = fn.CanonicalName
+				}
+				s = s[strings.IndexByte(s, '.')+1:]
 			}
-			rawByLogical[lp] = fn.CanonicalName
 		}
 	}
 
@@ -256,7 +274,7 @@ func globalRouteClasses(results []pyFileResult) routeClasses {
 	}
 	return routeClasses{
 		handler:  handlerClasses(classBases, handlerBaseClasses),
-		dispatch: dispatchClasses(verbs),
+		dispatch: dispatchClasses(verbs, classBases),
 	}
 }
 

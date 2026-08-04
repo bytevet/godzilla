@@ -3,16 +3,18 @@
 # Rails AUTO-ESCAPES `<%= %>`, so only the escape-bypassing forms are sinks.
 # show.html.erb: `<%== %>` (line 4, lowered to raw()) and an explicit raw()
 # (line 5); lines 3 and 8 are auto-escaped and line 6 is sanitized by h().
-# layout.html.erb: the second tag on line 6. Its line 7 is a modifier form
-# (`<%== x if y %>`) whose sink is deliberately dropped — a modifier cannot sit
-# inside raw()'s parens, and losing one tag's sink beats a syntax error losing
-# the file. `yield` on lines 4-5 must not break parsing.
+# layout.html.erb: the second tag on line 6, and the modifier form on line 7 —
+# `<%== x if y %>` keeps its sink because `<%== `/`raw((` are the same width, so
+# the condition nests inside the call. `yield` on lines 4-5 must not break
+# parsing.
 #
-# max: 3 pins the whole thing: an over-broad lowering that made every
+# max: 4 pins the whole thing: an over-broad lowering that made every
 # interpolation a sink fails the corpus rather than quietly costing precision on
-# every Rails app.
+# every Rails app. It also holds the coupling to ruby-xss.yaml's `ruby:raw` sink
+# — narrowing that glob breaks this sample rather than silently disabling ERB
+# unescaped-output detection.
 findings:
     - rule: ruby-xss
-      min: 3
-      max: 3
+      min: 4
+      max: 4
       sink: "ruby:raw"

@@ -3,6 +3,7 @@ package py_converter
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"godzilla/converters/ssabuild"
@@ -505,17 +506,24 @@ func collectDispatchVerbs(stmts []astNode, out map[string]map[string]bool) {
 	}
 }
 
-// dispatchClasses selects the classes carrying two or more distinct bare verbs.
-// Two is the threshold because one verb is a coincidence a helper decorator can
-// produce; a `@get` AND a `@post` on sibling methods of one class is a routing
-// table.
-func dispatchClasses(verbs map[string]map[string]bool) map[string]bool {
-	out := map[string]bool{}
+// dispatchClasses selects the classes carrying two or more distinct bare verbs,
+// then propagates that down the class hierarchy. Two is the threshold because
+// one verb is a coincidence a helper decorator can produce; a `@get` AND a
+// `@post` on sibling methods of one class is a routing table.
+//
+// The hierarchy step is what covers the common framework shape: a base class
+// holds the routing surface and each subclass adds a handful of handlers, often
+// with a SINGLE verb, which on its own evidence would not qualify. Inheriting
+// from a confirmed dispatch layer is that evidence.
+func dispatchClasses(verbs map[string]map[string]bool, classBases map[string][]string) map[string]bool {
+	seed := map[string]bool{}
 	for class, vs := range verbs {
 		if len(vs) >= 2 {
-			out[class] = true
+			seed[class] = true
 		}
 	}
+	out := handlerClasses(classBases, seed)
+	maps.Copy(out, seed) // handlerClasses returns only the SUBclasses it derived
 	return out
 }
 

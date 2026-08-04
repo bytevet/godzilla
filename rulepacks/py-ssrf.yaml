@@ -47,3 +47,18 @@ rules:
     # No built-in sanitizer neutralizes tainted input for a request URL;
     # the fix is allow-listing the destination host, not escaping.
     sanitizers: []
+    # Percent-encoding is re-encoding, not sanitizing — quote() leaves `:` and
+    # `/` unescaped, so the HOST survives it and the request still goes wherever
+    # the attacker said. An app with its own HTTP layer normalizes the URL on the
+    # way to the sink (pyload's myquote -> quote, CVE-2026-35187), and without
+    # this the flow dies at the encoder.
+    #
+    # Deliberately scoped to THIS rule rather than added to
+    # _default-propagators.yaml, which applies to every rule: quote() percent-
+    # encodes `'` to %27 by default, and a database does not percent-decode, so
+    # the same propagator would manufacture a false positive at a SQL sink. It
+    # neutralizes for SQL; it does not neutralize for SSRF.
+    propagators:
+      - "py:*urllib.parse.quote"
+      - "py:*urllib.parse.quote_plus"
+      - "py:*urllib.parse.urlencode"
