@@ -9,22 +9,18 @@ import ir "godzilla/pkg/ir/v1"
 // IR-only package, so the shared spelling lives with the rest of the
 // frontend-side IR scaffolding.
 
-// Reg returns a value referencing the SSA register name.
 func Reg(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_RegName{RegName: name}}
 }
 
-// Str returns a string-constant value.
 func Str(s string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: s}}}}
 }
 
-// Global returns a value referencing the global name.
 func Global(name string) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
 }
 
-// Nil returns the nil (None/null) constant value.
 func Nil() *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
 }

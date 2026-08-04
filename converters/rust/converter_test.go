@@ -182,9 +182,9 @@ func TestAxumTaintFlow_EndToEnd(t *testing.T) {
 // TestLowerMIR_BranchMergeKeepsTaint is a hermetic guard (no rustc) for FE-5:
 // a hand-built MIR body of the "default if empty" shape. `_1` (the tainted
 // param) is reassigned to a constant in the if-arm (bb2) and the two paths join
-// at bb3, which reads `_1` into the Command::arg sink. The block-structured
-// lowering must PHI-merge `_1` at bb3 so the tainted path survives; the prior
-// linear flattener overwrote it with the bb2 constant and dropped the finding.
+// at bb3, which reads `_1` into the Command::arg sink. The lowering must
+// PHI-merge `_1` at bb3 so the tainted path survives; overwriting it with the
+// bb2 constant drops the finding.
 func TestLowerMIR_BranchMergeKeepsTaint(t *testing.T) {
 	mir := "fn run(_1: axum::extract::Query<Params>) -> () {\n" +
 		"    bb0: {\n" +
@@ -309,10 +309,10 @@ func TestParseCargoTargets(t *testing.T) {
 	}
 }
 
-// TestRustCommandStep_Anchoring covers the receiver-aliasing predicate: the
-// real std::process::Command builder steps match in every path form MIR
-// prints, while a user type merely named like Command — which the old
-// strings.HasSuffix("Command::arg") match wrongly tripped on — does not.
+// TestRustCommandStep_Anchoring covers the receiver-aliasing predicate: the real
+// std::process::Command builder steps match in every path form MIR prints, while
+// a user type merely named like Command (which any suffix match would trip on)
+// does not.
 func TestRustCommandStep_Anchoring(t *testing.T) {
 	for _, c := range []struct {
 		norm string

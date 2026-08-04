@@ -66,7 +66,6 @@ import (
 // starting at 0 (the order NewBlock is called), and become BasicBlock.Index.
 type BlockID int
 
-// blockData is the builder's per-block bookkeeping.
 type blockData struct {
 	id BlockID
 
@@ -97,7 +96,6 @@ const (
 	termJump
 )
 
-// phi is a PHI node under construction.
 type phi struct {
 	name     string
 	variable string
@@ -139,7 +137,6 @@ func NewBuilder() *Builder {
 	}
 }
 
-// NewBlock allocates a fresh, unsealed basic block and returns its id.
 func (b *Builder) NewBlock() BlockID {
 	id := BlockID(len(b.blocks))
 	// defs/incomplete are allocated eagerly rather than lazily: WriteVariable and

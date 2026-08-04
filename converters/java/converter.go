@@ -45,7 +45,6 @@ type Converter struct {
 	inv *walkignore.Inventory
 }
 
-// NewConverter returns a Java frontend.
 func NewConverter() *Converter { return &Converter{} }
 
 // IsJavaFile reports whether path is an input this frontend lowers: a .java
@@ -447,7 +446,6 @@ func resolveInputs(abs string) []string {
 	return outputs
 }
 
-// buildSystem identifies a JVM build tool and how to invoke it.
 type buildSystem struct {
 	name        string   // "maven" or "gradle" (for messages)
 	wrapper     string   // committed wrapper script filename, preferred when present
@@ -456,7 +454,6 @@ type buildSystem struct {
 	classSuffix string   // path tail of a compiled-main output directory
 }
 
-// detectBuildSystem reports the build tool rooted at dir, if any.
 func detectBuildSystem(dir string) (buildSystem, bool) {
 	if proc.FileExists(filepath.Join(dir, "pom.xml")) {
 		return buildSystem{

@@ -151,9 +151,8 @@ func calleeTrailingName(e ast.Expression) string {
 //
 // Deliberately NOT IsJSFamily: this is matched CASE-SENSITIVELY against a
 // specifier written in source (`require('./util.js')`), whereas IsJSFamily
-// lowercases a filesystem path. Routing it through IsJSFamily would make
-// `./util.JS` resolve to a different module than it does today. It must be
-// extended by hand alongside needsTransform.
+// lowercases a filesystem path — routing it through IsJSFamily would change how
+// `./util.JS` resolves. Extend it by hand alongside needsTransform.
 var jsFamilyExts = map[string]bool{
 	".js": true, ".mjs": true, ".cjs": true,
 	".ts": true, ".tsx": true, ".jsx": true,
@@ -247,7 +246,6 @@ func collectDefaultExport(body []ast.Statement, localFuncs map[string]string, no
 	return found
 }
 
-// isModuleExports reports whether an assignment target is `module.exports`.
 func isModuleExports(e ast.Expression) bool {
 	dot, ok := e.(*ast.DotExpression)
 	if !ok || string(dot.Identifier.Name) != "exports" {

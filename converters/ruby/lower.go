@@ -189,7 +189,6 @@ func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFunc
 	}
 }
 
-// instrCount totals the instructions across a function's basic blocks.
 func instrCount(blocks []*ir.BasicBlock) int {
 	n := 0
 	for _, b := range blocks {
@@ -348,7 +347,6 @@ func (fs *funcState) newReg() string {
 	return r
 }
 
-// emit appends an instruction to the block currently being lowered.
 func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
 
 // write records val as the current value of a Ruby local/ivar name in the
@@ -1112,7 +1110,6 @@ func (fs *funcState) lookup(name string) *ir.Value {
 	return ssabuild.Str(name)
 }
 
-// scalarText returns a token/scalar node's text for a constant value.
 func scalarText(n interface{}) string {
 	switch v := n.(type) {
 	case string:

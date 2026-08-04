@@ -122,11 +122,11 @@ var esbuildSupported = map[string]bool{"dynamic-import": false}
 // coordinates.
 func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sourcemap.Consumer, error) {
 	res := api.Transform(code, api.TransformOptions{
-		Loader:     loader,
-		Format:     api.FormatCommonJS,
-		Target:     api.ESNext,
-		Sourcemap:  api.SourceMapExternal,
-		Sourcefile: sourcefile,
+		Loader:      loader,
+		Format:      api.FormatCommonJS,
+		Target:      api.ESNext,
+		Sourcemap:   api.SourceMapExternal,
+		Sourcefile:  sourcefile,
 		Supported:   esbuildSupported,
 		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
 	})

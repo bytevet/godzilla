@@ -44,7 +44,6 @@ type Converter struct {
 	frontend.Driver[rbFileResult]
 }
 
-// NewConverter returns a ready-to-use Ruby-to-gIR converter.
 func NewConverter() *Converter {
 	c := &Converter{}
 	c.NewBatch = c.batch
@@ -90,7 +89,6 @@ func (c *Converter) batch() *frontend.Batch[rbFileResult] {
 	}
 }
 
-// rbFileResult is one file's outcome within a batch chunk.
 type rbFileResult struct {
 	mod *ir.Module
 	err error
@@ -159,7 +157,6 @@ func materializeERB(files []string, out []rbFileResult) ([]string, func()) {
 	}
 }
 
-// writeHelperScript materializes the embedded rbdump.rb into a temp file.
 func writeHelperScript() (string, func(), error) {
 	path, cleanup, err := proc.WriteEmbeddedScript("godzilla-rbdump-*.rb", rbDumpScript)
 	if err != nil {

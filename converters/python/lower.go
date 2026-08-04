@@ -440,7 +440,6 @@ type routeClasses struct {
 	dispatch map[string]bool
 }
 
-// classCtx is one class's flags, resolved once at the ClassDef.
 type classCtx struct{ handler, dispatch bool }
 
 func (rc routeClasses) ctxFor(class string) classCtx {
@@ -644,7 +643,6 @@ func newFuncState(filename string) *funcState {
 	}
 }
 
-// emit appends an instruction to the block currently being lowered.
 func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
 
 // read returns the SSA value current for a Python local in the current block,
@@ -1815,7 +1813,6 @@ func dottedName(n astNode) string {
 	}
 }
 
-// constantValue converts a pyast.py Constant node into a gIR constant Value.
 func constantValue(n astNode) *ir.Value {
 	c := &ir.Constant{}
 	switch n.str("value_type") {

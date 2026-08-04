@@ -679,7 +679,6 @@ func inboundRequestValue(inst ssa.Instruction) bool {
 	}
 }
 
-// isNamedTypePtr reports whether t is a pointer to the named type pkgPath.name.
 func isNamedTypePtr(t types.Type, pkgPath, name string) bool {
 	ptr, ok := t.(*types.Pointer)
 	if !ok {
@@ -688,7 +687,6 @@ func isNamedTypePtr(t types.Type, pkgPath, name string) bool {
 	return isNamedType(ptr.Elem(), pkgPath, name)
 }
 
-// isNamedType reports whether t is the named (defined) type pkgPath.name.
 func isNamedType(t types.Type, pkgPath, name string) bool {
 	named, ok := t.(*types.Named)
 	if !ok {

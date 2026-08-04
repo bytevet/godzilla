@@ -513,7 +513,6 @@ func summarize(prog *ir.Program) summary {
 	return s
 }
 
-// printSummary renders a human-readable report of s to w.
 func printSummary(w io.Writer, s summary) {
 	fmt.Fprintf(w, "modules: %d\n", s.modules)
 	fmt.Fprintf(w, "functions: %d (%d synthetic)\n", s.functions, s.synthetic)
@@ -539,7 +538,6 @@ func printSummary(w io.Writer, s summary) {
 	}
 }
 
-// sortedKeys returns the keys of m sorted alphabetically.
 func sortedKeys(m map[string]int) []string {
 	return slices.Sorted(maps.Keys(m))
 }

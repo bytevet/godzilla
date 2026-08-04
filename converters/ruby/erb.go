@@ -115,7 +115,6 @@ func IsERBFile(path string) bool { return strings.HasSuffix(path, ".erb") }
 // cannot appear inside a parenthesized call argument.
 var modifierKeywords = [][]byte{[]byte(" if "), []byte(" unless "), []byte(" while "), []byte(" until "), []byte(" rescue ")}
 
-// hasTrailingModifier reports whether a tag body carries a statement modifier.
 func hasTrailingModifier(body []byte) bool {
 	for _, kw := range modifierKeywords {
 		if bytes.Contains(body, kw) {

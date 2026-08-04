@@ -62,7 +62,6 @@ func splitFns(text string) [][]string {
 	return out
 }
 
-// lowerState carries the per-function value-forwarding environment.
 type lowerState struct {
 	filename string
 	counter  int

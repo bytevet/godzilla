@@ -206,7 +206,6 @@ type block struct {
 	instrs []dumpInstr
 }
 
-// simState snapshots the operand stack and locals at a block boundary.
 type simState struct {
 	stack  []*ir.Value
 	locals map[int]*ir.Value

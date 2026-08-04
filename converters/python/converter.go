@@ -51,7 +51,6 @@ type Converter struct {
 	frontend.Driver[pyFileResult]
 }
 
-// NewConverter returns a ready-to-use Python-to-gIR converter.
 func NewConverter() *Converter {
 	c := &Converter{}
 	c.NewBatch = c.batch

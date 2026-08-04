@@ -736,7 +736,6 @@ func (s *flowScanner) peek(n int) byte {
 	return 0
 }
 
-// nextSignificantIs reports whether the next non-space byte is c.
 func (s *flowScanner) nextSignificantIs(c byte) bool {
 	return s.nextSignificantByte(s.i+1) == c
 }

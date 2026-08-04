@@ -93,7 +93,6 @@ type Converter struct {
 	frontend.Driver[jsFileResult]
 }
 
-// NewConverter returns a ready-to-use JavaScript-to-gIR converter.
 func NewConverter() *Converter {
 	c := &Converter{}
 	c.NewBatch = c.batch

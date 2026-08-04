@@ -128,7 +128,6 @@ func (c *Converter) batch() *frontend.Batch[rsFileResult] {
 	}
 }
 
-// rsFileResult is one file's outcome within a batch conversion.
 type rsFileResult struct {
 	mod *ir.Module
 	err error

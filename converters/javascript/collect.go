@@ -21,16 +21,12 @@ type pendingFunc struct {
 	objectName string
 }
 
-// collector walks a file's AST once, before any lowering happens, to find
-// every function declaration / function expression / arrow function
-// reachable from a statement's top-level expression tree (see the package
-// doc comment for the exact coverage) and assign each one a qualified name
-// and canonical name, mirroring converters/python's convertModule.collect.
-//
-// Unlike Python (where `def` only ever appears as a statement), JS functions
-// are frequently expression values (`const f = function(){}`,
-// `app.get(url, function(req,res){...})`), so collection here also walks
-// expression trees, not just statement lists.
+// collector walks a file's AST once, before any lowering, to find every function
+// declaration / function expression / arrow function reachable from a statement's
+// top-level expression tree (the package doc has the exact coverage) and assign
+// each a qualified and canonical name. It walks EXPRESSION trees as well as
+// statement lists, because JS functions are frequently expression values
+// (`const f = function(){}`, `app.get(url, function(req,res){...})`).
 type collector struct {
 	moduleName string
 	anonSeq    map[string]int
@@ -49,11 +45,10 @@ func newCollector(moduleName string) *collector {
 }
 
 // routingVerbs are the HTTP-router methods whose function argument is a request
-// handler (Express/Koa/Fastify/Hapi: app.get/post/put/…/use, router.METHOD).
-// A handler's FIRST parameter is the framework request object regardless of its
-// name, so lowering can bind property reads off it as request-taint sources even
-// when it is not named the conventional `req`/`request`/`ctx` — the JS analogue
-// of the Python route-handler-parameter source (COV-11).
+// handler (Express/Koa/Fastify/Hapi: app.get/post/put/…/use, router.METHOD). A
+// handler's FIRST parameter is the framework request object regardless of its
+// name, which is what lets lowering treat property reads off it as request-taint
+// sources even when it is not named `req`/`request`/`ctx` (COV-11).
 var routingVerbs = map[string]bool{
 	"get": true, "post": true, "put": true, "delete": true, "patch": true,
 	"head": true, "options": true, "all": true, "use": true,
