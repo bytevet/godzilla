@@ -37,10 +37,9 @@ type LangCoverage struct {
 	// Files is how many source files of this language the walk found, and Skipped
 	// how many of them the frontend could not lower. Converted is all-or-nothing
 	// and so hides a PARTIAL failure: a frontend that lowers three files out of two
-	// hundred still reports ok, which is how 165 of parse-server's 192 files were
-	// silently dropped while coverage read clean. Skipped is 0 for a frontend whose
-	// unit of work is not a file (Go lowers packages), so a 0 means "nothing known
-	// to be dropped", not a guarantee.
+	// hundred still reports ok. Skipped is 0 for a frontend whose unit of work is
+	// not a file (Go lowers packages), so 0 means "nothing known to be dropped",
+	// not a guarantee.
 	Files   int
 	Skipped int
 }
@@ -125,14 +124,12 @@ func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
 
 // runAnalyses runs the four independent analysis passes over an already-lowered
 // program and returns their findings in a deterministic order. The passes read
-// the program (and the rule set) but never mutate shared state, so they run
-// concurrently: the taint engine already saturates cores on a many-rule scan,
-// but on smaller inputs the spare cores run the dangerous-call and secrets scans
-// in parallel instead of after it. The rule set is precompiled up front so the
-// engine and the dangerous-call pass don't race building per-rule matchers.
-// An empty filePath skips the raw-file secrets scan (callers that already did
-// it); a non-nil inv (directory scans) feeds that scan from the cached walk
-// instead of re-walking filePath.
+// the program and the rule set but never mutate shared state, so they run
+// concurrently; the rule set is precompiled up front so the engine and the
+// dangerous-call pass don't race building per-rule matchers. An empty filePath
+// skips the raw-file secrets scan (for callers that already did it); a non-nil
+// inv (directory scans) feeds that scan from the cached walk instead of
+// re-walking filePath.
 func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool) []analysis.Finding {
 	_ = rs.Compile() // guard-compile errors are already reported by the loader at load
 	var (
@@ -146,15 +143,11 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walk
 		defer wg.Done()
 		taint = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).Analyze(prog)
 	}()
-	// Non-dataflow, call-site-syntactic rules (weak crypto, insecure randomness,
-	// etc.) evaluated alongside the taint engine (COV-4).
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
 	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
-		// language frontend parses — the dominant hardcoded-secret vector. A
-		// directory scan's file list comes from the shared inventory (one walk
-		// per scan); a single-file target is scanned directly as before.
+		// language frontend parses — the dominant hardcoded-secret vector.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -171,14 +164,10 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walk
 }
 
 // dropCoLocatedDangerous removes every dangerous-call finding that sits on a call
-// the taint engine ALREADY reported. The two passes are independent by design —
-// one matches a call syntactically, the other PROVES that an untrusted source
-// reaches it — so `eval(user_input)` is legitimately matched by both. Reporting
-// it twice adds no information: the dataflow finding is strictly richer (it names
-// the source and carries the taint path/Steps that drive SARIF codeFlows and LLM
-// triage), so it is the one that survives. A dangerous-call finding with no
-// dataflow twin is untouched — flagging exactly those is the whole point of a
-// call-site rule.
+// the taint engine ALREADY reported — `eval(user_input)` is legitimately matched
+// by both passes. The dataflow finding is strictly richer (it names the source
+// and carries the Steps that drive SARIF codeFlows and LLM triage), so it is the
+// one that survives. A dangerous-call finding with no dataflow twin is untouched.
 //
 // It is deliberately given only (danger, taint), never the secrets passes: a
 // hardcoded-secret finding can legitimately sit on the same call as a taint
@@ -211,17 +200,15 @@ func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding
 	return kept
 }
 
-// ScanFiles analyzes an explicit list of paths (a changed-files / pre-commit
-// entry point, CI-9) in a single process: each source path is lowered and its
-// modules merged into one program so the engine runs once (cross-file taint
-// among the changed files still connects, and there is one exit code / report),
-// while every path — source or not — is also scanned for hardcoded secrets so a
-// changed .env/compose/Dockerfile is covered. A path with an unsupported
-// extension contributes only its secrets scan; a genuine frontend failure is
-// warned about on stderr and skipped rather than aborting the batch (pre-commit
-// hands over mixed file types). A batch with no analyzable source — e.g. a
-// commit touching only docs — is not an error: it returns cleanly (with any
-// secrets those files contained), so a pre-commit hook does not spuriously fail.
+// ScanFiles analyzes an explicit list of paths (the changed-files / pre-commit
+// entry point) in one process: every source path is lowered and merged into a
+// single program so the engine runs once (cross-file taint among the changed
+// files still connects), while every path — source or not — is also scanned for
+// hardcoded secrets so a changed .env/compose/Dockerfile is covered. A path with
+// an unsupported extension contributes only its secrets scan; a frontend failure
+// is warned on stderr and skipped rather than aborting the batch, since
+// pre-commit hands over mixed file types. A batch with no analyzable source
+// returns cleanly rather than erroring, so a docs-only commit does not fail.
 func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	merged := &ir.Program{}
 	var coverage []LangCoverage
@@ -234,8 +221,6 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 			continue
 		}
 		if !info.IsDir() {
-			// A single file gets its secrets scan up front (source or not); only a
-			// path some frontend handles goes on to conversion.
 			findings = append(findings, analysis.ScanSecretsInFiles(p, rs, isSourcePath)...)
 			if _, conv := fileFrontend(p); conv == nil {
 				continue // non-source file: secrets already scanned, no dataflow
@@ -243,10 +228,9 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 		}
 		prog, cov, tp, inv, err := convert(p)
 		if info.IsDir() {
-			// A directory's secrets pass feeds off convert's single pruned walk
-			// (the shared inventory) instead of re-walking the same tree. When
-			// convert failed before yielding an inventory (e.g. a directory with no
-			// analyzable source), the config files it holds still get scanned.
+			// Feed off convert's single pruned walk. When convert failed before
+			// yielding an inventory (e.g. a directory with no analyzable source),
+			// the config files it holds still get scanned.
 			if inv != nil {
 				findings = append(findings, analysis.ScanSecretsInPaths(inv.Files(), rs, isSourcePath)...)
 			} else {
@@ -273,11 +257,9 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 // language coverage. For a single file it runs the matching frontend; for a
 // directory it walks the tree ONCE into a walkignore.Inventory (also returned,
 // for the raw-file secrets pass) and runs every present-language frontend off
-// that cached file list, merging their modules (a repo may mix languages) and
-// tolerating a frontend that finds nothing as long as one yields modules. A
-// frontend that fails on present source is warned on stderr AND recorded as a
-// failed-coverage entry, so the caller can fail the gate rather than report a
-// false "clean".
+// that cached file list, merging their modules. A frontend that fails on present
+// source is warned on stderr AND recorded as a failed-coverage entry, so the
+// caller can fail the gate rather than report a false "clean".
 func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkignore.Inventory, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -298,18 +280,16 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 		}}, targetPkgs, nil, nil
 	}
 
-	// ONE pruned walk of the tree; language detection, every present frontend,
-	// and the config-file secrets pass all consume this inventory instead of
-	// each re-walking the identical tree.
+	// ONE pruned walk: language detection, every present frontend and the
+	// config-file secrets pass all consume this inventory.
 	inv := walkignore.NewInventory(path)
 	present := detectLanguages(inv)
 	merged := &ir.Program{}
 	var coverage []LangCoverage
 	frontends := languageFrontends
-	// Present frontends are independent (separate converters, separate source
-	// sets), so run them concurrently. Results are collected per frontend index
-	// and merged in frontend order, keeping module order and coverage
-	// deterministic.
+	// Present frontends are independent, so run them concurrently. Results are
+	// collected per frontend index and merged in frontend order, keeping module
+	// order and coverage deterministic.
 	type feResult struct {
 		prog       *ir.Program
 		cov        LangCoverage
@@ -362,10 +342,9 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 // frontend pairs a language tag with the function that lowers a path to gIR and
 // the predicate that recognizes that language's single-file extensions. convert
 // takes the scan path plus, for directory scans, the shared file inventory (nil
-// for single files), and returns the lowered program and, for frontends that
-// lower dependency bodies (Go), the set of user-authored package paths so
-// findings inside lowered dependencies can be scoped out; nil for frontends
-// that don't lower deps.
+// for single files). It returns the lowered program and — only for frontends
+// that lower dependency bodies (Go) — the set of user-authored package paths, so
+// findings inside lowered dependencies can be scoped out; nil otherwise.
 type frontend struct {
 	name    string
 	convert func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error)
@@ -378,11 +357,9 @@ type frontend struct {
 }
 
 // languageFrontends is the single source of truth for the language→frontend
-// mapping used by convert (directory scan, run in this order), fileFrontend
-// (single-file dispatch), and detectLanguages (which languages are present).
-// The order is significant: it fixes module and coverage ordering for directory
-// scans, so keep go/python/javascript/java/cpp/rust/ruby as-is. The Go entry
-// uses goConvert (the dep-lowering path); every other frontend uses noDepConvert.
+// mapping used by convert, fileFrontend (single-file dispatch) and
+// detectLanguages. The order is significant: it fixes module and coverage
+// ordering for directory scans, so keep it as-is.
 var languageFrontends = []frontend{
 	{name: "go", convert: goConvert, lowersDeps: true,
 		matches: go_converter.IsGoFile},
@@ -428,11 +405,10 @@ type inventoryConverter interface {
 }
 
 // noDepConvert adapts a frontend that does not lower dependency bodies (every
-// frontend except Go) to the frontend.convert signature — it has no dependency
-// findings to scope, so it returns a nil target-package set. newC is the
-// frontend's NewConverter, called per conversion so each scan gets a fresh
-// converter. Directory scans (inv non-nil) hand the converter the shared
-// inventory; single-file scans keep the plain ConvertFile path.
+// frontend except Go) to the frontend.convert signature; it has no dependency
+// findings to scope, so it returns a nil target-package set. newC is called per
+// conversion so each scan gets a fresh converter. Directory scans (inv non-nil)
+// hand the converter the shared inventory; single-file scans use ConvertFile.
 func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
 	return func(p string, inv *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
 		c := newC()
@@ -454,15 +430,13 @@ func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inven
 }
 
 // scopeFindings drops findings whose sink function lives in a lowered dependency
-// package (not user code). Dependencies are lowered so taint flows THROUGH them,
-// but a sink reached inside a library is noise, not an actionable finding. Only
-// a dep-lowering frontend's language can produce such a finding (depLoweringLangs,
-// derived from the frontend table's lowersDeps flags — the same fact that decides
-// which modules seedScope holds back), so findings from every other language, and
-// those with no recorded package, are kept. Scoping keys on Finding.Language
-// (not module membership) because a Finding records its language and package
-// directly but not its module, and targetPkgs is a set of PACKAGE paths.
-// A no-op when targetPkgs is empty (nothing was dep-lowered).
+// package. Dependencies are lowered so taint flows THROUGH them, but a sink
+// reached inside a library is noise, not an actionable finding. Only a
+// dep-lowering frontend's language can produce one (depLoweringLangs), so
+// findings from every other language, and those with no recorded package, are
+// kept. Keys on Finding.Language rather than module membership because a Finding
+// records its language and package but not its module, and targetPkgs is a set
+// of PACKAGE paths. A no-op when targetPkgs is empty.
 func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []analysis.Finding {
 	if len(targetPkgs) == 0 {
 		return findings
@@ -477,10 +451,9 @@ func scopeFindings(findings []analysis.Finding, targetPkgs map[string]bool) []an
 	return kept
 }
 
-// isSourcePath reports whether a language frontend handles path, off the shared
-// languageFrontends table. Passed to analysis.ScanSecretsInFiles so the raw-file
-// secrets pass skips exactly the files whose string literals the gIR-constant
-// scanner already covers — one source of truth, no drifting extension list.
+// isSourcePath reports whether a language frontend handles path. Passed to
+// analysis.ScanSecretsInFiles so the raw-file secrets pass skips exactly the
+// files whose string literals the gIR-constant scanner already covers.
 func isSourcePath(path string) bool {
 	_, conv := fileFrontend(path)
 	return conv != nil

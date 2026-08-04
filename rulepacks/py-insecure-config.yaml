@@ -7,7 +7,7 @@
 #
 # All ship severity: low + confidence: medium, keeping them advisory under the
 # default `-fail-on medium` gate and inside the LLM reviewer's adjudication
-# range. A hardcoded-High call-site rule flooded a project once already.
+# range.
 rules:
   - id: py-insecure-tls-verify
     languages: [python]

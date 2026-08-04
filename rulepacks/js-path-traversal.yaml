@@ -14,43 +14,33 @@ rules:
       outside the intended directory. Validate/normalize the path and confirm
       it stays within an allowed base directory before use.
     extend: $_js-sources.yaml
-    # `*fs.readFile*` also matches the "Sync"/promises variants
-    # (fs.readFileSync, fs.promises.readFile); streamed reads are covered by the
-    # receiver-agnostic `*.createReadStream` below; broad `*.sendFile` (not
-    # `*res.sendFile`) so a chained response like res.status(200).sendFile(p) --
-    # which lowers to callee "js:<dynamic>.sendFile" -- is still caught,
-    # mirroring js-xss's broad `js:*.send`.
+    # `*fs.readFile*` also matches the Sync/promises variants. `*.sendFile` is
+    # deliberately broad (not `*res.sendFile`) so a chained
+    # res.status(200).sendFile(p) -- callee "js:<dynamic>.sendFile" -- is still
+    # caught, mirroring js-xss's broad `js:*.send`.
     sinks:
       - "js:*fs.readFile*"
       - "js:*.sendFile"
       # File reads are not always on the literal `fs` module: a static-file
       # server often reads through an injected filesystem abstraction (memfs,
-      # webpack-dev-middleware's `context.outputFileSystem`, a Vinyl/GracefulFS
-      # wrapper), so the receiver is an opaque object rather than `fs`. Match the
-      # read/stat entry points by method name so a tainted path handed to any
-      # `*.statSync`/`*.createReadStream` is caught. These are reads that act on
-      # a path argument, so a tainted path reaching them is the traversal; they
-      # do not fire without taint, so broadening the receiver adds no FP.
+      # webpack-dev-middleware's `context.outputFileSystem`), so the receiver is
+      # opaque. Match by method name instead. These act on a path argument and
+      # cannot fire without taint, so the broad receiver adds no FP.
       - "js:*.statSync"
       - "js:*.createReadStream"
     # path.basename strips the directory component, so it genuinely prevents
-    # traversal, mirroring go-path-traversal's filepath.Base. path.join /
-    # path.resolve / path.normalize do NOT contain input to a base directory
-    # ("/data" + "../../etc" resolves to "/etc"), so they are treated as
+    # traversal. path.join / path.resolve / path.normalize do NOT contain input
+    # to a base directory ("/data" + "../../etc" resolves to "/etc"), so they are
     # propagators, not sanitizers.
     sanitizers:
       - "js:*path.basename"
-    # (path.normalize needs no entry: `js:*.normalize` is a built-in default
-    # propagator, ORed into every rule's propagator check.)
+    # (path.normalize needs no entry: `js:*.normalize` is a default propagator.)
     propagators:
       - "js:*path.join"
       - "js:*path.resolve"
-      # URL/query decoding of an already-tainted value returns an equally
-      # tainted value (they decode `%2e%2e` -> `..`, if anything WIDENING the
-      # traversal surface), so they carry taint from arg to result. Modeled as
-      # propagators (not sanitizers): decoding never contains a path to a base
-      # directory. querystring.unescape sits between the request pathname and
-      # path.join in webpack-dev-middleware's getFilenameFromUrl.
+      # URL/query decoding WIDENS the traversal surface (`%2e%2e` -> `..`), so
+      # these carry taint rather than clearing it: decoding never contains a
+      # path to a base directory.
       - "js:*querystring.unescape"
       - "js:*querystring.parse"
       - "js:*url.parse"

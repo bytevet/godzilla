@@ -14,26 +14,19 @@ rules:
       "$1" bind parameters) instead of concatenating or templating user input
       into the query string.
     extend: $_js-sources.yaml
-    # Broad `*.query`/`*.execute` (not e.g. `*db.query`) so any database
-    # handle name/driver -- which lower to callee "js:db.query",
-    # "js:pool.query", "js:connection.execute", or "js:<dynamic>.query" for a
-    # chained handle -- is still caught. The `#0` pins the injection point to
-    # the query-string argument, so a PARAMETERIZED call
-    # `db.query("... = ?", [id])` -- where the untrusted value is a bound
-    # parameter (arg 1), not part of the query string -- is not a false
-    # positive. (JS method calls carry no receiver arg, so arg 0 is the query.)
+    # Broad `*.query`/`*.execute` (not `*db.query`) so any handle name -- callee
+    # "js:pool.query", "js:<dynamic>.query" for a chained handle -- is caught.
+    # `#0` pins the injection point to the query string, so a PARAMETERIZED
+    # `db.query("... = ?", [id])` is not a false positive. (JS method calls
+    # carry no receiver arg, so arg 0 is the query.)
     sinks:
       - "js:*.query#0"
       - "js:*.execute#0"
-      # ORM raw-query escape hatches (COV-13). Each takes a raw SQL string as
-      # logical arg 0 (JS method calls carry no receiver arg), so the `#0` pin
-      # keeps a PARAMETERIZED call from firing when only the bind values are
-      # tainted: knex.raw("... = ?", [id]) / prisma.$queryRawUnsafe(sql, ...binds)
-      # both put the untrusted value at arg 1+, not in the query text.
-      # Knex: knex.raw(...) plus the *Raw query-builder fragments. A chained
-      # builder (knex("t").whereRaw(...)) lowers its callee to
-      # "js:<dynamic>.<method>", which the leading `*` matches. `.raw` receiving a
-      # tainted arg-0 is overwhelmingly a knex raw SQL fragment; it cannot fire
+      # ORM raw-query escape hatches (COV-13). Each takes the raw SQL as logical
+      # arg 0, so `#0` keeps knex.raw("... = ?", [id]) /
+      # prisma.$queryRawUnsafe(sql, ...binds) from firing when only the bind
+      # values are tainted. A chained builder (knex("t").whereRaw(...)) lowers to
+      # "js:<dynamic>.<method>", which the leading `*` matches; these cannot fire
       # without taint, so the broad receiver adds no FP.
       - "js:*.raw#0"
       - "js:*.whereRaw#0"

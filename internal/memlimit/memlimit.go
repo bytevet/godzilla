@@ -2,12 +2,11 @@
 // the garbage collector work harder instead of OOM-killing the process.
 //
 // The Go GC's default target heap is ~2x the live set (GOGC=100). A whole-repo
-// scan with dependency lowering can hold a large live set (observed ~8 GiB on
-// gitea/argo-workflows during the SSA build+lower phase); doubling that reaches
-// the host's RAM and the kernel SIGKILLs the process — even though the working
-// set itself fits with headroom. Pinning GOMEMLIMIT to a fraction of available
-// memory makes the collector keep the heap under the ceiling: slower under
-// pressure, but the scan finishes instead of dying.
+// scan with dependency lowering can hold several GiB live during the SSA
+// build+lower phase; doubling that reaches the host's RAM and the kernel
+// SIGKILLs the process even though the working set itself fits. Pinning
+// GOMEMLIMIT to a fraction of available memory keeps the heap under the ceiling:
+// slower under pressure, but the scan finishes instead of dying.
 package memlimit
 
 import (

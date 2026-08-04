@@ -3,7 +3,9 @@
 ## Goal
 
 Move real-world CVE recall past the SSA-era plateau (~18.5%, 5/27 on the live
-web-app campaign) by closing the **modeling-breadth** gaps the SSA work does not
+web-app campaign *at the time this was written* — the campaign is re-fetched live
+each run, so compare against a current report, not this figure) by closing the
+**modeling-breadth** gaps the SSA work does not
 touch: per-framework request **sources**, framework-abstracted **sinks**, and the
 propagators/sanitizers that connect them. The SSA/CFG foundation (loop-carried
 taint, flow-sensitive guard precision) is the prerequisite that makes broadening

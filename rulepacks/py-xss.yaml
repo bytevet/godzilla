@@ -28,9 +28,8 @@ rules:
       - "py:*HttpResponse"
       - "py:*PlainTextResponse"
       - "py:*make_response"
-    # Explicit HTML-escapers only. The old "py:*escape" glob also matched
-    # html.unescape — the OPPOSITE of a sanitizer — so it is replaced with the
-    # canonical named escapers (COV-9).
+    # Explicit HTML-escapers only: a "py:*escape" glob would also match
+    # html.unescape, the OPPOSITE of a sanitizer (COV-9).
     sanitizers:
       - "py:*markupsafe.escape"
       - "py:*markupsafe.Markup"

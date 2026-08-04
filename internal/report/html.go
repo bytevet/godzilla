@@ -1,14 +1,11 @@
 // Package report renders a slice of analysis.Finding values into a
-// self-contained, standalone HTML document. The report has no external
-// assets (CSS and JS are inlined) and uses html/template so that untrusted
-// content coming from analyzed source code (messages, callee names, code
-// snippets, etc.) can never make the report itself vulnerable to XSS.
+// self-contained HTML document with no external assets. Everything
+// finding-derived comes from analyzed source code, so it is rendered through
+// html/template's contextual auto-escaping — a report must never itself be XSS.
 //
-// The document's markup, styling, and filter script live in separate source
-// files under templates/ and are compiled into the binary with go:embed; the
-// CSS/JS are static (they carry no finding data) and are injected into the
-// single template as template.CSS/template.JS typed values, so they emit
-// verbatim while every finding-derived value stays contextually auto-escaped.
+// The markup, styling and filter script live under templates/ and are embedded
+// with go:embed. The CSS/JS carry no finding data, so they are injected as
+// template.CSS/template.JS typed values and emit verbatim.
 package report
 
 import (
@@ -39,26 +36,21 @@ var reportCSS string
 //go:embed templates/report.js
 var reportJS string
 
-// The filter bar, tiles and normalization iterate the canonical worst-first /
-// most-certain-first orders (rules.Severities, analysis.Confidences) rather
-// than a local restatement, so a newly added severity or confidence level
+// The filter bar, tiles and normalization iterate rules.Severities and
+// analysis.Confidences rather than a local restatement, so a newly added level
 // cannot silently vanish from the report's display surfaces.
 
 // snippetContext is how many lines of source to show before/after the
 // highlighted line when rendering best-effort code context.
 const snippetContext = 3
 
-// WriteHTML renders findings as a complete standalone HTML document to w.
-// Findings are sorted worst-severity-first, then by sink location. All
-// finding-derived text is rendered through html/template, which
-// context-escapes it, so the resulting report is safe to open in a browser
-// even when findings embed attacker-controlled strings.
+// WriteHTML renders findings as a complete standalone HTML document to w,
+// sorted worst-severity-first then by sink location.
 func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	sorted := sortedFindings(findings)
 
-	// A per-call cache so a source file shared by many findings/steps is read
-	// off disk once. Kept call-scoped (not package-global) so a later scan or
-	// test never observes stale file contents.
+	// Call-scoped, not package-global, so a later scan or test never observes
+	// stale file contents.
 	cache := srclines.Cache{}
 
 	// Positions are rendered relative to the common project root so the report
@@ -163,9 +155,7 @@ type ruleRow struct {
 	SevClass string // chip/text class of this rule's worst observed severity
 
 	// sevRank is that same worst severity's rank, kept for the sort below.
-	// Unexported: html/template never reads unexported fields, so it stays out
-	// of the rendered output while sparing the comparator a class-string ->
-	// rank decode of a value we already had.
+	// Unexported, so html/template leaves it out of the rendered output.
 	sevRank int
 }
 
@@ -288,8 +278,7 @@ func newFindingView(cache srclines.Cache, root string, f analysis.Finding) findi
 // otherwise it falls back to the source and sink endpoints and flags the flow
 // as endpoints-only.
 func buildFlow(cache srclines.Cache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
-	// kinds[i] labels position i as source/sink/intermediate. The endpoints are
-	// expanded (Open) by default; intermediate steps stay collapsed.
+	// kinds[i] labels position i as source/sink/intermediate.
 	var positions []*ir.Position
 	var kinds []string
 	if len(f.Steps) > 0 {
@@ -544,7 +533,5 @@ func buildSnippet(cache srclines.Cache, pos *ir.Position) *codeSnippet {
 }
 
 // reportTemplate is the full HTML document template, parsed from the embedded
-// template file. All dynamic values are inserted through html/template
-// actions, which contextually auto-escape them, so untrusted content in
-// findings cannot break out of its context.
+// template file.
 var reportTemplate = template.Must(template.New("report").Parse(reportTemplateSrc))

@@ -79,8 +79,8 @@ func Builtin() (*rules.RuleSet, error) {
 
 // loadRules parses every non-fragment *.yaml/*.yml rulepack directly under fsys's
 // root against frags, concatenates their rules, and rejects duplicate ids. what
-// labels fsys in wrapped errors. Shared by LoadDir (an on-disk directory) and
-// Builtin (the embedded rulepacks FS), which differ only in the filesystem.
+// labels fsys in wrapped errors. Shared by LoadDir and Builtin, which differ
+// only in the filesystem.
 func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, error) {
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
@@ -111,9 +111,8 @@ func loadRules(fsys fs.FS, what string, frags fragmentSet) (*rules.RuleSet, erro
 }
 
 // defaultPropagatorsFragment is the one fragment no rule names in `extend:`: the
-// loader applies its propagators to EVERY rule (RuleSet.DefaultPropagators).
-// Making each pack extend it would restate the same list in all 60-odd packs —
-// exactly the boilerplate the rule-level `when:` default removed elsewhere.
+// loader applies its propagators to EVERY rule (RuleSet.DefaultPropagators),
+// rather than making all 60-odd packs restate the same list.
 const defaultPropagatorsFragment = "_default-propagators.yaml"
 
 // LoadDefault returns Godzilla's built-in rules merged with the user-supplied
@@ -259,9 +258,8 @@ func mergeUniq[T comparable](base, own []T) []T {
 }
 
 // readFragments adds every `_`-prefixed fragment file directly under fsys's root
-// to into. what labels fsys in wrapped errors. Shared by builtinFragments (the
-// embedded rulepacks FS) and fragmentsFor (a user rules directory), which differ
-// only in the filesystem — like loadRules for the rulepacks themselves.
+// to into. what labels fsys in wrapped errors. Shared by builtinFragments and
+// fragmentsFor, which differ only in the filesystem.
 func readFragments(fsys fs.FS, what string, into fragmentSet) error {
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
@@ -311,10 +309,9 @@ func fragmentsFor(dir string) (fragmentSet, error) {
 	return frags, nil
 }
 
-// checkDuplicateIDs rejects a RuleSet declaring the same rule id twice. Duplicate
+// checkDuplicateIDs rejects a RuleSet declaring the same rule id twice: duplicate
 // ids silently double-report and make a rule un-addressable by the baseline /
-// `godzilla:ignore` machinery; the copy-paste-heavy rulepacks make collisions
-// easy, so the merged set is checked after loading.
+// `godzilla:ignore` machinery.
 func checkDuplicateIDs(rs *rules.RuleSet) error {
 	seen := make(map[string]bool, len(rs.Rules))
 	var dups []string
@@ -349,27 +346,21 @@ func validate(rs *rules.RuleSet) error {
 			problems = append(problems, fmt.Sprintf("rule %q has missing or unrecognized severity %q (want info|low|medium|high|critical)", r.ID, r.Severity))
 		}
 		// A misspelled confidence would silently fall back to the default AND be
-		// invisible to the LLM reviewer (analysis.Confidence.Rank ranks an unknown value 0, so
-		// shouldReview never picks it up) — reject it at load, like an unrecognized
-		// severity, instead of shipping a rule that is quietly un-triageable.
+		// invisible to the LLM reviewer (an unknown value ranks 0, so shouldReview
+		// never picks it up), shipping a rule that is quietly un-triageable.
 		if !rules.ValidConfidence(r.Confidence) {
 			problems = append(problems, fmt.Sprintf("rule %q has unrecognized confidence %q (want low|medium|high, or omit for the default)", r.ID, r.Confidence))
 		}
-		// A sink with a "#" injection-point spec that names no valid argument
-		// index silently widens to "all arguments" (a false-positive-prone
-		// footgun); reject the typo instead of quietly weakening the sink. A
-		// dynamic sink's `when:` guard must compile (this is where a bad guard
-		// fails loud at load / `rules lint` instead of silently suppressing).
+		// See rules.InvalidSinkSpec: such a typo silently widens the sink to
+		// "all arguments".
 		for _, s := range r.Sinks {
 			if rules.InvalidSinkSpec(s.Pattern) {
 				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s.Pattern))
 			}
 		}
-		// Compile the rule here (idempotent, so the engine's later Compile is a
-		// no-op): this compiles its dynamic `when:` guards and its const_arg regexp
-		// exactly once per run and surfaces any error at load instead of letting it
-		// reach a scan. A const_arg declared but uncompilable would otherwise leave
-		// a rule that can never match, silently.
+		// Compile here (idempotent, so the engine's later Compile is a no-op) so a
+		// bad `when:` guard or const_arg regexp fails loud at load / `rules lint`
+		// rather than silently leaving a rule that suppresses or never matches.
 		if err := rs.Rules[i].Compile(); err != nil {
 			problems = append(problems, fmt.Sprintf("rule %q failed to compile: %v", r.ID, err))
 		}

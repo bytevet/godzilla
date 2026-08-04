@@ -5,11 +5,9 @@
 # LLM completion, a database row). When both fire on one call the richer
 # dataflow finding wins (internal/scan dropCoLocatedDangerous).
 #
-# `severity: low` keeps this reported without failing the default `-fail-on
-# medium` gate, since "this argument is not constant" proves dynamic execution
-# but not attacker control. `confidence: medium` overrides the dangerous-call
-# default of High so the LLM reviewer, which only adjudicates at or below
-# medium, actually sees it.
+# `severity: low` keeps this reported without failing the default gate, since
+# "this argument is not constant" proves dynamic execution but not attacker
+# control; `confidence: medium` puts it in the LLM reviewer's range.
 rules:
   - id: py-dynamic-code-exec
     kind: dangerous-call

@@ -1,12 +1,9 @@
 # SQL injection: untrusted request input flowing into a DB-API cursor/query
 # execution without parameterization.
 #
-# The "#0" suffix on each sink names the LOGICAL (source-level) index of the
-# query-string argument, so a parameterized call like
-# cursor.execute("... = ?", userInput) -- where userInput is a bound
-# placeholder value at a later position, not part of the query text -- is NOT
-# flagged. This mirrors go-sql-injection.yaml's identical treatment of
-# database/sql's Query/Exec family.
+# The "#0" on each sink names the LOGICAL index of the query-string argument, so
+# a parameterized cursor.execute("... = ?", userInput) -- where the untrusted
+# value is a bound placeholder, not query text -- is NOT flagged.
 rules:
   - id: py-sql-injection
     languages: [python]
@@ -25,16 +22,12 @@ rules:
       # SQLAlchemy's raw-SQL escape hatch: runs the string with no parameterization.
       - "py:*.exec_driver_sql#0"
     # An ORM's raw-SQL wrapper is a PASSTHROUGH, not a sink: sqlalchemy.text(sql)
-    # returns a TextClause carrying the string verbatim, and it is the later
-    # session.execute(clause) that runs it. Without these the taint dies inside the
-    # wrapper, so `execute` sees a clean argument and nothing fires -- which is why
-    # ORM-backed apps reported zero SQL-injection findings while other classes fired
-    # in the same code. Covered as both a bare call (`text(sql)`) and an attribute
-    # call (`sqlalchemy.text` / Flask-SQLAlchemy's `db.text`), since the frontend
-    # resolves the callee differently per import style.
-    #
-    # These only FORWARD taint, never create it, so a query built entirely from
-    # constants stays untainted and the parameterized forms are unaffected.
+    # returns a TextClause carrying the string verbatim, and the later
+    # session.execute(clause) runs it. Without these the taint dies in the
+    # wrapper and `execute` sees a clean argument. Listed as both a bare call
+    # (`text(sql)`) and an attribute call (`sqlalchemy.text` / `db.text`), since
+    # the frontend resolves the callee differently per import style. They only
+    # FORWARD taint, so all-constant and parameterized queries are unaffected.
     propagators:
       - "py:text"
       - "py:*.text"
