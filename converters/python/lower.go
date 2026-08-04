@@ -429,6 +429,11 @@ func collectClassBases(stmts []astNode, out map[string][]string) {
 // (matched by simple base name) directly or transitively. The transitive closure
 // is computed to a fixpoint so `class B(A)` where `class A(RequestHandler)` is
 // also detected.
+// The result holds only the DERIVED subclasses, never the seeds: the original
+// caller's seeds are external framework names (`RequestHandler`, `View`) that
+// the program does not define, and folding them in would make a program's own
+// unrelated `class View:` a request handler. A caller whose seeds ARE program
+// classes unions them back in itself.
 func handlerClasses(classBases map[string][]string, targetBases map[string]bool) map[string]bool {
 	result := map[string]bool{}
 	for changed := true; changed; {

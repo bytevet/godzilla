@@ -138,50 +138,63 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		return strings.ReplaceAll(strings.TrimPrefix(canon, "py:"), "/", ".")
 	}
 
-	// Index every lowered function by its logical dotted path AND by every
-	// dot-aligned suffix of it. A path shared by two functions is ambiguous and
-	// never used as a rewrite target.
+	// Index every lowered function twice: by its FULL logical path, and by each
+	// dot-aligned suffix of it. A key claimed by two different functions is
+	// ambiguous and never used as a rewrite target.
 	//
-	// Indexing suffixes is what makes resolution independent of WHERE the scan
-	// root sits. A module name is relative to the scan root, so scanning a repo
-	// whose package lives under `src/` gives functions the logical path
-	// `pyload.core.network.request_factory.get_url`, while the import inside that
-	// package writes `network.request_factory.get_url`. Matching only full paths
-	// against callee suffixes can never bridge that: no suffix of the callee
-	// equals the longer function path. Scanning `src/pyload/core` happened to
-	// line the two up, so the same code resolved from one root and silently
-	// dropped every cross-module call from the other.
+	// A module name is relative to the SCAN ROOT while an import is relative to
+	// the PACKAGE root, so a function's path can be strictly longer than the
+	// callee's (`a.b.pkg.mod.fn` vs `pkg.mod.fn`). Matching full paths alone
+	// cannot bridge that gap in either direction, which made resolution depend on
+	// where the scan root happened to sit; indexing suffixes closes it.
 	//
-	// The suffix walk deliberately stops before the LAST component, so a bare
-	// name is never indexed. That preserves the property the resolver relies on:
-	// a single-component method callee (`x.execute`) cannot match a function,
-	// since every indexed key still carries at least `module.name`.
-	rawByLogical := map[string]string{} // logical path (or suffix) -> raw canonical
-	ambiguous := map[string]bool{}
+	// The two tiers are kept APART because a suffix is weaker evidence than a
+	// full path. Folding them into one map lets a vendored or duplicated copy of
+	// a module poison a key that an exact match owned, silently breaking a link
+	// that used to resolve. Exact wins; suffixes only fill the gap.
+	exact, exactAmbig := map[string]string{}, map[string]bool{}
+	suffix, suffixAmbig := map[string]string{}, map[string]bool{}
+	claim := func(idx map[string]string, ambig map[string]bool, key, canon string) {
+		// A bare name is never a key: every key keeps at least `module.name`, which
+		// is what stops a single-component method callee (`x.execute`) from ever
+		// matching a function.
+		if strings.IndexByte(key, '.') < 0 {
+			return
+		}
+		if prev, seen := idx[key]; !seen {
+			idx[key] = canon
+		} else if prev != canon {
+			ambig[key] = true
+		}
+	}
 	rawSet := map[string]bool{} // every function's raw canonical (exact-resolvable already)
-	for _, m := range prog.Modules {
-		for _, fn := range m.Functions {
-			if fn.CanonicalName == "" {
-				continue
+	for _, fn := range irwalk.Funcs(prog) {
+		if fn.CanonicalName == "" {
+			continue
+		}
+		rawSet[fn.CanonicalName] = true
+		lp := logical(fn.CanonicalName)
+		claim(exact, exactAmbig, lp, fn.CanonicalName)
+		for s := lp; ; {
+			i := strings.IndexByte(s, '.')
+			if i < 0 {
+				break
 			}
-			rawSet[fn.CanonicalName] = true
-			for s := logical(fn.CanonicalName); strings.IndexByte(s, '.') >= 0; {
-				if prev, seen := rawByLogical[s]; seen && prev != fn.CanonicalName {
-					ambiguous[s] = true
-				} else {
-					rawByLogical[s] = fn.CanonicalName
-				}
-				s = s[strings.IndexByte(s, '.')+1:]
-			}
+			s = s[i+1:]
+			claim(suffix, suffixAmbig, s, fn.CanonicalName)
 		}
 	}
 
 	// resolve returns the raw canonical for a callee's logical path via the
-	// longest unique dot-aligned suffix, or "" if none/ambiguous.
+	// longest unique dot-aligned suffix, or "" if none/ambiguous. Each candidate
+	// is tried against the exact index before the suffix one, so a full-path match
+	// always beats a suffix match.
 	resolve := func(calleeLogical string) string {
-		s := calleeLogical
-		for {
-			if raw, ok := rawByLogical[s]; ok && !ambiguous[s] {
+		for s := calleeLogical; ; {
+			if raw, ok := exact[s]; ok && !exactAmbig[s] {
+				return raw
+			}
+			if raw, ok := suffix[s]; ok && !suffixAmbig[s] {
 				return raw
 			}
 			i := strings.IndexByte(s, '.')

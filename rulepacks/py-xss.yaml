@@ -37,6 +37,9 @@ rules:
       - "py:*html.escape"
       - "py:*flask.escape"
       - "py:*cgi.escape"
+      # Percent-encoding escapes `<` and `>`, so the value cannot open a tag.
+      - "py:*urllib.parse.quote"
+      - "py:*urllib.parse.quote_plus"
     # json.dumps embeds its argument's data verbatim, so it forwards taint rather
     # than clearing it: `HttpResponse(json.dumps(user_data))` is reflected-JSON
     # XSS when the body is served without a safe content type.

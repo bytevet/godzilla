@@ -42,4 +42,9 @@ rules:
       - "py:*.literal_column"
     # No built-in sanitizer neutralizes tainted input for raw SQL string
     # construction; the fix is parameterized queries, not escaping.
-    sanitizers: []
+    # Percent-encoding turns `'` into %27 and a database does not decode it, so
+    # a quoted value cannot break out of a literal (see _default-propagators.yaml,
+    # where it is a propagator for the URL classes it does NOT neutralize).
+    sanitizers:
+      - "py:*urllib.parse.quote"
+      - "py:*urllib.parse.quote_plus"

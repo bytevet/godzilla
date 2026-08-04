@@ -1,5 +1,4 @@
-"""A helper one package deep. The caller imports it by the path relative to the
-PACKAGE root (`pkg.net.client`), not to the scan root (`src/pkg/net/client`)."""
+"""The sink, one package deep."""
 import requests
 
 

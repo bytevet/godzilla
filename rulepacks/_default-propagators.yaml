@@ -106,6 +106,14 @@ propagators:
   - "py:*.encode"
   - "py:*.decode"
   - "py:*.casefold"
+  # URL percent-encoding. Like Go's url.QueryEscape and JS's encodeURIComponent
+  # above, it RE-ENCODES rather than neutralizes for the URL classes: with the
+  # `safe` set an app actually uses, `:` and `/` survive, so the host of an
+  # attacker-supplied URL survives with them. Where it DOES neutralize — `\'` for
+  # SQL, `<`/`>` for HTML — the rule that cares lists it as a sanitizer.
+  - "py:*urllib.parse.quote"
+  - "py:*urllib.parse.quote_plus"
+  - "py:*urllib.parse.urlencode"
   # split/join carry taint through the very common "split on a delimiter, keep
   # some parts, re-join" idiom (Streamlit CVE-2022-35918: path.split('/') ->
   # '/'.join(parts[1:]) -> os.path.join -> open). str.split yields a tainted

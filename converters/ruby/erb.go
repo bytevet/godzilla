@@ -19,9 +19,8 @@ import (
 // emitted plainly and only fires if it bypasses escaping itself (`raw`,
 // `.html_safe` -- already sinks in ruby-xss.yaml). The unescaped `<%== %>` form
 // IS a sink, and gets one the same way a Vue `v-html` does: its delimiters are
-// rewritten to a `raw(...)` call. `<%==` and `raw(` are both four bytes and `%>`
-// closes as `) `, so the substitution is length-preserving and positions still
-// hold.
+// rewritten to a `raw(...)` call. Every such rewrite is length-preserving, so
+// positions still hold — see copyERBTag for the widths it relies on.
 func erbToRuby(src []byte) []byte {
 	out := blankAll(src)
 	for i := 0; i < len(src); {
@@ -73,31 +72,25 @@ func copyERBTag(src, out []byte, open, tagEnd int) {
 	out[tagEnd] = ';'
 	switch {
 	case src[body] == '=' && src[body+1] == '=':
-		// <%== expr %> — unescaped output, which in Rails is exactly what raw()
-		// does, so rewriting the delimiters into that call is a faithful
-		// desugaring rather than an invented sink. It rides ruby-xss.yaml's
-		// existing `ruby:raw` sink, which COUPLES this to that glob: narrow or
-		// rename it and ERB unescaped output stops being detected. That coupling
-		// is held by test/ruby/erb_template_xss, whose max: pin fails if either
-		// side moves.
-		body += 2
+		body += 2 // <%== expr %> — unescaped output
 		switch {
 		case !hasTrailingModifier(src[body:tagEnd]):
 			copy(out[open:], []byte("raw("))
-			out[tagEnd], out[tagEnd+1] = ')', ';'
+			copy(out[tagEnd:], []byte(");"))
 		case src[body] == ' ' && src[tagEnd-1] == ' ':
 			// A trailing modifier (`<%== x if y %>`) cannot sit directly inside
 			// raw()'s parens, but it can inside a nested pair. `<%== ` and `raw((`
 			// are both five bytes and ` %>` and `));` both three, so the spaced
 			// form — the idiomatic one — keeps its sink at no positional cost.
 			copy(out[open:], []byte("raw(("))
+			copy(out[tagEnd-1:], []byte("));"))
 			body++
 			end--
-			out[tagEnd-1], out[tagEnd], out[tagEnd+1] = ')', ')', ';'
+		default:
+			// Unspaced with a modifier (`<%==x if y%>`) has no room for the
+			// nesting, so it stays a plain expression: losing one tag's sink beats
+			// a syntax error losing the whole template.
 		}
-		// Unspaced with a modifier (`<%==x if y%>`) has no room for the nesting,
-		// so it stays a plain expression: losing one tag's sink beats a syntax
-		// error losing the whole template.
 	case src[body] == '=':
 		body++ // <%= expr %> — auto-escaped by Rails, emitted as a plain expression
 	}
