@@ -8,64 +8,50 @@ import (
 
 // Module-level string constants are INLINED at their use sites (see
 // funcState.lookupName), rather than lowered as a GlobalName the engine cannot
-// read.
-//
-// The motivating shape is the commonest URL idiom in Python:
+// read. The motivating shape is the commonest URL idiom in Python:
 //
 //	BASE = "https://api.internal.example.com"
 //	requests.get(BASE + "/" + user_input)
 //
 // The engine's SSRF host check (internal/analysis/ssrf.go) proves a host is
-// FIXED by reconstructing the URL's constant prefix. A GlobalName operand has no
-// readable text, so the prefix came back empty, the host read as attacker-
-// controllable, and every such call reported CWE-918. Inlining the literal makes
-// the prefix visible and the finding correctly suppressed — and it does so for
-// every constant consumer at once (format templates, dangerous-call guards),
-// with no engine change.
+// FIXED by reconstructing the URL's constant prefix, and a GlobalName operand
+// carries no readable text. Inlining makes the prefix visible to every constant
+// consumer at once (format templates, dangerous-call guards) with no engine
+// change.
 //
 // # Why this is allowed to be wrong only in one direction
 //
 // Folding a value that is NOT actually constant would suppress a REAL finding —
-// a false negative on an exploitable SSRF, which is the one outcome ssrf.go's
-// contract forbids. So constStringGlobals proves immutability for the whole
-// module before folding anything, and gives up entirely the moment it might be
-// looking at an incomplete picture:
+// a false negative on an exploitable SSRF, the one outcome ssrf.go's contract
+// forbids. So constStringGlobals proves immutability for the whole module before
+// folding anything, and gives up entirely the moment it might be looking at an
+// incomplete picture:
 //
 //   - the name must be bound EXACTLY ONCE across the module, by a top-level
 //     assignment whose value is a string literal;
 //   - a module containing any construct that can rebind or unbind a name
 //     WITHOUT the walker seeing it folds nothing at all (see bindingSafeKinds).
 //
-// Both directions of failure are safe: a missed fold leaves the finding firing,
-// exactly as before this file existed.
+// A missed fold is safe: the finding simply keeps firing.
 //
 // The PROOF has to live here because Python's rebinding forms (`global`, `del`,
 // `match`, lambda) leave no trace in gIR at all, so the engine cannot answer the
-// question. The GAP it closes is not Python's, though: a constant-valued global
-// is unreadable to every constant-consuming analysis in every language (Go
-// package `var`, Java `static final`, JS module `const`). A second language
-// wanting this should lift the CONTRACT -- frontend proves const, engine
-// resolves a GlobalName through Module.Globals -- rather than copy this file.
+// question. The GAP it closes is not Python's, though — a constant-valued global
+// is unreadable to every constant-consuming analysis in every language. A second
+// language wanting this should lift the CONTRACT (frontend proves const, engine
+// resolves a GlobalName through Module.Globals) rather than copy this file.
 
 // bindingSafeKinds is every node kind this walker can traverse without risking a
-// missed binding. Two groups, one rule:
+// missed binding: the kinds pyast.py emits STRUCTURALLY (all children present,
+// so recursing sees every name they bind), plus the unlowered statements that
+// cannot bind, rebind or delete a name at all. Anything else -- `global`,
+// `nonlocal`, AnnAssign, Delete, Match, the catch-all "Unknown" -- arrives as a
+// kind-only node whose targets cannot be inspected, and aborts the walk.
 //
-//   - the kinds pyast.py emits STRUCTURALLY, whose children are all present, so
-//     recursing into them sees every name they bind;
-//   - the unlowered statements that cannot bind, rebind or delete a name at all
-//     (Pass/Break/Continue/Raise/Assert). pyast.py's conv_stmt renders these as a
-//     bare {"kind": <PythonClassName>, "pos": p}, so there is nothing to recurse
-//     into and nothing to miss.
-//
-// Anything else -- `global`, `nonlocal`, AnnAssign, Delete, Match, and the
-// catch-all "Unknown" -- arrives as a kind-only node whose targets cannot be
-// inspected, and aborts the walk.
-//
-// Listing the SAFE kinds rather than the dangerous ones is deliberate: if
-// pyast.py later emits a new binding form, it lands outside this set and folding
-// switches itself off, instead of silently mis-folding. The cost is that this is
-// a second copy of pyast.py's emitted-kind vocabulary living in Go; it fails
-// closed, so drift makes it conservative rather than wrong.
+// Listing the SAFE kinds rather than the dangerous ones is what makes this FAIL
+// CLOSED: a new binding form in pyast.py lands outside this set and switches
+// folding off instead of silently mis-folding. The cost is a second copy of
+// pyast.py's kind vocabulary in Go, which drift can only make conservative.
 var bindingSafeKinds = map[string]bool{
 	// structural
 	"Module": true, "FunctionDef": true, "ClassDef": true, "Assign": true,
@@ -82,11 +68,10 @@ var bindingSafeKinds = map[string]bool{
 // eachModuleConstAssign calls fn for every top-level `NAME = <literal>` binding,
 // with the bound name, the constant, and the value node (for its position).
 //
-// Two passes want this same shape and must not drift: convertModule turns them
-// into gIR Globals so the secret scanner can see a hardcoded literal, and
-// constStringGlobals takes the string-valued ones as fold candidates. The
-// filtering differs -- Globals wants every constant type, folding only strings --
-// so the predicate stays with each caller and only the traversal is shared.
+// Two passes want this same shape and must not drift: convertModule emits gIR
+// Globals from it, constStringGlobals takes the string-valued ones as fold
+// candidates. Only the traversal is shared — the filtering differs (Globals want
+// every constant type, folding only strings), so it stays with each caller.
 func eachModuleConstAssign(root astNode, fn func(name string, c *ir.Constant, val astNode)) {
 	for _, s := range root.list("body") {
 		if s.kind() != "Assign" {
@@ -151,7 +136,7 @@ func countBindings(n astNode, binds map[string]int) bool {
 		return false // a kind whose bindings are invisible: abort the whole walk
 	}
 	// Constant and Name are the most numerous nodes in any AST and carry no child
-	// node maps, so returning before walkChildren's range+type-switch is worth a
+	// node maps; returning before walkChildren's range+type-switch is worth a
 	// measured ~28% off this walk.
 	if kind == "Constant" || kind == "Name" {
 		return true

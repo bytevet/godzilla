@@ -52,7 +52,7 @@ func NewConverter() *Converter {
 
 // IsRustFile reports whether path is a Rust source file this frontend lowers.
 // Exported so internal/scan's language detection and this frontend's own file
-// selection share ONE predicate instead of drifting copies.
+// selection share ONE predicate.
 func IsRustFile(path string) bool { return strings.EqualFold(filepath.Ext(path), ".rs") }
 
 // ConvertFile lowers a single .rs file, a directory of standalone .rs files, or
@@ -89,10 +89,9 @@ func tryCargo(dir string) (prog *ir.Program, handled bool, err error) {
 		return nil, false, nil
 	}
 	// `cargo` executes arbitrary code from the scanned repo (build.rs,
-	// proc-macros, and every dependency crate's build script). Off by
-	// default; without opt-in, fall through to per-file rustc, which
-	// compiles the project's own sources with no dependency resolution
-	// and no build-script execution.
+	// proc-macros, every dependency crate's build script). Off by default; without
+	// opt-in, fall through to per-file rustc, which compiles the project's own
+	// sources with no dependency resolution and no build-script execution.
 	if buildpolicy.Allowed() {
 		prog, err = convertCargo(dir)
 		return prog, true, err
@@ -137,10 +136,8 @@ type rsFileResult struct {
 
 // emitMIR runs rustc to dump textual MIR for one source file. Spans are enabled
 // (-Zmir-include-spans=on) so every instruction gets a source position;
-// RUSTC_BOOTSTRAP=1 unlocks that flag on the stable toolchain (the MIR text
-// format is itself explicitly unstable, so this is not a new stability
-// assumption). --crate-type lib lets a file without `fn main` compile, and
-// --cap-lints allow silences sample warnings.
+// --crate-type lib lets a file without `fn main` compile, and --cap-lints allow
+// silences sample warnings.
 func emitMIR(src string) (string, error) {
 	rustc := "rustc"
 	if v := os.Getenv("GODZILLA_RUSTC"); v != "" {
@@ -164,9 +161,10 @@ func emitMIR(src string) (string, error) {
 
 // runMIR runs cmd — which must be configured to emit MIR to outPath — and returns
 // the emitted MIR text. It sets RUSTC_BOOTSTRAP=1, the escape hatch that unlocks
-// -Zmir-include-spans on the stable toolchain (the MIR text format is itself
-// unstable, so this adds no new stability assumption). label names the tool for
-// the error message.
+// -Zmir-include-spans on the stable toolchain; the MIR text format is itself
+// unstable, so this adds no new stability assumption. This is the ONE place that
+// env var is set — every MIR-emitting command routes through here. label names
+// the tool for the error message.
 func runMIR(cmd *exec.Cmd, outPath, label string) (string, error) {
 	cmd.Env = append(os.Environ(), "RUSTC_BOOTSTRAP=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -186,8 +184,7 @@ func runMIR(cmd *exec.Cmd, outPath, label string) (string, error) {
 // module is exactly the project's own code, with framework calls named by their
 // real crate paths. A build failure (e.g. a dependency that can't be fetched
 // offline) is surfaced as an error, which the directory merge / CLI treats as a
-// skipped frontend. --emit=mir=<path> pins the output; RUSTC_BOOTSTRAP=1 unlocks
-// the span flag on stable (the MIR text format is already unstable).
+// skipped frontend.
 func convertCargo(dir string) (*ir.Program, error) {
 	cargo := "cargo"
 	if v := os.Getenv("GODZILLA_CARGO"); v != "" {
@@ -195,10 +192,10 @@ func convertCargo(dir string) (*ir.Program, error) {
 	}
 
 	// Enumerate the project's own lib/bin targets (across workspace members) via
-	// `cargo metadata`, then emit + lower each. This fixes FE-3: the old code only
-	// built `--lib`, so binary crates (src/main.rs) — most deployable Rust — and
-	// workspaces produced zero analysis. Fall back to a plain `--lib`/default
-	// build if metadata is unavailable, so nothing regresses.
+	// `cargo metadata`, then emit + lower each — building only `--lib` would leave
+	// binary crates (src/main.rs, most deployable Rust) and workspaces with zero
+	// analysis (FE-3). Falls back to a best-effort build if metadata is
+	// unavailable.
 	targets := cargoTargets(cargo, dir)
 	if len(targets) == 0 {
 		targets = []cargoTarget{{kind: "lib"}, {kind: "bin"}} // best-effort fallback

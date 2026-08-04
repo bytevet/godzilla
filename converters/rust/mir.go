@@ -19,10 +19,10 @@ import (
 // out-pointer indirection), so a straight-line value-forwarding pass recovers
 // clean SSA. See converter.go for how the MIR text is produced.
 //
-// The lowering flattens control flow into one block (unlike the Python/JS/Ruby
-// frontends, which build a real CFG): it walks a function's basic blocks in order and forwards each
-// MIR local to its current gIR value. That is exact for the straight-line
-// source→sink handler shape that matters for taint.
+// The emitted gIR is ONE block (unlike the Python/JS/Ruby frontends, which build
+// a real CFG): MIR's blocks are walked in order, forwarding each MIR local to its
+// current gIR value, with explicit PHIs at joins (see lowerBlocks). That is exact
+// for the straight-line source→sink handler shape that matters for taint.
 
 // lowerMIR parses the MIR dump `text` for source file `filename` into a module.
 func lowerMIR(text, filename string) *ir.Module {
@@ -116,9 +116,8 @@ func lowerFn(body []string, filename string) *ir.Function {
 		fn.Params = append(fn.Params, v) // preserve arity for interproc arg->param mapping
 		if src, ok := axumExtractorSource(p.typ); ok {
 			// An axum handler receives already-extracted, attacker-controlled data
-			// as a typed parameter (Query<T>/Path<T>/Json<T>/Form<T>); synthesize a
-			// source CALL whose result IS the parameter's value, so the taint engine
-			// seeds it (the same trick the Java @RequestParam frontend uses). COV-7.
+			// as a typed parameter; synthesize a source CALL whose result IS the
+			// parameter's value, so the taint engine seeds it (COV-7).
 			reg := st.reg()
 			inst := &ir.Instruction{
 				Name: reg, Op: ir.OpCode_OP_CODE_CALL,
@@ -151,20 +150,17 @@ type mirBlock struct {
 
 // lowerBlocks lowers a function body block-by-block, threading the value
 // environment along the control-flow graph so a local reassigned on only some
-// paths is PHI-merged at the join instead of last-write-wins overwritten (FE-5).
-// The prior linear flattener dropped taint through the ubiquitous "default if
-// empty" shape (`if x.is_empty() { x = "default" }`): the else-arm's constant
-// reassignment clobbered the tainted binding, and the post-join sink read the
-// constant. Now each join block (≥2 predecessors) emits an OP_CODE_PHI of the
-// incoming values, keeping the tainted path live.
+// paths is PHI-merged at the join (≥2 predecessors) rather than overwritten
+// last-write-wins (FE-5). Without the merge the ubiquitous "default if empty"
+// shape (`if x.is_empty() { x = "default" }`) drops taint: the else-arm's
+// constant clobbers the tainted binding and the post-join sink reads the constant.
 //
-// Straight-line code — including the call chains that MIR splits across blocks
-// via return edges — has one predecessor per block, so its env is copied
-// through unchanged and lowering is identical to before. A block whose only
-// predecessors are unwind/cleanup edges (not in the normal CFG) falls back to
-// the textually-previous block's exit env, never doing worse than the old
-// linear walk. Aggregates (st.agg) stay global (last-write-wins); merging them
-// across branches is a rarer case left as-is.
+// Straight-line code — including the call chains MIR splits across blocks via
+// return edges — has one predecessor per block, so its env is copied through
+// unchanged. A block whose only predecessors are unwind/cleanup edges (not in the
+// normal CFG) falls back to the textually-previous block's exit env. Aggregates
+// (st.agg) stay global (last-write-wins); merging them across branches is a rarer
+// case left as-is.
 func (st *lowerState) lowerBlocks(lines []string) {
 	preamble, blocks := splitMIRBlocks(lines)
 	for _, ln := range preamble {
@@ -316,11 +312,9 @@ func parseHeader(h string) (name string, params []mirParam) {
 //   - Generic extractors — Query<T>, Path<T>, Json<T>, Form<T> — keyed on the
 //     extractor identifier immediately before the generic `<`, so both a bare
 //     `Query<..>` and a fully-qualified `axum::extract::Query<..>` match.
-//   - Non-generic body/query extractors — RawQuery (the raw query string) and
-//     RawForm (the raw form body) — matched by their bare type name. These names
-//     are axum-specific, so matching them does not risk the false positives a
-//     bare `String`/`Bytes` request-body param would (those common types are
-//     deliberately NOT treated as sources).
+//   - Non-generic body/query extractors — RawQuery and RawForm — matched by bare
+//     type name. Those names are axum-specific; a bare `String`/`Bytes`
+//     request-body param is deliberately NOT a source, being far too common.
 //
 // Returns ok=false for any non-extractor type.
 func axumExtractorSource(typ string) (string, bool) {
@@ -394,10 +388,9 @@ func (st *lowerState) line(raw string) {
 // terminator) into gIR, updating the value-forwarding environment.
 func (st *lowerState) assign(dst, expr string, pos *ir.Position, isCall bool) {
 	// rustc 1.97+ prefixes some Use rvalues with a `no_retag` qualifier (a
-	// Tree-Borrows retag annotation, e.g. `_10 = no_retag copy (_4.0: T)`). It
-	// carries no dataflow meaning; strip it so the operand parses exactly as on
-	// older rustc — without this, the case below misses and taint silently drops
-	// (notably through format!, which lowers its args via such a copy).
+	// Tree-Borrows annotation, e.g. `_10 = no_retag copy (_4.0: T)`). It carries no
+	// dataflow meaning, and leaving it on makes every case below miss, silently
+	// dropping taint — notably through format!, whose args lower via such a copy.
 	expr = strings.TrimPrefix(expr, "no_retag ")
 	if isCall {
 		st.emitCall(dst, expr, pos)
@@ -471,10 +464,9 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	}
 	norm := normalizeName(callee)
 	// `String + &str` overloads Add::add, which rustc lowers to a CALL rather than
-	// the native numeric-add rvalue. It is a string concatenation, so model it as
-	// the universal BIN_OP_ADD the engine already interprets for `+` in every
-	// language (taint propagation and SSRF fixed-host prefix reconstruction), so
-	// the engine needs no Rust-callee special case.
+	// the native numeric-add rvalue. Modeling it as the universal BIN_OP_ADD the
+	// engine already interprets for `+` in every language (taint propagation, SSRF
+	// prefix reconstruction) is what keeps Rust out of the engine as a special case.
 	if norm == "add" {
 		operands := st.operands(splitTop(argStr, ','))
 		st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_BIN_OP, BinOp: ir.BinOpKind_BIN_OP_ADD, Operands: operands, Pos: pos})
@@ -489,16 +481,16 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	}
 	inst := &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos}
 	// Tag two shapes with a language-neutral marker so the engine's SSRF host
-	// reconstruction reads the marker, not a Rust callee-name shape (both markers
-	// are inert to taint propagation — only OP_CODE_INTRINSIC consults the
-	// intrinsic-propagator table — so taint still flows via the existing rules):
-	//   - format!  -> fmt::Arguments::new(<decoded template>, args): builtin.format
-	//   - identity string conversions that forward their operand's text unchanged
-	//     (std conversion traits / format-result wrappers): builtin.identity
-	// The matches are anchored to the std paths and MIR's trait-qualified call
-	// form — never a name suffix, which a user function merely named like a
-	// conversion (my_into, W::clone) could trip, wrongly proving a fixed host and
-	// suppressing a real SSRF finding.
+	// reconstruction reads the marker, not a Rust callee-name shape (both are inert
+	// to taint propagation — only OP_CODE_INTRINSIC consults the
+	// intrinsic-propagator table):
+	//   - format! -> fmt::Arguments::new(<decoded template>, args): builtin.format
+	//   - identity string conversions that forward their operand's text unchanged:
+	//     builtin.identity
+	// Both matches are anchored to the std paths and MIR's trait-qualified call form
+	// — never a name suffix, which a user function merely named like a conversion
+	// (my_into, W::clone) would trip, wrongly proving a fixed host and suppressing a
+	// real SSRF finding.
 	switch {
 	case rustFormatArgsNew(callee):
 		inst.Intrinsic = "builtin.format"
@@ -523,10 +515,9 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 // rustCommandStepCallees are the exact normalized callees (generics stripped by
 // normalizeName, no `rust:` prefix) of the std::process::Command builder steps
 // that return their receiver: every step method crossed with the std path forms
-// MIR prints, mirroring how rustIdentityCallees anchors Command::new. The method
-// list must cover every step the API offers: the program is forwarded by
-// aliasing, so one unlisted step breaks the chain and the program stops
-// resolving at every step after it.
+// MIR prints. The list must cover every step the API offers — the program is
+// forwarded by aliasing, so one unlisted step breaks the chain and the program
+// stops resolving at every step after it.
 var rustCommandStepCallees = func() map[string]bool {
 	steps := []string{
 		"arg", "args", "arg0",

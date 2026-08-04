@@ -30,24 +30,21 @@ type Converter struct {
 	// reads are race-free.
 	baseTypes map[types.Type]*ir.Type
 
-	// fnNames lazily memoizes ssa.Function.String() — rendering it re-runs
-	// RelString/TypeString every time, and the same name is consulted by sort
-	// comparisons and per callee reference. Per-converter and private, exactly
-	// like typeCache.
+	// fnNames memoizes ssa.Function.String() — rendering it re-runs
+	// RelString/TypeString every time, and the same name is consulted by every
+	// sort comparison and callee reference.
 	fnNames map[*ssa.Function]string
 
 	// baseNames is a read-only view of the main converter's fnNames, shared with
-	// workers — the same contract as baseTypes: it is fully built by lowerModules'
+	// workers — the same contract as baseTypes: fully built by lowerModules'
 	// package loop (via the sort comparator and addPackageMembers) before any
-	// worker starts, and never written afterwards, so concurrent reads are
-	// race-free. Without it every worker re-rendered the names the parent had
-	// already memoized.
+	// worker starts, never written afterwards, so concurrent reads are race-free.
 	baseNames map[*ssa.Function]string
 
 	// valueCache interns the *ir.Value operand wrappers per function (cleared at
-	// the top of convertFunction): the same ssa.Value is typically referenced by
-	// many instructions, and the wrappers are immutable once emitted, so reusing
-	// one object per value halves the converter's smallest-object churn.
+	// the top of convertFunction): one ssa.Value is typically referenced by many
+	// instructions, and the wrappers are immutable once emitted, so one object per
+	// value halves the converter's smallest-object churn.
 	valueCache map[ssa.Value]*ir.Value
 
 	// routeHandlers maps a function registered as an HTTP route handler
@@ -60,9 +57,8 @@ type Converter struct {
 	// routeFormParams maps a route-registered handler to the register names of its
 	// BOUND-FORM parameters: value-struct params that a binding middleware
 	// (macaron/martini `binding.Bind`/`bindIgnErr`, etc.) reflectively fills from
-	// the request — e.g. gogs' EditFilePost(c *context.Context, f form.EditRepoFile).
-	// Such a param is request-derived, so addHTTPRequestSource seeds it as a
-	// request source; its field reads (f.TreePath) then carry taint. Populated by
+	// the request. Such a param is request-derived, so addHTTPRequestSource seeds
+	// it as a request source and its field reads carry taint. Populated by
 	// collectRouteHandlers alongside routeHandlers.
 	routeFormParams map[*ssa.Function][]string
 
@@ -105,10 +101,9 @@ func (c *Converter) fnString(f *ssa.Function) string {
 	return s
 }
 
-// ConvertFile lowers the Go package(s) at path into gIR. path may be either a
-// single .go file (its containing package is loaded) or a directory (all
-// packages under it are loaded recursively). Package load errors are reported
-// as warnings and conversion continues, so partial/vulnerable code still
+// ConvertFile lowers the Go package(s) at path into gIR — a single .go file
+// (loading its containing package) or a directory (loaded recursively). Package
+// load errors are warnings, not failures, so partial/vulnerable code still
 // converts.
 func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	abs, err := filepath.Abs(path)
@@ -138,28 +133,21 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		return nil, err
 	}
 	c.fset = fset
-	// AllFunctions is a full-program traversal (now covering the whole lowered
-	// dependency closure); compute it once and share it between route-handler
-	// detection and the per-package function grouping below.
+	// AllFunctions is a full-program traversal; compute it once and share it
+	// between route-handler detection and the grouping below.
 	allFns := ssautil.AllFunctions(prog)
 	c.routeHandlers, c.routeFormParams = collectRouteHandlers(allFns)
 
-	// Lower only the functions REACHABLE from user (reportable) code. The whole
-	// dependency closure is enormous — gitea is ~84k functions across 600+ dep
-	// packages — but the demand-driven engine only ever analyses a dependency
-	// function when taint reaches it via a call from user code, so lowering the
-	// unreachable remainder is pure retained-gIR memory that pushes a big scan
-	// into OOM. reachableFuncs mirrors the engine's own dispatch (static callees,
-	// closures, and CHA-by-method-name for interface calls), so it cannot drop
-	// anything the engine could reach: recall is unchanged, only never-analysed
-	// dead dependency code is skipped. Reportable-package functions are always
-	// kept (they are the taint seeds and where findings surface).
+	// Lower only the functions REACHABLE from user (reportable) code. A whole
+	// dependency closure runs to tens of thousands of functions, but the
+	// demand-driven engine only ever analyses a dependency function when taint
+	// reaches it from user code, so lowering the unreachable remainder is pure
+	// retained-gIR memory that pushes a big scan into OOM.
 	reach := reachableFuncs(allFns, reportable)
 
-	// pkg.Members only exposes package-level funcs, not methods or anonymous
-	// function literals (closures) — and vulnerable code frequently lives inside
-	// closures (e.g. http.HandleFunc handlers). AllFunctions enumerates every
-	// function/method/closure; group them by their defining package.
+	// pkg.Members only exposes package-level funcs, not methods or closures — and
+	// vulnerable code frequently lives inside a closure (e.g. an http.HandleFunc
+	// handler). AllFunctions enumerates every function/method/closure.
 	funcsByPkg := make(map[*ssa.Package][]*ssa.Function)
 	for fn := range allFns {
 		if fn.Pkg != nil && reach[fn] {
@@ -172,16 +160,14 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 // reachableFuncs returns the functions reachable from user (reportable) code by
 // following the same call edges the taint engine does: direct/static calls,
-// function values referenced as instruction operands (closures via MakeClosure,
-// func-valued args, method values), and interface dispatch resolved by CHA —
-// every concrete method whose name matches an invoked interface method, exactly
-// as the engine's methodImpls index. This is a SOUND over-approximation of what
-// the engine can analyse: a function it omits is one no reachable call site can
-// target, so skipping its lowering cannot change any finding. Reportable-package
+// function values referenced as instruction operands (MakeClosure, func-valued
+// args, method values), and interface dispatch resolved by CHA — every concrete
+// method whose name matches an invoked interface method, exactly as the engine's
+// methodImpls index. It must stay a SOUND over-approximation of what the engine
+// can analyse, so that a function it omits is one no reachable call site can
+// target and skipping its lowering cannot change any finding. Reportable-package
 // functions are always included (taint seeds; findings surface there), even ones
-// with no static caller (e.g. a handler registered by reflection or a route
-// verb). Bodiless (stdlib export-data) functions have no Blocks and contribute
-// no edges, matching the "stdlib is modeled by rules, not lowered" policy.
+// with no static caller.
 func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) map[*ssa.Function]bool {
 	// method name -> concrete methods exposing it, for interface-call resolution.
 	methodsByName := map[string][]*ssa.Function{}
@@ -204,10 +190,9 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 		}
 	}
 	// Recycled operand buffer: Operands APPENDS into the slice it is given, so a
-	// fresh nil per instruction allocates once for every instruction in the whole
-	// reachable dependency closure. Nothing retains rands or its elements beyond
-	// the loop body below, so one buffer serves the entire traversal (the same
-	// recycling x/tools itself does).
+	// fresh nil per instruction allocates once per instruction of the whole
+	// reachable closure. Nothing retains rands or its elements beyond the loop
+	// body, so one buffer serves the entire traversal.
 	var rands []*ssa.Value
 	for len(queue) > 0 {
 		fn := queue[len(queue)-1]
@@ -245,8 +230,8 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 // (no parsing, no typechecking) that discovers the dependency closure and
 // classifies every package by MODULE (go/packages NeedModule):
 //   - stdlib (nil Module) is NOT lowered — modeled by rules. Its bodies are
-//     never read downstream, so loading its source and building its SSA
-//     (which LoadAllSyntax did) was pure overhead;
+//     never read downstream, so loading its source and building its SSA is pure
+//     overhead;
 //   - the user's own module(s) — reportable: findings here are surfaced;
 //   - third-party modules — lowered so taint flows through their bodies, but
 //     findings inside them are scoped out downstream (noise, not actionable).
@@ -320,8 +305,7 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 // source-checking it, but with no stdlib parsing or typechecking, and (with no
 // syntax) its SSA packages are created bodyless, so prog.Build() skips stdlib
 // bodies too. Making every lowered package an explicit ROOT (never a bare dep)
-// is what keeps its Syntax+TypesInfo complete without NeedDeps; source roots
-// resolve each other in-memory, exactly as before.
+// is what keeps its Syntax+TypesInfo complete without NeedDeps.
 func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *token.FileSet, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
@@ -337,11 +321,9 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	if len(initial) == 0 {
 		return nil, nil, fmt.Errorf("no Go packages found under %s", dir)
 	}
-	// Some packages failed to load cleanly (type/parse errors). PrintErrors
-	// dumps the specifics to stderr; conversion continues on whatever built so
-	// partial/vulnerable code still converts. Route our summary line to stderr
-	// too — a stdout write would corrupt machine-readable output when the user
-	// pipes findings (e.g. `godzilla scan > out.txt`).
+	// Conversion continues on whatever built, so partial/vulnerable code still
+	// converts. The summary goes to stderr — a stdout write would corrupt
+	// machine-readable output when the user pipes findings.
 	if packages.PrintErrors(initial) > 0 {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
@@ -353,21 +335,20 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	// declarations still resolve callee names and method sets, but nothing is
 	// built or lowered for them.
 	//
-	// This replaces ssautil.AllPackages, which only visits the go/packages
-	// graph — and without NeedDeps that graph is truncated at the roots' direct
-	// imports. Export data can reference packages BEYOND that frontier (e.g. a
-	// type alias into a transitive stdlib package), and the SSA builder panics
-	// on any referenced-but-uncreated package, so we additionally create the
-	// full transitive types.Package closure (types-only) of every import.
-	// Build generic functions ONCE in their parameterized form (mode 0), NOT one
-	// monomorphized SSA copy per type-instantiation (ssa.InstantiateGenerics).
-	// The taint engine is context-insensitive — it merges all instantiations of a
-	// callee anyway — so instantiation adds no precision it can use, while on a
-	// generics-heavy dependency closure (e.g. the k8s client-go / apimachinery
-	// libraries that argo-workflows and gitea pull in) it multiplies the live SSA
-	// set enough to exhaust memory and OOM-kill a whole-repo scan. Dropping it
-	// keeps every generic body analyzed (AllFunctions still yields it) at a
-	// fraction of the footprint.
+	// ssautil.AllPackages is not enough here: it only visits the go/packages
+	// graph, which without NeedDeps is truncated at the roots' direct imports.
+	// Export data can reference packages BEYOND that frontier (e.g. a type alias
+	// into a transitive stdlib package), and the SSA builder PANICS on any
+	// referenced-but-uncreated package — hence the full transitive types.Package
+	// closure created types-only below.
+	//
+	// Mode 0 builds generic functions ONCE in parameterized form rather than one
+	// monomorphized copy per instantiation (ssa.InstantiateGenerics). The taint
+	// engine is context-insensitive and merges all instantiations of a callee
+	// anyway, so instantiation buys no precision it can use, while on a
+	// generics-heavy dependency closure it multiplies the live SSA set enough to
+	// OOM-kill a whole-repo scan. Every generic body is still analyzed
+	// (AllFunctions yields it).
 	prog := ssa.NewProgram(initial[0].Fset, 0)
 	created := map[*types.Package]bool{}
 	var createTypesOnly func(tp *types.Package)
@@ -396,12 +377,11 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 }
 
 // lowerModules lowers the target packages and every non-stdlib dependency
-// (third-party bodies, so taint flows through them). We do NOT tree-shake
-// before lowering: with demand-driven analysis (the engine analyzes a
-// dependency function only when taint reaches it — see Engine.ScopeSeed), the
-// analysis cost no longer scales with the lowered set, so a reachability
-// pre-pass (RTA) only added overhead. The remaining cost is the lowering
-// itself, which is parallelized here. The stdlib is skipped (modeled by rules).
+// (third-party bodies, so taint flows through them; the stdlib is modeled by
+// rules instead). No RTA pre-pass: analysis is demand-driven (the engine reaches
+// a dependency function only when taint does — see Engine.ScopeSeed), so its cost
+// does not scale with the lowered set and a reachability pass is pure overhead.
+// The remaining cost is the lowering itself, parallelized here.
 func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, stdlibPkgs map[string]bool) *ir.Program {
 	var pkgList []*ssa.Package
 	for pkg := range funcsByPkg {
@@ -437,10 +417,10 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 	}
 
 	// Convert functions concurrently — the dominant remaining cost once deps are
-	// lowered. Each worker uses its OWN Converter (own typeCache): the cache is
-	// pure memoization, so per-worker copies need no lock and cannot race, while
-	// the read-only fset/routeHandlers are shared. Output is
-	// deterministic: functions are pre-sorted and written to fixed slice indices.
+	// lowered. Each worker uses its OWN Converter: the caches are pure
+	// memoization, so per-worker copies need no lock and cannot race, while the
+	// read-only fset/routeHandlers are shared. Output stays deterministic:
+	// functions are pre-sorted and written to fixed slice indices.
 	type fnJob struct {
 		mod *ir.Module
 		idx int
@@ -477,11 +457,10 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 // worker returns a lightweight Converter that shares this converter's read-only
 // setup (fset, route tables, base types and base names) but has its own
 // typeCache/fnNames, so it can lower functions concurrently without locking or
-// racing on the shared caches.
-// targetPkgs is intentionally NOT copied: it is read only via TargetPackages()
-// on the top-level converter, never on the worker path.
+// racing on the shared caches. targetPkgs is intentionally NOT copied: it is read
+// only via TargetPackages() on the top-level converter, never on the worker path.
 func (c *Converter) worker() *Converter {
-	w := NewConverter() // shares NewConverter's per-converter cache initialization
+	w := NewConverter()
 	w.fset = c.fset
 	w.baseTypes = c.typeCache
 	w.baseNames = c.fnNames
@@ -519,9 +498,7 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 		CanonicalName: c.canonicalFunc(f),
 	}
 	// Tag a method with its bare name so the engine indexes it for CHA dynamic
-	// dispatch without parsing the canonical name. A method is type-resolved
-	// (the receiver has a static type), so the call site is left with
-	// untyped_dispatch=false and the engine fans out to every implementer.
+	// dispatch without parsing the canonical name.
 	if f.Signature != nil && f.Signature.Recv() != nil {
 		irFunc.MethodName = f.Name()
 	}
@@ -538,11 +515,9 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 			Kind: &ir.Value_RegName{RegName: p.Name()},
 		})
 	}
-	// Append captured free variables as trailing parameters (after the real
-	// params) so the analysis can flow taint from a `builtin.make_closure`
-	// binding into the closure's use of that captured variable — e.g. a request
-	// value captured by a `go func(){ db.Query(id) }()` goroutine. The engine
-	// maps the K make_closure bindings to the last K params.
+	// Append captured free variables as TRAILING parameters so taint flows from a
+	// `builtin.make_closure` binding into the closure's use of that variable — the
+	// engine maps the K bindings to the last K params, so the order matters.
 	for _, fv := range f.FreeVars {
 		irFunc.Params = append(irFunc.Params, &ir.Value{
 			Kind: &ir.Value_RegName{RegName: fv.Name()},
@@ -561,17 +536,16 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 	return irFunc
 }
 
-// httpRequestSourceCallee is the canonical name of the synthetic source the
-// frontend injects for an HTTP handler's *http.Request parameter (see
-// addHTTPRequestSource). It is listed as a source in the Go rule packs, so every
-// read off the request object carries taint — including field reads like
-// r.URL.Path / r.Form / r.Body that no method-call rule can match (the
-// documented "Go field-access sources aren't matchable" gap).
+// httpRequestSourceCallee is the canonical name of the synthetic source injected
+// for an HTTP handler's *http.Request parameter (see addHTTPRequestSource). The
+// Go rule packs list it as a source, so every read off the request object carries
+// taint — including field reads (r.URL.Path, r.Form, r.Body) that no method-call
+// rule can match.
 const httpRequestSourceCallee = "go:@net/http.Request"
 
-// newHTTPRequestSource builds the synthetic request-object source CALL that, when
-// its Name is set to a register holding an inbound *http.Request, marks that
-// register tainted (and request-object-tagged) at the engine.
+// newHTTPRequestSource builds the synthetic request-object source CALL: setting
+// its Name to a register holding an inbound *http.Request is what marks that
+// register tainted at the engine.
 func newHTTPRequestSource(name string, pos *ir.Position) *ir.Instruction {
 	return &ir.Instruction{
 		Name:    name,
@@ -585,27 +559,26 @@ func newHTTPRequestSource(name string, pos *ir.Position) *ir.Instruction {
 	}
 }
 
-// addHTTPRequestSource injects synthetic request-object sources so that every
-// value holding an INBOUND *http.Request is tainted. It mirrors the parameter
-// -source synthesis the Rust (axum typed params) and Java (@RequestParam)
-// frontends already do: the register defined by the synthetic source CALL is the
-// value's own name, so the engine (which seeds taint by register name) marks the
-// request tainted and whole-object taint flows to every field read off it.
+// addHTTPRequestSource injects synthetic request-object sources so every value
+// holding an INBOUND *http.Request is tainted. The register defined by the
+// synthetic source CALL is the value's own name, so the engine (which seeds taint
+// by register name) marks the request tainted and whole-object taint flows to
+// every field read off it.
 //
 // Three kinds of value are seeded:
 //
-//   - Any *http.Request PARAMETER of any function. An inbound request handed to a
-//     function is attacker-controlled regardless of what else the function takes,
-//     so the old ResponseWriter co-parameter requirement is dropped — it missed
-//     helpers and framework internals that receive the request alone.
+//   - Any *http.Request PARAMETER of any function — an inbound request handed to
+//     a function is attacker-controlled regardless of what else it takes, so no
+//     ResponseWriter co-parameter is required (that would miss helpers and
+//     framework internals which receive the request alone).
 //   - Any framework CONTEXT parameter of a route-registered handler
 //     (collectRouteHandlers) — a *gin.Context / echo.Context / *fiber.Ctx we have
 //     no other knowledge of.
-//   - Any FIELD-READ / LOAD value whose static type is *http.Request — e.g.
-//     macaron's `ctx.Req`, beego's `c.Ctx.Request`, read INSIDE the lowered
-//     framework body. This is what carries taint OUT of a framework whose request
-//     accessors (c.Input().Get, ctx.Params) bottom out in a field read off the
-//     embedded *http.Request rather than a modeled stdlib call.
+//   - Any FIELD-READ / LOAD value whose static type is *http.Request (macaron's
+//     `ctx.Req`, beego's `c.Ctx.Request`), read INSIDE the lowered framework body.
+//     This is what carries taint OUT of a framework whose request accessors bottom
+//     out in a field read off the embedded *http.Request rather than a modeled
+//     stdlib call.
 //
 // Only inbound requests are seeded: an OUTBOUND request is an http.NewRequest*
 // call RESULT (a *ssa.Call / *ssa.Extract), never a parameter or a field read, so
@@ -616,8 +589,7 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 	}
 
 	// (1) Parameters: inbound *http.Request params, plus a route handler's
-	// framework context param. Prepend one source per distinct register to the
-	// entry block.
+	// framework context param — one source per distinct register, prepended.
 	var paramSeeds []string
 	seen := map[string]bool{}
 	for _, p := range f.Params {
@@ -631,7 +603,7 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		seen[reg] = true
 	}
 	// Bound-form params of a route handler: a binding middleware filled them from
-	// the request, so field reads off them (f.TreePath) are attacker-controlled.
+	// the request, so field reads off them are attacker-controlled.
 	for _, reg := range c.routeFormParams[f] {
 		if reg != "" && !seen[reg] {
 			paramSeeds = append(paramSeeds, reg)
@@ -647,28 +619,25 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		entry.Instrs = append(srcs, entry.Instrs...)
 	}
 
-	// (2) Field-read / load values of type *http.Request, read inside this
-	// function's body. The SSA blocks and the IR blocks are 1:1 by index (see
-	// convertBlock), so instruction i of SSA block b lowered to IR instruction i
-	// of IR block b; we insert a synthetic source right after each such IR
-	// instruction, re-using its register name.
+	// (2) Field-read / load values of type *http.Request read inside this body.
+	// SSA and IR blocks are 1:1 by index (see convertBlock), so instruction i of
+	// SSA block b lowered to IR instruction i of IR block b; insert a synthetic
+	// source right after each such IR instruction, re-using its register name.
 	for bi, sb := range f.Blocks {
 		if bi >= len(irFunc.Blocks) {
 			break
 		}
 		irBlock := irFunc.Blocks[bi]
 		if len(sb.Instrs) != len(irBlock.Instrs) {
-			// The IR block no longer aligns 1:1 with the SSA block, so index-matching
-			// would misplace the source. This is NOT rare: part (1) prepends parameter
-			// sources to the entry block, so block 0 is skipped here whenever this
-			// function got a param seed — an entry-block *http.Request field read then
-			// gets no second synthetic source (its request param/context is already
-			// seeded above). Any other mismatch would be a lowering bug; skipping is the
-			// safe response either way.
+			// Index-matching would misplace the source. NOT rare: part (1) prepends
+			// parameter sources to the entry block, so block 0 is skipped whenever this
+			// function got a param seed — its entry-block *http.Request field read needs
+			// no second source, being already seeded above. Any other mismatch is a
+			// lowering bug; skipping is safe either way.
 			continue
 		}
 		// Fast path: most blocks read no inbound *http.Request, so the rebuilt slice
-		// would be value-identical to the original. Skip the allocation for them.
+		// would be value-identical. Skip the allocation for them.
 		hasReq := false
 		for _, sinst := range sb.Instrs {
 			if inboundRequestValue(sinst) {
@@ -703,8 +672,7 @@ func inboundRequestValue(inst ssa.Instruction) bool {
 	case *ssa.Field:
 		return isNamedTypePtr(v.Type(), "net/http", "Request")
 	case *ssa.UnOp:
-		// A load (*p) of a stored/embedded *http.Request — the shape FieldAddr+load
-		// lowers `ctx.Req` to.
+		// A load (*p) — the FieldAddr+load shape `ctx.Req` lowers to.
 		return v.Op == token.MUL && isNamedTypePtr(v.Type(), "net/http", "Request")
 	default:
 		return false
@@ -730,24 +698,22 @@ func isNamedType(t types.Type, pkgPath, name string) bool {
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
 }
 
-// templateTrustedTypes are the html/template string types whose conversion
-// marks a value as ALREADY-SAFE and BYPASSES the package's context-aware auto
-// -escaping. Converting attacker-controlled data to one is the canonical Go XSS
-// pattern (what gosec flags as G203). A conversion is not a call, so it carries
-// no callee for a sink rule to match — the frontend synthesizes one (see
-// emitTemplateTrustedConv).
+// templateTrustedTypes are the html/template string types whose conversion marks
+// a value ALREADY-SAFE and BYPASSES the package's context-aware auto-escaping.
+// Converting attacker-controlled data to one is the canonical Go XSS pattern
+// (gosec G203). A conversion is not a call, so it carries no callee for a sink
+// rule to match — the frontend synthesizes one (see emitTemplateTrustedConv).
 var templateTrustedTypes = map[string]bool{
 	"HTML": true, "HTMLAttr": true, "JS": true, "JSStr": true,
 	"URL": true, "CSS": true, "Srcset": true,
 }
 
-// emitTemplateTrustedConv, when t is an html/template trusted-string type,
-// lowers the conversion as a synthetic CALL `go:html/template.<Type>` (arg 0 =
-// the converted value) instead of an opaque OP_CODE_CONVERT, so the rule engine
-// can treat it as an XSS sink. It also stays a default propagator (see
-// internal/rules/propagators.go), so for every non-XSS rule the result still
-// carries taint exactly as the plain conversion did. Returns false (caller
-// emits the normal CONVERT) when t is not a trusted type.
+// emitTemplateTrustedConv, when t is an html/template trusted-string type, lowers
+// the conversion as a synthetic CALL `go:html/template.<Type>` (arg 0 = the
+// converted value) instead of an opaque OP_CODE_CONVERT, so the rule engine can
+// treat it as an XSS sink. It is also a default propagator, so for every non-XSS
+// rule the result still carries taint as a plain conversion would. Returns false
+// when t is not a trusted type.
 func (c *Converter) emitTemplateTrustedConv(irInst *ir.Instruction, t types.Type, x ssa.Value) bool {
 	named, ok := t.(*types.Named)
 	if !ok {
@@ -768,9 +734,8 @@ func (c *Converter) emitTemplateTrustedConv(irInst *ir.Instruction, t types.Type
 }
 
 // lowerConversion lowers a Go SSA type conversion (ChangeType / Convert): a
-// trusted-template-type source CALL when the destination is an html/template
-// trusted type, otherwise a plain CONVERT of the operand. Shared by the two SSA
-// conversion cases, which lower identically.
+// trusted-template-type sink CALL when the destination is an html/template
+// trusted type, otherwise a plain CONVERT of the operand.
 func (c *Converter) lowerConversion(irInst *ir.Instruction, t types.Type, x ssa.Value) {
 	if !c.emitTemplateTrustedConv(irInst, t, x) {
 		irInst.Op = ir.OpCode_OP_CODE_CONVERT
@@ -779,24 +744,21 @@ func (c *Converter) lowerConversion(irInst *ir.Instruction, t types.Type, x ssa.
 }
 
 // routingVerbs are the method names (lowercased) that register an HTTP handler
-// across the common Go routers — the near-universal REST verbs plus stdlib
-// Handle/HandleFunc and middleware Use/Any/All. A call to a method with one of
-// these names that is passed a function value is treated as a route
-// registration, which is how the frontend recognizes a handler for a framework
-// context type it has no other knowledge of.
+// across the common Go routers. A call to a method with one of these names that
+// is passed a function value is treated as a route registration, which is how the
+// frontend recognizes a handler for a framework context type it has no other
+// knowledge of.
 var routingVerbs = map[string]bool{
 	"get": true, "post": true, "put": true, "delete": true, "patch": true,
 	"head": true, "options": true, "connect": true, "trace": true,
 	"any": true, "all": true, "handle": true, "handlefunc": true, "use": true,
 }
 
-// collectRouteHandlers finds functions registered as HTTP route handlers and
-// maps each to the register name of its request/context parameter. A handler is
-// a function value passed to a call whose method name is a routing verb
-// (r.GET("/x", h), app.Post(..., h), mux.HandleFunc(..., h), e.Use(mw), …).
-//
-// It also returns, per handler, the register names of its BOUND-FORM parameters
-// (formParams): value-struct params a binding middleware fills from the request.
+// collectRouteHandlers finds functions registered as HTTP route handlers — a
+// function value passed to a call whose method name is a routing verb
+// (r.GET("/x", h), mux.HandleFunc(..., h), e.Use(mw), …) — and maps each to the
+// register name of its request/context parameter, plus its bound-form parameter
+// registers (see formParams).
 func collectRouteHandlers(allFns map[*ssa.Function]bool) (map[*ssa.Function]string, map[*ssa.Function][]string) {
 	handlers := map[*ssa.Function]string{}
 	forms := map[*ssa.Function][]string{}
@@ -830,13 +792,12 @@ func collectRouteHandlers(allFns map[*ssa.Function]bool) (map[*ssa.Function]stri
 }
 
 // formParams returns the register names of a route handler's bound-form
-// parameters: parameters whose static type is a named struct passed BY VALUE
-// (e.g. gogs' `f form.EditRepoFile`). A binding middleware
-// (macaron/martini `binding.Bind`/`bindIgnErr`, …) reflectively decodes the
-// request into such a param, so it is request-derived and its field reads carry
-// taint. The value-struct shape is the low-false-positive signal: a framework
-// context or an injected service is a pointer or interface, not a by-value
-// struct, so those are excluded.
+// parameters: parameters whose static type is a named struct passed BY VALUE. A
+// binding middleware (macaron/martini `binding.Bind`/`bindIgnErr`, …)
+// reflectively decodes the request into such a param, so it is request-derived
+// and its field reads carry taint. The value-struct shape is the
+// low-false-positive signal: a framework context or an injected service is a
+// pointer or interface, so those are excluded.
 func formParams(h *ssa.Function) []string {
 	var out []string
 	for _, p := range h.Params {
@@ -866,8 +827,7 @@ func routingMethodName(cc *ssa.CallCommon) string {
 }
 
 // handlerFuncArg returns the underlying *ssa.Function of a call argument that is
-// a function value — a named/anonymous function passed directly, or a closure
-// (MakeClosure) over one — or nil if the argument is not a function value.
+// a function value — passed directly or via MakeClosure — or nil.
 func handlerFuncArg(arg ssa.Value) *ssa.Function {
 	switch v := arg.(type) {
 	case *ssa.Function:
@@ -930,12 +890,10 @@ func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {
 		}
 	}
 
-	// Slab-allocate the block's instructions AND their positions: one
-	// exact-sized backing array each instead of one heap object per
-	// instruction — the converter's dominant allocations (every SSA instruction
-	// of every lowered function carries a Position). The slabs are never
-	// appended to or copied after pointers are taken, so the pointers stay
-	// stable; output is value-identical to individual allocations.
+	// Slab-allocate the block's instructions AND their positions: one exact-sized
+	// backing array each instead of a heap object per instruction — the
+	// converter's dominant allocation. The slabs must never be appended to or
+	// copied after pointers are taken, so the pointers stay stable.
 	slab := make([]ir.Instruction, len(b.Instrs))
 	posSlab := make([]ir.Position, len(b.Instrs))
 	irBlock.Instrs = make([]*ir.Instruction, len(b.Instrs))
@@ -948,21 +906,18 @@ func (c *Converter) convertBlock(b *ssa.BasicBlock) *ir.BasicBlock {
 }
 
 // goFormatCallees are the exact canonical FQNs of the stdlib string-returning
-// fmt formatters that carry the builtin.format marker (the literal template —
-// or first value — is the call's Args[0]; see internal/analysis/ssrf.go). Only
-// these three exist in the stdlib; anything else keeping the marker off is the
-// point of the exact match.
+// fmt formatters that carry the builtin.format marker (the literal template — or
+// first value — is the call's Args[0]; see internal/analysis/ssrf.go).
 var goFormatCallees = map[string]bool{
 	"go:fmt.Sprintf":  true,
 	"go:fmt.Sprint":   true,
 	"go:fmt.Sprintln": true,
 }
 
-// convertInstructionInto lowers one SSA instruction into irInst
-// (caller-provided storage, see the slabs in convertBlock). irInst and pos must
-// be zero-valued; pos is used (and linked as irInst.Pos) only when the
-// instruction has a valid source position, so an invalid position stays nil
-// exactly as before.
+// convertInstructionInto lowers one SSA instruction into irInst (caller-provided
+// storage, see the slabs in convertBlock). irInst and pos must be zero-valued;
+// pos is linked as irInst.Pos only when the instruction has a valid source
+// position, so an invalid position leaves Pos nil.
 func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Position, inst ssa.Instruction) {
 	if p := inst.Pos(); p.IsValid() {
 		fp := c.fset.Position(p)
@@ -1005,12 +960,12 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 			irInst.Op = ir.OpCode_OP_CODE_CALL
 		}
 		irInst.Call = c.convertCall(i.Call)
-		// Tag a printf-style formatter (fmt.Sprint*, template in Args[0]) with the
-		// language-neutral builtin.format marker so the engine's SSRF host
-		// reconstruction reads the marker, not a Go callee-name shape. The match is
-		// exact canonical FQNs: a name-shape heuristic would let a user function
-		// merely named like a formatter (MySprintf) claim "Args[0] is the template"
-		// semantics and wrongly prove a fixed host, suppressing a real SSRF finding.
+		// Tag a printf-style formatter with the language-neutral builtin.format
+		// marker so the engine's SSRF host reconstruction reads the marker, not a Go
+		// callee-name shape. The match is on exact FQNs: a name-shape heuristic would
+		// let a user function merely named like a formatter (MySprintf) claim
+		// "Args[0] is the template" and wrongly prove a fixed host, suppressing a
+		// real SSRF finding.
 		if goFormatCallees[irInst.Call.GetCallee()] {
 			irInst.Intrinsic = "builtin.format"
 		}
@@ -1145,9 +1100,8 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 	}
 }
 
-// blockName is the gIR label for an SSA basic block ("b<index>"); the
-// control-flow instructions (IF/JUMP/PHI) use it to name their target and
-// predecessor blocks.
+// blockName is the gIR label for an SSA basic block ("b<index>"), used by
+// IF/JUMP/PHI to name their target and predecessor blocks.
 func blockName(b *ssa.BasicBlock) string {
 	return "b" + strconv.Itoa(b.Index)
 }
@@ -1156,10 +1110,8 @@ func (c *Converter) convertValue(v ssa.Value) *ir.Value {
 	if v == nil {
 		return nil
 	}
-	// Intern the wrapper per function (valueCache is cleared by
-	// convertFunction): the same ssa.Value is referenced by many instructions,
-	// and the emitted wrappers are never mutated downstream, so one object per
-	// value is observably identical to a fresh allocation per reference.
+	// Interning is sound only because the emitted wrappers are never mutated
+	// downstream; the cache is per function (cleared by convertFunction).
 	if cached, ok := c.valueCache[v]; ok {
 		return cached
 	}
@@ -1195,10 +1147,10 @@ func (c *Converter) convertConstant(con *ssa.Const) *ir.Constant {
 }
 
 // constantText renders a Go constant for the IR. A string must come back
-// verbatim: constant.Value.String() is a display form that quotes it and
-// truncates past ~72 chars, which hid every long secret (JWTs, SendGrid keys, PEM
-// bodies) in Go alone and forced callers to unquote. Numeric and bool constants
-// keep that display form -- ExactString would render 3.14 as the rational 157/50.
+// VERBATIM: constant.Value.String() is a display form that quotes it and
+// truncates past ~72 chars, hiding every long secret (JWTs, PEM bodies) from the
+// secrets scanner. Numeric and bool constants keep that display form —
+// ExactString would render 3.14 as the rational 157/50.
 func constantText(v constant.Value) string {
 	if v.Kind() == constant.String {
 		return constant.StringVal(v)
@@ -1218,8 +1170,7 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		cc.Callee = c.canonicalFunc(fn)
 		// A statically resolved method call passes its receiver as Args[0]. Record
 		// the method name so the engine strips the receiver from the logical
-		// argument list without parsing the callee-name shape (the neutral signal:
-		// a non-invoke call that names a method has its receiver first).
+		// argument list without parsing the callee-name shape.
 		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
 			cc.MethodName = fn.Name()
 		}

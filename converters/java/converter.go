@@ -49,10 +49,8 @@ type Converter struct {
 func NewConverter() *Converter { return &Converter{} }
 
 // IsJavaFile reports whether path is an input this frontend lowers: a .java
-// source file or a compiled .class file (bytecode is the frontend's native
-// unit — see the package comment). Exported so internal/scan's language
-// detection and dispatch share ONE predicate with the frontend instead of
-// drifting copies.
+// source file or a compiled .class file. Exported so internal/scan's language
+// detection and dispatch share ONE predicate with the frontend.
 func IsJavaFile(path string) bool {
 	return strings.HasSuffix(path, ".java") || strings.HasSuffix(path, ".class")
 }
@@ -121,12 +119,9 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		return nil, fmt.Errorf("java not found on PATH (JDK %d+ required for the Java frontend): %w", minJDK, err)
 	}
 
-	// Probe the JDK version up front: the common CI JDK (Temurin 17/21) is too
-	// old for the classfile API, and the failure would otherwise surface as an
-	// opaque compile error. Only hard-fail on a POSITIVE too-old detection; if the
-	// probe itself can't run, proceed and let the dump report the real error.
-	// The probe result is cached per launcher path — spawning a JVM just to read
-	// its version (~150ms) is pure overhead on every scan after the first.
+	// Probe the JDK version up front: a too-old JDK would otherwise surface as an
+	// opaque compile error. Hard-fail only on a POSITIVE too-old detection; if the
+	// probe itself cannot run, proceed and let the dump report the real error.
 	if major, ok := javaMajorCached(javaExe); ok && major < minJDK {
 		return nil, fmt.Errorf("the Java frontend requires JDK %d+ (JavaDump.java uses the java.lang.classfile API); found Java %d at %s — install a JDK %d+ or set JAVA_HOME to one", minJDK, major, javaExe, minJDK)
 	}
@@ -138,12 +133,10 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 
 	inputs := resolveInputs(abs)
 
-	// Prefer the once-per-process precompiled helper: running `java
-	// JavaDump.java` (source-file mode) bootstraps the compiler and recompiles
-	// the helper on EVERY invocation (~0.5-1s); `java -cp <classes> JavaDump`
-	// skips that entirely. Identical helper source, identical JSON — only the
-	// launch mode differs. Falls back to source-file mode if javac is
-	// unavailable or the one-time compile failed.
+	// Prefer the precompiled helper: `java JavaDump.java` (source-file mode)
+	// bootstraps the compiler and recompiles the helper on EVERY invocation
+	// (~0.5-1s). Same source, same JSON — only the launch mode differs. Falls back
+	// to source-file mode if javac is unavailable or the one-time compile failed.
 	var args []string
 	if classDir := compiledHelperDir(javaExe); classDir != "" {
 		args = append([]string{"-cp", classDir, "JavaDump"}, inputs...)
@@ -245,16 +238,15 @@ func javaMajorCached(javaExe string) (int, bool) {
 var javaProbeCache sync.Map // launcher path -> probe
 
 // compiledHelperDir returns a directory containing the compiled JavaDump.class,
-// or "" — in which case the caller uses source-file mode, exactly as before.
+// or "" — in which case the caller uses source-file mode.
 //
 // The compiled helper lives in a persistent per-user cache keyed by the helper
-// source hash + JDK major, so every later scan — including a fresh CLI process
-// — skips source-file mode's per-invocation helper recompile (~0.5-1s). On a
-// cache miss the CURRENT invocation still uses source-file mode (never slower
-// than the status quo) while ONE background goroutine compiles and atomically
-// publishes the cache for everyone after. Any failure (no javac, no cache dir,
-// compile error) simply leaves the cache unpublished: the fallback path always
-// works and reports the real diagnostic.
+// source hash + JDK major, so every later scan — including a fresh CLI process —
+// skips the per-invocation helper recompile. On a cache miss the CURRENT
+// invocation still uses source-file mode while ONE background goroutine compiles
+// and atomically publishes the cache for everyone after. Any failure (no javac,
+// no cache dir, compile error) leaves the cache unpublished: the fallback path
+// always works and reports the real diagnostic.
 func compiledHelperDir(javaExe string) string {
 	major, ok := javaMajorCached(javaExe)
 	if !ok || major < minJDK {
@@ -374,12 +366,10 @@ func parseJavaMajor(out string) (int, bool) {
 	return major, true
 }
 
-// javaMajorFromReleaseFile reads the major version from the JDK's `release`
-// file (<jdk>/release, sibling of the launcher's bin/ directory; standard
-// since JDK 9), whose JAVA_VERSION="..." line carries the same version string
-// `java -version` prints. Returns false on any failure (missing file, no
-// JAVA_VERSION line, unparseable value) so the caller falls back to spawning
-// the JVM.
+// javaMajorFromReleaseFile reads the major version from the JDK's `release` file
+// (<jdk>/release, standard since JDK 9), whose JAVA_VERSION="..." line carries
+// the same version string `java -version` prints. Returns false on any failure,
+// so the caller falls back to spawning the JVM.
 func javaMajorFromReleaseFile(javaExe string) (int, bool) {
 	resolved, err := filepath.EvalSymlinks(javaExe)
 	if err != nil {
@@ -420,12 +410,10 @@ func writeHelperScript() (string, func(), error) {
 	return path, cleanup, nil
 }
 
-// resolveInputs decides which paths to hand the JavaDump helper for the scan
-// target. If the target is a directory holding a Maven (pom.xml) or Gradle
-// (build.gradle[.kts]) build, it builds the project first — so third-party
-// dependencies (e.g. a Spring app's spring-web / spring-jdbc) land on the
-// compile classpath — and returns the compiled .class output directories, which
-// the helper reads as bytecode. Otherwise the target is returned unchanged for
+// resolveInputs decides which paths to hand the JavaDump helper. A directory
+// holding a Maven (pom.xml) or Gradle (build.gradle[.kts]) build is built first —
+// so third-party dependencies land on the compile classpath — and its compiled
+// .class output directories are returned. Otherwise the target passes through for
 // the helper's in-process best-effort javac (JDK-only sources / loose .class).
 //
 // A missing build tool, or a build that fails, is non-fatal: it warns on stderr
@@ -487,9 +475,8 @@ func detectBuildSystem(dir string) (buildSystem, bool) {
 				tool:    "gradle",
 				// `compileJava` builds only the root project's main source set;
 				// unlike Maven's `compile` it does not aggregate a multi-module
-				// reactor's subprojects. Sufficient for a single-project app (the
-				// spring_boot sample); a multi-module Gradle target would need
-				// per-subproject `:sub:compileJava` (or the `classes` lifecycle).
+				// reactor's subprojects (those would need per-subproject
+				// `:sub:compileJava`, or the `classes` lifecycle).
 				args:        []string{"--console=plain", "-q", "compileJava"},
 				classSuffix: filepath.Join("build", "classes", "java", "main"),
 			}, true
@@ -525,19 +512,16 @@ func buildProject(dir string, sys buildSystem) ([]string, error) {
 // multi-module reactor has one per module.
 func classOutputDirs(root, suffix string) []string {
 	// The compiled output lives UNDER directories the source-scan ignore set
-	// deliberately excludes: Maven's target/classes, Gradle's build/classes/...
-	// (walkignore skips both "target" and "build" so source scans don't descend
-	// into build artifacts). Reusing that skip set here would prune the very
-	// directory we are looking for, so every build was silently discarded as
-	// "produced no classes". Exempt the directory names that make up the expected
-	// suffix, so the walk descends into them while still skipping unrelated
-	// ignored trees (a nested node_modules, a sibling module's vendored dir).
+	// deliberately excludes (walkignore skips "target" and "build"), so applying
+	// that skip set unmodified prunes the very directory being looked for and every
+	// build is silently discarded as "produced no classes". Exempting the names
+	// that make up the expected suffix lets the walk descend into them while still
+	// skipping unrelated ignored trees.
 	suffixParts := map[string]bool{}
 	for _, part := range strings.Split(suffix, string(filepath.Separator)) {
 		suffixParts[part] = true
 	}
 	var dirs []string
-	// WalkDir visits each directory exactly once, so no dedup is needed.
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil

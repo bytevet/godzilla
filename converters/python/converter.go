@@ -1,39 +1,31 @@
 // Package py_converter lowers Python source into gIR so the taint engine in
-// internal/analysis can analyze it, mirroring the public shape of
-// converters/go (NewConverter / Converter.ConvertFile).
+// internal/analysis can analyze it, mirroring the public shape of converters/go
+// (NewConverter / Converter.ConvertFile).
 //
-// Unlike the Go converter, which builds on golang.org/x/tools' SSA form, this
-// converter has no access to a Python compiler front end from Go without
-// adding a dependency. Per the project's "prefer python3" decision, it shells
-// out to an embedded helper script (pyast.py, see //go:embed below) that
-// parses the file with the Python standard library's `ast` module and prints
-// a compact JSON tree; convertModule/convertFunction/lowerStmt/lowerExpr
-// below turn that JSON into gIR.
+// There is no Python front end reachable from Go without a new dependency, so
+// this converter shells out to an embedded helper script (pyast.py) that parses
+// the file with the standard library's `ast` module and prints a compact JSON
+// tree; convertModule/convertFunction/lowerStmt/lowerExpr turn that into gIR.
+// ConvertFile returns a clear error if python3 is not on PATH.
 //
-// A tree-sitter (or other pure-Go parser) fallback for environments without
-// python3 is a documented FUTURE path, not implemented here: ConvertFile
-// returns a clear error if python3 is not on PATH.
-//
-// Known limitations (see also the doc comment on lowerBody):
+// Known limitations:
 //   - A real control-flow graph IS built, via converters/ssabuild: if/while/for/
 //     try get their own basic blocks, and PHIs are inserted on demand (Braun et
 //     al.) at the joins. A branch-free body still lowers to exactly one block,
 //     which keeps the engine's linear fast path. What remains approximate is
 //     exceptions and loop exits: lowerTry models a raise as ONE opaque edge from
-//     the try body into a single merged handler block, with no exception typing
-//     (every `except` clause's body is lowered into that one block), and `break`
-//     /`continue` are dropped rather than re-routed, so a loop's exit edges are
-//     the fall-through ones only.
-//   - Classes are only partially modeled: methods (`def` inside a `class`)
-//     become functions named "<Class>.<method>", but other class-body
-//     statements (class attributes, nested classes, decorators) are ignored.
-//   - Expression coverage covers calls, attribute/subscript reads, binary/unary
+//     the try body into a single merged handler block, with no exception typing,
+//     and `break`/`continue` are dropped rather than re-routed, so a loop's exit
+//     edges are the fall-through ones only.
+//   - Classes are only partially modeled: methods become functions named
+//     "<Class>.<method>", but other class-body statements (class attributes,
+//     nested classes, decorators) are ignored.
+//   - Expression coverage spans calls, attribute/subscript reads, binary/unary
 //     and boolean operators, comprehensions, container literals, unpacking
 //     assignment, walrus (`:=`), `await`, f-strings, str.format, constants, and
-//     names. Lambdas and decorators are not specifically modeled; unhandled
-//     expression/statement kinds become an OP_CODE_INTRINSIC "py.unsupported"
-//     node (expressions) or are silently dropped (statements), rather than
-//     aborting conversion.
+//     names. Lambdas and decorators are not specifically modeled; an unhandled
+//     expression becomes an OP_CODE_INTRINSIC "py.unsupported" and an unhandled
+//     statement is dropped, rather than aborting conversion.
 package py_converter
 
 import (
@@ -75,12 +67,10 @@ func IsPythonFile(path string) bool { return strings.HasSuffix(path, ".py") }
 // value per conversion: the Setup-resolved interpreter/helper paths are carried
 // in closure state private to this batch.
 //
-// The single-file/directory-batch skeleton is the shared driver; what is
-// Python's alone: parsing is batched — one `python3 pyast.py --batch
-// <chunk...>` invocation per chunk, so interpreter startup is paid per chunk,
-// not per file — lowering waits for every file to parse so the handler-class
-// set spans all files (lowerAll), and a directory scan gets cross-module call
-// resolution (resolveCrossModuleCalls).
+// What is Python's alone: parsing is batched (one `python3 pyast.py --batch
+// <chunk...>` per chunk, so interpreter startup is paid per chunk, not per
+// file), lowering waits for every file to parse so the handler-class set spans
+// all files (lowerAll), and a directory scan gets cross-module call resolution.
 func (c *Converter) batch() *frontend.Batch[pyFileResult] {
 	var pythonExe, scriptPath string
 	return &frontend.Batch[pyFileResult]{
@@ -118,20 +108,18 @@ func (c *Converter) batch() *frontend.Batch[pyFileResult] {
 
 // resolveCrossModuleCalls rewrites CALL callees that reference a function in
 // ANOTHER file via its dotted import path (`from pkg.util import f; f(x)` lowers
-// to callee "py:pkg.util.f") to that function's real canonical name, which the
-// module frontend builds from the file's path relative to the scan root and thus
-// uses "/" separators and may lack the import's leading package prefix (scanning
-// inside a package). The engine resolves calls by EXACT canonical name, so
-// without this a cross-subdir call never links and taint stops at the call --
-// only same-directory calls (bare module name == import name) resolved before.
+// to callee "py:pkg.util.f") to that function's real canonical name, which is
+// built from the file's path relative to the scan root and thus uses "/"
+// separators and may lack the import's leading package prefix. The engine
+// resolves calls by EXACT canonical name, so without this a cross-subdir call
+// never links and taint stops at it.
 //
 // Matching is by logical dotted path (module "/"→"."), taking the LONGEST
 // dot-aligned suffix that names exactly ONE function; an ambiguous or absent
-// match leaves the callee untouched. Single-component method callees ("x.execute")
-// can never match (a function's logical path always has >=1 dot: module + name),
-// so ordinary method/sink calls are unaffected -- only genuine multi-component
-// import paths resolve. Runs only in directory scans (single-file scans have one
-// module and nothing to cross-link).
+// match leaves the callee untouched. A single-component method callee
+// ("x.execute") can never match, since a function's logical path always has at
+// least one dot (module + name), so ordinary method/sink calls are unaffected.
+// Directory scans only — a single-file scan has nothing to cross-link.
 func resolveCrossModuleCalls(prog *ir.Program) {
 	// logical maps a "py:"-prefixed canonical name to its dotted logical path.
 	logical := func(canon string) string {
@@ -144,14 +132,12 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 	//
 	// A module name is relative to the SCAN ROOT while an import is relative to
 	// the PACKAGE root, so a function's path can be strictly longer than the
-	// callee's (`a.b.pkg.mod.fn` vs `pkg.mod.fn`). Matching full paths alone
-	// cannot bridge that gap in either direction, which made resolution depend on
-	// where the scan root happened to sit; indexing suffixes closes it.
+	// callee's (`a.b.pkg.mod.fn` vs `pkg.mod.fn`). Full paths alone cannot bridge
+	// that gap, which would make resolution depend on where the scan root sits.
 	//
-	// The two tiers are kept APART because a suffix is weaker evidence than a
-	// full path. Folding them into one map lets a vendored or duplicated copy of
-	// a module poison a key that an exact match owned, silently breaking a link
-	// that used to resolve. Exact wins; suffixes only fill the gap.
+	// The two tiers stay APART because a suffix is weaker evidence than a full
+	// path: folding them into one map would let a vendored or duplicated copy of
+	// a module poison a key an exact match owns. Exact wins; suffixes fill gaps.
 	exact, exactAmbig := map[string]string{}, map[string]bool{}
 	suffix, suffixAmbig := map[string]string{}, map[string]bool{}
 	claim := func(idx map[string]string, ambig map[string]bool, key, canon string) {
@@ -219,9 +205,8 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 }
 
 // pyFileResult is one file's outcome within a batch chunk. Parsing and lowering
-// are two phases: convertPythonChunk fills doc/file/module (or err); lowerParsed
-// then turns doc into mod, after a whole-program pass has computed the global
-// request-handler class set (cross-file subclassing, see lowerAll).
+// are two phases: convertPythonChunk fills doc/file/module (or err); lowerAll
+// then turns doc into mod.
 type pyFileResult struct {
 	doc    astNode
 	file   string
@@ -233,9 +218,8 @@ type pyFileResult struct {
 // convertPythonChunk parses a contiguous chunk of files with a single
 // `pyast.py --batch` invocation (one JSON document per file, argv order) via
 // proc.RunBatchScript, writing into out (index-aligned with files). A
-// process-level failure marks every file in the chunk; a per-file parse
-// failure marks only that file, mirroring the old file-at-a-time error
-// semantics.
+// process-level failure marks every file in the chunk; a per-file parse failure
+// marks only that file.
 func convertPythonChunk(pythonExe, scriptPath, root string, files []string, out []pyFileResult) {
 	proc.RunBatchScript("py_converter", "pyast.py", pythonExe, scriptPath, files, func(i int, doc any, err error) {
 		if err != nil {
@@ -247,8 +231,8 @@ func convertPythonChunk(pythonExe, scriptPath, root string, files []string, out 
 			out[i].err = fmt.Errorf("py_converter: failed to parse pyast.py output for %s: unexpected JSON document type %T", files[i], doc)
 			return
 		}
-		// Parse phase only: keep the AST; lowering happens in lowerParsed after the
-		// global handler-class set is known (lowerAll).
+		// Parse phase only: keep the AST; lowering happens in lowerAll, once the
+		// global handler-class set is known.
 		out[i].doc = astNode(m)
 		out[i].file = files[i]
 		out[i].module = moduleNameFor(root, files[i])
@@ -256,10 +240,9 @@ func convertPythonChunk(pythonExe, scriptPath, root string, files []string, out 
 }
 
 // lowerAll lowers every successfully-parsed result into a gIR Module. It first
-// computes the request-handler class set across ALL files (Tornado/Flask handler
-// subclassing frequently crosses file boundaries — e.g. ConfigHandler(BaseHandler)
-// with BaseHandler(RequestHandler) in another module), so a handler's request
-// accessors are seeded as taint sources regardless of where its base class lives.
+// computes the route-class sets across ALL files, because handler subclassing
+// frequently crosses file boundaries (`ConfigHandler(BaseHandler)` with
+// `BaseHandler(RequestHandler)` in another module).
 func lowerAll(results []pyFileResult) {
 	classes := globalRouteClasses(results)
 	for i := range results {
@@ -270,10 +253,9 @@ func lowerAll(results []pyFileResult) {
 	}
 }
 
-// globalRouteClasses builds both class sets the route tables need, across every
-// parsed file: request-handler classes (so cross-file subclassing resolves) and
-// dispatch classes (so a class whose methods are split across files still tallies
-// its full verb set).
+// globalRouteClasses builds both class sets the route tables need across every
+// parsed file, so a class whose bases or methods live in another file still
+// resolves and still tallies its full verb set.
 func globalRouteClasses(results []pyFileResult) routeClasses {
 	classBases := map[string][]string{}
 	verbs := map[string]map[string]bool{}

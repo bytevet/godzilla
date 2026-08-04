@@ -72,22 +72,18 @@ func firstPos(n interface{}) (line, col int, ok bool) {
 	return 0, 0, false
 }
 
-// convertModule lowers one Ruby file's Ripper sexp into a gIR module: every
-// `def` (top level or inside a class/module) becomes a function, and remaining
-// top-level statements are collected into a synthetic "<module>" function so
-// script-style and Sinatra-style handler code is still analyzed.
+// convertModule lowers one Ruby file's Ripper sexp into a gIR module: every `def`
+// becomes a function, and the remaining top-level statements are collected into a
+// synthetic "<module>" function so script- and Sinatra-style handler code is
+// still analyzed.
 func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	mod := &ir.Module{Name: moduleName, Language: "ruby"}
 
 	stmts := programStmts(root)
 
-	// Local (top-level) def names: a bare call to one is qualified with the module
-	// so it resolves to the function's canonical name for cross-function taint.
-	// qualifiedFuncs additionally records every def's CLASS-qualified name (the
-	// `<Class>.method` part after `ruby:<module>.`) so a bare `foo(x)` inside a
-	// class method — implicit-self dispatch — resolves to that same class's
-	// `ruby:<module>.<Class>.foo` instead of the class-less `ruby:<module>.foo`
-	// (which never matches an instance method's canonical name).
+	// localFuncs holds top-level def names; qualifiedFuncs additionally records
+	// every def's CLASS-qualified name (the `<Class>.method` part after
+	// `ruby:<module>.`). See localCallee for what each resolves.
 	localFuncs := map[string]bool{}
 	qualifiedFuncs := map[string]bool{}
 	var collectNames func(ss []interface{}, prefix string)
@@ -114,10 +110,6 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 			case "def":
 				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs))
 			case "defs":
-				// A singleton/class method `def self.m` — analyzed like any def but
-				// canonically named by its enclosing CLASS (not the file path) so a
-				// call on the class (or an ActiveRecord relation of it) in another
-				// file resolves to it for cross-function taint.
 				functions = append(functions, lowerDefs(s, filename, moduleName, className, qualPrefix, localFuncs, qualifiedFuncs))
 			case "class", "module":
 				// class C ... end → constant name at at(s,1) = ["const_ref",["@const","C",pos]]
@@ -148,10 +140,8 @@ func programStmts(root interface{}) []interface{} {
 
 // classModuleBody returns the bodystmt node of a `class`/`module` node. Ripper
 // lays these out differently: `["class", const, superclass_or_null, bodystmt]`
-// (body at index 3, index 2 is the optional superclass) but `["module", const,
-// bodystmt]` (body at index 2). Reading a fixed index 3 for both silently drops
-// every nested module's contents — the common `module A; module B; class C …`
-// nesting used across Rails engines and gems.
+// (body at index 3) but `["module", const, bodystmt]` (body at index 2). A fixed
+// index 3 for both silently drops every nested module's contents.
 func classModuleBody(s interface{}) interface{} {
 	if tag(s) == "module" {
 		return at(s, 2)
@@ -236,12 +226,11 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 // Its layout is ["defs", recv, ".", methodIdent, params, bodystmt].
 //
 // The canonical name is class-qualified but FILE-PATH-INDEPENDENT
-// (`ruby:<Class>.<method>`), so a call on the class — or on an ActiveRecord
-// relation of it, `Model.scope(...).class_method(arg)`, which dispatches to the
-// class method — in ANOTHER file resolves to this function for cross-function
-// taint (the engine matches a call's callee to a function by exact canonical
-// name). A synthetic receiver parameter occupies slot 0, mirroring the receiver
-// that a `recv.m(args)` call site prepends to its arguments, so the arg->param
+// (`ruby:<Class>.<method>`), because the engine matches a callee to a function by
+// exact canonical name: that is what lets a call on the class — or on an
+// ActiveRecord relation of it, `Model.scope(...).class_method(arg)` — resolve
+// here from ANOTHER file. A synthetic receiver parameter occupies slot 0,
+// mirroring the receiver a `recv.m(args)` call site prepends, so the arg->param
 // mapping lines the first real argument up with the first declared parameter.
 func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	name := identName(at(defNode, 3))
@@ -274,10 +263,9 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 
 // paramNames extracts the positional parameter names from a `params` node
 // (`["params", [reqs], [opts], rest, …]`) in source order: required first, then
-// optional (defaulted) params. Binding the optionals matters for taint — a
-// classic vulnerable signature is `def m(filter = nil)`, and without the
-// optional bound the tainted argument would map to no parameter and drop.
-// Keyword/splat/block params remain out of scope for the taint-focused MVP.
+// optional (defaulted). The optionals matter for taint — a classic vulnerable
+// signature is `def m(filter = nil)`, and unbound its tainted argument maps to no
+// parameter and drops. Keyword/splat/block params are out of scope.
 func paramNames(n interface{}) []string {
 	// def may wrap params in `paren`: ["paren", ["params", …]].
 	if tag(n) == "paren" {
@@ -310,11 +298,8 @@ func paramNames(n interface{}) []string {
 // funcState holds the per-function lowering state. Variable values and the
 // per-block instruction stream are owned by an ssabuild.Builder (real CFG +
 // on-demand PHI insertion, Braun et al.); `cur` is the block currently being
-// lowered into (threaded through the AST walk instead of appending to one flat
-// instruction list). `assigned` tracks which Ruby names have been written as a
-// local/ivar SO FAR in the traversal — it replaces the old env's key-presence
-// test (is this bare name a bound local, or a free identifier / method?) that
-// the Builder's per-block value map cannot answer directly.
+// lowered into. `assigned` answers what the Builder's per-block value map cannot
+// — is this bare name a bound local/ivar, or a free identifier / method?
 type funcState struct {
 	filename   string
 	moduleName string
@@ -329,17 +314,14 @@ type funcState struct {
 	b              *ssabuild.Builder
 	cur            ssabuild.BlockID
 	assigned       map[string]bool
-	// terminated reports whether the current block (cur) has already emitted a
-	// block-terminating RET (an explicit `return`). Such a block must NOT then
-	// receive a fall-through JUMP and must NOT become a predecessor of a merge /
-	// loop header — otherwise a returning arm spuriously feeds its (possibly
-	// tainted) values into the join, a false positive. Reset to false whenever
-	// lowering begins in a fresh block.
+	// terminated reports whether the current block has already emitted a
+	// block-terminating RET. Such a block must NOT receive a fall-through JUMP and
+	// must NOT become a predecessor of a merge / loop header — a returning arm
+	// feeding its possibly-tainted values into the join is a false positive. Reset
+	// to false whenever lowering begins in a fresh block.
 	terminated bool
-	// paramNames is the set of this function's own parameter names. A member
-	// read / `[]` off a parameter (or off a free/unbound identifier) is an
-	// "opaque base" — see isOpaqueBase — and the first opportunity to introduce
-	// taint, mirroring the JS/Python frontends' opaque-base source heuristic.
+	// paramNames is the set of this function's own parameter names; see
+	// isOpaqueBase.
 	paramNames map[string]bool
 }
 
@@ -389,12 +371,10 @@ func (fs *funcState) newValueInst(n interface{}) *ir.Instruction {
 
 // ivarGlobal returns the synthetic global key for an instance variable `@f`
 // inside a class method, or "" outside a class. It is the cross-method channel
-// for instance-variable taint: keyed per (module, class, @ivar), `@f = tainted`
-// in one method and a read of `@f` in a sibling method of the same class link
-// through the engine's existing global-taint propagation with NO engine change
-// (the store/read carry this key as a GlobalName operand, which
-// recordGlobalStore / readGlobalTaint already handle). Object-insensitive (all
-// instances of the class share the key) and scoped to the method's own
+// for instance-variable taint: the store/read carry this key as a GlobalName
+// operand, which the engine's recordGlobalStore / readGlobalTaint already handle,
+// so `@f = tainted` in one method reaches a sibling's read with NO engine change.
+// Object-insensitive (all instances share the key) but scoped to the method's own
 // class+module, so a same-named ivar on an unrelated class cannot alias.
 func (fs *funcState) ivarGlobal(ivarName string) string {
 	if fs.classQual == "" || ivarName == "" {
@@ -417,11 +397,9 @@ func (fs *funcState) lowerBody(stmts []interface{}) {
 }
 
 // lowerDefBody lowers a method body and emits an implicit RET of the last
-// expression's value — Ruby's implicit return. This lets the engine summarize a
-// helper that returns request data (`def fetch_path; params[:p]; end`) as
-// taint-returning, so a caller `p = fetch_path; File.read(p)` links up for
-// inter-procedural taint. An explicit `return x` inside the body emits its own
-// RET (see lowerStmt); the trailing RET here covers the fall-through value.
+// expression's value — Ruby's implicit return — so the engine can summarize a
+// helper that returns request data as taint-returning. An explicit `return x`
+// emits its own RET (see lowerStmt); this covers the fall-through value.
 func (fs *funcState) lowerDefBody(stmts []interface{}) {
 	var last *ir.Value
 	for _, s := range stmts {
@@ -445,10 +423,9 @@ func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
 	return last
 }
 
-// assignTarget binds val to an assignment target. A local (`@ident`) rebinds the
-// env. An instance variable (`@ivar`) rebinds the env too (intra-method precision)
-// AND stores into the per-(class, @ivar) synthetic global so a sibling method that
-// reads the same `@ivar` observes the taint cross-method (see ivarGlobal).
+// assignTarget binds val to an assignment target. An instance variable rebinds
+// the local value (intra-method precision) AND stores into the per-(class,
+// @ivar) synthetic global for cross-method flow (see ivarGlobal).
 func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
 	leaf := at(target, 1)
 	name := identName(leaf)
@@ -478,24 +455,22 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		fs.assignTarget(at(s, 1), val)
 		return val // Ruby assignment evaluates to the assigned value.
 	case "opassign":
-		// ["opassign", target, ["@op","||="/"+="/…], rhs] — the rhs is at index 3
-		// (index 2 is the operator token), so `@x ||= expr` must lower at(s,3);
-		// lowering index 2 would emit the operator and drop the expression (and any
-		// source/sink/cross-call inside it).
+		// ["opassign", target, ["@op","||="/"+="/…], rhs] — index 2 is the OPERATOR
+		// token, so the rhs must be read from index 3; index 2 would drop the
+		// expression and any source/sink inside it.
 		val := fs.lowerExpr(at(s, 3))
 		fs.assignTarget(at(s, 1), val)
 		return val
 	case "return":
-		// ["return", args] — an explicit return; emit RET of the returned value so
-		// the engine's taint-return summary sees it.
+		// ["return", args] — RET of the returned value, so the engine's
+		// taint-return summary sees it.
 		v := fs.lowerSeqLast(extractArgs(at(s, 1)))
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true // the current block ends here; no fall-through edge.
 		return v
 	case "return0":
-		// bare `return` (Ripper tags an argument-less return "return0") — returns
-		// nil. Emit the RET (so the block terminates, no fall-through edge) rather
-		// than falling through to a ruby.unsupported intrinsic.
+		// Ripper's tag for an argument-less `return`. The RET terminates the block;
+		// without this case it would fall through to a ruby.unsupported intrinsic.
 		v := ssabuild.Str("")
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true
@@ -528,9 +503,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		inner, _ := asList(at(n, 1))
 		return fs.lowerSeqLast(inner)
 	case "const_path_ref", "top_const_ref":
-		// A namespaced constant (`Net::HTTP`, `ERB::Util`). It carries no taint;
-		// return its flattened name so lowering the receiver of `Net::HTTP.get`
-		// does not fall through to a `ruby.unsupported` intrinsic.
+		// A namespaced constant carries no taint; its flattened name keeps the
+		// receiver of `Net::HTTP.get` off the ruby.unsupported path.
 		return ssabuild.Str(constPathName(n))
 	case "symbol_literal":
 		return ssabuild.Str(identName(at(at(n, 1), 1)))
@@ -542,9 +516,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		case "@ident":
 			return fs.lookup(identName(inner))
 		case "@ivar":
-			// An instance variable read: use the intra-method binding if this method
-			// assigned it, else read the per-(class, @ivar) synthetic global so taint
-			// stashed by a sibling method is observed cross-method (see ivarGlobal).
+			// Prefer this method's own binding; otherwise read the per-(class,
+			// @ivar) global so a sibling method's stashed taint is observed.
 			name := identName(inner)
 			if fs.assigned[name] {
 				return fs.read(name)
@@ -560,10 +533,9 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		}
 		return ssabuild.Str(scalarText(inner)) // @const / @kw / @gvar
 	case "vcall":
-		// A bare name: a local variable read if bound; else, if it names a known
-		// method (same-class or top-level def), a 0-arg method call — lower it as a
-		// CALL so a helper that returns request data links up for inter-procedural
-		// taint (`p = fetch_path`); otherwise a free identifier / constant.
+		// A bare name: a local read if bound; else, if it names a known method, a
+		// 0-arg CALL so `p = fetch_path` links up for inter-procedural taint;
+		// otherwise a free identifier / constant.
 		name := identName(at(n, 1))
 		if fs.assigned[name] {
 			return fs.read(name)
@@ -624,9 +596,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerStringLiteral lowers `"...#{x}..."`. Interpolation parts are folded with
-// BIN_OP_ADD so taint from an embedded expression flows to the string (mirroring
-// the Python f-string / JS template-literal lowering).
+// lowerStringLiteral lowers `"...#{x}..."`, folding the parts with BIN_OP_ADD so
+// taint from an embedded expression flows to the string.
 func (fs *funcState) lowerStringLiteral(n interface{}) *ir.Value {
 	return fs.lowerStringContent(at(n, 1))
 }
@@ -649,10 +620,8 @@ func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 }
 
 // lowerCase lowers `case cond; when …; else …; end`. The condition and EVERY
-// branch body are lowered inline into the current block (straight-line, like the
-// rest of the Ruby frontend), so taint reaching any branch — e.g. a raw SQL
-// string built only in the `else` arm — is analyzed rather than dropped as an
-// unsupported node.
+// branch body are lowered inline into the current block, so taint reaching any
+// branch — a raw SQL string built only in the `else` arm — is still analyzed.
 func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 	fs.lowerExpr(at(n, 1)) // subject expression (for any embedded source/sink)
 	var last *ir.Value
@@ -686,10 +655,9 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 }
 
 // lowerStmtSeqLast lowers a statement list inline and returns the last
-// statement's value. Unlike lowerSeqLast (which lowers *expressions*), this
-// dispatches through lowerStmt so an `assign`/`opassign`/`return` inside a
-// branch or loop body rebinds the env instead of falling through lowerExpr's
-// default to a `ruby.unsupported` intrinsic.
+// statement's value. Unlike lowerSeqLast (expressions), it dispatches through
+// lowerStmt, so an `assign`/`opassign`/`return` inside a branch or loop body
+// rebinds instead of falling through to a `ruby.unsupported` intrinsic.
 func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 	var last *ir.Value
 	for _, s := range stmts {
@@ -698,14 +666,12 @@ func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 	return last
 }
 
-// lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end` into a
-// REAL CFG diamond via the Builder's IfDiamond scaffold, so any variable
-// rebound on one or both arms reconciles automatically via an on-demand
-// ReadVariable PHI (retiring the manual env-merge path). `if`, `unless`, and
-// `elsif` share the layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil);
-// the polarity of `unless` is immaterial to taint (both arms are reachable), so
-// it is lowered like `if`. A nested `elsif` recurses into the else-block, so an
-// arbitrarily long chain becomes nested diamonds.
+// lowerIf lowers `if`/`unless`/`elsif cond; body; [elsif…|else…] end` into a REAL
+// CFG diamond via the Builder's IfDiamond scaffold, so a variable rebound on
+// either arm reconciles via an on-demand ReadVariable PHI. All three share the
+// layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil); `unless`'s
+// polarity is immaterial to taint since both arms are reachable. A nested `elsif`
+// recurses into the else-block, so a chain becomes nested diamonds.
 func (fs *funcState) lowerIf(n interface{}) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
 	var lastBody, lastElse *ir.Value
@@ -720,11 +686,10 @@ func (fs *funcState) lowerIf(n interface{}) *ir.Value {
 }
 
 // branchResult reconciles the two arms' RESULT values of an if/unless used as an
-// expression (`x = if c; a; else; b; end`). When both arms yield a distinct
-// value it stashes each into a synthetic variable at its arm-end and reads it
-// back in the merge block, so the Builder emits a proper PHI (with correct
-// predecessor labels) that keeps taint from either arm; otherwise it forwards
-// whichever arm produced a value.
+// expression (`x = if c; a; else; b; end`). Two distinct values are stashed into
+// a synthetic variable at each arm-end and read back in the merge block, so the
+// Builder emits a proper PHI (with correct predecessor labels) that keeps taint
+// from either arm; otherwise whichever arm produced a value is forwarded.
 func (fs *funcState) branchResult(a, b *ir.Value, thenEnd, elseEnd, merge ssabuild.BlockID) *ir.Value {
 	switch {
 	case a != nil && b != nil && a != b:
@@ -777,13 +742,11 @@ func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
 }
 
 // lowerCondMod lowers the statement-modifier conditionals `stmt if cond` and
-// `stmt unless cond` (`[tag, cond, stmt]`, the body being a single statement).
-// It is a one-armed diamond: the current block branches to a then-block (the
-// guarded statement) or straight to the merge; the then-block jumps to the merge.
-// A binding rebound in the guarded statement reconciles against the pre-modifier
-// value via the merge PHI (the false edge carries the pre-modifier value), so a
-// modifier assignment (`x = safe unless c`) keeps the original value live on the
-// not-taken path.
+// `stmt unless cond` (`[tag, cond, stmt]`) as a one-armed diamond: the current
+// block branches to a then-block or straight to the merge. The false edge carries
+// the pre-modifier value, so a binding rebound in the guarded statement
+// reconciles against it via the merge PHI and `x = safe unless c` keeps the
+// original value live on the not-taken path.
 func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
 	thenB := fs.b.NewBlock()
@@ -815,9 +778,9 @@ func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
 	})
 }
 
-// lowerBacktick lowers a backtick command literal “ `cmd #{x}` “ (and %x{}) —
-// which executes a shell command — to a synthetic CALL "ruby:%x" whose args are
-// the literal's parts, so a tainted interpolation reaches the sink.
+// lowerBacktick lowers a backtick command literal (and %x{}) — which executes a
+// shell command — to a synthetic CALL "ruby:%x" whose args are the literal's
+// parts, so a tainted interpolation reaches the sink.
 func (fs *funcState) lowerBacktick(n interface{}) *ir.Value {
 	parts, _ := asList(at(n, 1))
 	var args []*ir.Value
@@ -831,20 +794,17 @@ func (fs *funcState) lowerBacktick(n interface{}) *ir.Value {
 // ["binary", left, "<op>", right] -- the operator is a PLAIN STRING at index 2,
 // which is why scalarText reads it rather than identName.
 //
-// The operator used to be discarded entirely and every binary expression lowered
-// as BIN_OP_ADD. Since ADD is the engine's universal propagator, Ruby
-// `user == "admin"` carried taint (the false-positive class the Go and JS
-// frontends fixed by moving comparisons onto builtin.compare), and it also fed
-// internal/analysis/ssrf.go's constant-prefix reconstruction -- which walks
-// BIN_OP_ADD -- as though a comparison were string building.
+// The operator must not be discarded: BIN_OP_ADD is the engine's universal
+// propagator AND the kind ssrf.go's constant-prefix reconstruction walks, so a
+// comparison lowered as one would make `user == "admin"` carry taint and read as
+// string building.
 func (fs *funcState) lowerBinary(n interface{}) *ir.Value {
 	left := fs.lowerExpr(at(n, 1))
 	right := fs.lowerExpr(at(n, 3))
 	op := scalarText(at(n, 2))
 	if isComparisonOp(op) {
-		// The result is a bool (or an Integer for `<=>`, a MatchData index for
-		// `=~`): influence, not content. An inert intrinsic still gives the engine
-		// a def-use edge for guard analysis, matching Go/JS/Python.
+		// A comparison result is influence, not content. The inert intrinsic still
+		// gives the engine a def-use edge for guard analysis.
 		inst := fs.newValueInst(n)
 		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 		inst.Intrinsic = "builtin.compare"
@@ -865,19 +825,16 @@ func isComparisonOp(op string) bool {
 	return false
 }
 
-// binOpKind maps a Ruby binary operator to its gIR kind.
-//
-// Only two kinds are load-bearing; every BIN_OP propagates taint regardless of
-// kind (see propagatingOps in internal/analysis/taint.go), so the rest are
-// descriptive:
+// binOpKind maps a Ruby binary operator to its gIR kind. Every BIN_OP propagates
+// taint regardless of kind (propagatingOps in internal/analysis/taint.go), so
+// only two are load-bearing and the rest are descriptive:
 //
 //   - BIN_OP_ADD is the one kind ssrf.go's constSkeleton walks to rebuild a URL's
 //     constant prefix. `<<` maps to it because Ruby's shovel on a String or Array
 //     IS an append -- calling it SHL would still propagate taint but would make
 //     `url << part` opaque to the host check.
 //   - BIN_OP_REM is read by the same function as a printf-style template with the
-//     format at operand 0. Ruby's `"...%s" % v` has exactly Python's shape, which
-//     is what that arm was written for.
+//     format at operand 0, which is exactly the shape of Ruby's `"...%s" % v`.
 func binOpKind(op string) ir.BinOpKind {
 	switch op {
 	case "+", "<<":
@@ -914,18 +871,15 @@ func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n inter
 }
 
 // isOpaqueBase reports whether a receiver/base node refers to a value whose
-// origin is outside this function's own straight-line computation — either a
-// free/unbound identifier (a `vcall`, e.g. a framework accessor such as
-// Sinatra's `params`/`request` that Ripper cannot resolve to a local) or one of
-// this function's own parameters (a `var_ref` to a name in paramNames, e.g. a
-// Rails/Rack handler's `request`/`req` object). A member read / `[]` off such a
-// base is the first opportunity to introduce taint, mirroring the JS/Python
-// frontends' opaque-base heuristic (see converters/javascript/lower.go
-// isOpaqueBase). It deliberately does NOT treat an ordinary assigned local (a
-// `var_ref` not in paramNames) or a constant (`@const`) as opaque, so a local
-// happening to be named `params`, or a class like `User`, is not mistaken for
-// a request. Which opaque-base accessors actually seed taint is decided by the
-// rulepack source globs, not here.
+// origin is outside this function's own straight-line computation — a
+// free/unbound identifier (a `vcall`, e.g. Sinatra's `params`) or one of this
+// function's own parameters (a `var_ref` in paramNames, e.g. a Rails/Rack
+// handler's `request`). A member read / `[]` off such a base is the first
+// opportunity to introduce taint, mirroring converters/javascript's
+// isOpaqueBase. It deliberately does NOT treat an ordinary assigned local or a
+// constant as opaque, so a local happening to be named `params`, or a class like
+// `User`, is not mistaken for a request. Which opaque-base accessors actually
+// seed taint is decided by the rulepack source globs, not here.
 func (fs *funcState) isOpaqueBase(recv interface{}) (name string, ok bool) {
 	switch tag(recv) {
 	case "vcall":
@@ -943,11 +897,10 @@ func (fs *funcState) isOpaqueBase(recv interface{}) (name string, ok bool) {
 }
 
 // requestDotBases are the conventional names of a web request object across Ruby
-// frameworks. A member read off an opaque base with one of these names is
-// synthesized as a source CALL `ruby:<base>.<method>` (receiver-/base-scoped, so
-// the rulepack globs `ruby:request.*` / `ruby:req.*` filter by framework). Any
-// accessor is covered — the frontend no longer enumerates a fixed member list,
-// so Rack/Sinatra/Hanami accessors beyond the classic params/query/… set fire.
+// frameworks. A member read off an opaque base with one of these names becomes a
+// source CALL `ruby:<base>.<method>` — base-scoped, so the rulepack globs
+// (`ruby:request.*`) filter by framework. ANY accessor is covered rather than a
+// fixed member list, so Rack/Sinatra/Hanami accessors beyond params/query fire.
 var requestDotBases = map[string]bool{"request": true, "req": true, "params": true}
 
 // requestIndexBases are the conventional names of a request-controlled hash
@@ -970,9 +923,9 @@ func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerDotCall lowers `recv.method(args?)`. args is nil for the no-arg `call`
-// form. Any accessor off an opaque request base (`request.query_string`,
-// `req.params`) becomes a base-scoped source CALL `ruby:<base>.<method>`.
+// lowerDotCall lowers `recv.method(args?)`; args is nil for the no-arg `call`
+// form. An accessor off an opaque request base becomes a source CALL (see
+// requestDotBases).
 func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 	recv := at(n, 1)
 	method := identName(at(n, 3))
@@ -982,10 +935,10 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 	// Lower the receiver first so a chained inner call (a.b(x).c) still emits.
 	recvVal := fs.lowerExpr(recv)
 	callee := fs.calleeFor(recv, method)
-	// A method chain rooted at a constant — `Model.scope(a).class_method(x)` —
-	// dispatches (in ActiveRecord, via the relation) to the class's method. Give
-	// it a class-qualified callee so it resolves to that lowered `def self.method`
-	// across files, instead of the bare, unresolvable `ruby:method`.
+	// A chain rooted at a constant — `Model.scope(a).class_method(x)` — dispatches
+	// (via the ActiveRecord relation) to the class's method, so a class-qualified
+	// callee resolves it to that `def self.method` across files instead of leaving
+	// the bare, unresolvable `ruby:method`.
 	if callee == "ruby:"+method {
 		if base := chainRootConstBase(recv); base != "" {
 			callee = "ruby:" + base + "." + method
@@ -1015,13 +968,10 @@ func (fs *funcState) calleeFor(recv interface{}, method string) string {
 	return "ruby:" + method
 }
 
-// chainRootConstBase returns the base (last-segment) name of the constant that a
+// chainRootConstBase returns the base (last-segment) name of the constant a
 // receiver method chain is rooted at, or "" if it does not root at a constant.
 // It unwraps call / method_add_arg / method_add_block nodes down to the chain's
-// head receiver: `Foo::Bar.a(x).b` roots at `Foo::Bar`, base `Bar`. This lets a
-// call on an ActiveRecord relation (`Model.where(...).klass_method(arg)`)
-// resolve to the class method `ruby:Model.klass_method`, since a class/scope
-// method invoked on a relation dispatches back to the class.
+// head receiver: `Foo::Bar.a(x).b` roots at `Foo::Bar`, base `Bar`.
 func chainRootConstBase(n interface{}) string {
 	for i := 0; i < 64; i++ {
 		switch tag(n) {
@@ -1059,9 +1009,6 @@ func constPathName(n interface{}) string {
 	return identName(n)
 }
 
-// localCallee builds the canonical callee for a bare function call `name(...)`,
-// qualifying a local (top-level) def with the module name so cross-function
-// taint resolves to the function's canonical name; other names stay bare.
 // isKnownMethod reports whether name is a def in this module — a same-class
 // instance method (implicit-self) or a top-level function — as opposed to a
 // local variable or an external/framework name.
@@ -1072,10 +1019,11 @@ func (fs *funcState) isKnownMethod(name string) bool {
 	return fs.localFuncs[name]
 }
 
+// localCallee builds the canonical callee for a bare call `name(...)`. A
+// same-class instance method wins over a top-level def: implicit-self dispatch
+// calls the former, whose canonical name carries the class prefix, and only that
+// name links caller to callee for inter-procedural taint. Unknown names stay bare.
 func (fs *funcState) localCallee(name string) string {
-	// Implicit-self dispatch: a bare `foo(x)` inside a class method calls that
-	// same class's instance method, whose canonical name carries the class
-	// prefix. Prefer it so caller->callee links up for inter-procedural taint.
 	if fs.classQual != "" && fs.qualifiedFuncs[fs.classQual+name] {
 		return "ruby:" + fs.moduleName + "." + fs.classQual + name
 	}
@@ -1108,8 +1056,8 @@ func (fs *funcState) lowerCommandCall(n interface{}) *ir.Value {
 }
 
 // lowerMethodAddBlock lowers `call do |x| … end` / `call { … }` (Sinatra routes,
-// blocks): the call is lowered and the block body is lowered inline in the
-// current function so handler code inside the block is analyzed.
+// blocks). The block body is lowered inline in the current function, so handler
+// code inside the block is analyzed.
 func (fs *funcState) lowerMethodAddBlock(n interface{}) *ir.Value {
 	v := fs.lowerExpr(at(n, 1))
 	block := at(n, 2)

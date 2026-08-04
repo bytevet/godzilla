@@ -45,11 +45,10 @@ func convertMethod(className string, m dumpMethod, filename string) *ir.Function
 
 	// Local-slot layout: for an instance method, slot 0 is the receiver `this`
 	// (the engine maps an INVOKE receiver to param 0), then the declared
-	// parameters. Each is bound to a parameter register so a tainted argument at
-	// a call site flows into the callee. Slot advancement uses slotWidth(pt):
-	// long/double occupy two local slots, everything else one, so subsequent
-	// parameters land on their correct slots (see the `slot += slotWidth(pt)`
-	// below). Taint itself is width-agnostic — the width only affects slot index.
+	// parameters, each bound to a parameter register so a tainted call-site
+	// argument flows into the callee. long/double occupy TWO local slots (see
+	// slotWidth), so slots must be advanced by width or later parameters land on
+	// the wrong ones.
 	slot := 0
 	if !m.Static {
 		this := ssabuild.Reg("this")
@@ -62,12 +61,10 @@ func convertMethod(className string, m dumpMethod, filename string) *ir.Function
 		v := ssabuild.Reg(name)
 		fn.Params = append(fn.Params, v)
 		s.locals[slot] = v
-		// A parameter carrying framework annotations (e.g. Spring's
-		// @RequestParam) is untrusted input read outside this program's own
-		// call graph. The engine only seeds taint at a CALL matching a source
-		// glob, so we synthesize one — the same trick the JS/Python frontends
-		// use for opaque-base member reads — and rebind the slot to its (now
-		// tainted) result so every LOAD of this parameter carries taint.
+		// A parameter carrying framework annotations (e.g. Spring's @RequestParam)
+		// is untrusted input entering outside this program's call graph. The engine
+		// only seeds taint at a CALL matching a source glob, so synthesize one and
+		// rebind the slot to its result.
 		if i < len(m.ParamAnnotations) && len(m.ParamAnnotations[i]) > 0 {
 			s.locals[slot] = s.annotatedParamSource(m.ParamAnnotations[i], s.pos(entryLine(m)))
 		}
@@ -121,13 +118,12 @@ func entryLine(m dumpMethod) int {
 	return 0
 }
 
-// run lowers a method body. For straight-line code (no branch targets) it is a
-// single linear operand-stack simulation, identical to the original frontend.
-// When the method has control flow it is lowered block-by-block over the
-// reconstructed CFG, merging the operand stack and locals at each join with
-// OP_CODE_PHI (FE-4) — so a branch-selected value (`cond ? tainted : default`,
-// an if/else assignment) is no longer silently dropped, and the stack stays
-// aligned past the join instead of garbling every later instruction.
+// run lowers a method body. Straight-line code (no branch targets) is a single
+// linear operand-stack simulation. A method with control flow is lowered
+// block-by-block over the reconstructed CFG, merging the operand stack and locals
+// at each join with OP_CODE_PHI (FE-4): without the merge a branch-selected value
+// (`cond ? tainted : default`) is silently dropped and the stack is left
+// misaligned past the join, garbling every later instruction.
 func (s *methodState) run(instrs []dumpInstr) {
 	blocks, labelIdx := splitBlocks(instrs)
 	if len(blocks) <= 1 {
@@ -269,11 +265,10 @@ func splitBlocks(instrs []dumpInstr) ([]block, map[int]int) {
 
 // runBlocks lowers a method block-by-block over its CFG, threading the operand
 // stack and locals along control-flow edges and PHI-merging divergent bindings
-// at every join (≥2 predecessors). Blocks are processed in textual order —
-// which is topological for the forward edges javac emits — so a join's
-// predecessors are already lowered; a block reachable only via an unprocessed
-// (back-)edge falls back to the previous block's exit, never doing worse than
-// the old linear walk.
+// at every join (≥2 predecessors). Blocks are processed in textual order — which
+// is topological for the forward edges javac emits — so a join's predecessors are
+// already lowered; a block reachable only via an unprocessed (back-)edge falls
+// back to the previous block's exit.
 func (s *methodState) runBlocks(blocks []block, labelIdx map[int]int) {
 	blockAt := map[int]int{} // leader instruction index -> block index
 	for bi, b := range blocks {
@@ -476,8 +471,7 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	if in.Kind == "INVOKESTATIC" {
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: callee}}
 	} else {
-		// virtual/interface/special: the receiver (popped after the args) becomes
-		// operand 0 via CallCommon.Value, so a sink's `#0` lines up with it.
+		// The receiver is popped AFTER the args and goes in CallCommon.Value.
 		op = ir.OpCode_OP_CODE_INVOKE
 		cc.Value = s.pop() // receiver
 		cc.IsInvoke = true
@@ -492,10 +486,9 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	// Tag String.format / String.valueOf (template/value in Args[0]) with the
 	// language-neutral builtin.format marker so the engine's SSRF host
 	// reconstruction reads the marker, not a Java callee-name shape. The match is
-	// exact canonical FQNs (the owner is the bytecode internal name, so
-	// java/lang/String): a substring match would let a user method on a class
-	// merely named like String (MyString.format) claim "Args[0] is the template"
-	// semantics and wrongly prove a fixed host, suppressing a real SSRF finding.
+	// on exact FQNs: a substring match would let a user method on a class merely
+	// named like String (MyString.format) claim "Args[0] is the template" and
+	// wrongly prove a fixed host, suppressing a real SSRF finding.
 	if javaFormatCallees[callee] {
 		inst.Intrinsic = "builtin.format"
 	}
@@ -505,10 +498,9 @@ func (s *methodState) invoke(in dumpInstr, pos *ir.Position) {
 	}
 }
 
-// invokeDynamic handles the JVM's invokedynamic. String concatenation
-// (`"a" + x`, compiled to makeConcatWithConstants since JDK 9) is modeled as a
-// BIN_OP over its dynamic arguments so taint from any spliced value flows to the
-// result — mirroring the Python f-string / JS template-literal lowering. Other
+// invokeDynamic handles the JVM's invokedynamic. String concatenation (`"a" + x`,
+// compiled to makeConcatWithConstants since JDK 9) is modeled as a BIN_OP over its
+// dynamic arguments so taint from any spliced value flows to the result. Other
 // invokedynamic (lambda metafactory, etc.) yields a fresh untainted value.
 func (s *methodState) invokeDynamic(in dumpInstr, pos *ir.Position) {
 	args := s.popN(len(parseParams(in.Mdesc)))
@@ -719,8 +711,8 @@ func returnsVoid(desc string) bool {
 }
 
 // slotWidth reports how many local-variable slots a parameter type occupies
-// (long/double take two). Taint is width-agnostic; this only keeps slot indices
-// aligned with the bytecode.
+// (long/double take two), which is what keeps slot indices aligned with the
+// bytecode.
 func slotWidth(paramType string) int {
 	if paramType == "J" || paramType == "D" {
 		return 2

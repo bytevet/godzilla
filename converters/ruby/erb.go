@@ -6,9 +6,9 @@ import (
 )
 
 // ERB templates are Ruby embedded in markup, and Rails puts request input in
-// them directly (`<%= params[:id] %>`), so a view is a taint source site the
-// .rb-only frontend never saw. erbToRuby turns one into plain Ruby that Ripper
-// parses and lower.go lowers unchanged.
+// them directly (`<%= params[:id] %>`), so a view is a taint source site.
+// erbToRuby turns one into plain Ruby that Ripper parses and lower.go lowers
+// unchanged.
 //
 // The markup is blanked IN PLACE -- every removed byte becomes a space, newlines
 // survive -- so a position in the output is the same line and column as in the
@@ -19,8 +19,8 @@ import (
 // emitted plainly and only fires if it bypasses escaping itself (`raw`,
 // `.html_safe` -- already sinks in ruby-xss.yaml). The unescaped `<%== %>` form
 // IS a sink, and gets one the same way a Vue `v-html` does: its delimiters are
-// rewritten to a `raw(...)` call. Every such rewrite is length-preserving, so
-// positions still hold — see copyERBTag for the widths it relies on.
+// rewritten to a `raw(...)` call. Every such rewrite is length-preserving — see
+// copyERBTag for the widths it relies on.
 func erbToRuby(src []byte) []byte {
 	out := blankAll(src)
 	for i := 0; i < len(src); {
@@ -66,9 +66,8 @@ func copyERBTag(src, out []byte, open, tagEnd int) {
 
 	// The closing `%>` becomes a statement separator. Two tags on one line
 	// (`style="<%= a %>;<%= b %>"`) would otherwise strip to two juxtaposed
-	// expressions on that line, which is a syntax error and loses the whole
-	// template — 11% of decidim's views. `%>` is two bytes, so the separator
-	// still fits after the raw() form's closing paren.
+	// expressions, a syntax error that loses the whole template. `%>` is two
+	// bytes, so the separator still fits after the raw() form's closing paren.
 	out[tagEnd] = ';'
 	switch {
 	case src[body] == '=' && src[body+1] == '=':

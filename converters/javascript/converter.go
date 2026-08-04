@@ -1,6 +1,5 @@
-// Package js_converter lowers JavaScript source into gIR for the taint engine
-// in internal/analysis, following converters/python's structure: parse with a
-// language-native parser, then lower the AST per function (lower.go).
+// Package js_converter lowers JavaScript source into gIR for the taint engine in
+// internal/analysis: parse, then lower the AST per function (lower.go).
 //
 // Parsing uses github.com/dop251/goja's pure-Go ECMAScript parser -- no cgo, no
 // Node.js, no external process. Its file.Idx positions resolve to line/column
@@ -31,14 +30,10 @@
 // propagation carries taint through the rest. See emitRootPropertyRead and
 // isOpaqueBase in lower.go.
 //
-// A parameter is opaque whether it holds a framework request object or ordinary
-// data, and the two want opposite things: the first must INTRODUCE taint (the
-// request register is not itself tainted — see internal/analysis/doc.go), the
-// second must CARRY the taint it already has. The callee name serves the first;
-// the base register, kept in Call.Value and tagged builtin.member_read, serves
-// the second. Before that, the base was discarded and reading a property off an
-// already-tainted parameter produced a clean register — the shape most request
-// data takes once it crosses a function boundary.
+// Such a read carries BOTH a synthetic callee name and its base register (in
+// Call.Value, tagged builtin.member_read), because a parameter is opaque whether
+// it holds a framework request object or ordinary data; see emitRootPropertyRead
+// for why each is needed.
 //
 // Real call expressions lower to CALL with a syntactic dotted Callee built from
 // the callee expression (Identifier/DotExpression/string-keyed Bracket chains;
@@ -61,8 +56,9 @@
 //   - Classes are modeled per method ("<Class>.<method>", via collectClass);
 //     only non-method class-body statements (fields, static initializers) are
 //     unmodeled.
-//   - Destructuring targets and parameters are dropped, though the initializer
-//     is still lowered for its side effects and taint.
+//   - Destructuring ASSIGNMENT targets and (non-handler) destructured parameters
+//     are dropped; a destructuring declaration does bind its names, but only for
+//     flat identifier patterns.
 //   - `await x` / `yield x` lower to `x`; the wrapping is a no-op for taint.
 //   - Array/object literals collapse every element's taint into one PHI-merged
 //     register rather than tracking it per index/key.
@@ -104,16 +100,10 @@ func NewConverter() *Converter {
 	return c
 }
 
-// batch builds the shared frontend.Batch driver with JavaScript's hooks. A
-// fresh value per conversion: the default-export map is closure state private
-// to this batch.
-//
-// The single-file/directory-batch skeleton is the shared driver. Files convert
-// concurrently — the parse (goja), esbuild transform, and lowering are all
-// pure per-file CPU work with no shared state (the Converter is stateless).
-// What is JavaScript's alone: each file's default export is collected so
-// resolveJSCrossModuleCalls can rewrite cross-module markers once every file
-// has been lowered.
+// batch builds the shared frontend.Batch driver with JavaScript's hooks. A fresh
+// value per conversion: the default-export map is closure state private to this
+// batch, collected so resolveJSCrossModuleCalls can rewrite cross-module markers
+// once every file has been lowered.
 func (c *Converter) batch() *frontend.Batch[jsFileResult] {
 	// defaultExports maps each module name to its default-export function
 	// canonical, filled after all files are parsed (Finish).
@@ -155,15 +145,14 @@ const crossModuleMarker = "js:@mod:"
 
 // resolveJSCrossModuleCalls rewrites every "js:@mod:<module>" marker callee to
 // the named module's default-export function canonical name, once all files are
-// lowered (the callee may live in a file not yet seen at lowering time). It
-// mirrors converters/python's resolveCrossModuleCalls: the engine resolves calls
-// by EXACT canonical name, so without this a bare cross-file default-import call
-// (`const f = require('./util'); f(x)`) never links and taint stops at the call.
+// lowered (the callee may live in a file not yet seen at lowering time). The
+// engine resolves calls by EXACT canonical name, so without this a bare
+// cross-file default-import call (`const f = require('./util'); f(x)`) never
+// links and taint stops at the call.
 //
-// A marker with no single unambiguous default export (module.exports is a
-// non-function, an object of named exports, or absent) is stripped back to a
-// plain "js:<leaf>" bare name -- exactly what the callee would have been without
-// the marker -- so nothing downstream trips on the marker syntax. Only ADDS an
+// A marker with no single unambiguous default export is stripped back to a plain
+// "js:<leaf>" bare name -- what the callee would have been without the marker --
+// so nothing downstream trips on the marker syntax. This only ever ADDS an
 // inter-procedural edge to an unambiguously-named exported function (FP-safe).
 func resolveJSCrossModuleCalls(prog *ir.Program, defaultExports map[string]string) {
 	for cc := range irwalk.Calls(prog) {
@@ -193,16 +182,15 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 		return nil, "", fmt.Errorf("js_converter: failed to read %s: %w", path, err)
 	}
 
-	// Vue/Svelte single-file components are compiled to plain JS by the SFC
-	// extractor (script block + template directives as synthetic sink calls);
-	// extensions that always need one (.ts/.tsx/.jsx/.mjs/.cjs) are esbuild-
-	// transformed to CommonJS up front. Both return a sourcemap consumer that
-	// remaps positions back to the original file. SFCs must be intercepted before
-	// the generic transform — esbuild has no .vue/.svelte loader.
+	// Vue/Svelte SFCs are compiled to plain JS by the SFC extractor; extensions
+	// that always need one (.ts/.tsx/.jsx/.mjs/.cjs) are esbuild-transformed to
+	// CommonJS up front. Both return a sourcemap consumer that remaps positions
+	// back to the original file. SFCs must be intercepted BEFORE the generic
+	// transform — esbuild has no .vue/.svelte loader.
 	//
-	// .js takes NEITHER branch here. It is the ambiguous extension — plain script,
-	// ES modules, Flow and JSX all ship as .js — so rather than predict the
-	// dialect, it goes straight to goja and the parse failure below decides.
+	// .js takes NEITHER branch: it is the ambiguous extension (plain script, ESM,
+	// Flow and JSX all ship as .js), so it goes straight to goja and the parse
+	// failure below decides.
 	code := string(src)
 	var consumer *sourcemap.Consumer
 	var dirs []directivePos
@@ -228,16 +216,14 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 	astProg, err := parser.ParseFile(fset, path, code, 0)
 	if err != nil && !transformed {
 		// goja could not read it as plain script, so it is one of the other .js
-		// dialects: run the loader ladder. Letting the parse failure be the trigger
-		// replaced a content sniff (a pair of regexps for import/export over every
-		// .js file) that had to PREDICT this, and predicting failed both ways — it
-		// missed Flow annotations in a file with no import/export, and its regexps
-		// cost 7% of a scan on the common CommonJS file that needed no transform at
-		// all. Failing first is exact, and is paid only by files that would
-		// otherwise be lost, so it is never worth gating on a size heuristic.
+		// dialects: run the loader ladder. The PARSE FAILURE is the trigger rather
+		// than a content sniff, because predicting the dialect fails both ways — it
+		// misses Flow annotations in a file with no import/export, and it costs every
+		// ordinary CommonJS file a scan it did not need. Failing first is exact and is
+		// paid only by files that would otherwise be lost, so it needs no size gate.
 		//
-		// If the ladder cannot read it either, goja's original error is the one
-		// reported: it describes the file as written.
+		// If the ladder cannot read it either, goja's original error is reported: it
+		// describes the file as written.
 		if tcode, tconsumer, terr := transformToJS(path, src); terr == nil {
 			tfset := &file.FileSet{}
 			if tprog, perr := parser.ParseFile(tfset, path, tcode, 0); perr == nil {

@@ -26,11 +26,10 @@ func collectRequireAliases(body []ast.Statement) map[string]string {
 		if !ok {
 			continue
 		}
-		// Skip relative/absolute requires (./db, ../x, /abs): those are the
-		// project's OWN modules, whose functions are lowered and already matched
-		// by the module-name mechanism (a caller's `db.run` links to the lowered
-		// `js:db.run`). Rewriting them would break that cross-file resolution.
-		// Only bare package specifiers (child_process, express, …) are aliased.
+		// Skip relative/absolute requires: those are the project's OWN modules,
+		// already matched by the module-name mechanism (a caller's `db.run` links to
+		// the lowered `js:db.run`), and rewriting them breaks that cross-file
+		// resolution. Only bare package specifiers are aliased.
 		if strings.HasPrefix(mod, ".") || strings.HasPrefix(mod, "/") {
 			continue
 		}
@@ -104,10 +103,10 @@ var identityWrappers = map[string]bool{
 // memoize/identity wrapper (see identityWrappers) and g is a single Identifier
 // records X as an alias for whatever g resolves to (g's own require alias if it
 // has one, else g itself). resolveRequire then rewrites an `X(...)` call through
-// the wrapper to the wrapped function's canonical name, so
-// webpack-dev-middleware's `const memoizedParse = mem(parse)` (parse =
-// require("url").parse) makes `memoizedParse(url)` resolve to `url.parse`.
-// FP-safe: the wrapper whitelist leaves arbitrary `x = f(y)` untouched.
+// the wrapper to the wrapped function's canonical name, so with
+// `parse = require("url").parse`, `const memoizedParse = mem(parse)` makes
+// `memoizedParse(url)` resolve to `url.parse`. FP-safe: the wrapper whitelist
+// leaves arbitrary `x = f(y)` untouched.
 func collectIdentityWrapperAliases(body []ast.Statement, aliases map[string]string) {
 	for _, b := range topLevelBindings(body) {
 		id, ok := b.Target.(*ast.Identifier)

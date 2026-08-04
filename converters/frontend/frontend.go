@@ -5,9 +5,8 @@
 // run across worker goroutines (runChunks), count skipped files, and error only
 // when not a single file converted — so that skeleton lives here ONCE
 // (Batch.Convert) and a frontend supplies only its language-specific pieces as
-// fields/hooks. Before this, the skeleton was copied per frontend and the
-// copies drifted: the Rust and C/C++ variants lacked the skipped-file
-// accounting, so scan.LangCoverage.Skipped silently read 0 for them.
+// fields/hooks. Copies of it drift silently: a frontend that loses the
+// skipped-file accounting reports scan.LangCoverage.Skipped as 0, not as broken.
 //
 // Driver is the matching front half: the exported
 // ConvertFile/ConvertInventory/Skipped surface internal/scan consumes, which a
@@ -31,10 +30,8 @@ import (
 // Driver is the embeddable front half of a Batch-based Converter: the
 // skipped-file counter plus the ConvertFile/ConvertInventory entry points every
 // per-file frontend exposes to internal/scan. A frontend embeds it and supplies
-// only NewBatch, so its exported conversion surface is these promoted methods
-// rather than a per-frontend copy. A frontend with a pre-step that bypasses
-// batching entirely (Rust's cargo path) wraps the promoted methods with its
-// own and delegates.
+// only NewBatch. A frontend with a pre-step that bypasses batching entirely
+// (Rust's cargo path) wraps the promoted methods with its own and delegates.
 type Driver[R any] struct {
 	// NewBatch builds this frontend's Batch. It is invoked once per conversion,
 	// so state a Batch's Setup resolves (interpreter paths, per-run maps) stays
@@ -115,12 +112,11 @@ type Batch[R any] struct {
 // program, the number of files skipped (directory mode only; also meaningful
 // alongside the no-files-converted error), and an error.
 //
-// Single-file mode fails fast: a parse failure is the caller's only signal, so
-// it is surfaced immediately. Directory mode is resilient: one unparseable
-// file must not abort the whole batch (a single syntax error in an unrelated
-// file shouldn't hide every other file's findings), so a failed file is
-// warned about on stderr, counted as skipped, and dropped; Convert errors
-// only if not a single file in the tree converted.
+// Single-file mode fails fast: a parse failure is the caller's only signal.
+// Directory mode is resilient — one syntax error in an unrelated file must not
+// hide every other file's findings — so a failed file is warned about on stderr,
+// counted as skipped, and dropped; Convert errors only if not a single file in
+// the tree converted.
 func (b *Batch[R]) Convert(path string) (*ir.Program, int, error) {
 	root, files, isDir, err := walkignore.CollectTarget(path, b.Match)
 	if err != nil {
@@ -132,7 +128,7 @@ func (b *Batch[R]) Convert(path string) (*ir.Program, int, error) {
 // ConvertInventory is Convert over a pre-walked directory inventory: the scan
 // pipeline walks the scan root ONCE (walkignore.NewInventory) and every present
 // frontend selects its files from that cache instead of re-walking the same
-// tree. Selection (Inventory.Select) applies exactly the per-file policy
+// tree. Selection (Inventory.Select) must apply exactly the per-file policy
 // Convert's own walk applies — same match predicate, same SkipFile/TooBig caps,
 // same abort-on-walk-error contract — so the two entry points lower identical
 // file sets.

@@ -12,16 +12,12 @@ import (
 )
 
 // IsJSFamily reports whether path is a JavaScript-family source file the frontend
-// handles: plain JS, TypeScript, JSX/TSX, the ES-module / CommonJS variants, and
-// Vue/Svelte single-file components (whose <script> block is JS/TS and whose
-// template compiles to synthetic JS calls — see sfc.go). It is the single source
-// of truth for the extension set — the converter's own directory walk and
-// internal/scan's dispatch/detection table both call it.
-//
-// It is DERIVED from the two extension predicates that actually decide how a
-// file is read — isSFC and needsTransform — plus plain .js, so adding an
-// extension to either automatically extends the set the frontend collects
-// instead of leaving a third list to forget.
+// handles. It is the single source of truth for the extension set — the
+// converter's own directory walk and internal/scan's dispatch/detection table
+// both call it — and is DERIVED from the two predicates that actually decide how
+// a file is read (isSFC, needsTransform) plus plain .js, so adding an extension
+// to either extends this set automatically rather than leaving a third list to
+// forget.
 func IsJSFamily(path string) bool {
 	return isSFC(path) || needsTransform(path) || strings.ToLower(filepath.Ext(path)) == ".js"
 }
@@ -56,17 +52,13 @@ func needsTransform(path string) bool {
 }
 
 // transformToJS runs esbuild to strip TypeScript types and lower ES modules to
-// CommonJS — which the existing lowering already understands via
-// require/exports/module.exports — returning the transformed JS plus a sourcemap
-// consumer that maps transformed positions back to the original file. esbuild
-// does NOT type-check (it only strips), which keeps it fast, matching the
-// project's speed goal. Target ESNext minimizes syntax downleveling so the
-// output stays close to source. A build error is returned so the directory
-// merge treats the file as a skipped/failed conversion, exactly like a parse
-// error.
+// the CommonJS the lowering already understands, returning the transformed JS
+// plus a sourcemap consumer mapping transformed positions back to the original
+// file. A build error is returned so the directory merge treats the file as a
+// skipped/failed conversion, exactly like a parse error.
 func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
-	// Hoisted: every rung would otherwise re-copy the whole source into a fresh
-	// string, and a file that fails every rung is exactly the large one.
+	// Hoisted: converting per rung re-copies the whole source, and a file that
+	// fails every rung is exactly the large one.
 	code, base := string(src), filepath.Base(path)
 	var firstErr error
 	for _, loader := range loaderLadder(path) {
@@ -78,12 +70,10 @@ func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error)
 			firstErr = err // the primary loader's error is the honest one
 		}
 	}
-	// Last rung: Flow. esbuild has no Flow loader and Flow is not valid
-	// TypeScript, so no choice of loader recovers these -- the source itself has
-	// to change. stripFlow blanks Flow-only syntax in place, preserving every byte
-	// offset so esbuild's sourcemap (and therefore remapPositions) stays correct;
-	// see flowstrip.go. Retrying the whole ladder rather than one loader keeps the
-	// dialect question open: a Flow file may also be an ES module or use JSX.
+	// Last rung: Flow. esbuild has no Flow loader and Flow is not valid TypeScript,
+	// so no loader recovers these -- the source itself has to change (flowstrip.go).
+	// Retrying the WHOLE ladder rather than one loader keeps the dialect question
+	// open: a Flow file may also be an ES module or use JSX.
 	if stripped, ok := stripFlow(code); ok && stripped != code {
 		for _, loader := range loaderLadder(path) {
 			if out, cons, err := runESBuild(stripped, loader, base); err == nil {
@@ -97,18 +87,13 @@ func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error)
 // loaderLadder returns the esbuild loaders to try for path, in order, stopping at
 // the first that parses.
 //
-// Guessing the dialect from the extension and committing to it is what made this
-// frontend fragile: an extension is a hint, not a contract, and being wrong cost
-// the WHOLE file. .js in the wild holds plain script, ES modules, Flow
-// annotations, and JSX — four dialects behind one extension, and each one
-// discovered the hard way became another special case here.
-//
-// Trying candidates instead turns "predict the dialect" into "find the one that
-// parses", so a dialect we did not anticipate costs an extra attempt rather than
-// the file. Attempts are only ever paid on failure, and a failed esbuild parse is
-// cheap next to losing the source. The first loader's error is the one reported,
-// since a later loader failing says nothing useful about a file it was never
-// meant to read.
+// An extension is a hint, not a contract: .js in the wild holds plain script, ES
+// modules, Flow annotations and JSX. Committing to a guess costs the WHOLE file
+// when it is wrong, so this turns "predict the dialect" into "find the one that
+// parses" — an unanticipated dialect costs an extra attempt instead. Attempts are
+// only ever paid on failure, and a failed esbuild parse is cheap next to losing
+// the source. The FIRST loader's error is the one reported, since a later loader
+// failing says nothing useful about a file it was never meant to read.
 func loaderLadder(path string) []api.Loader {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".ts":
@@ -122,22 +107,19 @@ func loaderLadder(path string) []api.Loader {
 	}
 }
 
-// esbuildSupported is hoisted out of runESBuild so the map is not reallocated on
-// every transform. The consumer is goja, not a browser, and goja cannot parse
-// `import(...)`. ESNext otherwise counts it as supported, so esbuild passes it
-// through untouched and the file fails at PARSE time instead of transform time --
-// which reads as a broken transform when it is really an unsupported construct.
-// Declaring it unsupported makes esbuild downlevel it to the require-based form
-// the lowering already understands.
+// esbuildSupported marks `import(...)` unsupported, and is hoisted out of
+// runESBuild so the map is not reallocated per transform. The consumer is goja,
+// not a browser, and goja cannot parse `import(...)`; ESNext otherwise counts it
+// as supported, so esbuild passes it through untouched and the file fails at
+// PARSE time instead of transform time — which reads as a broken transform when
+// it is really an unsupported construct. Declaring it unsupported makes esbuild
+// downlevel it to the require-based form the lowering already understands.
 var esbuildSupported = map[string]bool{"dynamic-import": false}
 
-// runESBuild is the shared esbuild pass behind transformToJS (whole-file
-// TS/ESM transform) and the SFC extractor (its synthesized combined buffer):
-// it strips TS types and lowers ES modules to CommonJS with the same options,
-// returning the transformed JS and a sourcemap consumer mapping transformed
-// positions back to code (nil if the map is missing/unparseable — non-fatal, we
-// fall back to transformed positions). A build error is returned so the caller
-// treats the file as a skipped/failed conversion, exactly like a parse error.
+// runESBuild is the shared esbuild pass behind transformToJS and the SFC
+// extractor, so both use identical options. The returned consumer is nil if the
+// map is missing or unparseable — non-fatal, positions then stay in transformed
+// coordinates.
 func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sourcemap.Consumer, error) {
 	res := api.Transform(code, api.TransformOptions{
 		Loader:     loader,
@@ -145,12 +127,6 @@ func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sou
 		Target:     api.ESNext,
 		Sourcemap:  api.SourceMapExternal,
 		Sourcefile: sourcefile,
-		// The consumer is goja, not a browser, and goja cannot parse `import(...)`.
-		// ESNext otherwise counts it as supported, so esbuild passes it through
-		// untouched and the file fails at PARSE time instead of transform time --
-		// which reads as a broken transform when it is really an unsupported
-		// construct. Declaring it unsupported makes esbuild downlevel it to the
-		// require-based form the lowering already understands.
 		Supported:   esbuildSupported,
 		TsconfigRaw: `{"compilerOptions":{"experimentalDecorators":true}}`,
 	})
@@ -165,12 +141,11 @@ func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sou
 }
 
 // remapPositions rewrites every Position in a module from transformed (esbuild
-// output) coordinates back to the original source, using the sourcemap consumer.
-// Source positions are mandatory (CLAUDE.md), and type-stripping reflows lines,
-// so this remap is required — not optional — for TS/ESM files. goja columns are
-// 1-based while sourcemap generated/original columns are 0-based, hence the
-// -1/+1. Positions that do not map are left unchanged. A nil consumer (plain
-// .js, or a map that failed to parse) is a no-op.
+// output) coordinates back to the original source. Type-stripping reflows lines
+// and source positions are mandatory (CLAUDE.md), so this is required, not
+// optional, for TS/ESM files. goja columns are 1-based while sourcemap columns
+// are 0-based, hence the -1/+1. Positions that do not map are left unchanged; a
+// nil consumer (plain .js, or an unparseable map) is a no-op.
 func remapPositions(mod *ir.Module, c *sourcemap.Consumer) {
 	if mod == nil || c == nil {
 		return

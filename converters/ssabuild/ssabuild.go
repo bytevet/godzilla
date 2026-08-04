@@ -4,16 +4,14 @@
 //
 // # Why this package exists
 //
-// The Python, JavaScript and Ruby frontends lower straight-line code into a
-// single basic block with an environment map (variable name -> current value).
-// That drops branch bodies, cannot model loop-carried values, and never
-// exercises the engine's dominator-based guard precision because it always hits
-// the single-block linear fast path. This package generalizes that env map into
-// a per-block map of current definitions and inserts PHI nodes on demand, so a
-// frontend can emit a real CFG (blocks + preds/succs + OP_CODE_IF/JUMP/PHI) that
-// is byte-for-byte the shape the Go frontend already emits and the taint engine
-// already consumes. It depends only on the gIR value type (pkg/ir/v1); it has no
-// dependency on any frontend and knows nothing about any source language.
+// A frontend that lowers into one block with a flat variable->value environment
+// drops branch bodies, cannot model loop-carried values, and never exercises the
+// engine's dominator-based guard precision. This package generalizes that env map
+// into a per-block map of current definitions with PHI nodes inserted on demand,
+// so a frontend can emit a real CFG (blocks + preds/succs + OP_CODE_IF/JUMP/PHI)
+// byte-for-byte the shape the Go frontend emits and the taint engine consumes. It
+// depends only on the gIR value type (pkg/ir/v1) and knows nothing about any
+// source language.
 //
 // # The algorithm (Braun et al.)
 //
@@ -155,9 +153,9 @@ func (b *Builder) NewBlock() BlockID {
 }
 
 // AddInstr appends a caller-produced body instruction to a block, in order.
-// Body instructions are emitted after the block's PHIs and before its
-// terminator. The builder never inspects them except to resolve operands that
-// referenced a PHI which was later eliminated.
+// Body instructions are emitted after the block's PHIs and before its terminator.
+// The builder inspects them only to resolve operands that referenced a PHI which
+// was later eliminated.
 func (b *Builder) AddInstr(block BlockID, inst *ir.Instruction) {
 	b.blocks[block].body = append(b.blocks[block].body, inst)
 }
@@ -443,8 +441,7 @@ func (b *Builder) livePhi(v *ir.Value) *phi {
 // --- value helpers -------------------------------------------------------
 
 // undefValue represents a read of an undefined variable (a value reaching a
-// point on no real path). Frontends are not expected to produce these for
-// well-formed input; documented for completeness.
+// point on no real path). Well-formed input should not produce one.
 func undefValue() *ir.Value {
 	return Reg("__undef")
 }

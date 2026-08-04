@@ -5,11 +5,9 @@ import "strings"
 // Flow-typed JavaScript support, by BLANKING Flow-only syntax in place.
 //
 // Flow ships in plain `.js` files, so the loader ladder reaches them, but every
-// rung fails: esbuild has no Flow loader (its api.Loader enum has no such entry
-// and the package contains no Flow support at all), and Flow's type syntax is
-// not valid TypeScript either. parse-server drops files this way, including
-// PostgresStorageAdapter.js, which is where its SQL sinks live. (BACKLOG FE-12
-// carries the corpus scorecard; a running count here would only rot.)
+// rung fails: esbuild has no Flow loader, and Flow's type syntax is not valid
+// TypeScript either. Without this rung such a file is dropped whole, taking its
+// sinks with it.
 //
 // # Why blanking, and why it may not rewrite
 //
@@ -23,9 +21,8 @@ import "strings"
 // So stripFlow is offset-preserving: every removed byte becomes a space, every
 // newline survives. Stripped line/column then equal the original's, esbuild's own
 // map is already correct, and remapPositions needs no change. sfc.go:extractSFCToJS
-// uses the same trick one dimension down, padding with newlines so a <script>
-// body lands on its true SFC line. It is also what Meta's flow-remove-types does,
-// for the same stated reason.
+// uses the same trick one dimension down. (Meta's flow-remove-types does the same,
+// for the same reason.)
 //
 // The corollary is that translating Flow to TypeScript is out of bounds:
 // `{[string]: T}` -> `{[k: string]: T}` adds characters and would shift every
@@ -36,25 +33,23 @@ import "strings"
 // The stripped buffer is handed to esbuild's TS loader, which ERASES types
 // outright. So a blanked annotation never has to remain meaningful -- it only has
 // to leave behind something that parses. That is what makes this tractable
-// without implementing Flow's type grammar: rather than teach the scanner about
-// maybe-types, unions, generics, variance and indexers one by one, it finds where
-// an annotation STARTS and blanks through to its terminator.
+// without implementing Flow's type grammar: the scanner finds where an annotation
+// STARTS and blanks through to its terminator.
 //
 // # Failure direction
 //
 // This rung only ever runs on a file that already failed every loader, so a strip
-// that yields something unparseable costs nothing -- the file is dropped exactly
-// as it is today. The outcome to avoid is blanking VALUE code, which would turn a
-// dropped file into a silently mis-lowered one. Every decision below therefore
-// prefers to leave text alone when the context is not certain, and stripFlow
-// refuses the whole file rather than guess.
+// yielding something unparseable costs nothing -- the file is dropped either way.
+// The outcome to avoid is blanking VALUE code, which turns a dropped file into a
+// silently mis-lowered one. Every decision below therefore prefers to leave text
+// alone when the context is not certain, and stripFlow refuses the whole file
+// rather than guess.
 
 // looksLikeFlow reports whether a file is worth attempting a Flow strip on.
 //
-// It is not a dialect prediction -- the frontend deliberately stopped predicting
-// dialects (see needsTransform) -- but a blast-radius limit on the LAST rung: the
-// scanner only runs on a file that has already failed every loader, and requiring
-// a Flow marker keeps it away from files that failed for some unrelated reason.
+// It is not a dialect prediction -- the frontend does not predict dialects, see
+// needsTransform -- but a blast-radius limit on the LAST rung: requiring a Flow
+// marker keeps the scanner away from files that failed for an unrelated reason.
 func looksLikeFlow(src string) bool {
 	if strings.Contains(src, "@flow") || strings.Contains(src, "opaque type ") {
 		return true
@@ -72,9 +67,8 @@ func stripFlow(src string) (string, bool) {
 	if !looksLikeFlow(src) {
 		return src, false
 	}
-	// The bottom frame stands for top level, which IS a declaration position. With
-	// it every frame lookup is total, so no accessor has to special-case an empty
-	// stack and no caller can read a zero frame's fields by mistake.
+	// The bottom frame stands for top level, which IS a declaration position, and
+	// makes every frame lookup total — no accessor has to handle an empty stack.
 	s := &flowScanner{src: src, out: []byte(src), memberStart: true,
 		frames: []frame{{declPos: true}}}
 	if !s.run() {
@@ -84,8 +78,7 @@ func stripFlow(src string) (string, bool) {
 }
 
 // frame is one open bracket. All per-bracket state lives here rather than in
-// parallel stacks, so "what is directly inside this bracket" is a single lookup
-// instead of a comparison between two independently-maintained depths.
+// parallel stacks, so "what is directly inside this bracket" is one lookup.
 type frame struct {
 	open byte // '(', '[' or '{'
 	// isClass marks a `{` that opened a CLASS body. A `name: T` there is a
@@ -95,8 +88,7 @@ type frame struct {
 	isClass bool
 	// declPos marks a frame a declaration or class member may begin directly
 	// inside: a block or a class body, never an object literal, a destructuring
-	// pattern or an import/export specifier list. opensBlock decides it and states
-	// why it is default-deny.
+	// pattern or an import/export specifier list. Decided by opensBlock.
 	declPos bool
 	// ternary is the ENCLOSING frame's count of unmatched `?`, restored when this
 	// bracket closes. A ternary's `:` binds to one of them, so it is not an
@@ -123,11 +115,10 @@ type flowScanner struct {
 	// prevWord is the last identifier/keyword, for `const x: T` and `opaque type`.
 	prevWord string
 	// pendingClassDepth is the frame depth at which a `class` keyword is waiting for
-	// its body, or 0 for none. The depth stamp is what keeps it a per-bracket fact
-	// like everything else in frame: an unstamped flag is consumed by the NEXT `{`
-	// anywhere, so `class X extends mix({ a: 1 })` marked the MIXIN's literal as the
-	// class body -- blanking `: 1` to leave `{ a }`, which is valid shorthand and so
-	// parses, mis-lowered, while the real body lost its isClass.
+	// its body, or 0 for none. The depth stamp matters: an unstamped flag is
+	// consumed by the NEXT `{` anywhere, so `class X extends mix({ a: 1 })` would
+	// mark the MIXIN's literal as the class body -- blanking `: 1` to leave `{ a }`,
+	// valid shorthand that parses mis-lowered, while the real body lost its isClass.
 	pendingClassDepth int
 	// memberStart is true where a declaration or class member may begin: at a
 	// statement boundary (`;`, `{`, `}`) inside a frame whose declPos allows one,
@@ -136,12 +127,10 @@ type flowScanner struct {
 	//
 	// The invariant both serve: a `:` is an annotation only where a declaration can
 	// carry one, and `type`/`interface` are keywords only where one can begin.
-	// startsDeclaration and annotationStarts explain what goes wrong without it.
 	memberStart, identStartsMember bool
 }
 
-// top returns the innermost frame. The bottom frame stands for top level, so this
-// is always defined.
+// top returns the innermost frame; the bottom frame makes it always defined.
 func (s *flowScanner) top() frame {
 	return s.frames[len(s.frames)-1]
 }
@@ -150,11 +139,10 @@ func (s *flowScanner) top() frame {
 // declaration may begin in -- as opposed to an object literal, a destructuring
 // pattern, or an import/export specifier list.
 //
-// It answers from the preceding token, which is the same signal a real parser
-// uses (statement position versus expression position), and it is DEFAULT-DENY:
-// an unrecognised predecessor yields false. Saying false about a real block only
-// costs a `type` alias declared inside it -- the file is left unparseable and
-// dropped. Saying true about a specifier list runs a declaration blank through
+// It answers from the preceding token (statement position versus expression
+// position) and is DEFAULT-DENY. Saying false about a real block only costs a
+// `type` alias declared inside it -- the file is left unparseable and dropped.
+// Saying true about a specifier list runs a declaration blank through
 // `import { type Config } from './config'`, blanking the import and whatever
 // follows until the braces happen to rebalance, and that result can PARSE.
 func (s *flowScanner) opensBlock() bool {
@@ -174,8 +162,7 @@ func (s *flowScanner) opensBlock() bool {
 		return s.top().declPos
 	}
 	// prevWord only describes the token when prev is a word byte; after a bracket or
-	// operator it is a stale leftover from inside it -- the same discipline
-	// annotationStarts follows.
+	// operator it is a stale leftover from inside it.
 	if isWordByte(s.prev) {
 		switch s.prevWord {
 		case "else", "do", "try", "finally":
@@ -185,7 +172,6 @@ func (s *flowScanner) opensBlock() bool {
 	return false
 }
 
-// inClassBody reports whether the innermost frame is a class body.
 func (s *flowScanner) inClassBody() bool {
 	return s.top().isClass
 }
@@ -204,7 +190,7 @@ func (s *flowScanner) push(open byte, isClass, declPos bool) {
 
 // pop closes a bracket frame and restores the enclosing ternary count. Closing
 // one that was never opened means the source is not balanced the way the scanner
-// read it, which is a refusal rather than something to recover from.
+// read it — a refusal, not something to recover from.
 func (s *flowScanner) pop(open byte) {
 	n := len(s.frames)
 	if n == 1 || s.frames[n-1].open != open {
@@ -315,11 +301,10 @@ func (s *flowScanner) run() bool {
 
 		switch c {
 		case '(':
-			// A `(` opens a parameter list, a call, or a parenthesised expression.
-			// All three are annotation-capable in Flow -- the last one because a cast
-			// is written `(expr: T)` -- and the shapes that must NOT be read as
-			// annotations are excluded by the ternary counter and by the frame the
-			// `:` is found in, rather than by refusing the group.
+			// A parameter list, a call, or a parenthesised expression: all three are
+			// annotation-capable in Flow (the last because a cast is `(expr: T)`).
+			// Shapes that must NOT be read as annotations are excluded by the ternary
+			// counter and by the frame the `:` is found in, not by refusing the group.
 			s.push('(', false, false)
 		case ')':
 			s.pop('(')
@@ -389,12 +374,12 @@ func (s *flowScanner) inParenGroup() bool {
 // actually introduces a declaration.
 //
 // Neither word is reserved, so both conditions matter. It must sit where a
-// declaration can begin -- React names variables `type` constantly, and
+// declaration can begin -- React code names variables `type` constantly, and
 // `(type as ReactConsumerType<any>)` otherwise reads as `type Alias` and blanks
 // the rest of the function while staying brace-balanced, so the result parses and
 // is silently wrong. And the next significant token must be the name being
-// declared. (A member access needs no separate test: `.` is not a statement
-// boundary, so memberStart is already false after one.)
+// declared. (A member access needs no test: `.` is not a statement boundary, so
+// memberStart is already false after one.)
 func (s *flowScanner) startsDeclaration() bool {
 	if !s.memberStart {
 		return false
@@ -410,13 +395,12 @@ func (s *flowScanner) startsDeclaration() bool {
 // any `export`/`declare` modifiers, returning the offset the blank must begin at.
 //
 // Blanking the keyword alone leaves the modifier stranded -- `export` followed by
-// nothing is a syntax error, and `export type` is how parse-server writes nearly
-// every one of these.
+// nothing is a syntax error, and `export type` is the common spelling.
 //
-// `import` needs no special case here: it is not an isDeclModifier word, so it
-// consumes the declaration position and the caller's memberStart test already
-// rejects `import type X from 'y'` -- which is valid TypeScript that esbuild
-// erases on its own, and which blanking would destroy.
+// `import` needs no special case: it is not an isDeclModifier word, so it consumes
+// the declaration position and the caller's memberStart test already rejects
+// `import type X from 'y'` -- valid TypeScript that esbuild erases on its own, and
+// which blanking would destroy.
 func (s *flowScanner) declarationStart(kwStart int) int {
 	from := kwStart
 	for {
@@ -459,10 +443,8 @@ func (s *flowScanner) blankDeclaration(from int) {
 			if depth == 0 {
 				s.i++
 				// A brace body may still be followed by `;` (`export type X = {…};`).
-				// Left behind it is a harmless empty statement, so this is not
-				// load-bearing -- it only keeps the blanked span whole. Bounded to the
-				// SAME line: a `;` opening the next one is a leading-semicolon statement
-				// (`;[1, 2].forEach(…)`), not this declaration's terminator.
+				// Bounded to the SAME line: a `;` opening the next one is a
+				// leading-semicolon statement (`;[1, 2].forEach(…)`), not a terminator.
 				if j := s.skipInlineSpace(s.i); j < len(s.src) && s.src[j] == ';' {
 					s.i = j + 1
 				}
@@ -476,11 +458,10 @@ func (s *flowScanner) blankDeclaration(from int) {
 				return
 			}
 		case '\n':
-			// A newline ends the declaration only if it is actually complete. A
-			// multi-line union -- `type T =\n  | 'a'\n  | 'b';` -- is the common Flow
-			// shape, and stopping at its first newline would strand every remaining
-			// branch as a syntax error. Continue while either side of the break shows
-			// the expression is unfinished.
+			// A newline ends the declaration only if it is complete. A multi-line
+			// union -- `type T =\n  | 'a'\n  | 'b';` -- is the common Flow shape, and
+			// stopping at its first newline strands every remaining branch as a syntax
+			// error. Continue while either side of the break shows it unfinished.
 			if depth == 0 && !s.typeOpenBefore(lastSig, lastSigPos) &&
 				!typeOpenAfter(s.nextSignificantByte(s.i)) {
 				s.finishDeclaration(from)
@@ -506,10 +487,9 @@ func (s *flowScanner) finishDeclaration(from int) {
 // across a line break, asked of the last significant byte before the break and
 // the first one after it.
 //
-// The two sets differ on purpose rather than by oversight: Flow style breaks
-// AFTER `=` and BEFORE `|`, so an opener can end a line and a continuation can
-// begin the next. Hence openers (`< ( [ { + -`) only in the first, closers
-// (`) ] }`) only in the second.
+// The two sets differ on purpose: Flow style breaks AFTER `=` and BEFORE `|`, so
+// an opener can end a line and a continuation can begin the next. Hence openers
+// (`< ( [ { + -`) only in the first, closers (`) ] }`) only in the second.
 func (s *flowScanner) typeOpenBefore(c byte, pos int) bool {
 	switch c {
 	case '=', '|', '&', ',', '<', '(', '[', '{', ':', '?', '.', '+', '-':
@@ -562,11 +542,9 @@ func (s *flowScanner) nextSignificantByte(j int) byte {
 // rather than an object-literal value, a ternary alternative, a label or a
 // `case`. It answers yes only in the positions a declaration can carry one.
 func (s *flowScanner) annotationStarts() bool {
-	// A ternary's `:` is preceded by an expression and matched by an earlier `?`
-	// on the same nesting level; the cheapest reliable discriminator is what the
-	// `:` follows. The three cases are disjoint, so prevWord -- which only
-	// describes the token in the identifier case, and is a stale leftover from
-	// inside the bracket otherwise -- is read in that case alone.
+	// The discriminator is what the `:` follows. The cases are disjoint, so
+	// prevWord -- meaningful only in the identifier case, stale otherwise -- is
+	// read in that case alone.
 	switch {
 	case isWordByte(s.prev):
 		switch s.prevWord {
@@ -612,13 +590,12 @@ const typeParamScanLimit = 512
 // blankTypeParams blanks a type-PARAMETER list at s.i, `<T: Bound, U>`. The whole
 // list goes, not just the bound.
 //
-// `<` is ambiguous with less-than, and getting that wrong would blank a real
+// `<` is ambiguous with less-than, and getting that wrong blanks a real
 // comparison, so three conditions must all hold: the caller has established that
 // what precedes is a declaration NAME; a matching `>` is found within
 // typeParamScanLimit with balanced nesting and no `;` or `=` (neither can appear
-// in a type-parameter list, but both are common between two comparisons); and the
-// list actually contains a `:`, without which there is no Flow syntax to remove
-// and nothing to gain by touching it.
+// in a type-parameter list, both are common between two comparisons); and the list
+// actually contains a `:`, without which there is no Flow syntax to remove.
 //
 // The bracket kinds share ONE counter, so a `<` closed by a `)` drives depth
 // negative and bails -- which is exactly the shape a pair of comparisons makes.
@@ -657,11 +634,8 @@ func (s *flowScanner) blankTypeParams() {
 // isDeclModifier reports whether word may precede a declaration or class member's
 // name without ending the statement-start position: the export/ambient markers,
 // the property modifiers, and the accessor and async keywords that introduce a
-// method.
-//
-// A switch because every other keyword set in this file is one. Note the cost of
-// accepting the accessor words: a class property named literally
-// `get`/`set`/`async`/`static` does not get its annotation stripped -- the safe
+// method. The cost of accepting the accessor words is that a class property named
+// literally `get`/`set`/`async`/`static` keeps its annotation -- the safe
 // direction, since the file is then dropped rather than mis-blanked.
 func isDeclModifier(word string) bool {
 	switch word {
@@ -718,7 +692,7 @@ func (s *flowScanner) blankAnnotation(isReturnType bool) bool {
 				// (`cb: (e: Error) => void`) and is consumed with it. In a RETURN
 				// annotation the same token is the enclosing arrow function's own
 				// arrow -- `const f = (x): T => {…}` -- and must survive, or the
-				// arrow is destroyed and the file no longer parses.
+				// file no longer parses.
 				if s.peek(1) != '>' || isReturnType {
 					s.blank(start, s.i)
 					return true
@@ -733,9 +707,8 @@ func (s *flowScanner) blankAnnotation(isReturnType bool) bool {
 				return true
 			}
 			if c == '\n' {
-				// An annotation may legitimately wrap, but a bare newline also ends a
-				// class property (`x: T` with no semicolon). Stop here: blanking less
-				// is always safe, and the remainder is left for the loaders to judge.
+				// An annotation may wrap, but a bare newline also ends a class
+				// property (`x: T` with no semicolon). Stop: blanking less is safe.
 				s.blank(start, s.i)
 				return true
 			}
@@ -774,21 +747,21 @@ func (s *flowScanner) nextWordIs(w string) bool {
 	return strings.HasPrefix(s.src[s.skipSpaceFrom(s.i):], w)
 }
 
-// regexCanStart reports whether a `/` at s.i begins a regex literal rather than
-// a division. The standard discriminator: division can only follow something
-// that ends a value, so anything else means regex.
+// regexCanStart reports whether a `/` at s.i begins a regex literal rather than a
+// division: division can only follow something that ends a value, so anything
+// else means regex.
 //
 // Getting this wrong desynchronises the scanner -- a regex body may contain
 // quotes, braces and parens -- but not silently: the run ends with unbalanced
-// depth and stripFlow refuses the file, which drops it exactly as before.
+// depth and stripFlow refuses the file.
 func (s *flowScanner) regexCanStart() bool {
 	switch s.prev {
 	case ')', ']', '}':
 		return false
 	}
 	if isWordByte(s.prev) {
-		// A value-ending identifier or number means division -- except for the
-		// keywords after which an expression (and so a regex) may begin.
+		// An identifier or number ends a value, so division -- except after these
+		// keywords, where an expression (and so a regex) may begin.
 		switch s.prevWord {
 		case "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
 			"case", "do", "else", "yield", "await", "throw":
@@ -883,12 +856,11 @@ func (s *flowScanner) skipTemplate() bool {
 		case '$':
 			if s.peek(1) == '{' {
 				s.i += 2
-				// A substitution is arbitrary JS, so it needs the same lexing the
-				// main loop does -- including REGEX literals. `` `"${x.replace(/"/g,
-				// \'""\')}"` `` is real parse-server code: without regex handling the
-				// quote inside /"/g reads as a string opener and swallows the rest of
-				// the file. prev is tracked locally so regexCanStart can tell a regex
-				// from a division here too.
+				// A substitution is arbitrary JS and needs the same lexing the main
+				// loop does -- including REGEX literals: in `` `"${x.replace(/"/g,
+				// '""')}"` `` the quote inside /"/g would otherwise read as a string
+				// opener and swallow the rest of the file. prev is tracked locally so
+				// regexCanStart can tell a regex from a division here too.
 				depth, prev := 1, byte(0)
 				for s.i < len(s.src) && depth > 0 {
 					c := s.src[s.i]
