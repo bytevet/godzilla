@@ -26,7 +26,7 @@ go test ./...
 go test ./internal/analysis/
 go test ./converters/go/ -run TestGIRv2Metadata
 
-# Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.c/.cpp file). Exit codes:
+# Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.erb/.c/.cpp file). Exit codes:
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
 go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>

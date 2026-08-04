@@ -198,7 +198,9 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
 - **Ruby** (`converters/ruby/`) — an embedded helper (`rbdump.rb`, run via `ruby`)
   parses with the stdlib **Ripper** and emits its S-expression AST as JSON;
   `lower.go` lowers that tree to a real CFG (`ssabuild`). Ripper ships with every MRI Ruby.
-  Emits `ruby:` names.
+  `.erb` templates are stripped to plain Ruby first (`erb.go`), blanking the markup IN PLACE so
+  byte offsets — and therefore positions — survive; `<%== %>` becomes the `raw()` call
+  ruby-xss.yaml already models. Emits `ruby:` names.
 - **C / C++** (`converters/cpp/` + shared `converters/llvm/`) — clang compiles each
   unit to **LLVM IR** (`-O1 -g`), parsed via libLLVM and lowered. This is the
   **opt-in cgo backend** (`-tags "llvm byollvm"`), *not* in the default binary, which
