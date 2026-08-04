@@ -200,12 +200,23 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		}
 	}
 
+	// Memoized per CALLEE, not per call site: a program has far more calls than
+	// distinct callee names, and the same unresolved name repeats across every
+	// site that calls it. Keying on the raw callee also skips `logical`, which
+	// allocates. A "" result is cached too — the miss is the common case, and the
+	// walk that proves it is the expensive one. The indexes are fully built above
+	// and SetCallee does not touch them, so the answer cannot change mid-loop.
+	resolved := map[string]string{}
 	for cc := range irwalk.Calls(prog) {
 		callee := cc.GetCallee()
 		if callee == "" || rawSet[callee] {
 			continue // unset, or already resolves by exact name
 		}
-		raw := resolve(logical(callee))
+		raw, seen := resolved[callee]
+		if !seen {
+			raw = resolve(logical(callee))
+			resolved[callee] = raw
+		}
 		if raw == "" {
 			continue
 		}
