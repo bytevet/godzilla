@@ -1,0 +1,10 @@
+<%# A Rails view: request input reaches the page here, not in a .rb file. %>
+<div>
+  <p><%= params[:id] %></p>
+  <p><%== params[:name] %></p>
+  <p><%= raw(params[:bio]) %></p>
+  <p><%= h(params[:note]) %></p>
+  <% if params[:admin] %>
+    <span><%= params[:role] %></span>
+  <% end %>
+</div>

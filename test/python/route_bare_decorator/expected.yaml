@@ -1,0 +1,11 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Api carries two distinct bare verbs (@post, @get), so it is a dispatch class
+# and BOTH handlers seed their params — including preview(), which has no
+# access-control decorator. Helper has a single bare @post and no sibling verb,
+# so it is an ordinary class and stays clean; max: 2 pins that.
+findings:
+    - rule: py-ssrf
+      min: 2
+      max: 2
+      sink: "py:requests.get"

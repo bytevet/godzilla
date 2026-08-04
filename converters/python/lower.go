@@ -44,7 +44,7 @@ func (m *modCtx) newFuncState() *funcState {
 // and methods) becomes its own ir.Function; module-level statements that are
 // not defs/classes are collected into one synthetic "<module>" function, the
 // Python analogue of Go's package-init/main flattening in converters/go.
-func convertModule(root astNode, filename, moduleName string, handlerClassSet map[string]bool) *ir.Module {
+func convertModule(root astNode, filename, moduleName string, classes routeClasses) *ir.Module {
 	mod := &ir.Module{
 		Name:     moduleName,
 		Language: "python",
@@ -85,26 +85,26 @@ func convertModule(root astNode, filename, moduleName string, handlerClassSet ma
 	// i.e. a real method (not a module function or a closure nested in a def). The
 	// engine's cross-object CHA dispatch indexes such functions by method name, so
 	// a call `obj.method(x)` resolves to it (see interproc buildMethodImpls).
-	var collect func(stmts []astNode, qualPrefix string, inHandlerClass, inClass bool)
-	collect = func(stmts []astNode, qualPrefix string, inHandlerClass, inClass bool) {
+	var collect func(stmts []astNode, qualPrefix string, cls classCtx, inClass bool)
+	collect = func(stmts []astNode, qualPrefix string, cls classCtx, inClass bool) {
 		for _, s := range stmts {
 			switch s.kind() {
 			case "FunctionDef":
-				srcParams := routeHandlerParams(s, inHandlerClass)
-				fn := convertFunction(ctx, s, qualPrefix, srcParams, inHandlerClass, inClass)
+				srcParams := routeHandlerParams(s, cls)
+				fn := convertFunction(ctx, s, qualPrefix, srcParams, cls.handler, inClass)
 				functions = append(functions, fn)
 				// A nested def inside a handler/method is not itself a verb method of
 				// the class, so its handler-class and method context reset.
-				collect(s.list("body"), qualPrefix+s.str("name")+".", false, false)
+				collect(s.list("body"), qualPrefix+s.str("name")+".", classCtx{}, false)
 			case "ClassDef":
 				// Only methods (nested FunctionDefs) are modeled; other
 				// class-body statements are a documented limitation.
 				cn := s.str("name")
-				collect(s.list("body"), qualPrefix+cn+".", handlerClassSet[cn], true)
+				collect(s.list("body"), qualPrefix+cn+".", classes.ctxFor(cn), true)
 			}
 		}
 	}
-	collect(root.list("body"), "", false, false)
+	collect(root.list("body"), "", classCtx{}, false)
 
 	// Module-level constant bindings (NAME = <literal>) are Python module
 	// globals. The env-based lowering keeps such a literal only in the
@@ -308,15 +308,15 @@ var (
 // params exclude self/cls, request/websocket, and Depends()/Security()-injected
 // params; a handler-class verb method contributes its params after self/cls (the
 // URL route captures).
-func routeHandlerParams(node astNode, inHandlerClass bool) []string {
+func routeHandlerParams(node astNode, cls classCtx) []string {
 	params := node.strList("params")
 	if len(params) == 0 {
 		return nil
 	}
-	if hasRouteDecorator(node) {
+	if hasRouteDecorator(node, cls.dispatch) {
 		return decoratedRouteParams(node, params)
 	}
-	if inHandlerClass && handlerMethodVerbs[node.str("name")] {
+	if cls.handler && handlerMethodVerbs[node.str("name")] {
 		return positionalAfterSelf(params)
 	}
 	return nil
@@ -325,17 +325,43 @@ func routeHandlerParams(node astNode, inHandlerClass bool) []string {
 // hasRouteDecorator reports whether any decorator is a routing decorator. A
 // dotted decorator matches on its last component; a bare one matches only if
 // routeDecorators marks it as valid bare (see that map).
-func hasRouteDecorator(node astNode) bool {
+// A bare HTTP verb counts only inside a dispatch class (see routeClasses).
+func hasRouteDecorator(node astNode, inDispatchClass bool) bool {
 	for _, d := range node.strList("decorators") {
-		name, dotted := d, false
-		if i := strings.LastIndex(d, "."); i >= 0 {
-			name, dotted = d[i+1:], true
+		name, dotted := simpleName(d)
+		bare, ok := routeDecorators[name]
+		if !ok {
+			continue
 		}
-		if bare, ok := routeDecorators[name]; ok && (dotted || bare) {
+		if dotted || bare || inDispatchClass {
 			return true
 		}
 	}
 	return false
+}
+
+// bareVerbDecorators returns the bare HTTP verbs decorating a def -- an
+// undotted decorator naming a verb that routeDecorators does NOT accept on its
+// own. These are the evidence routeClasses tallies.
+func bareVerbDecorators(node astNode) []string {
+	var out []string
+	for _, d := range node.strList("decorators") {
+		name, dotted := simpleName(d)
+		if bare, ok := routeDecorators[name]; ok && !dotted && !bare {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// simpleName splits a dotted name into its last component and reports whether it
+// was dotted at all — the match rule for every decorator and base-class table in
+// this file, which key on the simple name.
+func simpleName(s string) (string, bool) {
+	if i := strings.LastIndex(s, "."); i >= 0 {
+		return s[i+1:], true
+	}
+	return s, false
 }
 
 // decoratedRouteParams filters a decorated route function's params down to the
@@ -411,10 +437,7 @@ func handlerClasses(classBases map[string][]string, targetBases map[string]bool)
 				continue
 			}
 			for _, b := range bases {
-				simple := b
-				if i := strings.LastIndex(b, "."); i >= 0 {
-					simple = b[i+1:]
-				}
+				simple, _ := simpleName(b)
 				if targetBases[simple] || result[simple] {
 					result[cls] = true
 					changed = true
@@ -424,6 +447,76 @@ func handlerClasses(classBases map[string][]string, targetBases map[string]bool)
 		}
 	}
 	return result
+}
+
+// routeClasses is the per-class context the route tables need, computed across
+// ALL files so subclassing and dispatch layers that span modules still resolve.
+type routeClasses struct {
+	// handler holds request-handler class names (Tornado RequestHandler, Django
+	// CBVs, …), by simple name.
+	handler map[string]bool
+	// dispatch holds classes that are their OWN routing layer. An app that does
+	// not use `@app.post` writes its routes as a bare `@post`, which is far too
+	// weak a marker on its own -- `post` is an ordinary word. What is not weak is
+	// the SET: a class whose methods carry two or more DISTINCT bare HTTP verbs
+	// is dispatching, because a one-off helper decorator does not come with a
+	// sibling named after a different verb.
+	//
+	// This replaced a list of access-control decorator names (`@permission`,
+	// `@login_required`, …) used as a co-signal. That list was unbounded, and
+	// worse, ANTI-CORRELATED with risk: pyload has 84 bare verbs of which 73
+	// carry @permission, so keying on the co-signal excluded exactly the 11
+	// UNAUTHENTICATED endpoints -- the ones most worth seeding. The verb set
+	// admits all 84 and needs no vocabulary to maintain.
+	dispatch map[string]bool
+}
+
+// classCtx is one class's flags, resolved once at the ClassDef.
+type classCtx struct{ handler, dispatch bool }
+
+func (rc routeClasses) ctxFor(class string) classCtx {
+	return classCtx{handler: rc.handler[class], dispatch: rc.dispatch[class]}
+}
+
+// collectDispatchVerbs records, per class, the set of distinct bare HTTP verbs
+// its methods are decorated with, recursing so a class nested in another class
+// or in a function is still seen. Keyed by simple class name, and unioned across
+// files by the caller, matching collectClassBases.
+func collectDispatchVerbs(stmts []astNode, out map[string]map[string]bool) {
+	for _, s := range stmts {
+		switch s.kind() {
+		case "ClassDef":
+			name := s.str("name")
+			for _, m := range s.list("body") {
+				if m.kind() != "FunctionDef" {
+					continue
+				}
+				for _, verb := range bareVerbDecorators(m) {
+					if out[name] == nil {
+						out[name] = map[string]bool{}
+					}
+					out[name][verb] = true
+				}
+			}
+			collectDispatchVerbs(s.list("body"), out)
+		case "FunctionDef":
+			collectDispatchVerbs(s.list("body"), out)
+		}
+	}
+}
+
+// dispatchClasses selects the classes carrying two or more distinct bare verbs.
+// Two is the threshold because one verb is a coincidence a helper decorator can
+// produce; a `@get` AND a `@post` on sibling methods of one class is a routing
+// table.
+func dispatchClasses(verbs map[string]map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for class, vs := range verbs {
+		if len(vs) >= 2 {
+			out[class] = true
+		}
+	}
+	return out
 }
 
 // emitRouteSource emits the synthetic source CALL every route-handler taint

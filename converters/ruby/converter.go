@@ -27,7 +27,10 @@ package ruby_converter
 import (
 	_ "embed"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"godzilla/converters/frontend"
@@ -55,8 +58,10 @@ func NewConverter() *Converter {
 
 // IsRubyFile reports whether path is a Ruby source file this frontend lowers.
 // Exported so internal/scan's language detection and this frontend's own file
-// selection share ONE predicate instead of drifting copies.
-func IsRubyFile(path string) bool { return strings.HasSuffix(path, ".rb") }
+// selection share ONE predicate instead of drifting copies. ERB templates count:
+// a Rails view holds request input and output sinks, and erbToRuby turns one
+// into plain Ruby before it reaches Ripper.
+func IsRubyFile(path string) bool { return strings.HasSuffix(path, ".rb") || IsERBFile(path) }
 
 // batch builds the shared frontend.Batch driver with Ruby's hooks. A fresh
 // value per conversion: the Setup-resolved interpreter/helper paths are carried
@@ -105,13 +110,61 @@ type rbFileResult struct {
 // parse failure marks only that file, mirroring the old file-at-a-time error
 // semantics.
 func convertRubyChunk(rubyExe, scriptPath, root string, files []string, out []rbFileResult) {
-	proc.RunBatchScript("ruby_converter", "rbdump.rb", rubyExe, scriptPath, files, func(i int, doc any, err error) {
+	// Ripper reads paths, so an ERB template is stripped to Ruby on disk first.
+	// Only the PARSE path is redirected: the module name and every reported
+	// position stay on the original .erb, which erbToRuby keeps byte-aligned.
+	parse, cleanup := materializeERB(files, out)
+	defer cleanup()
+	proc.RunBatchScript("ruby_converter", "rbdump.rb", rubyExe, scriptPath, parse, func(i int, doc any, err error) {
 		if err != nil {
+			// RunBatchScript names the path it was handed, which for a template is
+			// the stripped copy. Report the .erb the user actually has.
+			if parse[i] != files[i] {
+				err = fmt.Errorf("%s (stripped from %s)", err, files[i])
+			}
 			out[i].err = err
 			return
 		}
 		out[i].mod = convertModule(doc, files[i], moduleNameFor(root, files[i]))
 	})
+}
+
+// materializeERB returns the paths to hand Ripper -- files unchanged except for
+// ERB templates, which are stripped to Ruby in a temp dir -- plus a cleanup. A
+// template that cannot be read or written records its error in out and keeps its
+// original path, so it fails as one file rather than taking the chunk down.
+func materializeERB(files []string, out []rbFileResult) ([]string, func()) {
+	var dir string
+	parse := slices.Clone(files)
+	for i, f := range files {
+		if !IsERBFile(f) {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			out[i].err = fmt.Errorf("ruby_converter: reading %s: %w", f, err)
+			continue
+		}
+		// One temp dir per chunk, created only once a template is actually seen,
+		// so a pure-.rb scan makes no directory at all.
+		if dir == "" {
+			if dir, err = os.MkdirTemp("", "godzilla-erb-"); err != nil {
+				out[i].err = fmt.Errorf("ruby_converter: %w", err)
+				continue
+			}
+		}
+		tmp := filepath.Join(dir, fmt.Sprintf("%d.rb", i))
+		if err := os.WriteFile(tmp, erbToRuby(src), 0o600); err != nil {
+			out[i].err = fmt.Errorf("ruby_converter: %w", err)
+			continue
+		}
+		parse[i] = tmp
+	}
+	return parse, func() {
+		if dir != "" {
+			_ = os.RemoveAll(dir)
+		}
+	}
 }
 
 // writeHelperScript materializes the embedded rbdump.rb into a temp file.
