@@ -137,9 +137,19 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 	// The two tiers stay APART because a suffix is weaker evidence than a full
 	// path: folding them into one map would let a vendored or duplicated copy of
 	// a module poison a key an exact match owns. Exact wins; suffixes fill gaps.
-	exact, exactAmbig := map[string]string{}, map[string]bool{}
-	suffix, suffixAmbig := map[string]string{}, map[string]bool{}
-	claim := func(idx map[string]string, ambig map[string]bool, key, canon string) {
+	//
+	// A key owned by more than one function stores `ambiguous` rather than a
+	// canonical, so one map carries both facts. Presizing matters here: the suffix
+	// index holds roughly one entry per dotted component, ~6x the function count,
+	// and growing from zero re-hashes through about twice the final bucket bytes.
+	const ambiguous = "" // never a real canonical: fn.CanonicalName == "" is skipped
+	nFuncs := 0
+	for _, m := range prog.GetModules() {
+		nFuncs += len(m.GetFunctions())
+	}
+	exact := make(map[string]string, nFuncs)
+	suffix := make(map[string]string, nFuncs*6)
+	claim := func(idx map[string]string, key, canon string) {
 		// A bare name is never a key: every key keeps at least `module.name`, which
 		// is what stops a single-component method callee (`x.execute`) from ever
 		// matching a function.
@@ -149,24 +159,24 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 		if prev, seen := idx[key]; !seen {
 			idx[key] = canon
 		} else if prev != canon {
-			ambig[key] = true
+			idx[key] = ambiguous
 		}
 	}
-	rawSet := map[string]bool{} // every function's raw canonical (exact-resolvable already)
+	rawSet := make(map[string]bool, nFuncs) // raw canonicals, already exact-resolvable
 	for _, fn := range irwalk.Funcs(prog) {
 		if fn.CanonicalName == "" {
 			continue
 		}
 		rawSet[fn.CanonicalName] = true
 		lp := logical(fn.CanonicalName)
-		claim(exact, exactAmbig, lp, fn.CanonicalName)
+		claim(exact, lp, fn.CanonicalName)
 		for s := lp; ; {
 			i := strings.IndexByte(s, '.')
 			if i < 0 {
 				break
 			}
 			s = s[i+1:]
-			claim(suffix, suffixAmbig, s, fn.CanonicalName)
+			claim(suffix, s, fn.CanonicalName)
 		}
 	}
 
@@ -176,10 +186,10 @@ func resolveCrossModuleCalls(prog *ir.Program) {
 	// always beats a suffix match.
 	resolve := func(calleeLogical string) string {
 		for s := calleeLogical; ; {
-			if raw, ok := exact[s]; ok && !exactAmbig[s] {
+			if raw := exact[s]; raw != ambiguous {
 				return raw
 			}
-			if raw, ok := suffix[s]; ok && !suffixAmbig[s] {
+			if raw := suffix[s]; raw != ambiguous {
 				return raw
 			}
 			i := strings.IndexByte(s, '.')
