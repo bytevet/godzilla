@@ -67,14 +67,8 @@ func sqlInjectionRuleSet(t testing.TB) *rules.RuleSet {
 
 // TestLogSQLInjectionCallees is a diagnostic test: it converts the real
 // sql_injection sample and logs every distinct Call.Callee the Go converter
-// actually produces today.
-//
-// This documents the real canonical-name scheme used to build the globs in
-// sqlInjectionRuleSet. (Historical note: the converter originally walked only
-// pkg.Members and dropped the anonymous http.HandleFunc closure where the
-// vulnerability lives; converters/go now enumerates all functions via
-// ssautil.AllFunctions, so that closure -- "godzilla/test/go/sql_injection.main$1"
-// -- is lowered and the flow is detectable end-to-end.)
+// produces, documenting the canonical-name scheme the globs in
+// sqlInjectionRuleSet are written against.
 func TestLogSQLInjectionCallees(t *testing.T) {
 	prog := convertSQLInjectionSample(t)
 	callees := distinctCallees(prog)
@@ -87,10 +81,9 @@ func TestLogSQLInjectionCallees(t *testing.T) {
 }
 
 // TestAnalyze_SQLInjection_RealConversion runs the engine against the *actual*
-// output of go_converter for the sql_injection sample. The converter now lowers
-// the vulnerable http.HandleFunc closure (SSA name main$1), so the full
-// source -> propagator -> sink flow is present in the IR and must be detected
-// end-to-end.
+// output of go_converter for the sql_injection sample: the vulnerable
+// http.HandleFunc closure (SSA name main$1) must be lowered, so the full
+// source -> propagator -> sink flow is detected end-to-end.
 func TestAnalyze_SQLInjection_RealConversion(t *testing.T) {
 	prog := convertSQLInjectionSample(t)
 	engine := NewEngine(sqlInjectionRuleSet(t))
@@ -122,12 +115,10 @@ func TestAnalyze_SQLInjection_RealConversion(t *testing.T) {
 //	    ...
 //	})
 //
-// It stands in for that closure once the converter is able to emit it (see
-// TestLogSQLInjectionCallees) using the exact real canonical callee names.
-// The shape mirrors the real SSA one-for-one for the relevant instructions:
-// a call to (net/url.Values).Get (source) is fed as an argument to
-// fmt.Sprintf (propagator), whose result is fed to (*database/sql.DB).Query
-// (sink) -- the canonical SQL injection pattern in the sample.
+// The shape mirrors the real SSA one-for-one for the relevant instructions,
+// using the exact canonical callee names (see TestLogSQLInjectionCallees):
+// (net/url.Values).Get (source) feeds fmt.Sprintf (propagator), whose result
+// feeds (*database/sql.DB).Query (sink).
 func TestAnalyze_SQLInjection_HandlerClosure(t *testing.T) {
 	const file = "../../test/go/sql_injection/main.go"
 	pos := func(line, col int32) *ir.Position {

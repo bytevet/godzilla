@@ -148,12 +148,10 @@ func validatorArgsOf(condReg string, defs map[string]*ir.Instruction, rule *rule
 		// Not a validator call itself: follow boolean-shaping operands (negation,
 		// comparison against a constant, type convert) toward the validator.
 		//
-		// compareIntrinsic has to be listed explicitly. A comparison used to lower
-		// to OP_CODE_BIN_OP and was covered by that arm; once the frontends moved
-		// it onto an inert intrinsic so it would stop PROPAGATING taint, this walk
-		// silently stopped following it, and `if validate(x) == true { ... }` no
-		// longer reached the validator. Not propagating and not being traceable are
-		// different properties, and only the first was intended.
+		// compareIntrinsic must be listed explicitly. It is inert to TAINT
+		// PROPAGATION by design, but that is a different property from being
+		// traceable: drop it here and `if validate(x) == true { ... }` stops
+		// reaching the validator.
 		switch {
 		case def.Op == ir.OpCode_OP_CODE_UN_OP,
 			def.Op == ir.OpCode_OP_CODE_BIN_OP,

@@ -62,9 +62,8 @@ func scaleRules(count int) *rules.RuleSet {
 }
 
 // BenchmarkEngine_RuleScaling measures Engine.Analyze as the rule pack grows.
-// The dominant inner cost is glob matching per (call-site × pattern); the
-// shape-specialized matcher keeps this ~3× cheaper than the prior backtracking
-// regexp, so competitive-scale rule packs stay affordable.
+// The dominant inner cost is glob matching per (call-site × pattern), which is
+// what keeps competitive-scale rule packs affordable.
 func BenchmarkEngine_RuleScaling(b *testing.B) {
 	prog := buildScaleProgram(500)
 	for _, n := range []int{1, 10, 50, 200} {
@@ -95,14 +94,10 @@ func inertRules(count int) *rules.RuleSet {
 }
 
 // BenchmarkEngine_InertRules is a REGRESSION GUARD, not a target to optimise.
-// Analyze used to spawn a goroutine and a full seeded worklist for every rule,
-// gated only on language, so a rule that could never fire still cost an
-// O(functions × instructions) walk. Adding 14 secret rules to the shipped pack
-// made that visible as a +76% allocation regression on a small scan.
-//
-// With the cannot-fire gate in Analyze, rule count must not matter here: all
-// three sub-benchmarks should report essentially the same ns/op and allocs/op.
-// If they start diverging, something has begun evaluating inert rules again.
+// A rule that cannot fire must cost no goroutine and no seeded worklist (see
+// canProduceFinding in Analyze), so rule count must not matter here: all three
+// sub-benchmarks should report essentially the same ns/op and allocs/op. If they
+// start diverging, something has begun evaluating inert rules again.
 func BenchmarkEngine_InertRules(b *testing.B) {
 	prog := buildScaleProgram(120)
 	for _, n := range []int{0, 14, 100} {

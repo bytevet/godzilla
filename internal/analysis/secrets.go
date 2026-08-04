@@ -47,14 +47,12 @@ func secretDetectorsOf(rs *rules.RuleSet) []secretDetector {
 // ruleID@position dedup set, the path-exclusion memo, and the findings so far.
 type secretScan struct {
 	dets []secretDetector
-	// pre is every detector's pattern ORed into one alternation regexp, used as
-	// a single-pass prefilter in text: RE2 compiles an alternation to one
-	// near-flat automaton, so the overwhelmingly common no-match string pays one
-	// scan instead of one per detector. Purely an optimization — a string that
-	// passes still runs each detector's own regexp, which alone decides the
-	// match and attributes it to its rule. nil (no detectors, or the union
-	// failed to compile) means no prefilter: the per-detector loop is the
-	// unchanged fallback.
+	// pre is every detector's pattern ORed into one alternation regexp, used as a
+	// single-pass prefilter in text so the common no-match string pays one scan
+	// instead of one per detector. Purely an optimization — a string that passes
+	// still runs each detector's own regexp, which alone decides the match and
+	// attributes it to its rule. nil (no detectors, or the union failed to
+	// compile) means no prefilter, and the per-detector loop stands alone.
 	pre      *regexp.Regexp
 	seen     map[string]bool // ruleID@position, for dedup
 	excluded map[string]bool // filename -> excluded, see pathExcluded
@@ -90,10 +88,9 @@ func combinedDetectorRe(dets []secretDetector) *regexp.Regexp {
 	return re
 }
 
-// pathExcluded is secretPathExcluded memoized per filename. Exclusion is a
-// property of the FILE, but was recomputed — lowercase, normalize, split — for
-// every string constant in the lowered dependency closure (123.5 MB of
-// allocations on a self-scan).
+// pathExcluded is secretPathExcluded memoized per filename: exclusion is a
+// property of the FILE, but is asked once per string constant in the whole
+// lowered dependency closure.
 func (s *secretScan) pathExcluded(filename string) bool {
 	if v, ok := s.excluded[filename]; ok {
 		return v
@@ -111,15 +108,12 @@ func (s *secretScan) text(str string, pos *ir.Position, lang, fn string) {
 	if str == "" || s.pathExcluded(pos.GetFilename()) {
 		return
 	}
-	// One pass over the union of all patterns rejects the common secret-free
-	// string before the per-detector loop (see secretScan.pre).
 	if s.pre != nil && !s.pre.MatchString(str) {
 		return
 	}
 	for _, d := range s.dets {
-		// Match BEFORE the language check: a miss is the overwhelmingly common case
-		// and MatchString is cheaper than AppliesTo's slice scan, so testing the
-		// regexp first keeps the rare-hit path from paying for the filter.
+		// Match BEFORE the language check: a miss is the common case and MatchString
+		// is cheaper than AppliesTo's slice scan.
 		if !d.re.MatchString(str) || !d.rule.AppliesTo(lang) {
 			continue
 		}
@@ -162,10 +156,9 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		}
 	}
 	for mod, fn := range irwalk.Funcs(prog) {
-		// Exclusion is a property of the file, and a function has exactly one, so
-		// testing it here skips an excluded dependency's blocks and operands
-		// outright rather than re-testing per string constant. A function with no
-		// Pos falls through to the per-string check in text.
+		// Exclusion is a property of the file, so testing it here skips an excluded
+		// dependency's whole body. A function with no Pos falls through to the
+		// per-string check in text.
 		if s.pathExcluded(fn.GetPos().GetFilename()) {
 			continue
 		}
@@ -189,19 +182,15 @@ func ScanSecrets(prog *ir.Program, rs *rules.RuleSet) []Finding {
 const secretFileMaxBytes = 5 << 20 // 5 MiB
 
 // ScanSecretsInFiles walks root for textual CONFIG files that the language
-// frontends never parse — .env, docker-compose.yml, Dockerfile, CI YAML,
-// .npmrc, .properties, Terraform, and the like — and applies the secret
-// patterns line by line, reporting file:line positions. This closes the biggest
-// secret-leak vector: a credential committed to a config file rather than
-// source code, which the gIR-constant scanner (ScanSecrets) cannot see. Source
-// files handled by a frontend are skipped here (their string literals are
-// already covered by ScanSecrets) to avoid double-reporting: isSource is the
-// caller's REQUIRED "a language frontend handles this path" predicate
-// (internal/scan derives it from its frontend table, the single source of
-// truth for supported extensions). root may be a file or a directory; a
-// non-existent path yields no findings. It gathers the pruned file list and
-// delegates to ScanSecretsInPaths; the scan pipeline calls that directly off
-// its cached inventory instead of walking here.
+// frontends never parse — .env, docker-compose.yml, Dockerfile, CI YAML, .npmrc,
+// .properties, Terraform, and the like — and applies the secret patterns line by
+// line, reporting file:line positions. This covers a credential committed to a
+// config file rather than source code, which the gIR-constant scanner
+// (ScanSecrets) cannot see. Source files handled by a frontend are skipped to
+// avoid double-reporting: isSource is the caller's REQUIRED "a language frontend
+// handles this path" predicate (internal/scan derives it from its frontend table,
+// the single source of truth for supported extensions). root may be a file or a
+// directory; a non-existent path yields no findings.
 func ScanSecretsInFiles(root string, rs *rules.RuleSet, isSource func(path string) bool) []Finding {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -302,10 +291,8 @@ func isScannableConfigFile(path string) bool {
 //   - directories that DO hold first-party source (so the walk keeps them) yet
 //     whose credential-shaped strings are fixture/example/translation data.
 //
-// The real-world CVE benchmark showed these were the dominant secret-scan false
-// positives — example JWTs in an OpenAPI schema, connection-string-shaped values
-// in translation JSON, an SSH cert inside a vendored crypto library. Scanning them
-// costs precision at the CI gate for no real signal.
+// These were the dominant secret-scan false positives on the real-world CVE
+// benchmark: scanning them costs precision at the CI gate for no real signal.
 //
 // The vendored/build/venv/cache directories walkignore already prunes are handled
 // by reusing walkignore.SkipDir below (single source of truth) rather than being

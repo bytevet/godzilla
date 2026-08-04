@@ -17,13 +17,10 @@ import (
 // Build one with buildCallGraph, over the shared function/method indexes
 // (buildFuncIndex, buildMethodImpls).
 type CallGraph struct {
-	// Funcs indexes every function in the program by its CanonicalName
-	// (e.g. "go:net/http.HandleFunc" or
-	// "go:godzilla/test/go/sql_injection.main$1"). A function with an empty
-	// CanonicalName (gIR always sets it for real converter output) gets a
-	// unique "__local<N>" fallback key, so it is still analyzed
-	// intra-procedurally — this is the ONE name->function index, shared with
-	// Analyze (see buildFuncIndex).
+	// Funcs indexes every function in the program by its CanonicalName. A function
+	// with an empty one gets a unique "__local<N>" fallback key so it is still
+	// analyzed intra-procedurally. This is the ONE name->function index, shared
+	// with Analyze (see buildFuncIndex).
 	Funcs map[string]*ir.Function
 
 	// Edges maps a caller's CanonicalName to a sorted, de-duplicated list
@@ -35,34 +32,29 @@ type CallGraph struct {
 	// callers, so it never appears as an Edges key.
 	Edges map[string][]string
 
-	// Callees is the set of DISTINCT callee names this program calls, including
-	// the unresolved ones Edges drops (unlowered stdlib, dynamic dispatch). It is
-	// collected here rather than by a separate walk because this pass already
-	// visits every instruction — the engine uses it to skip a rule whose sink
-	// globs match nothing the program calls, and a second walk to build it cost
-	// more on a dependency-heavy scan than the skipping saved.
+	// Callees is the set of DISTINCT callee names this program calls, including the
+	// unresolved ones Edges drops (unlowered stdlib, dynamic dispatch). The engine
+	// uses it to skip a rule whose sink globs match nothing the program calls; it
+	// is collected here rather than by a separate walk because this pass already
+	// visits every instruction, and a second walk cost more than the skipping saved.
 	Callees map[string]bool
 }
 
 // buildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
 // INTRINSIC-with-a-Call instruction (the latter covers go.defer/go.goroutine),
-// over a prebuilt function index (buildFuncIndex) and CHA method index
-// (buildMethodImpls). Analyze needs both indexes anyway, so it passes its
-// copies in here rather than letting the graph rebuild them — one index, one
-// policy, for both consumers.
+// over the prebuilt function index (buildFuncIndex) and CHA method index
+// (buildMethodImpls) Analyze passes in — one index, one policy, for both
+// consumers.
 //
-//   - A direct call (not IsInvoke, no MethodName) resolves through Call.Callee,
-//     adding one edge if we have gIR for that function and dropping it otherwise
-//     — calls into net/http, fmt and the rest of the unlowered stdlib.
+//   - A direct call resolves through Call.Callee, adding one edge if we have gIR
+//     for that function and dropping it otherwise (the unlowered stdlib).
 //
-//   - Dynamic dispatch (IsInvoke, or MethodName set as a defensive fallback for
-//     IR that records a method call without the flag) resolves by Class
-//     Hierarchy Analysis over the same bare-method-name index the engine's
-//     INVOKE dispatch uses (buildMethodImpls): an edge to every known function
-//     whose Function.method_name equals the call's method name. This
-//     over-approximates on purpose, linking types that share a method name
-//     without sharing an interface: for a caller-index primitive, never missing
-//     a real edge beats precision, and a points-to analysis is out of scope.
+//   - Dynamic dispatch (IsInvoke) resolves by Class Hierarchy Analysis over the
+//     same bare-method-name index the engine's INVOKE dispatch uses: an edge to
+//     every known function whose Function.method_name matches. This
+//     over-approximates on purpose, linking types that share a method name without
+//     sharing an interface — for a caller-index primitive, never missing a real
+//     edge beats precision, and a points-to analysis is out of scope.
 //
 // A call naming neither (an unresolved dynamic value) is dropped.
 func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]string) *CallGraph {

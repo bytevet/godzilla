@@ -11,9 +11,8 @@ import (
 // into a package-level global by one function and read back by another must
 // flow through the global to a sink. The flow crosses a function boundary via
 // program-wide state, so the finding is Medium confidence (the tier the LLM
-// reviewer adjudicates). Before ENG-6 a store to a global dropped the taint
-// entirely — a silent false negative for the very common "stash request data
-// in a package var" idiom.
+// reviewer adjudicates). Without it the very common "stash request data in a
+// package var" idiom is a silent false negative.
 func TestAnalyze_GlobalTaintFlow(t *testing.T) {
 	conv := go_converter.NewConverter()
 	prog, err := conv.ConvertFile("../../test/go/global_taint/main.go")
@@ -81,8 +80,8 @@ func TestAnalyze_GlobalTaintSafe(t *testing.T) {
 // writes request data into its out-pointer parameter taints the caller's local,
 // so a downstream sink on that local must fire. The taint reaches the caller
 // through a pointer across a function boundary, so it is Medium confidence.
-// Before ENG-6b a store through a parameter was invisible to callers — a silent
-// false negative for the out-parameter-fill idiom (parsers, binders, decoders).
+// Without it the out-parameter-fill idiom (parsers, binders, decoders) is a
+// silent false negative.
 func TestAnalyze_OutParamFill(t *testing.T) {
 	conv := go_converter.NewConverter()
 	prog, err := conv.ConvertFile("../../test/go/outparam_fill/main.go")

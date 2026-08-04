@@ -34,35 +34,26 @@ const formatIntrinsic = "builtin.format"
 // matching any language's conversion-callee name.
 const identityIntrinsic = "builtin.identity"
 
-// compareIntrinsic is the language-neutral marker a frontend sets on a
-// COMPARISON. Its result is a bool -- influence, not content -- so it must not
-// propagate operand taint, which it achieves by being an intrinsic absent from
-// intrinsicPropagators rather than a BIN_OP (every BIN_OP propagates).
-//
-// It is a CROSS-FRONTEND contract: Go, JavaScript, Python and Ruby all emit it.
-// The engine still has to FOLLOW it when tracing a branch condition back to a
-// validator (see guards.go), which is the one place a comparison's operands
-// matter even though its taint does not.
+// compareIntrinsic is the CROSS-FRONTEND marker for a COMPARISON. Its result is a
+// bool -- influence, not content -- so it must not propagate operand taint, which
+// it achieves by being an intrinsic absent from intrinsicPropagators rather than a
+// BIN_OP (every BIN_OP propagates). The engine still has to FOLLOW it when tracing
+// a branch condition back to a validator (see guards.go), which is the one place a
+// comparison's operands matter even though its taint does not.
 const compareIntrinsic = "builtin.compare"
 
-// memberReadIntrinsic marks a synthesized member read (`obj.field` lowered as a
-// CALL so its name can match a source glob) whose base the frontend kept in
-// Call.Value. The engine carries that base's taint to the result: reading a
-// property off a tainted object yields tainted data, which no rule models because
-// it is not a transform.
-//
-// It is a CROSS-FRONTEND contract, not a JS detail: any frontend that lowers a
-// member read as a synthetic call should set it rather than inventing another
-// mechanism. JS (converters/javascript emitRootPropertyRead) and Python
-// (converters/python lowerSubscript) both emit it.
+// memberReadIntrinsic is the CROSS-FRONTEND marker for a synthesized member read
+// (`obj.field` lowered as a CALL so its name can match a source glob) whose base
+// the frontend kept in Call.Value. The engine carries that base's taint to the
+// result: reading a property off a tainted object yields tainted data, which no
+// rule models because it is not a transform.
 const memberReadIntrinsic = "builtin.member_read"
 
 // kwargIntrinsic tags a named-argument marker a frontend emits to keep a keyword
 // argument's NAME available to rule guards: Args[0] is the name (a string
 // constant), Args[1] the value it wraps. gIR's CallCommon carries only positional
 // args, and a call site may pass keywords in any order, so without this marker
-// `shell=True` is indistinguishable from `check=True` once lowered. Modeling it
-// as an intrinsic keeps the frozen gIR schema untouched.
+// `shell=True` is indistinguishable from `check=True` once lowered.
 //
 // Frontends wrap only CONSTANT values, so the marker never hides taint: it is
 // deliberately absent from intrinsicPropagators, and everything that reads an
@@ -116,7 +107,8 @@ func urlHostControllable(injectable []*ir.Value, tainted taintState, defs map[st
 // constSkeleton reconstructs v's string construction as a skeleton for a dynamic
 // guard: constant runs verbatim, rules.DynMarker for each dynamic (non-constant)
 // run. It returns the skeleton and whether the WHOLE value is constant. It does
-// not stop at the first dynamic leaf — it emits a marker and continues — so a guard can inspect constant pieces anywhere in the argument.
+// not stop at the first dynamic leaf — it emits a marker and continues — so a
+// guard can inspect constant pieces anywhere in the argument.
 func constSkeleton(v *ir.Value, defs map[string]*ir.Instruction, seen map[string]bool) (string, bool) {
 	if s, ok := constStr(v); ok {
 		return s, true
