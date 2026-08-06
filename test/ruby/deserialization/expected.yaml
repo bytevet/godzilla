@@ -1,0 +1,8 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Marshal.load and YAML.load on request data; safe_load, JSON.parse and the
+# constant-path load must stay clean, which max: 2 pins.
+findings:
+    - rule: ruby-insecure-deserialization
+      min: 2
+      max: 2
