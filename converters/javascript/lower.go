@@ -15,18 +15,15 @@ import (
 // funcState holds the per-function lowering state. Variable values and the
 // per-block instruction stream are owned by an ssabuild.Builder (real CFG +
 // on-demand PHI insertion, Braun et al.); `cur` is the block currently being
-// lowered into (threaded through the AST walk instead of appending to one flat
-// instruction list). `assigned` tracks which JS names have been written as a
-// local SO FAR in the traversal — it replaces the old env's key-presence test
-// (is this bare name a bound local, or a free identifier / global / import?)
-// that the Builder's per-block value map cannot answer directly. `paramRegs`
-// is the set of register names that are this function's own parameters (see
-// isOpaqueBase); `terminated` reports whether the current block has already
-// emitted a block-terminating RET (an explicit `return`), so a returning arm is
-// not wired into a merge / loop header / switch fall-through as a predecessor.
-// `nameOf` is the shared node->canonical-name map built by the collector (so an
-// inline function expression/arrow used as a value resolves to a FuncName
-// reference to its already-lowered ir.Function instead of being inlined again).
+// lowered into. `assigned` answers what the Builder's per-block value map
+// cannot: is this bare name a bound local, or a free identifier / global /
+// import? `paramRegs` is the set of registers that are this function's own
+// parameters (see isOpaqueBase); `terminated` reports whether the current block
+// already emitted a RET, so a returning arm is not wired into a merge / loop
+// header / switch fall-through as a predecessor. `nameOf` is the collector's
+// shared node->canonical-name map, so an inline function expression/arrow used
+// as a value resolves to a FuncName reference to its already-lowered
+// ir.Function instead of being inlined again.
 type funcState struct {
 	filename   string
 	fset       *file.FileSet
@@ -120,10 +117,8 @@ func (fs *funcState) newReg() string {
 	return r
 }
 
-// posForIdx resolves a goja file.Idx to a gIR Position via the file's
-// FileSet, returning nil when unavailable (matching converters/go's
-// convertPos and converters/python's posFromNode, which both return nil for
-// an invalid/unknown position).
+// posForIdx resolves a goja file.Idx to a gIR Position, returning nil when
+// unavailable.
 func posForIdx(fset *file.FileSet, filename string, idx file.Idx) *ir.Position {
 	if fset == nil || idx == 0 {
 		return nil
@@ -141,22 +136,20 @@ func (fs *funcState) newValueInst(idx file.Idx) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posForIdx(fs.fset, fs.filename, idx)}
 }
 
-// newVoidInst allocates a fresh instruction with no result register (for
-// STORE/RET).
+// newVoidInst allocates a fresh instruction with no result register (STORE/RET).
 func (fs *funcState) newVoidInst(idx file.Idx) *ir.Instruction {
 	return &ir.Instruction{Pos: posForIdx(fs.fset, fs.filename, idx)}
 }
 
-// emit appends an instruction to the block currently being lowered.
 func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
 
 // read returns the SSA value current for a JS local in the current block,
 // inserting PHIs on demand (branch joins / loop headers) via the Builder.
 func (fs *funcState) read(name string) *ir.Value { return fs.b.ReadVariable(name, fs.cur) }
 
-// write records val as the current value of a JS local name in the current
-// block and marks the name as assigned (so a later bare read resolves it as a
-// variable rather than a free identifier / global / import).
+// write records val as the current value of a JS local, marking the name
+// assigned so a later bare read resolves it as a variable rather than a free
+// identifier / global / import.
 func (fs *funcState) write(name string, val *ir.Value) {
 	fs.b.WriteVariable(name, fs.cur, val)
 	fs.assigned[name] = true
@@ -197,20 +190,15 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 }
 
 // emitPromiseContinuation models `p.then(cb)` by emitting the call it actually
-// performs at runtime: cb(<p's resolved value>).
-//
-// Without it a promise is a wall taint cannot cross, and in modern Node that wall
-// sits across the middle of most request handling. parse-server is the case that
-// forced this: its router reads `req.body` in one function which RETURNS a value,
-// and a generic `.then(result => ...)` callback several frames away writes the
-// response — 234 `.then` calls hold that architecture together, and not one flow
-// survived the hop, so a 3,225-function lowering produced zero findings.
+// performs at runtime: cb(<p's resolved value>). Without it a promise is a wall
+// taint cannot cross, and in modern Node that wall sits across the middle of
+// most request handling.
 //
 // The continuation is emitted as an INDIRECT call (no callee name, the callback
-// in Call.Value), which is exactly the shape the engine's higher-order machinery
-// already resolves through its points-to set — so this needs no engine change,
-// and it inherits that path's singleton-only discipline: a `.then` whose callback
-// cannot be resolved unambiguously binds nothing rather than guessing.
+// in Call.Value), the shape the engine's higher-order machinery already resolves
+// through its points-to set — so this needs no engine change, and it inherits
+// that path's singleton-only discipline: a `.then` whose callback cannot be
+// resolved unambiguously binds nothing rather than guessing.
 //
 // The receiver stands in for the resolved value, which is what makes the chain
 // work: a tainted promise yields a tainted callback parameter. Only `.then`'s
@@ -257,11 +245,8 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 }
 
 // moduleCtx bundles the file-scoped state every function lowered from one JS
-// module needs. It exists so lowerFunction takes one context instead of nine
-// positional parameters, and — more importantly — so the module-scoped funcState
-// fields are primed in exactly ONE place (newFuncState below); the <module>
-// function and each real function used to prime them separately, with nothing
-// keeping the two lists in sync.
+// module needs, so the module-scoped funcState fields are primed in exactly ONE
+// place (newFuncState below) rather than once per call site.
 type moduleCtx struct {
 	filename         string
 	moduleName       string
@@ -284,11 +269,9 @@ func (m *moduleCtx) newFuncState() *funcState {
 	return fs
 }
 
-// lowerFunction lowers one collected function (declaration, function
-// expression, or arrow function) into an ir.Function whose body is a REAL CFG
-// (blocks + preds/succs + on-demand PHI) built by an ssabuild.Builder. A
-// function with no branches still emits exactly ONE block (the engine's linear
-// fast path).
+// lowerFunction lowers one collected function (declaration, function expression,
+// or arrow function) into an ir.Function whose body is a REAL CFG built by an
+// ssabuild.Builder.
 func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 	filename, fset := m.filename, m.fset
 	fn := &ir.Function{
@@ -328,12 +311,9 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 }
 
 // bindParams binds each parameter (and the rest parameter, if any) to a
-// register named after the parameter itself, mirroring converters/python's
-// convertFunction (which uses the Python parameter name directly as its gIR
-// register name rather than allocating a fresh "tN" temp). Destructuring
-// parameters (ObjectPattern/ArrayPattern) are a documented limitation: given
-// a synthetic "_argN" name so the parameter list stays positionally aligned,
-// but the pattern's own bindings are not modeled.
+// register named after the parameter itself. Destructuring parameters
+// (ObjectPattern/ArrayPattern) get a synthetic "_argN" name so the parameter
+// list stays positionally aligned; the pattern's own bindings are not modeled.
 func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 	bind := func(name string) {
 		v := ssabuild.Reg(name)
@@ -352,11 +332,8 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 		// the request-source globs regardless of the parameter's actual name.
 		if i == 0 && fs.isHandler {
 			fs.reqParam = name
-			// A handler that destructures its request object in the signature —
-			// `(req, res) => ...` written as `({ query, body }, res) => ...` — has
-			// no `req.query` member read to seed taint from. Bind each destructured
-			// property to a synthetic `js:req.<key>` source read so it matches the
-			// request-source globs exactly as an in-body `req.query` access would (COV-11).
+			// A signature-destructured request object — `({ query, body }, res) =>`
+			// — has no `req.query` member read to seed taint from (COV-11).
 			if pat, ok := b.Target.(*ast.ObjectPattern); ok {
 				fs.bindHandlerDestructure(pat)
 			}
@@ -371,11 +348,8 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 
 // bindHandlerDestructure binds each property of a route handler's destructured
 // request parameter — `({ query, body: b }, res) => ...` — to a synthetic
-// `js:req.<key>` source read, so the local (`query`, `b`) carries request taint
-// exactly as an in-body `req.query` member read would. Only plain, non-computed
-// shorthand/keyed properties are modeled (`{ query }`, `{ query: q }`); a nested
-// or computed pattern is skipped (a documented limitation), mirroring how the
-// positional-parameter path leaves unhandled patterns as opaque _argN slots.
+// `js:req.<key>` source read, so the local carries request taint exactly as an
+// in-body `req.query` member read would. Nested/computed patterns are skipped.
 func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
 	for _, b := range objectPatternBindings(pat) {
 		if b.Key == "" || b.Local == "" {
@@ -400,15 +374,11 @@ func (fs *funcState) lowerConciseBody(body ast.ConciseBody) {
 	}
 }
 
-// isOpaqueBase reports whether v is a value whose origin is outside this
-// function's own straight-line computation: either a free/global identifier
-// (Value_GlobalName, e.g. an unrequired/undeclared name like `child_process`
-// or `console`) or one of this function's own parameters (Value_RegName for
-// a name in fs.paramRegs, e.g. an Express handler's `req`). See the package
-// doc comment ("The opaque object source heuristic") for why both cases are
-// treated the same way: property reads off either kind of value are the
-// first opportunity to introduce taint, since the engine only ever seeds
-// taint at a CALL matching a source glob.
+// isOpaqueBase reports whether v originates outside this function's own
+// straight-line computation: a free/global identifier (Value_GlobalName) or one
+// of this function's own parameters (a Value_RegName in fs.paramRegs, e.g. an
+// Express handler's `req`). Both are treated alike — see the package doc's
+// "opaque object source heuristic".
 func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 	if v == nil {
 		return "", false
@@ -422,13 +392,12 @@ func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 	return "", false
 }
 
-// canonRoot canonicalizes a PARAMETER name used as an opaque member-read root.
-// A route handler's request parameter (any name) canonicalizes to `req` so
-// property reads off it (`rq.query` -> "js:req.query") match the request-source
-// globs, which are keyed on the conventional names (COV-11). Shared by
-// isOpaqueBase and opaqueRootFor's AST fallback: the two must agree, or a
-// request read inside a loop is named differently from the same read outside it
-// and its taint is silently dropped.
+// canonRoot canonicalizes a PARAMETER name used as an opaque member-read root:
+// a route handler's request parameter (any name) becomes `req` so property reads
+// off it (`rq.query` -> "js:req.query") match the request-source globs, which are
+// keyed on the conventional names (COV-11). isOpaqueBase and opaqueRootFor's AST
+// fallback must both route through this, or a request read inside a loop is named
+// differently from the same read outside it and its taint is silently dropped.
 func (fs *funcState) canonRoot(name string) string {
 	if name == fs.reqParam && !reqConventionNames[name] {
 		return "req"
@@ -437,18 +406,18 @@ func (fs *funcState) canonRoot(name string) string {
 }
 
 // opaqueRootFor classifies the base of a member read (`base.field` / `base[i]`)
-// as an opaque source root, given both the base AST expression and its lowered
-// value. It first tries the value-based isOpaqueBase (which also handles an
-// intra-block alias like `const r = req; r.query` and non-identifier bases such
-// as `this`), then falls back to an AST-name check for a plain identifier base.
+// as an opaque source root. It first tries the value-based isOpaqueBase (which
+// also handles an intra-block alias like `const r = req; r.query` and
+// non-identifier bases such as `this`), then falls back to an AST-name check for
+// a plain identifier base.
 //
 // The AST fallback is required inside loops: reading a parameter in a loop body
-// returns an as-yet-unresolved header PHI value whose register name is the PHI,
-// not the parameter, so isOpaqueBase would miss it (the PHI collapses back to the
-// parameter only when the header is sealed, after the body is lowered) — and the
-// member read would wrongly become a plain FIELD instead of the synthetic source
-// CALL, dropping loop-carried request taint. A free/global identifier is never
-// tracked as a variable, so it is never PHI-wrapped; only a parameter needs this.
+// returns an as-yet-unresolved header PHI whose register name is the PHI, not the
+// parameter (it collapses back only when the header is sealed, after the body is
+// lowered), so isOpaqueBase misses it and the member read wrongly becomes a plain
+// FIELD instead of the synthetic source CALL, dropping loop-carried request taint.
+// A free/global identifier is never tracked as a variable, so it is never
+// PHI-wrapped; only a parameter needs this.
 func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bool) {
 	if root, ok := fs.isOpaqueBase(base); ok {
 		return root, ok
@@ -472,21 +441,17 @@ func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bo
 // "js:<root>.<field>", so it can match a rule's source glob (e.g.
 // "js:*req.query*") exactly like a real call would.
 //
-// When the base is a REGISTER it is also carried in Call.Value — the same place
-// emitCallRecvInst puts a method call's receiver — and the instruction is tagged
-// builtin.member_read so the engine propagates that receiver's taint to the
-// result. Without it the base was simply dropped, so reading a property off an
-// already-tainted parameter produced a CLEAN register: `use(mk(req))` where
-// `use(o){sink(o.field)}` found nothing, while the scalar equivalent fired. That
-// is the shape most request data takes once it crosses a function boundary.
-//
-// A parameter is an opaque base whether it holds a framework request object or
-// ordinary data, and the two need opposite things: the former must INTRODUCE
-// taint via the callee glob (it is not itself tainted — see internal/analysis
-// doc.go on request sources), the latter must CARRY the taint it already has.
-// Naming the callee exactly as before serves the first; the receiver serves the
-// second. A non-register base (a global, `this`, a closure-captured free name)
-// keeps the plain FuncName form, which leaves that whole branch untouched.
+// When the base is a REGISTER it is also carried in Call.Value — where
+// emitCallRecvInst puts a method call's receiver — and tagged
+// builtin.member_read so the engine propagates the receiver's taint to the
+// result. Both are needed because a parameter is an opaque base whether it holds
+// a framework request object or ordinary data, and the two want opposite things:
+// the former must INTRODUCE taint via the callee glob (it is not itself tainted —
+// see internal/analysis doc.go on request sources), the latter must CARRY the
+// taint it already has. Drop the receiver and `use(mk(req))` with
+// `use(o){sink(o.field)}` reads clean, which is the shape most request data takes
+// once it crosses a function boundary. A non-register base (a global, `this`, a
+// closure-captured free name) keeps the plain FuncName form.
 func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, idx file.Idx) *ir.Value {
 	callee := "js:" + root + "." + field
 	inst := fs.newValueInst(idx)
@@ -502,11 +467,9 @@ func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, id
 }
 
 // lowerBody lowers a statement list, building a REAL CFG (blocks + preds/succs +
-// PHI) via the Builder for control-flow compounds (if/for/for-in/for-of/while/
-// do-while/switch/try) and lowering straight-line statements (labelled/with and
-// leaf statements) into the current block, so a function with no branches still
-// emits exactly ONE block (the engine's linear fast path). Mirrors
-// converters/python's lowerBody.
+// PHI) via the Builder for control-flow compounds and lowering straight-line
+// statements into the current block, so a function with no branches still emits
+// exactly ONE block (the engine's linear fast path).
 func (fs *funcState) lowerBody(stmts []ast.Statement) {
 	for _, s := range stmts {
 		switch v := s.(type) {
@@ -544,15 +507,13 @@ func (fs *funcState) lowerBody(stmts []ast.Statement) {
 }
 
 // lowerIf lowers `if (test) consequent [else alternate]` into a REAL CFG
-// diamond via the Builder's IfDiamond scaffold, so any variable rebound on one
-// or both arms reconciles automatically via an on-demand ReadVariable PHI
-// (retiring the manual env-merge path — including the ubiquitous "default if
-// empty" idiom `if (!x) x = "d"`, whose pre-branch tainted value is now kept
-// by the merge PHI). An `else if` is an IfStatement in the parent's Alternate,
-// so an arbitrarily long chain becomes nested diamonds via the recursive
-// lowerBody.
+// diamond via the Builder's IfDiamond scaffold, so a variable rebound on either
+// arm reconciles via an on-demand ReadVariable PHI — which is what keeps the
+// pre-branch tainted value in the "default if empty" idiom `if (!x) x = "d"`.
+// An `else if` is an IfStatement in the parent's Alternate, so a chain becomes
+// nested diamonds via the recursive lowerBody.
 func (fs *funcState) lowerIf(v *ast.IfStatement) {
-	cond := fs.lowerExpr(v.Test) // condition (also lowers any embedded source/sink)
+	cond := fs.lowerExpr(v.Test)
 	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
 		func() { fs.lowerBody(stmtList(v.Consequent)) },
 		func() {
@@ -582,11 +543,9 @@ func (fs *funcState) lowerDoWhile(v *ast.DoWhileStatement) {
 }
 
 // lowerFor lowers a C-style `for (init; test; update) body` into the HeaderLoop
-// CFG. The initializer runs once in the pre-loop (current) block; the header
-// evaluates the test (a missing test is an opaque always-true, so both body and
-// exit are traversed) and branches to body or exit; the update runs at the END
-// of the body block, before the back-edge to the header. Reassignments/
-// accumulations in the body or update flow through the header PHI, modeling
+// CFG. A missing test is an opaque always-true, so both body and exit are
+// traversed; the update runs at the END of the body block, before the back-edge.
+// Reassignments in the body or update flow through the header PHI, modeling
 // loop-carried taint.
 func (fs *funcState) lowerFor(v *ast.ForStatement) {
 	if v.Initializer != nil {
@@ -608,12 +567,9 @@ func (fs *funcState) lowerFor(v *ast.ForStatement) {
 }
 
 // lowerForRange lowers `for (into in|of source) body` into the same HeaderLoop
-// CFG as lowerWhile. The source is lowered once in the pre-loop block; the loop
-// variable (into) is bound to the source's value at the top of the BODY block
-// each iteration (element taint == container taint, so a tainted iterable
-// taints the loop variable, mirroring converters/python's for-loop target
-// binding). Reassignments/accumulations in the body flow through the header
-// PHI, modeling loop-carried taint.
+// CFG as lowerWhile. The loop variable is bound to the source's value at the top
+// of the BODY block each iteration (element taint == container taint, so a
+// tainted iterable taints the loop variable).
 func (fs *funcState) lowerForRange(into ast.ForInto, source ast.Expression, bodyStmt ast.Statement) {
 	src := fs.lowerExpr(source) // evaluate the iterable in the pre-loop block
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
@@ -645,23 +601,20 @@ func (fs *funcState) bindForInto(into ast.ForInto, val *ir.Value) {
 }
 
 // lowerSwitch lowers `switch (disc) { case ...: ... }` conservatively (a
-// may-analysis; break is NOT modeled precisely). The discriminant is lowered in
-// the current block, which begins a cascade of two-way decision branches so
-// EVERY case block (and the exit, for the no-match path) is reachable. Each
-// case's consequent is lowered into its own block and FALLS THROUGH to the next
-// case's block (the last case falls through to exit), so taint written in any
-// case — and a value that fall-through carries into a later case — is captured.
-// `default` is just one of the cases and needs no special handling (every case
-// is reachable). See converters/python's conservative Try model for the same
-// "opaque branch to reach every relevant block" idea.
+// may-analysis; break is NOT modeled precisely). A cascade of two-way decision
+// branches makes EVERY case block (and the exit, for the no-match path)
+// reachable; each case's consequent lowers into its own block and FALLS THROUGH
+// to the next (the last to exit), so taint written in any case — and carried by
+// fall-through into a later case — is captured. `default` needs no special
+// handling since every case is reachable.
 func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
 	disc := fs.lowerExpr(v.Discriminant)
 	n := len(v.Body)
 	if n == 0 {
 		return // empty switch: discriminant already lowered for side effects
 	}
-	// Lower each case's test expression (for an embedded source/sink) in the
-	// discriminant block; the boolean result is not otherwise needed.
+	// Lower each case's test in the discriminant block for an embedded
+	// source/sink; the boolean result is not otherwise needed.
 	for _, cs := range v.Body {
 		if cs.Test != nil {
 			fs.lowerExpr(cs.Test)
@@ -690,9 +643,8 @@ func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
 		}
 	}
 
-	// Lower each case body; add the conservative fall-through edge to the next
-	// case (or exit for the last). A case block's predecessors — its decision
-	// edge and the prior case's fall-through — are both wired before it is lowered.
+	// A case block's predecessors — its decision edge and the prior case's
+	// fall-through — are both wired before it is lowered, so it can be sealed here.
 	for i := 0; i < n; i++ {
 		fs.b.Seal(caseBlocks[i])
 		fs.cur = caseBlocks[i]
@@ -714,16 +666,14 @@ func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
 }
 
 // lowerTry lowers `try { body } [catch (e) { handler }] [finally { fin }]`
-// conservatively (a may-analysis; no exception typing), mirroring
-// converters/python's lowerTry. The try body is lowered into the current block.
-// An EXCEPTION EDGE then models that an exception may occur anywhere in the body:
-// the body-end block branches to the catch block or to an after block, so a
-// value a source in the try body assigned reaches the handler via that
-// predecessor edge (and, through the after block, code following the try).
-// `finally` runs on both paths, so it is lowered into the after block. A
-// try/finally with no catch is a straight-line continuation. When the body
-// always returns there is no exception edge (the handler's body-var reads are
-// then undefined — a minor recall gap, never a false positive).
+// conservatively (a may-analysis; no exception typing). An EXCEPTION EDGE models
+// that an exception may occur anywhere in the body: the body-end block branches
+// to the catch block or to an after block, so a value assigned by a source in the
+// try body reaches the handler via that predecessor edge (and, through the after
+// block, code following the try). `finally` runs on both paths, so it lowers into
+// the after block. A try/finally with no catch is a straight-line continuation.
+// When the body always returns there is no exception edge (the handler's body-var
+// reads are then undefined — a minor recall gap, never a false positive).
 func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	if v.Body != nil {
 		fs.lowerBody(v.Body.List)
@@ -732,7 +682,6 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	bodyTerm := fs.terminated
 
 	if v.Catch == nil {
-		// try/finally with no catch clause: finally is a straight-line continuation.
 		if v.Finally != nil {
 			fs.lowerBody(v.Finally.List)
 		}
@@ -742,9 +691,7 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	handlerB := fs.b.NewBlock()
 	after := fs.b.NewBlock()
 	if !bodyTerm {
-		// Exception edge: the body may branch into the handler, else fall through to
-		// the after block. The condition is opaque (both edges are traversed).
-		fs.b.SetIf(bodyEnd, ssabuild.Str(""), handlerB, after)
+		fs.b.SetIf(bodyEnd, ssabuild.Str(""), handlerB, after) // opaque condition: both edges traversed
 	}
 	fs.b.Seal(handlerB) // sole predecessor (bodyEnd) known, if any
 
@@ -763,7 +710,7 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	fs.cur = after
 	fs.terminated = bodyTerm && handlerTerm
 	if v.Finally != nil {
-		fs.lowerBody(v.Finally.List) // finally runs on both the normal and handler paths
+		fs.lowerBody(v.Finally.List)
 	}
 }
 
@@ -805,21 +752,18 @@ func (fs *funcState) lowerStmt(s ast.Statement) {
 			inst.Operands = []*ir.Value{fs.lowerExpr(v.Argument)}
 		}
 		fs.emit(inst)
-		// The current block ends here: no fall-through edge to a merge / loop
-		// header / switch fall-through (a returning arm must not feed its values
-		// into the join).
+		// A returning arm must not feed its values into a merge / loop header /
+		// switch fall-through join.
 		fs.terminated = true
 	case *ast.ThrowStatement:
-		// `throw x` does NOT terminate the block for CFG purposes: leaving the
-		// block non-terminated preserves the exception edge into an enclosing
-		// try's catch (see lowerTry), so taint assigned before a `throw` in a try
-		// body still reaches the handler (mirrors converters/python's Raise).
+		// `throw x` deliberately does NOT terminate the block: leaving it
+		// non-terminated preserves the exception edge into an enclosing try's catch
+		// (see lowerTry), so taint assigned before a `throw` reaches the handler.
 		fs.lowerExpr(v.Argument)
 	case *ast.FunctionDeclaration:
-		// Converted separately (see collector); just bind the name in this
-		// scope so later reads of it (as a plain value, not a call callee --
-		// calls are resolved purely syntactically, see lowerCall) resolve to
-		// a function reference instead of falling back to a GlobalName.
+		// Converted separately (see collector); bind the name so later reads of it
+		// as a plain VALUE resolve to a function reference rather than a GlobalName.
+		// (Call callees are resolved syntactically instead — see lowerCall.)
 		if v.Function.Name != nil {
 			if canonical, ok := fs.nameOf[v.Function]; ok {
 				fs.write(string(v.Function.Name.Name), &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}})
@@ -833,14 +777,8 @@ func (fs *funcState) lowerStmt(s ast.Statement) {
 }
 
 // lowerBinding lowers one `var`/`let`/`const` binding, evaluating its
-// initializer (if any) and binding the result to the target name in the
-// current environment. Destructuring targets (ObjectPattern/ArrayPattern)
-// are a documented limitation: the initializer is still lowered for its side
-// effects / taint discovery, but no bindings are introduced.
+// initializer (if any) and binding the result to the target name.
 func (fs *funcState) lowerBinding(b *ast.Binding) {
-	// Object destructuring: `const { id } = req.query` / `const { user } =
-	// req.body` is the common Express idiom, so bind each destructured name to a
-	// field read off the initializer, propagating the initializer's taint.
 	if op, ok := b.Target.(*ast.ObjectPattern); ok {
 		fs.lowerObjectPatternBinding(op, b.Initializer)
 		return
@@ -865,7 +803,7 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 // lowerObjectPatternBinding binds each name in an object-destructuring pattern
 // (const { a, b: c, ...rest } = init) to a field read off the initializer, so
 // taint carried by the initializer (typically req.query / req.body) reaches the
-// destructured names. Array destructuring remains a documented limitation.
+// destructured names — the common Express idiom.
 func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.Expression) {
 	if init == nil {
 		return
@@ -887,10 +825,9 @@ func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.E
 }
 
 // lowerArrayPatternBinding binds each name in an array-destructuring pattern
-// (const [a, b, ...rest] = init) to the initializer's value, so taint carried by
-// the initializer reaches the destructured names (element taint == container
-// taint, mirroring tuple unpacking). Elisions and per-element defaults / nested
-// patterns are not modeled.
+// (const [a, b, ...rest] = init) to the initializer's value (element taint ==
+// container taint). Elisions, per-element defaults and nested patterns are not
+// modeled.
 func (fs *funcState) lowerArrayPatternBinding(ap *ast.ArrayPattern, init ast.Expression) {
 	if init == nil {
 		return
@@ -916,10 +853,9 @@ type patBinding struct{ Local, Key string }
 // the three places that walk one: a handler's destructured request parameter, a
 // destructuring variable declaration, and `const {a, b} = require('m')`. Only
 // plain shorthand (`{query}`) and keyed-with-identifier-target (`{query: q}`)
-// properties are modeled — a nested or otherwise non-identifier binding target
-// yields no entry, the documented limitation all three shared before this was
-// factored out (and drifted on). op.Rest is deliberately NOT handled here: each
-// caller binds it differently.
+// properties are modeled; a nested or otherwise non-identifier target yields no
+// entry. op.Rest is deliberately NOT handled here — each caller binds it
+// differently.
 func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
 	var out []patBinding
 	for _, p := range op.Properties {
@@ -927,8 +863,7 @@ func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
 		case *ast.PropertyShort:
 			out = append(out, patBinding{Local: string(prop.Name.Name), Key: string(prop.Name.Name)})
 		case *ast.PropertyKeyed:
-			// `{ query: q }` -> field `query`, local `q`; only a plain identifier
-			// binding target is modeled (a nested/computed pattern is skipped).
+			// `{ query: q }` -> field `query`, local `q`.
 			if id, ok := prop.Value.(*ast.Identifier); ok {
 				out = append(out, patBinding{Local: string(id.Name), Key: propertyKeyName(prop.Key)})
 			}
@@ -949,12 +884,11 @@ func propertyKeyName(key ast.Expression) string {
 	return ""
 }
 
-// lowerExpr lowers an expression to a gIR Value, emitting whatever
-// instructions are needed to compute it (into the current block). Names
-// assigned as locals resolve through the Builder to their current SSA value
-// (constant, register, or an on-demand PHI); unbound names (free variables:
-// builtins, other functions' or the module's locals, since closures are not
-// modeled -- see package doc) fall back to a GlobalName reference.
+// lowerExpr lowers an expression to a gIR Value, emitting whatever instructions
+// are needed to compute it into the current block. Names assigned as locals
+// resolve through the Builder to their current SSA value; unbound names (free
+// variables — builtins, another function's or the module's locals, since closures
+// are not modeled) fall back to a GlobalName reference.
 func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 	if e == nil {
 		return nil
@@ -979,9 +913,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return ssabuild.Nil()
 
 	case *ast.RegExpLiteral:
-		// Best-effort string representation, mirroring converters/python's
-		// fallback for constants it does not model precisely.
-		return ssabuild.Str(v.Literal)
+		return ssabuild.Str(v.Literal) // best-effort string representation
 
 	case *ast.TemplateLiteral:
 		return fs.lowerTemplateLiteral(v)
@@ -1003,11 +935,8 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return last
 
 	case *ast.ConditionalExpression:
-		// No control-flow graph: evaluate the test for side effects/taint
-		// discovery, then merge both branches' values with a PHI so taint
-		// from either arm propagates to the result (see propagatingOps in
-		// internal/analysis, which treats OP_CODE_PHI as a taint
-		// propagator).
+		// No branch blocks: evaluate the test for side effects/taint discovery,
+		// then merge both arms with a PHI so taint from either reaches the result.
 		fs.lowerExpr(v.Test)
 		cv := fs.lowerExpr(v.Consequent)
 		av := fs.lowerExpr(v.Alternate)
@@ -1051,23 +980,21 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "super"}}
 
 	case *ast.YieldExpression:
-		// Generators are not specially modeled: `yield x` lowers to `x`.
+		// Generators are not modeled: `yield x` lowers to `x`.
 		if v.Argument != nil {
 			return fs.lowerExpr(v.Argument)
 		}
 		return ssabuild.Nil()
 
 	case *ast.AwaitExpression:
-		// Promises/async are not specially modeled: `await x` lowers to `x`.
+		// `await x` lowers to `x` (see emitPromiseContinuation for `.then`).
 		return fs.lowerExpr(v.Argument)
 
 	case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
 		return fs.funcRefValue(e)
 
 	case *ast.OptionalChain:
-		// `a?.b` — optional chaining short-circuits on null/undefined but
-		// otherwise yields the same value as `a.b`, so lower the wrapped
-		// expression directly; taint flows identically.
+		// `a?.b` yields the same value as `a.b` when it does not short-circuit.
 		return fs.lowerExpr(v.Expression)
 
 	case *ast.Optional:
@@ -1079,14 +1006,13 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 }
 
 // funcRefValue resolves an inline function-literal/arrow expression (e.g. a
-// callback argument) to a FuncName reference to the ir.Function the
-// collector already created for it, rather than inlining its body again.
+// callback argument) to a FuncName reference to the ir.Function the collector
+// already created for it, rather than inlining its body again.
 func (fs *funcState) funcRefValue(e ast.Expression) *ir.Value {
 	if canonical, ok := fs.nameOf[e]; ok {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}}
 	}
-	// Should not happen (the collector visits every expression tree lowering
-	// does), but stay defensive rather than panicking.
+	// Unreachable — the collector visits every expression tree lowering does.
 	return fs.emitUnsupported(e.Idx0(), "unresolved inline function literal")
 }
 
@@ -1104,8 +1030,6 @@ func (fs *funcState) lowerDot(v *ast.DotExpression) *ir.Value {
 	return fs.emitFieldRead(base, field, v.Idx0())
 }
 
-// emitFieldRead emits a FIELD read of field off base at idx and returns the
-// resulting register value.
 func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *ir.Value {
 	inst := fs.newValueInst(idx)
 	inst.Op = ir.OpCode_OP_CODE_FIELD
@@ -1142,9 +1066,8 @@ func bracketFieldName(m ast.Expression) string {
 	return "*"
 }
 
-// lowerAggregate lowers an array/object literal's element values, merging
-// their taint into one register via OP_CODE_PHI (a documented
-// field-insensitive approximation: see the package doc comment).
+// lowerAggregate lowers an array/object literal's element values, merging their
+// taint into one register via OP_CODE_PHI (field-insensitive; see package doc).
 func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Value {
 	var acc *ir.Value
 	for _, e := range exprs {
@@ -1169,10 +1092,8 @@ func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Va
 }
 
 // lowerTemplateLiteral folds a template literal's raw text chunks and
-// substituted expressions left-to-right with BIN_OP_ADD (string
-// concatenation), mirroring converters/python's JoinedStr (f-string)
-// handling, so taint carried by any ${expr} slot propagates to the final
-// value.
+// substituted expressions left-to-right with BIN_OP_ADD, so taint carried by any
+// ${expr} slot propagates to the final value.
 func (fs *funcState) lowerTemplateLiteral(v *ast.TemplateLiteral) *ir.Value {
 	var acc *ir.Value
 	for i, el := range v.Elements {
@@ -1204,10 +1125,9 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerBinary lowers a binary expression (arithmetic, bitwise, or --
-// approximated, see package doc -- logical) to a BIN_OP instruction. A
-// comparison instead lowers to the inert builtin.compare intrinsic: its result
-// is a bool, which carries influence rather than content.
+// lowerBinary lowers a binary expression (arithmetic, bitwise, or — approximated,
+// see package doc — logical) to a BIN_OP. A comparison instead lowers to the inert
+// builtin.compare intrinsic: a bool carries influence rather than content.
 func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	left := fs.lowerExpr(v.Left)
 	right := fs.lowerExpr(v.Right)
@@ -1224,9 +1144,8 @@ func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerUnary lowers a unary expression, including prefix/postfix ++/--,
-// which also rebinds the operand's environment entry (approximating the
-// mutation) when the operand is a plain identifier.
+// lowerUnary lowers a unary expression. Prefix/postfix ++/-- on a plain
+// identifier also rebinds it, approximating the mutation.
 func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
 	operand := fs.lowerExpr(v.Operand)
 	inst := fs.newValueInst(v.Idx0())
@@ -1245,8 +1164,7 @@ func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
 }
 
 // lowerAssign lowers `target = value` (and compound assignments like `+=`),
-// returning the assigned value so AssignExpression can also be used as a
-// sub-expression (e.g. `x = y = 5`).
+// returning the assigned value so it can also be a sub-expression (`x = y = 5`).
 func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
 	var rhs *ir.Value
 	if a.Operator == token.ASSIGN {
@@ -1266,13 +1184,11 @@ func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
 }
 
 // assignTo binds a lowered value to an assignment target. A bare identifier
-// target rebinds the environment. A DotExpression/BracketExpression target
-// (`obj.attr = v` / `arr[i] = v`) emits a STORE with the base object as the
-// address operand, matching how converters/python's `assign` lowers
-// Attribute/Subscript targets: this is what lets a tainted value written
-// into a container mark that container tainted (see visitStore in
-// internal/analysis/taint.go). Destructuring targets are a documented
-// limitation: dropped.
+// rebinds the variable. A DotExpression/BracketExpression target (`obj.attr = v`
+// / `arr[i] = v`) emits a STORE with the base object as the address operand,
+// which is what lets a tainted value written into a container mark that container
+// tainted (see visitStore in internal/analysis/taint.go). Destructuring targets
+// are dropped.
 func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 	switch t := target.(type) {
 	case *ast.Identifier:
@@ -1282,26 +1198,14 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 	case *ast.BracketExpression:
 		fs.emitStore(t.Left, val, t.Idx0())
 	default:
-		// ArrayPattern/ObjectPattern (destructuring assignment) or other
-		// unsupported target shape: dropped.
+		// Destructuring assignment or another unsupported target shape: dropped.
 	}
 }
 
 // lowerCall lowers a call expression to OP_CODE_CALL. The callee is a purely
-// syntactic dotted name built from the call's callee expression (see
-// syntacticCallee), never resolved through the environment -- mirroring
-// converters/python's dottedName -- so e.g. `child_process.exec(cmd)`
-// resolves to "js:child_process.exec" regardless of whether/how
-// `child_process` is bound.
-//
-// Before that syntactic name is built, lowerNestedCallees walks the same
-// Dot/Bracket "Left" chain looking for an embedded CallExpression -- e.g. the
-// `axios.get(url)` inside `axios.get(url).then(cb)` -- and lowers it first.
-// Without this step the inner call would never be visited at all: syntactic
-// name building is a pure string walk with no side effects, so the inner
-// call's own instruction (and therefore its args, its taint, and its chance
-// to match a source/sink glob) would silently disappear. See the package doc
-// note on the js-ssrf sample's chained axios.get(...).then(...) handler.
+// syntactic dotted name (see syntacticCallee), never resolved through the
+// environment, so `child_process.exec(cmd)` resolves to "js:child_process.exec"
+// regardless of whether/how `child_process` is bound.
 func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	// For a method call, lower the receiver (the callee's base object) so its
 	// register can be carried in Call.Value (see emitCallRecvInst): this both
@@ -1320,10 +1224,9 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 		fs.lowerNestedCallees(v.Callee)
 	}
 	callee := "js:" + fs.resolveRequire(syntacticCallee(v.Callee))
-	// A bare call to a top-level function (helper(x)) must carry the module
-	// name so its callee matches the function's CanonicalName; otherwise byKey
-	// never resolves it and taint does not flow through the local helper.
-	// Member calls (obj.method) and unknown/global names are left unqualified.
+	// A bare call to a top-level function (helper(x)) must carry the module name
+	// so its callee matches the function's CanonicalName; otherwise byKey never
+	// resolves it and taint does not flow through the local helper.
 	if id, ok := v.Callee.(*ast.Identifier); ok {
 		if canonical, found := fs.localFuncs[string(id.Name)]; found {
 			callee = canonical
@@ -1349,30 +1252,25 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	return ssabuild.Reg(call.Name)
 }
 
-// lowerNew lowers `new Foo(args)` the same way as a call (constructing an
-// object is, for taint-propagation purposes, indistinguishable from calling
-// a function with the same arguments); the "new" prefix is preserved in the
-// callee so it does not collide with a plain `Foo(args)` call. Like lowerCall,
-// it lowers any call nested in its callee chain first (see lowerNestedCallees)
-// so e.g. `new (getCtor()).Client(url)` still lowers `getCtor()`.
+// lowerNew lowers `new Foo(args)` the same way as a call (for taint purposes
+// construction is indistinguishable from calling a function with the same
+// arguments); the "new" prefix keeps the callee from colliding with a plain
+// `Foo(args)` call.
 func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
 	return fs.emitCall("js:new:"+syntacticCallee(v.Callee), v.ArgumentList, v.Idx0())
 }
 
-// lowerNestedCallees walks a call/new expression's callee along its
-// DotExpression/BracketExpression "Left" links -- the exact chain shape
-// syntacticCallee walks -- and lowers any CallExpression it finds along the
-// way via the ordinary fs.lowerCall path. It recurses into that inner call's
-// own callee too, so a multiply-chained expression like
-// `foo(x).bar(y).baz(z)` lowers inside-out: `foo(x)` first, then `bar(y)`
-// (called on foo's result), then the outer `baz(z)` is built by lowerCall's
-// caller. The inner call's result register is intentionally discarded here --
-// syntacticCallee's existing "<dynamic>" fallback for a non-Identifier/Dot
-// root (already relied on for e.g. `getHandler().process(x)` ->
-// "<dynamic>.process") still names the outer call; this function's only job
-// is to make sure the inner call is not silently skipped, so its own
-// callee/args/taint remain visible to the analysis engine.
+// lowerNestedCallees walks a call/new expression's callee along the same
+// Dot/Bracket "Left" chain syntacticCallee walks and lowers any CallExpression
+// it finds — e.g. the `axios.get(url)` inside `axios.get(url).then(cb)` —
+// inside-out via the ordinary lowerCall path.
+//
+// Without it the inner call is never visited at all: syntactic name building is
+// a pure string walk with no side effects, so the inner call's instruction (and
+// with it its args, its taint, and its chance to match a source/sink glob) would
+// silently disappear. Its result register is deliberately discarded — the outer
+// call is still named by syntacticCallee's "<dynamic>" fallback.
 func (fs *funcState) lowerNestedCallees(e ast.Expression) {
 	switch v := e.(type) {
 	case *ast.CallExpression:
@@ -1384,18 +1282,14 @@ func (fs *funcState) lowerNestedCallees(e ast.Expression) {
 	}
 }
 
-// syntacticCallee builds a canonical, purely syntactic dotted callee name
-// from a call's callee expression, e.g. DotExpression(DotExpression(
-// Identifier("res"), "locals"), "get") -> "res.locals.get". A callee rooted
-// in something other than a plain Identifier/DotExpression/string-keyed
-// BracketExpression chain (e.g. a nested call, a computed bracket index, or
-// a function expression) resolves to "<dynamic>" for that sub-path, so e.g.
-// `getHandler().process(x)` yields "<dynamic>.process" -- glob patterns like
-// "js:*.process" still match it. Mirrors converters/python's dottedName. Any
-// CallExpression along this same chain has already been lowered to its own
-// instruction by lowerCall/lowerNew's call to lowerNestedCallees before this
-// runs, so collapsing it to "<dynamic>" here only affects the outer call's
-// name, not whether the inner call itself was seen.
+// syntacticCallee builds a canonical, purely syntactic dotted callee name from a
+// call's callee expression, e.g. `res.locals.get`. A callee rooted in anything
+// other than a plain Identifier/Dot/string-keyed-Bracket chain (a nested call, a
+// computed index, a function expression) resolves to "<dynamic>" for that
+// sub-path, so `getHandler().process(x)` yields "<dynamic>.process" — glob
+// patterns like "js:*.process" still match it. Any CallExpression along the chain
+// has already been lowered by lowerNestedCallees, so collapsing it here costs
+// only the outer call's name.
 func syntacticCallee(e ast.Expression) string {
 	switch v := e.(type) {
 	case *ast.Identifier:
@@ -1438,11 +1332,9 @@ func numberValue(raw interface{}) *ir.Value {
 }
 
 // binOpKind maps a goja binary-operator token to a gIR BinOpKind. Logical
-// &&/||/?? have no logical-op counterpart in gIR's BinOpKind and are
-// approximated as their bitwise equivalents (safe for taint propagation:
-// either operand tainted still taints the result), and the three
-// right-shift variants are collapsed into BIN_OP_SHR -- both documented in
-// the package doc comment.
+// &&/||/?? have no gIR counterpart and are approximated as their bitwise
+// equivalents (safe for taint: either operand tainted still taints the result);
+// the right-shift variants collapse into BIN_OP_SHR.
 func binOpKind(op token.Token) ir.BinOpKind {
 	switch op {
 	case token.PLUS:
@@ -1509,9 +1401,8 @@ func binOpKindForCompoundAssign(op token.Token) ir.BinOpKind {
 }
 
 // unOpKind maps a goja unary-operator token to a gIR UnOpKind. ++/-- have no
-// dedicated UnOpKind counterpart and fall back to UN_OP_UNSPECIFIED; the
-// UN_OP instruction is still emitted (see lowerUnary) so taint still
-// propagates through it.
+// counterpart and fall back to UN_OP_UNSPECIFIED; lowerUnary still emits the
+// UN_OP so taint propagates through it.
 func unOpKind(op token.Token) ir.UnOpKind {
 	switch op {
 	case token.NOT:

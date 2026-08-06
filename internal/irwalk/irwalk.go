@@ -1,18 +1,12 @@
-// Package irwalk provides the nil-guarded gIR traversal iterators shared by
-// the analysis passes, the frontends' whole-program rewrites, and converter
-// tests. They replace the four-deep `for module → function → block →
-// instruction` nest, each level nil-guarded, that every whole-program pass had
-// written out by hand. Repeating it meant a pass could silently forget a nil
-// check, and it buried each pass's actual work under a dozen lines of
-// scaffolding.
+// Package irwalk provides the nil-guarded gIR traversal iterators shared by the
+// analysis passes, the frontends' whole-program rewrites, and converter tests.
+// Use them instead of hand-writing the four-deep `module → function → block →
+// instruction` nest, where a pass can silently forget a nil check.
 //
-// These are range-over-func iterators, so a `continue`/`break`/`return` in the
-// caller behaves exactly as it did in the hand-written loops. Every consumer
-// runs ONCE per scan (Analyze's function index, the call graph, the
-// dangerous-call and secret passes, the frontends' cross-module callee
-// rewrites), so the per-element closure call is not on a hot path — the
-// per-(function × rule) inner loops in the engine's funcAnalysis methods are
-// deliberately left on hand-written loops.
+// These are range-over-func iterators, so `continue`/`break`/`return` behaves as
+// in a plain loop. Every consumer runs ONCE per scan, so the per-element closure
+// call is not hot; the engine's per-(function × rule) inner loops are
+// deliberately left as hand-written loops.
 package irwalk
 
 import (
@@ -65,9 +59,7 @@ func Instrs(fn *ir.Function) iter.Seq[*ir.Instruction] {
 	}
 }
 
-// Calls yields the CallCommon of every CALL/INVOKE instruction in prog — the
-// walk shared by the frontends' cross-module callee rewrites and by converter
-// tests that assert on the callees a lowering produced.
+// Calls yields the CallCommon of every CALL/INVOKE instruction in prog.
 func Calls(prog *ir.Program) iter.Seq[*ir.CallCommon] {
 	return func(yield func(*ir.CallCommon) bool) {
 		for _, fn := range Funcs(prog) {

@@ -2,33 +2,40 @@
 
 ## Goal
 
-Move real-world CVE recall past the SSA-era plateau (~18.5%, 5/27 on the live
-web-app campaign) by closing the **modeling-breadth** gaps the SSA work does not
-touch: per-framework request **sources**, framework-abstracted **sinks**, and the
-propagators/sanitizers that connect them. The SSA/CFG foundation (loop-carried
-taint, flow-sensitive guard precision) is the prerequisite that makes broadening
-these rules **safe** — dominator-guard suppression now controls the false-positive
-blast radius that over-broad rules would otherwise create.
+Move real-world CVE recall by closing **modeling-breadth** gaps: per-framework
+request **sources**, framework-abstracted **sinks**, and the propagators and
+sanitizers that connect them. For the current number, run the campaign
+(`.claude/skills/cve-recall`) — it re-fetches its CVE list live, so any figure
+written here would be stale by the next run.
 
-## Why recall stayed flat through the SSA work
+The SSA/CFG foundation (loop-carried taint, flow-sensitive guard precision) is
+what makes broadening these rules **safe**: dominator-guard suppression controls
+the false-positive blast radius an over-broad rule would otherwise create.
 
-The live misses are not intra-function control-flow problems. They cluster on
-classes whose exploit reaches the sink through a **framework/library API the
-rulepacks don't model**:
+## Status — the rules-first lever is largely exhausted
 
-- **SSRF** (largest cluster) — the tainted URL reaches an HTTP client through a
-  framework/library wrapper (`requests`/`httpx`/`aiohttp`/`urllib`; `axios`/`got`/
-  `node-fetch`) that isn't a modeled sink, or the request source the flow starts
-  from isn't modeled for that framework.
-- **Insecure deserialization** — the untrusted data is a loaded artifact
-  (pickle/YAML/model file), not an HTTP string, so there is no modeled **source**
-  to seed; and/or the deserializer sink isn't modeled.
-- **Framework-rendered XSS / open redirect** — the sink is a template render or a
-  framework redirect helper, not a raw response write.
+The premise this plan opened with, that the residual misses were YAML edits away,
+no longer holds. The SSRF client sinks it called the biggest cluster are modeled
+(`requests`, `httpx`, `urlopen`, `pycurl`; `axios`, `http(s).request`), and the
+misses that remain need **frontend or engine capability**, not rule breadth.
+Read the backlog below as "what a capability would unlock", not as ready work.
 
-The hits, by contrast, are all direct request→file/query shapes godzilla already
-models. Closing the gaps above is a **rules-first** effort (the repo's design:
-"adding a sink/source is usually a YAML edit, not code").
+The capability blockers, each established by measurement rather than inspection:
+
+- **Untyped dispatch stops at an ambiguous method name.** For Python/Ruby/JS the
+  engine crosses a method call only when the method name is unique program-wide,
+  because fanning out on a name like `execute` would seed taint into every
+  same-named method across unrelated classes. Receiver-class narrowing recovers
+  the case where the receiver's construction is visible; an opaque receiver with
+  a common name still stops. This is the single most common wall in real code.
+- **Framework-abstracted rendering** — a value reaching HTML through a view
+  component (Rails cells, template helpers) rather than a response write. The
+  template is now parsed for ERB, but the chain through the component is not
+  followed.
+- **Second-order flows** — source and sink in different requests, joined by a
+  store. No intra-process edge exists, so no dataflow engine reaches them.
+- **Non-HTTP untrusted input** — a model config or loaded artifact rather than a
+  request string, so there is no seeded source at all.
 
 ## The hard constraint — false positives
 
@@ -36,10 +43,10 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
 
 1. **Corpus `go test ./test/corpus/` FP=0 AND FN=0** (the precision floor).
 2. **Real-project FP smoke** — rescan a large real app in the same language and
-   confirm the finding count doesn't explode (the lesson from the gitea
-   421→2356 summary blow-up). Model **narrowly and precisely** (exact framework
-   API globs, receiver-pinned sink args `#idx`, `builtin.format`/`identity`
-   SSRF host-fix suppression, dominator-guard sanitizers) — never wildcard sinks.
+   confirm the finding count doesn't explode. Model **narrowly and precisely**
+   (exact framework API globs, receiver-pinned sink args `#idx`,
+   `builtin.format`/`identity` SSRF host-fix suppression, dominator-guard
+   sanitizers) — never wildcard sinks.
 3. Verify the **specific CVE flips** miss→hit on the campaign (evidence, not hope).
 4. `build`/`gofmt`/`vet` clean; quality-gate perf within budget.
 
@@ -48,101 +55,23 @@ Broadening sources/sinks trades recall for FP risk. Every change is gated on:
 1. From the campaign, pick a miss **cluster** by class × frequency × tractability.
 2. Read the **actual CVE fix commit** (the campaign records each miss's fix-changed
    files) to see the exact source→sink shape — model *that*, not a guess.
-3. Model it: a YAML rule edit (source/sink/propagator/sanitizer glob) first; a
-   frontend opaque-base source **synthesis** if the source is a member-read off an
-   opaque base; engine only as a last resort.
+3. Model it: a YAML rule edit first; a frontend synthetic source/sink for a
+   construct that is not a call in the source language; the engine only as a last
+   resort (see the escape-hatch ordering in `CLAUDE.md`).
 4. Gate (the four checks above).
 5. Commit; re-run the campaign; record the recall delta.
 
-> **Status: the rules-first lever is largely exhausted.** The progress log below
-> records the finding that supersedes this plan's premise: the residual campaign
-> misses need frontend/engine capabilities (dict/XML taint-through,
-> untrusted-artifact and response-body sources), not YAML edits. R1/R4/R5 are kept
-> for the shape of the problem, but each needs a capability first — do not read
-> them as ready-to-implement rule work. R2 and the config-flag rules that followed
-> it are done.
+## Backlog
 
-## Prioritized backlog (evidence-based; refined from the fresh baseline)
+Each item is one gated increment; re-measure recall after each.
 
-- [ ] **R1 — SSRF framework HTTP-client sinks** (biggest cluster: langflow,
-      superset, strapi, parse-server). Model Python `requests`/`httpx`/`aiohttp`/
-      `urllib.request`/`urllib3` and JS `axios`/`got`/`node-fetch`/`http(s).request`
-      as CWE-918 sinks; ensure the request source reaches them. `urlHostControllable`
-      already suppresses fixed-host FPs.
-- [x] **R2 — Insecure-deserialization hardening** — DONE as FP-safe breadth, not a
-      campaign flip. Fix-commit analysis showed 3 of the 4 CWE-502 misses are
-      **mislabeled** (vllm = DoS, pyload = auth + file-write session-pickle, superset =
-      authorization/CWE-863) and the one real RCE (ray, `cloudpickle.loads` fed by
-      pyarrow's `__arrow_ext_deserialize__` C-boundary callback) needs ray-specific
-      frontend synthesis — out of scope. Landed the generalizable, dataflow-only part:
-      modern deserializer sinks (`cloudpickle`/`dill`/`joblib`/`torch.load`), inline
-      Flask file-upload sources (`request.files`), and a rule-scoped `.read` propagator
-      so `pickle.loads(upload.read())` flows. Never a `dangerous-call` (that was the
-      reverted flood). Verified FP-safe: campaign findings 153→153 with **zero** per-app
-      change (all ML apps flat), corpus FP=0/FN=0. See progress log.
-- [ ] **R6 — Per-framework request-source breadth** (renumbered: the "R3" in the
-      progress log is the path-traversal propagator work, a different item): FastAPI/Starlette `Request`,
-      Django `request`, Express/Koa `ctx.request`, so flows originate for more apps.
-- [ ] **R4 — Framework-rendered XSS / open-redirect helpers**: template renderers,
-      `redirect()`/`sendRedirect` framework wrappers.
-- [ ] **R5 — Code-injection residuals**: `eval`/`exec`/template-eval reached through
+- [ ] **Per-framework request-source breadth** — FastAPI/Starlette `Request`,
+      Django `request`, Express/Koa `ctx.request`, so flows originate for more
+      apps. Still genuine rule work.
+- [ ] **Remaining SSRF clients** — `aiohttp`, `urllib3`; `got`, `node-fetch`.
+      Rule work, but the cluster it was meant to unlock is now capability-bound.
+- [ ] **Framework-rendered XSS / open-redirect helpers** — template renderers,
+      `redirect()`/`sendRedirect` wrappers. Needs the rendering capability above
+      to pay off on component-based frameworks.
+- [ ] **Code-injection residuals** — `eval`/`exec`/template-eval reached through
       a framework layer.
-
-Each Rn is one gated increment; re-measure recall after each. Order may shift once
-the fresh baseline's per-miss fix files are analysed.
-
-## Progress log
-
-(updated as items land — newest first)
-
-- **R2 (insecure-deserialization hardening) — LANDED (breadth, not a campaign flip).**
-  Two investigations (fix-commit shapes + current modeling) found R2 is largely a
-  labeling artifact: 3 of the 4 CWE-502 campaign misses are not deserialization taint
-  flows (vllm CVE-2026-55514 = assertion-crash DoS; pyload CVE-2026-35464 = auth +
-  file-write session-pickle; superset CVE-2023-40610 = authorization CWE-863), and the
-  lone real RCE (ray CVE-2026-41486) deserializes Parquet metadata through pyarrow's
-  `__arrow_ext_deserialize__` C-boundary callback with `cloudpickle.loads` — invisible to
-  the SSA, env-gated, ray-specific. So R2 flips **no** campaign CVE FP-safely. Landed the
-  generalizable hardening instead (`rulepacks/py-insecure-deserialization.yaml`): added
-  modern deserializer **sinks** (`cloudpickle.load(s)`, `dill.load(s)`, `joblib.load`,
-  `torch.load` — all dataflow, inert without a source, never `dangerous-call`), inline
-  Flask file-upload **sources** (`request.files.get`/`__getitem__`, scoped to this rule so
-  other rules are untouched; FastAPI `UploadFile` already seeds via `py:@http.param`), and
-  a rule-scoped `.read` **propagator** to carry `upload.read()` bytes across to the sink.
-  Three corpus samples (upload→pickle, request→cloudpickle, and a **safe** constant-path
-  `torch.load` control that stays silent) lock in both the fire and the anti-flood. Gate:
-  corpus FP=0/FN=0; campaign findings **153→153 with zero per-app change** (every ML app —
-  ray/vllm/mlflow/superset/langflow/label-studio/llama-index — byte-identical), so
-  `torch.load`/`joblib.load` did not need dropping. Recall unchanged 7/35. Out of scope
-  (documented): the ray pyarrow-callback source, the 3 non-CWE-502 CVEs, and the
-  `UploadFile.file.read()` field-hop + `base64/BytesIO`→`torch.load` chain.
-- **`json.dumps` XSS propagator — LANDED (breadth, not a campaign flip).** Investigated the
-  next four "source-works, class-doesn't-reach-fix-line" Python misses (llama-index SQLi &
-  code-injection, langflow code-injection, label-studio XSS) by reading each fix commit. None
-  is an R3-style rule-fixable flip: llama-index SQLi/code-injection are **source** gaps (LLM
-  query param; outbound HTTP-response/SSE body) whose only rule-level fixes are high-FP and
-  still wouldn't fire; langflow needs an **arg-value predicate** (`allow_dangerous_code=True`)
-  the rule model can't express; label-studio XSS dies **upstream** in lxml/dict taint the
-  straight-line frontend drops. The one clean, FP-safe gap found: `json.dumps`/`json.dump` was
-  not a py-xss propagator, so `HttpResponse(json.dumps(user))` (reflected-JSON XSS) lost taint.
-  Added them to `py-xss.yaml` + a `test/python/xss_json` corpus sample (fires only with the
-  propagator). FP-safe confirmed: campaign findings_total **flat 118→118**, recall unchanged at
-  6/27, corpus FP=0/FN=0. Landed on correctness merit; documented as breadth, not a metric flip.
-  **Conclusion: the rules-first recall lever is now exhausted for this campaign's residual
-  misses** — further gains need frontend/engine capabilities (dict/XML taint-through,
-  untrusted-artifact & response-body sources, arg-value predicates), each a larger change with
-  real FP surface, tracked under R1/R2 (#87/#88) rather than autonomous rule edits.
-- **R3 (path-traversal propagators) — LANDED.** Recall **5/27 → 6/27 (22.2%)** on the
-  py/js/ruby campaign. Root cause of the gradio misses was a **propagator gap**, not a
-  source/sink gap: the FastAPI path param source *is* seeded and the `open`/`FileResponse`
-  sink *is* modeled, but taint died at the ubiquitous `pathlib.Path(x)` / `os.path.normpath(x)`
-  normalization hop because Python — unlike Java (`Paths.get`/`Path.of`/`Path.resolve`) — had no
-  path-normalization propagators. Added them to `py-path-traversal.yaml` and `py-zip-slip.yaml`
-  (both share `_py-fs.yaml`): `pathlib.Path`, `.resolve`/`.absolute`/`.joinpath`/
-  `.expanduser`, `os.path.normpath`/`.abspath`/`.realpath`. Propagators forward existing taint
-  and create no findings on their own, so the FP blast radius is structurally zero — confirmed:
-  **CVE-2024-4941 gradio flips MISS→HIT** (`py-path-traversal` → `open` in `processing_utils.py`,
-  a fix-changed file, cross-function), **CVE-2026-28414 gradio MISS→CLASS-ONLY**, and **all 26
-  other targets are byte-identical** (findings_total 102→118, the +16 entirely inside gradio's
-  two vulnerable file-serving flows). Corpus FP=0/FN=0.
-- _pending_ — baseline re-measured; backlog to be refined from per-miss fix files.

@@ -21,11 +21,9 @@ func cmdiRules(t testing.TB) *rules.RuleSet {
 		testsupport.Message("command injection"))
 }
 
-// TestCommandInjection exercises the core taint paths for the cmdi rule:
-//   - params[:x] concatenated into a single-string system() call fires;
-//   - a backtick literal with an interpolated tainted value (`ping #{host}`) fires;
-//   - the safe multi-arg form system("ls", x) — no shell — does not, because the
-//     sink pins arg #0.
+// TestCommandInjection exercises the core taint paths for the cmdi rule,
+// including that the safe multi-arg form system("ls", x) does NOT fire, because
+// the sink pins arg #0.
 func TestCommandInjection(t *testing.T) {
 	requireRuby(t)
 	cases := []struct {

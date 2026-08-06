@@ -1,23 +1,20 @@
 # Default propagators: library calls that return a transformed copy of their
-# input and therefore CARRY taint from an argument to the result, but which no
-# rule treats as a sanitizer. Real code almost never passes a raw source straight
-# into a sink -- it trims, lower-cases, re-encodes, or reformats the value first
-# -- so without these a single intervening stdlib string call silently drops
-# taint and the injection slips past the gate (the dominant false-negative class).
+# input and therefore CARRY taint arg -> result, but which no rule treats as a
+# sanitizer. Real code almost never passes a raw source straight into a sink --
+# it trims, lower-cases, re-encodes or reformats first -- so without these a
+# single intervening stdlib string call silently drops taint (the dominant
+# false-negative class).
 #
-# Unlike every other fragment, this one is NOT pulled in with `extend:`. The
-# loader applies it to every rule automatically (see defaultPropagatorsFragment),
-# which is the point: restating it per pack is exactly the boilerplate the
-# rule-level `when:` default removed elsewhere. A rule's own source/sink/sanitizer
-# for the same callee still wins, because the engine classifies sink/sanitizer/
-# source before propagator.
+# Unlike every other fragment this one is NOT pulled in with `extend:`: the
+# loader applies it to every rule (see defaultPropagatorsFragment). A rule's own
+# source/sink/sanitizer for the same callee still wins, because the engine
+# classifies sink/sanitizer/source before propagator.
 #
 # Deliberately conservative: only pure, taint-preserving string/encoding
 # transforms belong here. Nothing that neutralizes an injection (escaping is not
 # sanitizing for command/path/SQL contexts) and nothing a built-in rule uses as a
 # sanitizer -- path helpers like filepath.Base are omitted for exactly that
-# reason. Patterns are language-prefixed canonical-name globs, so matching the
-# union against a language-tagged callee is naturally language-correct.
+# reason.
 #
 # A user rules directory may ship its own `_default-propagators.yaml` to replace
 # this list.
@@ -47,21 +44,21 @@ propagators:
   - "go:*net/url.QueryUnescape"
   - "go:*net/url.PathEscape"
   - "go:*net/url.PathUnescape"
-  # url.Parse / ParseRequestURI: string -> *url.URL. The returned URL (and its
-  # .Path / .Host / .String()) is built ENTIRELY from the input string, so
-  # forwarding taint is semantically exact -- it recovers the very common
-  # request-string -> url.Parse -> os.Open(u.Path) / http.Get(u.String()) flow
-  # (minio CVE-2022-35919) that otherwise dies at the bodyless stdlib call.
+  # url.Parse / ParseRequestURI: the returned *url.URL (and its .Path / .Host /
+  # .String()) is built ENTIRELY from the input string, so forwarding taint is
+  # exact. Recovers request-string -> url.Parse -> os.Open(u.Path) /
+  # http.Get(u.String()), which otherwise dies at the bodyless stdlib call
+  # (minio CVE-2022-35919).
   - "go:*net/url.Parse"
   - "go:*net/url.ParseRequestURI"
   # net/http + net/url request accessors: carry request taint through a lowered
   # framework's INTERNAL stdlib parsing. A framework wraps the request in its own
-  # context type (gin.Context, echo.Context, ...) and reads it via these stdlib
-  # helpers -- gin's c.Query bottoms out in c.Request.URL.Query() -- but the
-  # stdlib is not lowered, so without these the flow dies inside the library and
-  # only frameworks with an explicit accessor source glob are covered. Modeled as
-  # propagators rather than sources: the receiver is Call.Value, already tainted
-  # only when it derives from a request source, so ordinary code is untouched.
+  # context type (gin.Context, ...) and reads it via these helpers -- gin's
+  # c.Query bottoms out in c.Request.URL.Query() -- but the stdlib is not
+  # lowered, so without these only frameworks with an explicit accessor source
+  # glob are covered. Propagators rather than sources: the receiver is
+  # Call.Value, tainted only when it derives from a request source, so ordinary
+  # code is untouched.
   - "go:*net/url*.Query"
   - "go:*net/url*.ParseQuery"
   - "go:*net/url.Values*.Get"
@@ -77,10 +74,9 @@ propagators:
   - "go:*net/http.Header*.Get"
   - "go:*net/http.Header*.Values"
   # html/template trusted-string conversions (synthesized as CALLs by the Go
-  # frontend, see emitTemplateTrustedConv). They are XSS SINKS in go-xss, but for
-  # every OTHER rule they must still forward taint arg->result exactly as the
-  # plain type conversion did, so a flow passing through one before reaching a
-  # different sink is not lost.
+  # frontend, see emitTemplateTrustedConv). They are XSS SINKS in go-xss, but
+  # every OTHER rule must still see them forward taint arg->result as the plain
+  # type conversion did, so a flow through one to a different sink is not lost.
   - "go:html/template.HTML"
   - "go:html/template.HTMLAttr"
   - "go:html/template.JS"
@@ -88,11 +84,10 @@ propagators:
   - "go:html/template.URL"
   - "go:html/template.CSS"
   - "go:html/template.Srcset"
-  # NOTE: the Go `append` builtin is deliberately absent. append is called on
-  # every slice in a program, so carrying taint through all of them explodes the
-  # taint set in framework code (a large dep-heavy scan slowdown). The engine
-  # propagates it ONLY when the result is a byte/rune slice -- character-level
-  # string reconstruction -- gated by isByteOrRuneSlice in handleCall, not here.
+  # NOTE: the Go `append` builtin is deliberately absent -- it is called on every
+  # slice in a program, so carrying taint through all of them explodes the taint
+  # set in framework code. The engine propagates it ONLY when the result is a
+  # byte/rune slice (isByteOrRuneSlice in handleCall), not here.
 
   # --- Python: str methods / builtins ---
   - "py:*.strip"
@@ -106,10 +101,17 @@ propagators:
   - "py:*.encode"
   - "py:*.decode"
   - "py:*.casefold"
-  # split/join carry taint through the very common "split on a delimiter, keep
-  # some parts, re-join" idiom (Streamlit CVE-2022-35918: path.split('/') ->
-  # '/'.join(parts[1:]) -> os.path.join -> open). str.split yields a tainted
-  # list; sep.join re-joins a tainted list into a tainted str.
+  # URL percent-encoding RE-ENCODES rather than neutralizes for the URL classes:
+  # with the `safe` set an app actually uses, `:` and `/` survive, so an
+  # attacker-supplied host survives with them. Where it DOES neutralize (`\'` for
+  # SQL, `<`/`>` for HTML) the rule that cares lists it as a sanitizer. Same for
+  # Go's url.QueryEscape and JS's encodeURIComponent.
+  - "py:*urllib.parse.quote"
+  - "py:*urllib.parse.quote_plus"
+  - "py:*urllib.parse.urlencode"
+  # split/join carry taint through the "split on a delimiter, keep some parts,
+  # re-join" idiom (Streamlit CVE-2022-35918). str.split yields a tainted list;
+  # sep.join re-joins a tainted list into a tainted str.
   - "py:*.split"
   - "py:*.rsplit"
   - "py:*.splitlines"

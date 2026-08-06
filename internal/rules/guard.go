@@ -74,8 +74,7 @@ type Guard struct {
 	prog *vm.Program
 	// What the source actually mentions. A guard cannot observe a root it never
 	// names, so anything it does not read is not worth building: kwargsOf
-	// allocates a map per evaluation (lazily, but a single keyword argument is
-	// enough to trigger it), and container reconstruction walks the IR.
+	// allocates a map per evaluation and container reconstruction walks the IR.
 	usesKWArgs     bool
 	needsStructure bool
 }
@@ -149,21 +148,19 @@ func ArgHostFixed(a Arg) bool {
 }
 
 // EvalHostFixed is the engine-supplied fact behind the `hostFixed()` guard
-// builtin. It is a FACT the guard layer cannot compute for itself: deciding it
-// needs the call's injection-point arguments, the current taint state, and the IR
-// def map. Supplying it as a function keeps the *policy* -- whether a rule should
-// suppress on it -- in the rule's `when:` expression, instead of the engine
-// branching on a rule's CWE string.
+// builtin. The guard layer cannot compute it: deciding it needs the call's
+// injection-point arguments, the current taint state, and the IR def map.
+// Supplying it as a function keeps the *policy* — whether a rule suppresses on
+// it — in the rule's `when:`, instead of the engine branching on a CWE string.
 //
-// This backs the ZERO-ARG form, which reuses the sink's own #idx pinning and is
+// It backs the ZERO-ARG form, which reuses the sink's own #idx pinning and is
 // the one to prefer: the URL is not always argument 0 (requests.request pins #1)
 // and some sinks take a request OBJECT rather than a URL string (net/http
-// Client.Do), so restating the index in the guard risks checking the wrong
-// argument -- the HTTP method instead of the URL -- if the two ever disagree.
+// Client.Do), so restating the index risks checking the wrong argument.
 //
-// The explicit hostFixed(arg[i]) form (see ArgHostFixed) stays available for rules
-// that want the check spelled out or need an argument that is not an injection
-// point; it reads the skeleton directly and needs no engine state.
+// The explicit hostFixed(arg[i]) form (see ArgHostFixed) stays available for a
+// rule that wants the check spelled out or needs a non-injection-point argument;
+// it reads the skeleton directly and needs no engine state.
 type EvalHostFixed func() bool
 
 // alwaysControllable is the default when no engine fact is supplied (e.g. a
@@ -181,9 +178,8 @@ func CompileGuard(src string) (*Guard, error) {
 	if strings.TrimSpace(src) == "" {
 		return nil, nil
 	}
-	// Compiled once per sink/callee entry, so one source recurs across a pack. A
-	// Guard is immutable and an expr program is safe to Run concurrently, so
-	// programs are shared. Errors are not cached — they fail `rules lint` at load.
+	// One source recurs across a pack. A Guard is immutable and an expr program
+	// is safe to Run concurrently, so programs are shared. Errors are not cached.
 	if g, ok := guardCache.Load(src); ok {
 		return g.(*Guard), nil
 	}

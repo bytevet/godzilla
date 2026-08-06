@@ -32,9 +32,8 @@ const (
 )
 
 // Severities lists every recognized severity from worst to best. It is the
-// single authority for severity ordering: Rank derives from it, and display
-// surfaces (the HTML report's filter bar and summary ordering) iterate it —
-// so a newly added severity shows up everywhere by being added here once.
+// single authority for severity ordering: Rank derives from it and display
+// surfaces iterate it, so adding one here is enough.
 var Severities = []Severity{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo}
 
 // Rank returns a comparable ordering for a severity (higher is worse):
@@ -50,12 +49,11 @@ func (s Severity) Rank() int {
 }
 
 // ValidConfidence reports whether s is a spelling a rule may declare in its
-// `confidence:` field: empty (unset, meaning "use the default") or one of
-// low|medium|high, case- and space-insensitively. It is only a SPELLING check:
-// package rules cannot name analysis.Confidence (internal/analysis imports
-// internal/rules, so the reverse would be an import cycle), so the string ->
-// Confidence conversion lives in analysis.ParseConfidence and the loader uses
-// this predicate to reject a typo at load time.
+// `confidence:` field: empty (unset, "use the default") or low|medium|high,
+// case- and space-insensitively. SPELLING only — package rules cannot name
+// analysis.Confidence (analysis imports rules; the reverse would be a cycle),
+// so conversion lives in analysis.ParseConfidence and the loader uses this to
+// reject a typo at load time.
 func ValidConfidence(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "low", "medium", "high":
@@ -70,16 +68,13 @@ type Rule struct {
 	Languages []string `yaml:"languages"` // empty => applies to all languages
 	Severity  Severity `yaml:"severity"`
 
-	// Confidence optionally overrides the confidence a dangerous-call finding is
-	// reported with. Empty means High — the call-site-deterministic default every
-	// shipped dangerous-call rule was written against, so an unset field changes no
-	// existing rule. Set it to "medium" for a heuristic call-site rule whose matches
-	// are real but want a human/LLM look: confidence is what makes a finding
-	// TRIAGEABLE (internal/llm.Filter reviews everything at or below its threshold,
-	// analysis.ConfidenceMedium by default), while severity alone decides the CI
-	// gate (-fail-on), so the two dials are set independently. Ignored by dataflow
-	// rules, whose confidence is derived from the flow itself (intra-procedural
-	// High, cross-function Medium).
+	// Confidence overrides the confidence a dangerous-call finding is reported
+	// with; empty means High. Set "medium" for a heuristic call-site rule that
+	// wants a human/LLM look: confidence is what makes a finding TRIAGEABLE
+	// (internal/llm.Filter reviews everything at or below its threshold), while
+	// severity alone decides the CI gate (-fail-on). Ignored by dataflow rules,
+	// whose confidence comes from the flow itself (intra-procedural High,
+	// cross-function Medium).
 	Confidence string `yaml:"confidence"`
 
 	CWE     string `yaml:"cwe"`
@@ -87,8 +82,7 @@ type Rule struct {
 
 	// Extend names one or more `_`-prefixed fragment files (e.g.
 	// "$_go-common.yaml") whose pattern-list fields are merged into this rule at
-	// load time — the DRY mechanism that keeps a language's shared request
-	// sources / propagators in one place instead of copy-pasted into every pack.
+	// load time, keeping a language's shared sources/propagators in one place.
 	// The loader appends the fragment's entries ahead of this rule's own (deduped)
 	// and then clears Extend; it never reaches the matcher. Accepts a single
 	// scalar or a YAML sequence. See internal/rules/loader.
@@ -99,10 +93,10 @@ type Rule struct {
 
 	// RequestObjectSources are source globs whose value is an untrusted HTTP
 	// request OBJECT (not a scalar), e.g. Go's synthetic "go:@net/http.Request".
-	// A DEPENDENCY function that contains one internally (a framework accessor
+	// A DEPENDENCY function containing one internally (a framework accessor
 	// reading *http.Request through a field, with no tainted argument) generates
 	// request taint out of nowhere, so the engine seeds such a function when user
-	// code calls it directly (buildReqSourceHosts) — otherwise the demand-driven
+	// code calls it directly (buildReqSourceHosts); otherwise the demand-driven
 	// dependency scope would never analyze it. These are also ordinary sources
 	// (list them in Sources too); this only tags the flavor.
 	RequestObjectSources []string `yaml:"request_object_sources"`
@@ -116,11 +110,8 @@ type Rule struct {
 
 	// When is the rule's DEFAULT dynamic guard: a sink (or dangerous-call callee)
 	// that declares no `when:` of its own inherits this one. A guard like
-	// `not hostFixed()` is rule POLICY — it says what this whole rule means — but
-	// the schema previously had nowhere to put it except on every single sink, so
-	// a pack repeated the identical expression a dozen times and a sink added
-	// later silently opted out of it. Declaring it once here makes the default
-	// explicit and un-forgettable. An entry's own `when:` always wins, so
+	// `not hostFixed()` is rule POLICY; declaring it once here stops a sink added
+	// later from silently opting out. An entry's own `when:` always wins, so
 	// `when: 'true'` on one sink is the per-sink opt-out. Inheritance is applied
 	// where the guard is resolved (effectiveWhen), so a sink merged in from a
 	// fragment inherits it too.
@@ -141,9 +132,9 @@ type Rule struct {
 	Kind string `yaml:"kind"`
 
 	// Matches is a kind: secret rule's detector — a Go regexp run against string
-	// constants and config-file lines. Deliberately specific (a fixed prefix or a
-	// structural marker) rather than entropy-based, since a CI gate cannot afford
-	// the noise. Ignored by other kinds; see MatchesRe.
+	// constants and config-file lines. Keep it specific (a fixed prefix or a
+	// structural marker) rather than entropy-based: a CI gate cannot afford the
+	// noise. Ignored by other kinds; see MatchesRe.
 	Matches string `yaml:"matches"`
 
 	// Callees are the dangerous-call patterns for a kind: dangerous-call rule —
@@ -156,19 +147,18 @@ type Rule struct {
 	// a Callee fires regardless of arguments.
 	ConstArg *ConstArg `yaml:"const_arg"`
 
-	// Validators are guard/barrier callees (ENG-9): a boolean-returning check
-	// (an allowlist test, a regexp match, a path-containment predicate like
+	// Validators are guard/barrier callees: a boolean-returning check (an
+	// allowlist test, a regexp match, a path-containment predicate like
 	// filepath.IsLocal) that, when it dominates the branch leading to a sink,
 	// clears the checked value's taint on that path. Unlike a Sanitizer — which
 	// transforms a value and returns a clean result — a Validator returns a bool
-	// and leaves the value unchanged; it neutralizes the finding by controlling
+	// and leaves the value unchanged, neutralizing the finding by controlling
 	// which path reaches the sink. Matched by canonical-FQN glob, like sinks.
 	Validators []string `yaml:"validators"`
 
-	// defaultProps is RuleSet.DefaultPropagators compiled ONCE for the whole set
-	// and shared by reference, handed down by RuleSet.Compile so a rule answers
-	// IsPropagator on its own and the engine never has to know defaults exist.
-	// Unexported and not from YAML; a Rule compiled outside a RuleSet has none.
+	// defaultProps is RuleSet.DefaultPropagators compiled ONCE per set and shared
+	// by reference, handed down by RuleSet.Compile so a rule answers IsPropagator
+	// on its own. Not from YAML; a Rule compiled outside a RuleSet has none.
 	//
 	// Deliberately NOT inside matchers: the loader compiles each rule during
 	// validate(), before the set-wide list is known, and Rule.Compile is
@@ -176,9 +166,8 @@ type Rule struct {
 	// that ordering. Kept on the Rule, it can be installed at any point.
 	defaultProps []*compiledGlob
 
-	// matchers holds the pattern lists precompiled to shape-matchers (built by
-	// Compile). Unexported and not from YAML; nil until compiled, when the
-	// matching methods fall back to the package-level cached path.
+	// matchers holds the pattern lists precompiled to shape-matchers. Not from
+	// YAML; nil until Compile, before which the matching methods compile lazily.
 	matchers *ruleMatchers
 }
 
@@ -285,12 +274,11 @@ type RuleSet struct {
 }
 
 // WithRules returns a new RuleSet holding the given rules plus every set-wide
-// field of rs — DefaultPropagators (and its compiled form). DefaultPropagators
-// is a side channel (`yaml:"-"`, filled by the loader, invisible in the rules
-// slice), so any code that derives a RuleSet from another by filtering or
-// rewriting its rules must build the result with this constructor rather than a
-// struct literal: forgetting the field would silently strip the set-wide
-// propagators from every rule — a mass false-negative, not an error.
+// field of rs. Code deriving a RuleSet from another by filtering or rewriting
+// its rules MUST use this rather than a struct literal: DefaultPropagators is a
+// side channel (`yaml:"-"`, invisible in the rules slice), and dropping it
+// silently strips set-wide propagators from every rule — a mass false-negative,
+// not an error.
 func (rs *RuleSet) WithRules(rulesList []Rule) *RuleSet {
 	return &RuleSet{
 		Rules:              rulesList,
@@ -307,11 +295,9 @@ func (rs *RuleSet) WithRules(rulesList []Rule) *RuleSet {
 // Idempotent.
 func (rs *RuleSet) Compile() error {
 	var errs []error
-	// Compiled ONCE for the whole set and shared by reference with every rule.
-	// Memoized because Compile is called on every scan (from both Scan and
-	// Engine.Analyze) while Rule.Compile is idempotent: without this guard the
-	// set-wide propagator list — ~100 globs — was re-classified on each call, which
-	// made classifyGlob the single largest allocation source in a small scan.
+	// Compiled once per set and shared by reference with every rule. Memoized
+	// because Compile runs on every scan (from both Scan and Engine.Analyze):
+	// re-classifying the ~100 set-wide globs each time dominates allocation.
 	if rs.defaultProps == nil && len(rs.DefaultPropagators) > 0 {
 		rs.defaultProps = classifyAll(rs.DefaultPropagators)
 	}
@@ -363,9 +349,9 @@ func (r *Rule) AppliesTo(language string) bool {
 
 // ruleMatchers holds a rule's pattern lists precompiled into shape-matchers, so
 // the hot matching path (once per call-site × rule) is a plain slice walk with
-// no per-call cache lookup, mutex, or "#idx" re-parse. Built once by Compile;
-// nil until then, in which case the matching methods compile lazily via ensure —
-// ONE matching semantics, whether or not the caller compiled first.
+// no per-call cache lookup, mutex, or "#idx" re-parse. Built by Compile; until
+// then the matching methods compile lazily via ensure, so matching semantics
+// are the same whether or not the caller compiled first.
 type ruleMatchers struct {
 	sources     []*compiledGlob
 	sinks       []compiledSink
@@ -443,13 +429,11 @@ func (r *Rule) Compile() error {
 }
 
 // ensure returns the rule's compiled matchers, compiling them on first use.
-// Production paths compile eagerly and single-threaded before matching (the
-// loader at load time, and every analysis pass via RuleSet.Compile — see
-// Compile's doc); this lazy fallback exists so a hand-built Rule (tests,
-// embedding tools) matches with the SAME semantics instead of a divergent
-// uncompiled path. A compile error degrades exactly as Compile documents:
-// fail-closed guards, nil regexps. Not safe for a FIRST call from concurrent
-// goroutines — concurrency is only supported behind an eager Compile.
+// Production paths compile eagerly and single-threaded; this fallback exists so
+// a hand-built Rule (tests, embedding tools) matches with the SAME semantics
+// instead of a divergent uncompiled path. A compile error degrades exactly as
+// Compile documents: fail-closed guards, nil regexps. Not safe for a FIRST call
+// from concurrent goroutines — concurrency requires an eager Compile.
 func (r *Rule) ensure() *ruleMatchers {
 	if r.matchers == nil {
 		_ = r.Compile()
@@ -479,10 +463,8 @@ func (r *Rule) MatchesRe() *regexp.Regexp {
 
 // GlobSet is a set of canonical-name globs precompiled to shape-matchers, for a
 // caller that matches the same list against many subjects but does not own a
-// Rule (e.g. the engine's request-object host scan, which walks every
-// instruction of every lowered dependency function). A Rule's own pattern lists
-// get the same treatment via its lazily-compiled matchers (ensure); GlobSet is
-// the standalone equivalent for a bare []string of patterns.
+// Rule (e.g. the engine's request-object host scan). It is the standalone
+// equivalent of a Rule's own compiled pattern lists.
 type GlobSet struct{ gs []*compiledGlob }
 
 // NewGlobSet precompiles patterns into a GlobSet.
@@ -541,12 +523,10 @@ func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 // InvalidSinkSpec reports whether a sink entry carries a "#" injection-point
 // spec that names no valid argument index — an empty spec ("...Query#") or one
 // whose tokens are not all non-negative integers ("...Query#x", "...Query#-1",
-// "...Query#0,"). Such an entry parses (leniently, at runtime) to zero indices,
-// which is indistinguishable from a bare pattern and so silently widens the
-// sink to "every argument is an injection point" — the false-positive-prone
-// default an author who bothered to write "#" almost certainly did NOT intend
-// (it reintroduces the parameterized-query false positive). The loader rejects
-// it so a typo fails loud at load time instead of quietly weakening the sink.
+// "...Query#0,"). Such an entry parses leniently to zero indices, which is
+// indistinguishable from a bare pattern and silently widens the sink to "every
+// argument is an injection point", reintroducing the parameterized-query false
+// positive. The loader rejects it so a typo fails loud at load time.
 func InvalidSinkSpec(entry string) bool {
 	_, _, valid := parseSinkSpec(entry)
 	return !valid
@@ -682,17 +662,14 @@ func (g *compiledGlob) matchSegments(s string) bool {
 // metacharacter is '*', which matches any run of characters including '/' and
 // '.'; everything else is matched literally. Matching is anchored (full string).
 //
-// The overwhelming majority of real canonical-name globs are pure literals
-// (`ruby:system`) or a single `*` prefix/suffix (`c*:strcpy`, `go:*request*`).
-// Running a backtracking regexp for those is wasteful — and glob matching is the
-// hottest CPU cost in the engine, run once per (call-site × rule pattern), so it
-// grows linearly with rule-pack size. Classifying each pattern by shape once
-// (rules lazy-compile theirs via ensure; other callers hold a GlobSet) lets the
-// match use plain string primitives; only genuinely multi-`*` patterns fall to
-// the general segment walk. No regexp, no per-match allocation.
+// Glob matching is the engine's hottest CPU cost — once per (call-site × rule
+// pattern), so it grows with rule-pack size — and nearly every real glob is a
+// pure literal (`ruby:system`) or a single `*` prefix/suffix (`go:*request*`).
+// Classifying by shape once lets the match use plain string primitives; only
+// multi-`*` patterns fall to the general segment walk. No regexp, no
+// per-match allocation.
 func classifyGlob(pattern string) *compiledGlob {
-	// A pattern with invalid UTF-8 bytes matched nothing under the old regexp
-	// path (a fuzz-found DoS guard); preserve that exactly.
+	// Invalid UTF-8 matches nothing: a fuzz-found DoS guard.
 	if !utf8.ValidString(pattern) {
 		return &compiledGlob{kind: globNever}
 	}

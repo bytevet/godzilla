@@ -2,11 +2,11 @@
 """pyast.py - Parse a Python source file with the stdlib `ast` module and emit
 a compact JSON tree on stdout.
 
-This script is embedded into the Go binary via //go:embed and executed as
+Embedded into the Go binary via //go:embed and executed as
 `python3 pyast.py [--batch] <file.py> [more...]` by
 converters/python/converter.go, which builds gIR from the JSON it prints. It
-has no dependencies beyond the Python 3 standard library (ast, json, sys) so
-it works with any python3 on PATH.
+has no dependencies beyond the Python 3 standard library, so it works with any
+python3 on PATH.
 
 Output shape
 ------------
@@ -17,11 +17,11 @@ Each file's document is a single JSON object:
 or, when that file failed to parse/read, {"error": "<message>"}.
 
 Batch mode (--batch): one JSON document per line, in argv order, always exit
-0 — a per-file failure is that file's own {"error": ...} line. The Go frontend
-ALWAYS passes --batch (converter.go's convertPythonChunk), including for a
-single-file scan, so a per-file error always arrives as that file's {"error"}
-document. Single-file mode (no flag) exists only for running this script by
-hand: the bare document on stdout and exit 1 on failure.
+0 — a per-file failure is that file's own {"error": ...} line, so one broken
+file cannot hide the rest, and interpreter startup is paid once per batch. The
+Go frontend ALWAYS passes --batch, including for a single-file scan. Single-file
+mode exists only for running this script by hand: the bare document on stdout,
+exit 1 on failure.
 
 Every statement/expression node is a JSON object with a "kind" field and a
 "pos": {"line": <1-based>, "col": <1-based>} field (Python's col_offset is
@@ -255,9 +255,8 @@ def conv_stmt(node):
             "pos": p,
         }
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        # Emit the context-manager items (`with EXPR as VAR:`) so the frontend can
-        # lower them as `VAR = EXPR`. Dropping them made the extremely common
-        # `with open(tainted) as f:` file/resource idiom invisible to analysis.
+        # The context-manager items are emitted so the frontend can lower them as
+        # `VAR = EXPR`; see lowerBody's "With" case.
         items = [
             {
                 "context": conv_expr(it.context_expr),
@@ -270,17 +269,16 @@ def conv_stmt(node):
         return {
             "kind": "Try",
             "body": conv_body(node.body),
-            # `name` is the `except E as name` binding. It is not lowered as a
-            # statement, but it DOES bind a name, which whole-module binding
-            # analyses (converters/python/constglobal.go) must be able to see.
+            # `except E as name` is not lowered as a statement, but it DOES bind
+            # a name, which constglobal.go's whole-module walk must be able to see.
             "handlers": [{"name": h.name, "body": conv_body(h.body)} for h in node.handlers],
             "orelse": conv_body(node.orelse),
             "finalbody": conv_body(node.finalbody),
             "pos": p,
         }
     # Imports carry their names+asnames so the lowering can resolve aliased and
-    # from-imported sink modules (FE-2): `import subprocess as sp` / `from os
-    # import system` otherwise silently break module-anchored sink matching.
+    # from-imported sink modules; without them `import subprocess as sp` silently
+    # breaks module-anchored sink matching.
     if isinstance(node, ast.Import):
         return {
             "kind": "Import",
@@ -297,11 +295,9 @@ def conv_stmt(node):
         }
     if isinstance(node, ast.AnnAssign):
         # `x: T = v` binds exactly like `x = v` -- the annotation is irrelevant to
-        # dataflow, so lowering it as an Assign keeps taint alive through the
-        # increasingly common annotated form. Previously it fell through to
-        # "Unknown", which drops the VALUE expression too: `x: str = tainted()`
-        # lost the taint entirely. Without a value it declares only a type and
-        # binds nothing, so it is inert.
+        # dataflow. Emitting it as Unknown instead would drop the VALUE too, so
+        # `x: str = tainted()` would lose its taint entirely. Without a value it
+        # declares only a type and binds nothing, so it is inert.
         if node.value is None:
             return {"kind": "Pass", "pos": p}
         return {
@@ -392,22 +388,15 @@ def conv_expr(node):
         }
 
     if isinstance(node, ast.BoolOp):
-        # `a or b` / `a and b`: the result is one of the operands, so taint from
-        # any operand can reach it. Emit all operands for the lowerer to model
-        # as a taint-merging BIN_OP.
         return {"kind": "BoolOp", "values": [conv_expr(v) for v in node.values], "pos": p}
 
     if isinstance(node, ast.Compare):
-        # `a < b`, `x == y`, `k in d`, ...: the boolean result does not carry the
-        # operands' taint, but lower every operand so a source/sink/validator call
-        # inside the comparison fires and the branch condition references it (the
-        # ops themselves are irrelevant to taint).
+        # The comparison ops are irrelevant to taint and omitted; the operands are
+        # kept so a source/sink/validator call inside the comparison still fires.
         return {"kind": "Compare", "left": conv_expr(node.left),
                 "comparators": [conv_expr(c) for c in node.comparators], "pos": p}
 
     if isinstance(node, ast.IfExp):
-        # ternary `a if cond else b`: the result is a or b, so taint from either
-        # branch can reach it. `test` is emitted for its side effects only.
         return {
             "kind": "IfExp",
             "test": conv_expr(node.test),
@@ -417,14 +406,9 @@ def conv_expr(node):
         }
 
     if isinstance(node, ast.NamedExpr):
-        # walrus `target := value`: the expression's value is `value`, and it
-        # also binds `target`.
         return {"kind": "NamedExpr", "target": conv_expr(node.target), "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-        # [elt for t in iter if cond ...]: emit the element and each generator so
-        # a source/sink inside the comprehension is lowered and the loop target
-        # can inherit the iterable's taint.
         return {"kind": "Comprehension", "elt": conv_expr(node.elt),
                 "generators": [conv_comprehension(g) for g in node.generators], "pos": p}
 
@@ -439,30 +423,26 @@ def conv_expr(node):
         return {"kind": "FormattedValue", "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, ast.Await):
-        # `await x` yields x's resolved value; for taint it is transparent.
         return {"kind": "Await", "value": conv_expr(node.value), "pos": p}
 
     if isinstance(node, (ast.List, ast.Tuple)):
-        # As a VALUE: a list/tuple literal, which carries its elements' taint. As
-        # an unpacking TARGET (a, b = ...): bind each element. Both are handled by
-        # the "Sequence" lowering, distinguished by context (lowerExpr vs assign).
+        # One "Sequence" kind serves both roles — a literal VALUE and an unpacking
+        # TARGET — which the lowering distinguishes by context (lowerExpr/assign).
         return {"kind": "Sequence", "container": "list", "elts": [conv_expr(e) for e in node.elts], "pos": p}
 
     if isinstance(node, ast.Set):
         return {"kind": "Sequence", "container": "list", "elts": [conv_expr(e) for e in node.elts], "pos": p}
 
     if isinstance(node, ast.Dict):
-        # A dict literal is the payload shape for JSON bodies, kwargs, and DB
-        # param maps. Lower its keys and values as a flat Sequence so a source or
-        # sink INSIDE the literal is emitted and can fire (FE-7) — previously the
-        # whole dict was "Unknown" -> py.unsupported and every inner call was
-        # dropped. (A None key is `**spread` per PEP 448; lower only its value.)
+        # Keys and values go out as one flat Sequence so a source or sink INSIDE
+        # the literal — the payload shape for JSON bodies, kwargs and DB param
+        # maps — is emitted and can fire. (A None key is `**spread` per PEP 448;
+        # only its value is lowered.)
         #
-        # container="dict" tells the lowering the elts run is key,value,key,value
-        # so a guard can address entries by key. A `**spread` contributes a value
-        # with no key and breaks that alignment, so such a literal is marked
-        # "list" instead: the elements still carry taint, but no key structure is
-        # claimed rather than a mis-paired one.
+        # container="dict" promises the elts run is key,value,key,value, so a
+        # guard can address entries by key. A `**spread` contributes a value with
+        # no key and breaks that alignment, so such a literal is marked "list":
+        # the elements still carry taint, but no key structure is claimed.
         elts = []
         for k, v in zip(node.keys, node.values):
             if k is not None:
@@ -495,10 +475,6 @@ def parse_one(path):
 
 
 def main():
-    # Batch mode (--batch <files...>): one JSON document per line, in argument
-    # order, always exit 0. A per-file failure is that file's own
-    # {"error": ...} line, so one broken file cannot hide the rest — and
-    # interpreter startup is paid once per batch instead of once per file.
     if len(sys.argv) >= 2 and sys.argv[1] == "--batch":
         for path in sys.argv[2:]:
             print(json.dumps(parse_one(path)))
@@ -508,9 +484,7 @@ def main():
         print(json.dumps({"error": "usage: pyast.py [--batch] <file.py> [more files...]"}))
         sys.exit(1)
 
-    # Single-file mode (manual invocation only — the Go frontend always passes
-    # --batch): the JSON (or {"error": ...}) on stdout, exit 1 on failure, so
-    # running this script by hand fails loudly.
+    # Single-file mode exits 1 on failure, so running this by hand fails loudly.
     out = parse_one(sys.argv[1])
     print(json.dumps(out))
     sys.exit(1 if "error" in out else 0)

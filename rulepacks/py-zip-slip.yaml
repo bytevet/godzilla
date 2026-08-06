@@ -39,10 +39,7 @@ rules:
       # lever -- a source glob cannot negate, and a callee is classified
       # sanitizer-before-source.
       - "py:inspect.getmembers"
-    # os.path.join does NOT contain the name to a base directory (a leading
-    # "../" still escapes), so it forwards taint rather than clearing it --
-    # mirroring py-path-traversal's identical treatment.
-    # The path-normalization propagators come from _py-fs.yaml (shared with
-    # py-path-traversal), so an archive entry name normalized with
-    # `os.path.normpath` / `pathlib.Path(...).resolve` before extraction still
-    # carries taint to the write sink.
+    # The path-normalization propagators come from _py-fs.yaml. os.path.join,
+    # os.path.normpath and pathlib resolve do NOT contain the name to a base
+    # directory (a leading "../" still escapes), so they forward taint rather
+    # than clearing it.

@@ -49,13 +49,12 @@ func TestConvertFile_SQLInjectionSample(t *testing.T) {
 				if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "py.unsupported" {
 					t.Errorf("unsupported python construct in function %s: %s", f.Name, inst.Comment)
 				}
-				// An object-method sink like `cursor.execute(...)` now lowers to an
-				// INVOKE (CHA method dispatch), while a resolved module accessor like
-				// request.args.get stays a CALL; accept either op and match on Callee.
+				// An object-method sink like `cursor.execute(...)` is an INVOKE (CHA
+				// dispatch) while a resolved module accessor stays a CALL, so accept
+				// either op and match on Callee.
 				if (inst.Op == ir.OpCode_OP_CODE_CALL || inst.Op == ir.OpCode_OP_CODE_INVOKE) && inst.Call != nil {
-					// `request` comes from `from flask import request`, so FE-2 alias
-					// resolution qualifies the callee to py:flask.request.args.get;
-					// match by suffix so the test is robust to that (correct) rewrite.
+					// `from flask import request` makes alias resolution qualify the
+					// callee to py:flask.request.args.get; match by suffix.
 					if strings.HasSuffix(inst.Call.Callee, "request.args.get") {
 						foundSourceCall = true
 					}
@@ -156,12 +155,9 @@ func TestConvertFile_CommandInjectionSample(t *testing.T) {
 	t.Logf("finding: %s", found.String())
 }
 
-// TestConvertFile_BranchMergeDefault proves that the "default if empty"
-// pattern (`if not host: host = "localhost"`) no longer drops taint (FE-5).
-// Before branch-merge PHI flattening the reassignment inside the `if` killed
-// the tainted binding on the merge path, a false negative; lowerIfMerge now
-// PHI-merges both incoming values so the tainted branch keeps the flow live
-// into the os.system sink.
+// TestConvertFile_BranchMergeDefault pins that the "default if empty" pattern
+// (`if not host: host = "localhost"`) keeps taint: the merge PHI must carry the
+// pre-branch tainted value through to the os.system sink.
 func TestConvertFile_BranchMergeDefault(t *testing.T) {
 	requirePython3(t)
 
@@ -207,10 +203,9 @@ func TestConvertFile_Directory(t *testing.T) {
 	}
 }
 
-// TestConvertFile_SubscriptSourceSample proves that test/python/
-// command_injection_subscript/app.py's `request.args["cmd"]` (bracket
-// subscript form) lowers to a synthetic "py:request.args.__getitem__" source
-// CALL rather than a plain OP_CODE_INDEX, making the previously-dead
+// TestConvertFile_SubscriptSourceSample pins that the bracket-subscript form
+// `request.args["cmd"]` lowers to a synthetic "py:request.args.__getitem__"
+// source CALL rather than a plain OP_CODE_INDEX, which is what makes the
 // "py:*request.args.__getitem__" glob in py-command-injection.yaml fire.
 func TestConvertFile_SubscriptSourceSample(t *testing.T) {
 	requirePython3(t)
@@ -258,13 +253,10 @@ func TestConvertFile_SubscriptSourceSample(t *testing.T) {
 
 // TestSubscript_OpaqueBaseDiscrimination is a whitebox test (no python3
 // dependency: it builds pyast.py-shaped astNode trees directly) covering the
-// three cases funcState.lowerExpr's Subscript case must discriminate: a base
-// rooted at an unbound module global/import, a base rooted at the function's
-// own parameter, and a base rooted at a local variable holding a
-// locally-computed value. Only the first two are "opaque" and should lower
-// to a synthetic source CALL; the local case must stay OP_CODE_INDEX so
-// taint propagation through e.g. `local_list[i]` (via propagatingOps) is not
-// regressed.
+// three roots lowerSubscript must discriminate: an unbound module global/import,
+// the function's own parameter, and a local holding a locally-computed value.
+// Only the first two are opaque and lower to a synthetic source CALL; the local
+// must stay OP_CODE_INDEX or taint through `local_list[i]` regresses.
 func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 	nameNode := func(id string) map[string]any {
 		return map[string]any{"kind": "Name", "id": id}
@@ -337,10 +329,8 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 			t.Fatalf("callee = %v, want %q", instrs[0].Call, wantCallee)
 		}
 		// A parameter-rooted read must ALSO carry the parameter register in
-		// Call.Value and be tagged builtin.member_read (the cross-frontend
-		// contract, see internal/analysis memberReadIntrinsic), so incoming
-		// inter-procedural taint on `req` reaches the result instead of
-		// dropping at the synthetic source call.
+		// Call.Value and be tagged builtin.member_read, or incoming
+		// inter-procedural taint on `req` drops at the synthetic source call.
 		if got := instrs[0].Call.GetValue().GetRegName(); got != "req" {
 			t.Fatalf("Call.Value = %v, want the req parameter register", instrs[0].Call.GetValue())
 		}
@@ -353,10 +343,8 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 		fs := newFuncState("test.py")
 		fs.write("details", ssabuild.Reg("details"))
 		fs.paramRegs["details"] = true
-		// details["path"], where `details` is this function's own parameter
-		// (the CVE-2025-47782 motioneye helper shape). One synthetic CALL,
-		// base in Call.Value, tagged builtin.member_read -- no INDEX/BIN_OP_OR
-		// merge.
+		// details["path"] where `details` is a parameter (CVE-2025-47782): one
+		// synthetic CALL, base in Call.Value, tagged builtin.member_read.
 		sub := subscriptNode(nameNode("details"), strConst("path"))
 
 		fs.lowerExpr(sub)
@@ -416,13 +404,11 @@ func TestSubscript_OpaqueBaseDiscrimination(t *testing.T) {
 	})
 }
 
-// TestSubscript_TaintedParamMemberRead proves the flow the builtin.member_read
-// tag exists for: a helper's PARAMETER arrives tainted from its caller and the
-// helper reads a member chain off it with a subscript (`d.args["k"]` --
-// param.attr[key], not a plain param[key]). Before the member_read lowering
-// this dropped the incoming taint: the synthetic __getitem__ source call only
-// INTRODUCES taint when its dotted name matches a source glob, and the old
-// INDEX+BIN_OP_OR fallback was gated to plain-Name parameter bases only.
+// TestSubscript_TaintedParamMemberRead pins the flow the builtin.member_read tag
+// exists for: a helper's PARAMETER arrives tainted from its caller and the helper
+// reads a member chain off it with a subscript (`d.args["k"]` — param.attr[key],
+// not a plain param[key]). The synthetic __getitem__ source only INTRODUCES taint
+// when its dotted name matches a source glob, so without the tag this drops.
 func TestSubscript_TaintedParamMemberRead(t *testing.T) {
 	requirePython3(t)
 
@@ -466,12 +452,10 @@ def handler():
 	}
 }
 
-// TestConvertFile_DirectorySkipsUnparseableFile proves that a directory
-// conversion tolerates one unparseable .py file: test/python/resilience
-// contains both broken.py (a syntax error) and a valid, vulnerable app.py.
-// The batch must still succeed, must still yield app.py's module (and only
-// that one -- broken.py contributes none), and the taint engine must still
-// find app.py's vulnerability.
+// TestConvertFile_DirectorySkipsUnparseableFile pins that a directory conversion
+// tolerates one unparseable .py file: test/python/resilience holds both
+// broken.py (a syntax error) and a valid, vulnerable app.py, and the batch must
+// still succeed, yield only app.py's module, and still find its vulnerability.
 func TestConvertFile_DirectorySkipsUnparseableFile(t *testing.T) {
 	requirePython3(t)
 
@@ -517,11 +501,9 @@ func TestConvertFile_SingleUnparseableFileErrors(t *testing.T) {
 	}
 }
 
-// TestConvertFile_ModuleConstantBecomesGlobal proves that a module-level
-// constant binding (NAME = "literal") is surfaced as a gIR Global with its
-// string init value. Without this, the literal lives only in the <module>
-// function's env and is invisible to constant-inspecting passes such as the
-// hardcoded-secret scanner — the false-negative this regression-guards.
+// TestConvertFile_ModuleConstantBecomesGlobal pins that a module-level constant
+// binding surfaces as a gIR Global with its string init value; otherwise the
+// literal is invisible to the hardcoded-secret scanner.
 func TestConvertFile_ModuleConstantBecomesGlobal(t *testing.T) {
 	requirePython3(t)
 
@@ -546,8 +528,8 @@ func TestConvertFile_ModuleConstantBecomesGlobal(t *testing.T) {
 	}
 }
 
-// TestResolveDotted covers FE-2 import-alias resolution of a callee's root:
-// module aliases (import x as y) and from-imports (from m import n).
+// TestResolveDotted covers import-alias resolution of a callee's root: module
+// aliases (import x as y) and from-imports (from m import n).
 func TestResolveDotted(t *testing.T) {
 	fs := &funcState{aliases: map[string]string{
 		"sp":     "subprocess",    // import subprocess as sp

@@ -21,13 +21,11 @@ rules:
       # (CVE-2025-52967, mlflow gateway_proxy_handler). The URL is arg #1, so pin
       # it with #1 (the HTTP method in arg #0 is not the injection point).
       - "py:*requests.request#1"
-      # httpx outbound requests, module-level functions and the client-instance
-      # streaming API (CVE-2024-48052, gradio save_url_to_cache:
-      # client.stream("GET", url, follow_redirects=True)). For .stream/.request
-      # the URL follows the HTTP method, so pin arg #1; httpx.get/post take the
-      # URL as arg #0. Scoped to httpx.* and *client.* (the httpx.Client /
-      # AsyncClient idiom) rather than a bare *.stream/*.request to avoid
-      # matching unrelated stream/request methods.
+      # httpx module-level functions plus the client-instance streaming API
+      # (CVE-2024-48052). For .stream/.request the URL follows the HTTP method,
+      # so pin arg #1; httpx.get/post take it as arg #0. Scoped to httpx.* and
+      # *client.* rather than a bare *.stream/*.request, which would match
+      # unrelated methods.
       - "py:httpx.get"
       - "py:httpx.post"
       - "py:httpx.stream#1"
@@ -36,13 +34,11 @@ rules:
       - "py:*client.request#1"
       - "py:*urlopen"
       # pycurl sets the URL as an OPTION — `c.setopt(pycurl.URL, url)` — so there
-      # is no URL-named call to match, and an app with its own HTTP layer bottoms
-      # out here rather than at requests/httpx (pyload, CVE-2026-35187).
-      # The option in arg #0 is a module attribute, not a literal, so it does not
-      # reconstruct and no guard can tell pycurl.URL from pycurl.POSTFIELDS.
-      # Pinning the VALUE (#1) is as narrow as this gets: untrusted data reaching
-      # a non-URL curl option is a known false positive, accepted because taint is
-      # still required to fire.
+      # is no URL-named call to match (pyload, CVE-2026-35187). Arg #0 is a
+      # module attribute, not a literal, so it does not reconstruct and no guard
+      # can tell pycurl.URL from pycurl.POSTFIELDS. Pinning the VALUE (#1) is as
+      # narrow as this gets: untrusted data reaching a non-URL curl option is an
+      # accepted false positive, since taint is still required to fire.
       - "py:*.setopt#1"
     # No built-in sanitizer neutralizes tainted input for a request URL;
     # the fix is allow-listing the destination host, not escaping.

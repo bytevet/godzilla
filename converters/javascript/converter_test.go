@@ -122,12 +122,10 @@ func TestConvertCommandInjectionSample(t *testing.T) {
 	requireFinding(t, findings, "js-command-injection")
 }
 
-// TestConvertBranchMergeDefault proves the statement-level "default if empty"
-// pattern (`if (!host) host = "localhost"`) no longer drops taint (FE-5).
-// Before branch-merge PHI flattening the reassignment inside the `if` killed
-// the tainted binding on the merge path (a false negative); lowerIfMerge now
-// PHI-merges both incoming values so the tainted branch stays live into the
-// execSync sink.
+// TestConvertBranchMergeDefault pins the statement-level "default if empty"
+// pattern (`if (!host) host = "localhost"`, FE-5): without the merge PHI the
+// reassignment inside the `if` kills the tainted binding on the merge path and
+// the execSync sink reads clean (a false negative).
 func TestConvertBranchMergeDefault(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/branch_merge_default/app.js")
 
@@ -152,16 +150,13 @@ func TestConvertSSRFSample(t *testing.T) {
 	requireFinding(t, findings, "js-ssrf")
 }
 
-// TestConvertChainedAxiosCallSSRF is a regression test for the
-// chained-call lowering bug: a CallExpression that appears inside another
-// call's *callee* (e.g. the `axios.get(url)` inside
-// `axios.get(url).then(cb)`) must still be lowered to its own OP_CODE_CALL
-// -- with its own real arguments -- even though it is never assigned to an
-// intermediate variable first. Before the fix, lowerCall built the outer
-// call's callee purely syntactically (via syntacticCallee) and never ran
-// lowerExpr on it, so the inner axios.get(...) call (and the taint flowing
-// through its argument) was silently dropped and never matched the SSRF
-// sink glob.
+// TestConvertChainedAxiosCallSSRF pins the chained-call lowering: a
+// CallExpression inside another call's *callee* (the `axios.get(url)` in
+// `axios.get(url).then(cb)`) must get its own OP_CODE_CALL with its own real
+// arguments, even though it is never assigned to an intermediate variable.
+// Building the outer callee purely syntactically without also lowering it drops
+// the inner call — and the taint through its argument — so the SSRF sink glob
+// never matches.
 func TestConvertChainedAxiosCallSSRF(t *testing.T) {
 	src := `
 var express = require("express");
@@ -217,12 +212,9 @@ func TestConvertPathTraversalSample(t *testing.T) {
 	requireFinding(t, findings, "js-path-traversal")
 }
 
-// TestNewRulePacksDoNotCrossFire proves that the three new rule packs
-// (js-sqli, js-ssrf, js-path-traversal) do not spuriously fire on the
-// pre-existing xss/command-injection samples, and that js-xss/
-// js-command-injection do not spuriously fire on the three new samples --
-// i.e. the broad `js:*.<method>` sink globs stay isolated to their own
-// vulnerability class.
+// TestNewRulePacksDoNotCrossFire pins that the broad `js:*.<method>` sink globs
+// stay isolated to their own vulnerability class: no pack fires on another
+// pack's sample.
 func TestNewRulePacksDoNotCrossFire(t *testing.T) {
 	sets := []*rules.RuleSet{xssRuleSet(t), commandInjectionRuleSet(t), sqliRuleSet(t), ssrfRuleSet(t), pathTraversalRuleSet(t)}
 	var all []rules.Rule
@@ -263,12 +255,9 @@ func TestConvertDirectory(t *testing.T) {
 	}
 }
 
-// TestConvertDirectorySkipsUnparseableFile proves that a directory
-// conversion tolerates one unparseable .js file: test/js/resilience contains
-// both broken.js (a syntax error) and a valid, vulnerable app.js. The batch
-// must still succeed, must still yield app.js's module (and only that one --
-// broken.js contributes none), and the taint engine must still find
-// app.js's vulnerability.
+// TestConvertDirectorySkipsUnparseableFile pins that a directory conversion
+// tolerates one unparseable .js file: the batch still succeeds, yields only
+// app.js's module, and the engine still finds app.js's vulnerability.
 func TestConvertDirectorySkipsUnparseableFile(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/resilience")
 
@@ -284,10 +273,9 @@ func TestConvertDirectorySkipsUnparseableFile(t *testing.T) {
 	requireFinding(t, findings, "js-xss")
 }
 
-// TestConvertSingleUnparseableFileErrors proves that a single-file path
-// (as opposed to a directory) still surfaces a parse failure as an error,
-// per ConvertFile's contract: only a directory batch tolerates a broken
-// sibling file.
+// TestConvertSingleUnparseableFileErrors pins the other half of ConvertFile's
+// contract: only a directory batch tolerates a broken file; a single-file path
+// surfaces the parse failure as an error.
 func TestConvertSingleUnparseableFileErrors(t *testing.T) {
 	conv := NewConverter()
 	_, err := conv.ConvertFile("../../test/js/resilience/broken.js")
@@ -304,10 +292,9 @@ func functionNamesForModules(prog *ir.Program) []string {
 	return names
 }
 
-// TestNoUnsupportedInstructions guards against silent regressions: every
-// instruction in the converted samples should have a real OpCode, not the
-// generic "js.unsupported" intrinsic fallback, mirroring
-// converters/go's TestConvertComplexFile absence-of-fallback-comments check.
+// TestNoUnsupportedInstructions is the absence-of-fallback check (CLAUDE.md):
+// every instruction in the converted samples must have a real OpCode, never the
+// generic "js.unsupported" intrinsic.
 func TestNoUnsupportedInstructions(t *testing.T) {
 	for _, path := range []string{
 		"../../test/js/xss/app.js",

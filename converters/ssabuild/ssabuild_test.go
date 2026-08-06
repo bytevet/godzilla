@@ -10,7 +10,6 @@ func constInt(n int64) *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_IntVal{IntVal: n}}}}
 }
 
-// phisOf returns the PHI instructions at the head of a materialized block.
 func phisOf(blk *ir.BasicBlock) []*ir.Instruction {
 	var out []*ir.Instruction
 	for _, inst := range blk.Instrs {

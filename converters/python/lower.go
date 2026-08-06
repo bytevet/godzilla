@@ -3,6 +3,7 @@ package py_converter
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"godzilla/converters/ssabuild"
@@ -11,10 +12,8 @@ import (
 
 // modCtx bundles the file-scoped facts every lowered function in a module needs:
 // the source filename (for positions), the module name (for canonical names) and
-// the three module-level name tables (top-level defs, import aliases, imported
-// names). It is built once in convertModule and threaded into convertModuleInit
-// and convertFunction, which previously took them as five positional parameters
-// each and then repeated the same field-copy block.
+// the module-level name tables. Built once in convertModule and threaded into
+// convertModuleInit and convertFunction.
 type modCtx struct {
 	filename   string
 	moduleName string
@@ -39,11 +38,10 @@ func (m *modCtx) newFuncState() *funcState {
 	return fs
 }
 
-// convertModule turns one parsed Python file (root = the {"kind":"Module", ...}
-// node from pyast.py) into a gIR Module. Every `def` (including nested defs
-// and methods) becomes its own ir.Function; module-level statements that are
-// not defs/classes are collected into one synthetic "<module>" function, the
-// Python analogue of Go's package-init/main flattening in converters/go.
+// convertModule turns one parsed Python file (root = pyast.py's
+// {"kind":"Module", ...} node) into a gIR Module. Every `def` — nested defs and
+// methods included — becomes its own ir.Function; the remaining module-level
+// statements are collected into one synthetic "<module>" function.
 func convertModule(root astNode, filename, moduleName string, classes routeClasses) *ir.Module {
 	mod := &ir.Module{
 		Name:     moduleName,
@@ -52,15 +50,9 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 
 	var functions []*ir.Function
 
-	// collect walks the statement tree looking for FunctionDef/ClassDef nodes
-	// (at any nesting depth reachable via defs/classes) and lowers each into
-	// its own ir.Function, tracking a dotted qualname prefix as it descends
-	// (e.g. "MyClass." for methods, "outer." for a closure nested in outer).
-	// Top-level `def` names: a bare call to one of these (helper(x)) resolves to
-	// the module-level function, so lowerCall qualifies its callee with the
-	// module name to match the function's CanonicalName. (Nested defs called by
-	// bare name are a documented limitation — the straight-line lowering does not
-	// model Python's lexical scoping.)
+	// Top-level `def` names, consumed by classifyCallee to qualify a bare call.
+	// A nested def called by bare name is a documented limitation: the lowering
+	// does not model Python's lexical scoping.
 	localFuncs := map[string]bool{}
 	for _, s := range root.list("body") {
 		if s.kind() == "FunctionDef" {
@@ -74,13 +66,11 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 	ctx := &modCtx{filename: filename, moduleName: moduleName, localFuncs: localFuncs, aliases: aliases, imported: imported,
 		constGlobals: constStringGlobals(root)}
 
-	// Route-handler taint sources (COV-11): web frameworks deliver untrusted input
-	// as HANDLER PARAMETERS, not `request.X` accessor calls, so a handler's params
-	// must be seeded as sources or the flow is never tainted. Recognition is
-	// data-driven (see the handler-recognition tables below), so it is not tied to
-	// any one framework. handlerClassSet — the set of request-handler class names
-	// (by simple name) — is computed across ALL files (lowerAll/globalHandlerClasses)
-	// so handler subclassing that crosses file boundaries still resolves.
+	// collect walks the statement tree, lowering each FunctionDef/ClassDef at any
+	// nesting depth into its own ir.Function and tracking a dotted qualname prefix
+	// ("MyClass." for a method, "outer." for a closure nested in outer). `classes`
+	// carries the route-handler recognition tables (see below).
+	//
 	// inClass marks a FunctionDef whose immediate enclosing scope is a class body,
 	// i.e. a real method (not a module function or a closure nested in a def). The
 	// engine's cross-object CHA dispatch indexes such functions by method name, so
@@ -106,14 +96,10 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 	}
 	collect(root.list("body"), "", classCtx{}, false)
 
-	// Module-level constant bindings (NAME = <literal>) are Python module
-	// globals. The env-based lowering keeps such a literal only in the
-	// <module> function's register map (a bare-Name assign emits no
-	// instruction), so a constant referenced from another function — or never
-	// referenced at all — is invisible to passes that inspect the IR for
-	// literals, most importantly the hardcoded-secret scanner. Surface each as
-	// a gIR Global with an init value (the proto's intended home for a module
-	// constant), mirroring how package-level vars appear in the Go frontend.
+	// A bare-Name assign emits no instruction, so a module-level `NAME = <literal>`
+	// would live only in the <module> function's register map and stay invisible to
+	// passes that inspect the IR for literals — above all the hardcoded-secret
+	// scanner. Surface each as a gIR Global with its init value instead.
 	eachModuleConstAssign(root, func(name string, c *ir.Constant, val astNode) {
 		mod.Globals = append(mod.Globals, &ir.Global{
 			Name:      name,
@@ -128,10 +114,9 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 	return mod
 }
 
-// convertModuleInit lowers a file's top-level straight-line statements
-// (skipping nested def/class bodies, which become their own functions) into a
-// synthetic entry-point function, analogous to converters/go treating
-// package-level init code as part of the SSA program.
+// convertModuleInit lowers a file's top-level straight-line statements (skipping
+// def/class bodies, which become their own functions) into the synthetic
+// entry-point function.
 func convertModuleInit(ctx *modCtx, root astNode) *ir.Function {
 	fn := &ir.Function{
 		Name:          ctx.moduleName + ".<module>",
@@ -149,8 +134,7 @@ func convertModuleInit(ctx *modCtx, root astNode) *ir.Function {
 // convertFunction lowers a single `def` (module-level, nested, or method) into
 // an ir.Function whose blocks are built by the ssabuild Builder (a branch-free
 // body yields exactly one block). srcParams names this function's route-handler
-// parameters (see routeHandlerParams): each is an untrusted taint source and is
-// seeded with a synthetic source CALL below.
+// parameters (see routeHandlerParams), each seeded as a taint source below.
 func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []string, inHandlerClass, isMethod bool) *ir.Function {
 	name := node.str("name")
 	qualname := qualPrefix + name
@@ -177,21 +161,16 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 		fs.write(p, v)
 		fs.paramRegs[p] = true
 	}
-	// A method's first parameter is conventionally `self` (or `cls`); record it
-	// and the class qualname prefix so `self.method(x)` calls resolve to the
-	// sibling method. Guarding on the self/cls name keeps this from misfiring in
-	// ordinary functions.
+	// Guarding on the conventional self/cls name keeps sibling-method resolution
+	// from misfiring in an ordinary function.
 	if hasSelfReceiver(params) {
 		fs.selfName = params[0]
 		fs.methodPrefix = qualPrefix
 	}
 
-	// RW-1: seed each route-handler parameter as a taint source. A synthetic
-	// source CALL (canonical name "py:@http.param", a source glob in the Python
-	// rulepacks) is emitted at function entry and the param name is rebound to its
-	// tainted result, so every subsequent read of the param carries taint — the
-	// same frontend trick JS/Python opaque-base reads and the Java @RequestParam
-	// source use, needing no gIR/engine change.
+	// Seed each route-handler parameter as a taint source: emit the synthetic
+	// source CALL at function entry and rebind the param name to its tainted
+	// result, so every subsequent read of the param carries taint.
 	for _, p := range srcParams {
 		if !fs.assigned[p] {
 			continue // defensive: name not an actual parameter
@@ -207,25 +186,20 @@ func convertFunction(ctx *modCtx, node astNode, qualPrefix string, srcParams []s
 // --- Web-route-handler recognition (COV-11): the single extension point -------
 //
 // Frameworks deliver untrusted input as handler PARAMETERS, not `request.X`
-// accessor calls. Rather than special-case each framework in the detection
-// LOGIC, the frontend recognizes two generic SHAPES driven by the declarative
-// tables below — so adding a framework (aiohttp, Sanic, Django CBV, Falcon, …)
-// is a data edit here, not new code:
+// accessor calls, so a handler's params must be seeded as sources or the flow is
+// never tainted. Rather than special-case each framework in the detection LOGIC,
+// the frontend recognizes three generic SHAPES driven by the declarative tables
+// below — so adding a framework (aiohttp, Sanic, Django CBV, Falcon, …) is a data
+// edit here, not new code:
 //
-//  1. a function decorated `<receiver>.<verb>`, verb in routeDecoratorVerbs
-//     (FastAPI @app.get, @router.post, aiohttp @routes.get, Sanic @app.get, …);
+//  1. a function carrying a routeDecorators decorator — a dotted HTTP verb
+//     (@app.get, @routes.post) or a bare routing symbol (@route, @expose,
+//     @action). The decorator NAME is what covers the class-based APIs, whose
+//     methods are named `data`/`upload_example` rather than after a verb;
 //  2. a `<verb>`-named method, verb in handlerMethodVerbs, of a class
-//     subclassing one of handlerBaseClasses (Tornado RequestHandler, Flask
-//     MethodView, … — matched by simple base name, transitively);
-//
-// Shape 1 covers the class-based APIs too, because a decorator NAME is the
-// signal there rather than the method's: Flask-AppBuilder routes @expose("/data")
-// to a method called `data`, DRF routes @action(detail=True) to one called
-// `upload_example`. Neither name is an HTTP verb and neither is a registration on
-// an app/router object, so both were invisible -- the handler's parameters stayed
-// clean and NO rule could fire downstream of them, which is why a campaign miss
-// in superset, label-studio or pyload showed the expected class firing zero times
-// across the entire project rather than firing at the wrong line.
+//     subclassing one of handlerBaseClasses (matched by simple base name,
+//     transitively);
+//  3. a BARE HTTP verb decorator inside a dispatch class (see routeClasses).
 //
 // routeParamSource is the canonical name of the synthetic source CALL seeded at
 // each recognized parameter; it is a source glob in every Python taint rulepack,
@@ -257,12 +231,10 @@ var (
 	handlerBaseClasses = map[string]bool{
 		"RequestHandler": true, // Tornado
 		"MethodView":     true, // Flask pluggable views
-		// Django class-based views + DRF APIView. A verb method (get/post/…) of a
-		// subclass takes the URL captures as params after (self, request); those
-		// captures are untrusted route input. Listed by simple base name (matched
-		// transitively), covering both direct `View` subclasses and the concrete
-		// generic views (whose own base `View` is declared in Django, not user
-		// code, so it cannot be resolved by the transitive closure alone).
+		// Django CBVs + DRF APIView. A verb method of a subclass takes the URL
+		// captures as params after (self, request). The concrete generic views are
+		// listed alongside `View` because their own base is declared in Django, not
+		// user code, so the transitive closure alone cannot reach them.
 		"View":           true, // django.views.generic.View — base of all Django CBVs
 		"TemplateView":   true,
 		"ListView":       true,
@@ -275,13 +247,12 @@ var (
 		"APIView":        true, // Django REST Framework
 		"GenericAPIView": true, // Django REST Framework
 		// DRF ViewSets. Their STANDARD actions (list/create/retrieve/…) are
-		// deliberately NOT added to handlerMethodVerbs: those take the request
-		// object plus a `pk`, and request.data/.query_params are already precise
-		// source globs, so seeding them would buy almost nothing while making
-		// every helper method named `create`/`update` in any handler class a
-		// taint origin. A ViewSet's CUSTOM actions are what carry untrusted
-		// input, and shape 3 catches those by their @action decorator. Listing
-		// the bases still matters: it makes `self.request` resolve inside them.
+		// deliberately NOT in handlerMethodVerbs: request.data/.query_params
+		// already cover them as precise source globs, so seeding would buy almost
+		// nothing while making every helper method named `create`/`update` in any
+		// handler class a taint origin. A ViewSet's CUSTOM actions carry the
+		// untrusted input and shape 1 catches those by their @action decorator.
+		// Listing the bases still makes `self.request` resolve inside them.
 		"ViewSet":              true,
 		"GenericViewSet":       true,
 		"ModelViewSet":         true,
@@ -292,22 +263,20 @@ var (
 		"BaseView":             true, // Flask-AppBuilder
 		"ModelRestApi":         true, // Flask-AppBuilder
 	}
-	// requestObjectParams name a handler parameter that holds the framework
-	// REQUEST OBJECT itself rather than an untrusted URL capture. Django/DRF verb
-	// methods take it as the first positional after self (`get(self, request,
-	// pk)`); it is excluded from synthetic param sources because request.GET/
-	// .POST/.data accessors are already precise source globs, and seeding the
-	// whole object would be both broader than needed and less precise
-	// (request.user / request.method are not injection sources).
+	// requestObjectParams name a handler parameter holding the framework REQUEST
+	// OBJECT itself rather than an untrusted URL capture. Excluded from synthetic
+	// param sources: the request.GET/.POST/.data accessors are already precise
+	// source globs, and seeding the whole object is less precise (request.user /
+	// request.method are not injection sources).
 	requestObjectParams = map[string]bool{"request": true, "websocket": true}
 )
 
 // routeHandlerParams returns the untrusted parameter names of a `def` when it is
-// a web-route handler (one of the two shapes above), or nil otherwise. Detection
-// is deliberately conservative to avoid false positives: a decorated route's
-// params exclude self/cls, request/websocket, and Depends()/Security()-injected
-// params; a handler-class verb method contributes its params after self/cls (the
-// URL route captures).
+// a web-route handler (one of the shapes above), or nil otherwise. Detection is
+// deliberately conservative to avoid false positives: a decorated route's params
+// exclude self/cls, request/websocket, and Depends()/Security()-injected params;
+// a handler-class verb method contributes its params after self/cls (the URL
+// route captures).
 func routeHandlerParams(node astNode, cls classCtx) []string {
 	params := node.strList("params")
 	if len(params) == 0 {
@@ -413,9 +382,8 @@ func collectClassBases(stmts []astNode, out map[string][]string) {
 	for _, s := range stmts {
 		switch s.kind() {
 		case "ClassDef":
-			// Append (union) rather than overwrite so a class name defined in more
-			// than one file (collectClassBases is also called across all files to
-			// resolve cross-file handler subclassing) keeps every base it declares.
+			// Union rather than overwrite: this runs across ALL files, so a class
+			// name declared in more than one keeps every base it declares.
 			out[s.str("name")] = append(out[s.str("name")], s.strList("bases")...)
 			collectClassBases(s.list("body"), out)
 		case "FunctionDef":
@@ -424,10 +392,14 @@ func collectClassBases(stmts []astNode, out map[string][]string) {
 	}
 }
 
-// handlerClasses returns the set of class names that subclass one of targetBases
-// (matched by simple base name) directly or transitively. The transitive closure
-// is computed to a fixpoint so `class B(A)` where `class A(RequestHandler)` is
-// also detected.
+// handlerClasses returns the class names that subclass one of targetBases
+// (matched by simple base name) directly or transitively, to a fixpoint.
+//
+// The result holds only the DERIVED subclasses, never the seeds: the original
+// caller's seeds are external framework names (`RequestHandler`, `View`) the
+// program does not define, and folding them in would make a program's own
+// unrelated `class View:` a request handler. A caller whose seeds ARE program
+// classes unions them back in itself.
 func handlerClasses(classBases map[string][]string, targetBases map[string]bool) map[string]bool {
 	result := map[string]bool{}
 	for changed := true; changed; {
@@ -462,26 +434,22 @@ type routeClasses struct {
 	// is dispatching, because a one-off helper decorator does not come with a
 	// sibling named after a different verb.
 	//
-	// This replaced a list of access-control decorator names (`@permission`,
-	// `@login_required`, …) used as a co-signal. That list was unbounded, and
-	// worse, ANTI-CORRELATED with risk: pyload has 84 bare verbs of which 73
-	// carry @permission, so keying on the co-signal excluded exactly the 11
-	// UNAUTHENTICATED endpoints -- the ones most worth seeding. The verb set
-	// admits all 84 and needs no vocabulary to maintain.
+	// Do not reintroduce an access-control decorator co-signal (`@permission`,
+	// `@login_required`): it is ANTI-correlated with risk, excluding exactly the
+	// unauthenticated endpoints most worth seeding.
 	dispatch map[string]bool
 }
 
-// classCtx is one class's flags, resolved once at the ClassDef.
 type classCtx struct{ handler, dispatch bool }
 
 func (rc routeClasses) ctxFor(class string) classCtx {
 	return classCtx{handler: rc.handler[class], dispatch: rc.dispatch[class]}
 }
 
-// collectDispatchVerbs records, per class, the set of distinct bare HTTP verbs
-// its methods are decorated with, recursing so a class nested in another class
-// or in a function is still seen. Keyed by simple class name, and unioned across
-// files by the caller, matching collectClassBases.
+// collectDispatchVerbs records, per class, the distinct bare HTTP verbs its
+// methods are decorated with, recursing into nested classes and functions. Keyed
+// by simple class name and unioned across files by the caller, like
+// collectClassBases.
 func collectDispatchVerbs(stmts []astNode, out map[string]map[string]bool) {
 	for _, s := range stmts {
 		switch s.kind() {
@@ -505,24 +473,27 @@ func collectDispatchVerbs(stmts []astNode, out map[string]map[string]bool) {
 	}
 }
 
-// dispatchClasses selects the classes carrying two or more distinct bare verbs.
-// Two is the threshold because one verb is a coincidence a helper decorator can
-// produce; a `@get` AND a `@post` on sibling methods of one class is a routing
-// table.
-func dispatchClasses(verbs map[string]map[string]bool) map[string]bool {
-	out := map[string]bool{}
+// dispatchClasses selects the classes carrying two or more distinct bare verbs,
+// then propagates that down the class hierarchy. Two is the threshold because
+// one verb is a coincidence a helper decorator can produce; a `@get` AND a
+// `@post` on sibling methods of one class is a routing table. The hierarchy step
+// covers the common shape where a base holds the routing surface and each
+// subclass adds handlers with a SINGLE verb, too little evidence on its own.
+func dispatchClasses(verbs map[string]map[string]bool, classBases map[string][]string) map[string]bool {
+	seed := map[string]bool{}
 	for class, vs := range verbs {
 		if len(vs) >= 2 {
-			out[class] = true
+			seed[class] = true
 		}
 	}
+	out := handlerClasses(classBases, seed)
+	maps.Copy(out, seed) // handlerClasses returns only the SUBclasses it derived
 	return out
 }
 
 // emitRouteSource emits the synthetic source CALL every route-handler taint
-// origin is built from: a CALL to the canonical @http.param name whose RESULT
-// register the engine seeds. Defined once here; the wrappers below are its only
-// producers.
+// origin is built from: a CALL to routeParamSource whose RESULT register the
+// engine seeds. The wrappers below are its only producers.
 func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Value) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
@@ -536,25 +507,22 @@ func (fs *funcState) emitRouteSource(n astNode, comment string, args ...*ir.Valu
 	return ssabuild.Reg(inst.Name)
 }
 
-// emitParamSource is emitRouteSource for a route-handler parameter. The param
-// is passed as the call's sole argument for readability only; taint lands on the
-// call RESULT, which convertFunction rebinds to the param name.
+// emitParamSource is emitRouteSource for a route-handler parameter. The param is
+// passed as the sole argument for readability only: taint lands on the call
+// RESULT, which convertFunction rebinds to the param name.
 func (fs *funcState) emitParamSource(param string, n astNode) *ir.Value {
 	return fs.emitRouteSource(n, "route-param-source:"+param, ssabuild.Reg(param))
 }
 
-// emitHandlerSource emits a synthetic source CALL (routeParamSource) for a
-// request accessor reached through `self` in a handler-class method (Tornado
-// self.get_argument / self.request.body); its result register carries taint. The
-// canonical name is the same @http.param glob every Python taint rulepack already
-// treats as a source, so no rule change is needed beyond the accessor's own sink.
+// emitHandlerSource is emitRouteSource for a request accessor reached through
+// `self` in a handler-class method (Tornado self.get_argument /
+// self.request.body).
 func (fs *funcState) emitHandlerSource(n astNode, label string) *ir.Value {
 	return fs.emitRouteSource(n, "handler-request-source:"+label)
 }
 
-// Tornado request accessors reached via `self` inside a handler-class method.
-// tornadoArgMethods are call accessors (self.get_argument(...)); the *.body /
-// *.arguments members of self.request are attribute reads (tornadoRequestAttrs).
+// Tornado request accessors reached via `self` inside a handler-class method:
+// call accessors (self.get_argument(...)) and attribute reads off self.request.
 var (
 	tornadoArgMethods = map[string]bool{
 		"get_argument": true, "get_arguments": true,
@@ -609,12 +577,9 @@ func (fs *funcState) selfArgMethod(funcNode astNode) bool {
 // funcState holds the per-function lowering state. Variable values and the
 // per-block instruction stream are owned by an ssabuild.Builder (real CFG +
 // on-demand PHI insertion, Braun et al.); `cur` is the block currently being
-// lowered into (threaded through the AST walk instead of appending to one flat
-// instruction list). `assigned` tracks which Python names have been written as
-// a local SO FAR in the traversal — it replaces the old env's key-presence
-// test (is this bare name a bound local, or a free identifier / module global /
-// import?) that the Builder's per-block value map cannot answer directly.
-// `paramRegs` is the set of register names that are this function's own
+// lowered into. `assigned` answers what the Builder's per-block value map cannot
+// — is this bare name a bound local, or a free identifier / module global /
+// import? `paramRegs` is the set of register names that are this function's own
 // parameters (see isOpaqueBase); `terminated` reports whether the current block
 // has already emitted a block-terminating RET (an explicit `return`), so a
 // returning arm is not wired into a merge / loop header as a predecessor.
@@ -627,10 +592,7 @@ type funcState struct {
 	paramRegs  map[string]bool
 	terminated bool
 
-	// moduleName and localFuncs let lowerCall qualify a bare local call
-	// (helper(x)) with the module name so its callee "py:<module>.helper"
-	// matches the callee function's CanonicalName — without this the call is
-	// unresolved and inter-procedural taint through the local helper is lost.
+	// moduleName and localFuncs let classifyCallee qualify a bare local call.
 	moduleName string
 	localFuncs map[string]bool
 
@@ -638,34 +600,27 @@ type funcState struct {
 	// at their use sites by lookupName. See constglobal.go.
 	constGlobals map[string]*ir.Constant
 
-	// selfName and methodPrefix let lowerCall qualify a `self.method(x)` call
-	// inside a class method to the sibling method's canonical name
-	// ("py:<module>.<Class>.method"). selfName is the receiver param ("self" or
-	// "cls"); methodPrefix is the class qualname prefix (e.g. "UserAPI."). Both
-	// are empty for non-methods.
+	// selfName is the receiver param ("self" or "cls"); methodPrefix is the class
+	// qualname prefix ("UserAPI."). Together they resolve `self.method(x)` to the
+	// sibling method's canonical name. Both empty for non-methods.
 	selfName     string
 	methodPrefix string
 
 	// inHandlerClass marks that this function is a method of a web request-handler
-	// class (Tornado RequestHandler / Flask MethodView subclass; see
-	// handlerClassSet). In such a method the request object reached via `self`
-	// (`self.request.body`, `self.get_argument(...)`) is untrusted input, so those
-	// reads are lowered to a synthetic source CALL — the same @http.param trick the
-	// verb-method/route parameters use, but for the accessor style Tornado uses
-	// (CVE-2025-47782 motioneye: json.loads(self.request.body) -> shell pipeline).
+	// class (see routeClasses.handler), which is what makes a request read via
+	// `self` untrusted input — see selfRequestAccessor / selfArgMethod.
 	inHandlerClass bool
 
 	// aliases maps a locally-bound import name to its canonical dotted path
-	// (FE-2): "sp" -> "subprocess" for `import subprocess as sp`, "system" ->
-	// "os.system" for `from os import system`. resolveDotted rewrites a callee's
-	// root through it so module-anchored sink rules match regardless of aliasing.
+	// ("sp" -> "subprocess"). resolveDotted rewrites a callee's root through it so
+	// module-anchored sink rules match regardless of aliasing.
 	aliases map[string]string
 
 	// localAlias maps a local variable to the request-rooted attribute path it was
 	// assigned (`a` -> "request.args" for `a = request.args`), per function. It lets
 	// resolveDotted rewrite `a.get(...)` to `request.args.get` so the existing
-	// request source globs match the aliased form (mlflow CVE-2025-52967), not just
-	// the inline `request.args.get(...)`. Narrow to request-rooted chains to stay FP-safe.
+	// request source globs match the aliased form (CVE-2025-52967). Narrow to
+	// request-rooted chains to stay FP-safe.
 	localAlias map[string]string
 
 	// importedNames is the module's set of import-bound names (see
@@ -688,7 +643,6 @@ func newFuncState(filename string) *funcState {
 	}
 }
 
-// emit appends an instruction to the block currently being lowered.
 func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
 
 // read returns the SSA value current for a Python local in the current block,
@@ -703,10 +657,10 @@ func (fs *funcState) write(name string, val *ir.Value) {
 	fs.assigned[name] = true
 }
 
-// requestAliasPath returns the request-rooted attribute path a variable is being
-// aliased to when an assignment's RHS is a `request.<...>` chain (or a ternary
-// between such chains), else "". Used to resolve `a = request.args; a.get("k")`
-// to the `request.args.get` source the inline form already matches.
+// requestAliasPath returns the request-rooted attribute path an assignment's RHS
+// names (`request.<...>`, or a ternary between such chains), else "" — what lets
+// `a = request.args; a.get("k")` resolve to the same `request.args.get` source
+// the inline form matches.
 func requestAliasPath(n astNode) string {
 	if n == nil {
 		return ""
@@ -726,9 +680,9 @@ func requestAliasPath(n astNode) string {
 }
 
 // resolveDotted rewrites the root component of a dotted callee name through the
-// per-function request-alias table (`a` -> "request.args") and the import alias
-// table (`sp` -> "subprocess"), so `a.get` becomes `request.args.get` and
-// `sp.call` becomes `subprocess.call` (FE-2). Names with no alias pass through.
+// per-function request-alias table and the import alias table, so `a.get`
+// becomes `request.args.get` and `sp.call` becomes `subprocess.call`. Names with
+// no alias pass through.
 func (fs *funcState) resolveDotted(dotted string) string {
 	if len(fs.aliases) == 0 && len(fs.localAlias) == 0 {
 		return dotted
@@ -747,12 +701,11 @@ func (fs *funcState) resolveDotted(dotted string) string {
 }
 
 // collectImportedNames returns the set of local names bound by Import/ImportFrom
-// statements — INCLUDING plain `import subprocess` (bound name "subprocess"),
-// which collectImportAliases does not record. A method call whose receiver root
-// is an imported name is a library/module call (subprocess.run, os.system, a
-// module's function), matched by sink globs on its callee; it must NOT be lowered
-// to a CHA INVOKE, which would fan the (often tainted) argument into every
-// same-named user method. Used by lowerCall to gate INVOKE emission.
+// statements — INCLUDING plain `import subprocess`, which collectImportAliases
+// does not record. A method call whose receiver root is an imported name is a
+// library/module call matched by sink globs on its callee; it must NOT become a
+// CHA INVOKE, which would fan the (often tainted) argument into every same-named
+// user method. classifyCallee gates INVOKE emission on this.
 func collectImportedNames(body []astNode) map[string]bool {
 	names := map[string]bool{}
 	for _, s := range body {
@@ -785,9 +738,9 @@ func collectImportedNames(body []astNode) map[string]bool {
 	return names
 }
 
-// collectImportAliases scans a module body for Import/ImportFrom statements and
-// returns the local-name -> canonical-dotted-path map (FE-2). `import x as y`
-// binds y->x; `from m import n as a` binds a->m.n; relative imports are skipped.
+// collectImportAliases returns the local-name -> canonical-dotted-path map for a
+// module body: `import x as y` binds y->x, `from m import n as a` binds a->m.n;
+// relative imports are skipped.
 func collectImportAliases(body []astNode) map[string]string {
 	aliases := map[string]string{}
 	for _, s := range body {
@@ -826,16 +779,13 @@ func (fs *funcState) newReg() string {
 	return r
 }
 
-// newValueInst allocates a fresh instruction with a result register (for
-// value-producing ops: CALL, FIELD, INDEX, BIN_OP, UN_OP, INTRINSIC), mirroring
-// how converters/go only sets Instruction.Name for ssa.Value instructions.
+// newValueInst allocates a fresh instruction with a result register, for
+// value-producing ops (CALL, FIELD, INDEX, BIN_OP, UN_OP, INTRINSIC).
 func (fs *funcState) newValueInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posFromNode(fs.filename, n)}
 }
 
-// newVoidInst allocates a fresh instruction with no result register (for
-// STORE/RET), matching converters/go leaving Instruction.Name empty for
-// non-ssa.Value instructions.
+// newVoidInst allocates a fresh instruction with no result register (STORE/RET).
 func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Pos: posFromNode(fs.filename, n)}
 }
@@ -844,7 +794,8 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 // passed under, as a `builtin.kwarg(<name>, <value>)` intrinsic whose result
 // stands in for the value in the call's argument list. gIR carries positional
 // arguments only, so this is what lets a rule guard tell `shell=True` from
-// `check=True`. Callers wrap constants only, so the marker never hides taint.
+// `check=True`. Only CONSTANTS may be wrapped: a constant carries no taint, so
+// the marker can never hide a tainted value from the engine.
 func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
@@ -859,18 +810,17 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Va
 
 // emitAggregate builds a `builtin.aggregate` container-construction intrinsic
 // over the given element values, giving the container a REGISTER of its own.
-// The engine lists this intrinsic in intrinsicPropagators (see
-// internal/analysis/taint.go), so taint on any element flows to that register
-// and a later whole-container use — json.dumps(d), a template context, a
-// response body — observes it.
+// The engine lists this intrinsic in intrinsicPropagators (internal/analysis/
+// taint.go), so taint on any element flows to that register and a later
+// whole-container use — json.dumps(d), a template context, a response body —
+// observes it.
 //
 // Elements go in Operands, not Call.Args: visitIntrinsic propagates with
 // markTaintFromOperands, which reads Operands.
 //
-// Emitted even for an EMPTY container. The register is the point: `d = {}`
-// previously lowered to a constant, and a constant destination makes visitStore
-// early-return (it needs an address register), which is why `d[k] = tainted`
-// used to drop taint even before any element existed.
+// Emitted even for an EMPTY container, because the register is the point:
+// visitStore early-returns on a constant destination, so `d = {}` lowered as a
+// constant would drop `d[k] = tainted`.
 func (fs *funcState) emitAggregate(intrinsic string, elts []*ir.Value, n astNode) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
@@ -889,9 +839,7 @@ const (
 )
 
 // lowerAggregate lowers each element expression and builds the container from
-// the results. Shared by the two places a container is built in place — a
-// literal and a comprehension — which differ only in where their elements come
-// from.
+// the results — shared by the literal and comprehension cases.
 func (fs *funcState) lowerAggregate(intrinsic string, elts []astNode, n astNode) *ir.Value {
 	vals := make([]*ir.Value, 0, len(elts))
 	for _, e := range elts {
@@ -902,14 +850,12 @@ func (fs *funcState) lowerAggregate(intrinsic string, elts []astNode, n astNode)
 
 // selfFieldGlobal returns the synthetic global key for a one-level `self.<field>`
 // access inside a method, or "" when node is not such an access. It is the
-// cross-method channel for instance-field taint: keyed per (module, class,
-// field), `self.f = tainted` in one method and a read of `self.f` in a sibling
-// method of the same class link through the engine's existing global-taint
-// propagation with NO engine change (the store/read carry this key as a
-// GlobalName operand, which recordGlobalStore / readGlobalTaint already handle).
-// Object-insensitive (all instances of the class share the key) and scoped to
-// the method's own class+module, so a same-named field on an unrelated class in
-// another file cannot alias.
+// cross-method channel for instance-field taint: the store/read carry this key as
+// a GlobalName operand, which the engine's recordGlobalStore / readGlobalTaint
+// already handle, so `self.f = tainted` in one method reaches a sibling's read of
+// `self.f` with NO engine change. Object-insensitive (all instances share the
+// key) but scoped to the method's own class+module, so a same-named field on an
+// unrelated class cannot alias.
 func (fs *funcState) selfFieldGlobal(node astNode) string {
 	if fs.selfName == "" || fs.methodPrefix == "" || node.kind() != "Attribute" {
 		return ""
@@ -947,9 +893,7 @@ func (fs *funcState) foldBinOp(kind ir.BinOpKind, acc, val *ir.Value, n astNode)
 }
 
 // lowerIterTarget lowers the `iter` of a for-loop / comprehension generator and
-// binds its `target` to that value (element taint == container taint), so taint
-// in the iterable reaches the loop variable and a source in the iterable is not
-// dropped.
+// binds its `target` to that value (element taint == container taint).
 func (fs *funcState) lowerIterTarget(n astNode) {
 	it := n.node("iter")
 	if it == nil {
@@ -963,9 +907,9 @@ func (fs *funcState) lowerIterTarget(n astNode) {
 
 // lookupName resolves a bare Name reference through the Builder, falling back to
 // a GlobalName reference for an unbound name (module global, builtin, or
-// imported symbol) -- the same rule the "Name" case of lowerExpr applies,
-// factored out here so the Subscript case (see isOpaqueBase) can classify a
-// chain's root before deciding what to emit.
+// imported symbol). Factored out of lowerExpr's "Name" case so the Subscript
+// case (see isOpaqueBase) can classify a chain's root before deciding what to
+// emit.
 //
 // It is NOT side-effect free: an assigned name goes through
 // ssabuild.ReadVariable, which memoises the result into the block's currentDef
@@ -989,11 +933,9 @@ func (fs *funcState) lookupName(id string) *ir.Value {
 	if fs.localFuncs[id] {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: "py:" + fs.moduleName + "." + id}}
 	}
-	// A module-level string constant is inlined as its literal rather than left
-	// as an opaque GlobalName, so every consumer that reads constant text sees it
-	// -- notably the SSRF host check, which proves a URL's host is fixed from its
-	// constant prefix and otherwise read `BASE + "/" + user` as attacker
-	// controllable. Only names constStringGlobals proved immutable get here.
+	// A module-level string constant is inlined as its literal so every consumer
+	// of constant text can read it; only names constStringGlobals proved
+	// immutable reach here. See constglobal.go.
 	if c, ok := fs.constGlobals[id]; ok {
 		return &ir.Value{Kind: &ir.Value_Constant{Constant: c}}
 	}
@@ -1002,14 +944,12 @@ func (fs *funcState) lookupName(id string) *ir.Value {
 
 // isOpaqueBase reports whether v is a value whose origin is outside this
 // function's own straight-line computation: either a free/global identifier
-// (Value_GlobalName, e.g. an unbound module global or imported symbol like
-// `request` or `os`) or one of this function's own parameters (Value_RegName
-// for a name in fs.paramRegs). Mirrors converters/javascript's
-// funcState.isOpaqueBase (see that package's doc comment, "the opaque object
-// source heuristic"): a Subscript read rooted at either kind of value is the
-// first opportunity to introduce taint, since the engine only ever seeds
-// taint at a CALL matching a source glob (see
-// internal/analysis/interproc.go's handleCall).
+// (Value_GlobalName, e.g. `request` or `os`) or one of this function's own
+// parameters (Value_RegName for a name in fs.paramRegs). Mirrors
+// converters/javascript's funcState.isOpaqueBase (see that package's doc, "the
+// opaque object source heuristic"): a Subscript read rooted at either kind of
+// value is the first opportunity to introduce taint, since the engine only ever
+// seeds taint at a CALL matching a source glob.
 func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 	if v == nil {
 		return "", false
@@ -1025,9 +965,8 @@ func (fs *funcState) isOpaqueBase(v *ir.Value) (name string, ok bool) {
 
 // rootName walks a Name/Attribute chain -- the same shape dottedName walks --
 // down to its root and returns the root Name node's identifier, or "" if the
-// chain bottoms out in something other than a plain Name (e.g. a nested Call
-// or Subscript). Used by the Subscript case of lowerExpr to find the name to
-// classify with isOpaqueBase.
+// chain bottoms out in something else (a nested Call or Subscript). Gives
+// lowerSubscript / classifyCallee the name to classify with isOpaqueBase.
 func rootName(n astNode) string {
 	for n != nil {
 		switch n.kind() {
@@ -1043,11 +982,10 @@ func rootName(n astNode) string {
 }
 
 // lowerBody lowers a statement list, building a REAL CFG (blocks + preds/succs +
-// PHI) via the Builder for control-flow compounds (If/For/While/Try) and lowering
-// straight-line statements (and non-branching With) into the current block, so a
-// function with no branches still emits exactly ONE block (the engine's linear
-// fast path). FunctionDef/ClassDef are skipped (each becomes its own ir.Function
-// via convertModule.collect).
+// PHI) via the Builder for the control-flow compounds and lowering straight-line
+// statements into the current block, so a function with no branches still emits
+// exactly ONE block (the engine's linear fast path). FunctionDef/ClassDef are
+// skipped — each becomes its own ir.Function via convertModule.collect.
 func (fs *funcState) lowerBody(stmts []astNode) {
 	for _, s := range stmts {
 		switch s.kind() {
@@ -1060,11 +998,9 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 		case "For":
 			fs.lowerFor(s)
 		case "With":
-			// `with EXPR as VAR:` lowers as `VAR = EXPR`: lower each context-manager
-			// expression (so a sink/source CALL such as open(...) is emitted, not
-			// dropped) and bind its `as` target, then lower the body — straight into
-			// the current block (its body may itself branch, which lowerBody handles).
-			// Without this the whole `with open(tainted) as f: ...` idiom was invisible.
+			// `with EXPR as VAR:` lowers as `VAR = EXPR`, so a sink/source CALL such
+			// as open(...) is emitted rather than dropped. The body goes straight
+			// into the current block (it may itself branch; lowerBody handles that).
 			for _, it := range s.list("items") {
 				ctx := it.node("context")
 				if ctx == nil {
@@ -1084,13 +1020,12 @@ func (fs *funcState) lowerBody(stmts []astNode) {
 	}
 }
 
-// lowerIf lowers `if cond: body [elif/else: orelse]` into a REAL CFG diamond
-// via the Builder's IfDiamond scaffold, so any variable rebound on one or both
-// arms reconciles automatically via an on-demand ReadVariable PHI (retiring the
-// manual env-merge path — including the ubiquitous "default if empty" idiom
-// `if not x: x = "d"`, whose pre-branch tainted value is now kept by the merge
-// PHI). Python's `elif` is an `If` node in the parent's `orelse`, so an
-// arbitrarily long chain becomes nested diamonds via the recursive lowerBody.
+// lowerIf lowers `if cond: body [elif/else: orelse]` into a REAL CFG diamond via
+// the Builder's IfDiamond scaffold, so a variable rebound on either arm
+// reconciles via an on-demand ReadVariable PHI — which is what keeps the
+// pre-branch tainted value alive through the "default if empty" idiom
+// `if not x: x = "d"`. Python's `elif` is an `If` node in the parent's `orelse`,
+// so a chain becomes nested diamonds via the recursive lowerBody.
 func (fs *funcState) lowerIf(s astNode) {
 	cond := fs.lowerTest(s) // condition, lowered in the current block
 	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
@@ -1122,11 +1057,9 @@ func (fs *funcState) lowerWhile(s astNode) {
 
 // lowerFor lowers `for target in iter: body [else: orelse]` into the same
 // HeaderLoop CFG as lowerWhile. The iterable is lowered once in the pre-loop
-// block; the loop target is bound to the iterable's value at the top of the
-// BODY block each iteration (element taint == container taint, so a tainted
-// iterable taints the target). Reassignments/accumulations in the body flow
-// through the header PHI, modeling loop-carried taint. The iteration condition
-// is opaque (a placeholder), so the engine traverses both the body and the exit.
+// block and the target rebound to its value at the top of the BODY block each
+// iteration (element taint == container taint). The iteration condition is an
+// opaque placeholder, so the engine traverses both the body and the exit.
 func (fs *funcState) lowerFor(s astNode) {
 	var iterVal *ir.Value
 	if it := s.node("iter"); it != nil {
@@ -1144,14 +1077,11 @@ func (fs *funcState) lowerFor(s astNode) {
 }
 
 // lowerTry lowers `try: body [else: orelse] except ...: handler [finally: fin]`
-// conservatively (a may-analysis; no exception typing). The try body (and its
-// `else`, which runs on normal completion) is lowered into the current block. An
-// EXCEPTION EDGE then models that an exception may occur anywhere in the body:
-// the body-end block branches to a single handler block (all `except` clauses
-// lowered sequentially into it — conservative) or to an after block, so taint a
-// source in the try body assigned reaches the handler via that predecessor edge
-// (and, through the after block, code following the try). `finally` runs on both
-// paths, so it is lowered into the after block.
+// conservatively (a may-analysis; no exception typing). The body and its `else`
+// go into the current block; an EXCEPTION EDGE then models that an exception may
+// occur anywhere in the body, branching to a single handler block (every `except`
+// clause lowered sequentially into it) or to an after block. `finally` runs on
+// both paths, so it is lowered into the after block.
 //
 // A block that RETURNS still gets its outgoing edge: `try: return fast()` can
 // raise before it returns, and a `finally` runs on the returning path too. The
@@ -1217,9 +1147,8 @@ func (fs *funcState) lowerStmt(s astNode) {
 		aliasPath := requestAliasPath(valNode)
 		for _, target := range s.list("targets") {
 			fs.assign(target, val)
-			// Track/untrack a request-attribute alias so `a = request.args;
-			// a.get(k)` resolves its callee to request.args.get. A rebind to a
-			// non-request value clears any stale alias.
+			// Track the request-attribute alias (see requestAliasPath); a rebind
+			// to a non-request value must CLEAR any stale one.
 			if target.kind() == "Name" {
 				if aliasPath != "" {
 					fs.localAlias[target.str("id")] = aliasPath
@@ -1242,27 +1171,23 @@ func (fs *funcState) lowerStmt(s astNode) {
 			inst.Operands = []*ir.Value{fs.lowerExpr(v)}
 		}
 		fs.emit(inst)
-		// The current block ends here: no fall-through edge to a merge / loop
-		// header (an arm that returns must not feed its values into the join).
+		// The current block ends here: an arm that returns must not feed its
+		// values into a merge / loop header.
 		fs.terminated = true
 	case "Pass", "Import", "ImportFrom", "Global", "Nonlocal", "Break", "Continue", "Raise", "Assert", "Delete", "Unknown":
-		// No-ops / unsupported: dropped. Unlike unsupported expressions
-		// (which must still yield a value for their parent), a dropped
-		// statement leaves no gap in the IR.
+		// No-ops / unsupported: dropped. Unlike an unsupported EXPRESSION, which
+		// must still yield a value for its parent, a dropped statement leaves no
+		// gap in the IR.
 	default:
 		// Should not happen given pyast.py's schema, but stay defensive.
 	}
 }
 
-// assign binds a lowered value to an assignment target. A bare Name target
-// rebinds the environment (the SSA-like "current register for this Python
-// variable" mapping). An Attribute/Subscript target (obj.attr = v / arr[i] =
-// v) emits a STORE with the base object as the address operand, matching how
-// converters/go lowers ssa.Store; this is what lets a tainted value written
-// into a container mark that container tainted. A Tuple/List (unpacking) target
-// binds EACH element to the whole RHS value — element taint == container taint,
-// mirroring for-loop targets and conservative for recall — and nested unpacking
-// recurses; any other target shape is still dropped.
+// assign binds a lowered value to an assignment target. A bare Name rebinds the
+// variable. An Attribute/Subscript target (obj.attr = v / arr[i] = v) emits a
+// STORE with the base object as the address operand, which is what lets a
+// tainted value written into a container mark that container tainted. Any target
+// shape not handled below is dropped.
 func (fs *funcState) assign(target astNode, val *ir.Value) {
 	switch target.kind() {
 	case "Name":
@@ -1273,10 +1198,9 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 		inst.Op = ir.OpCode_OP_CODE_STORE
 		inst.Operands = []*ir.Value{base, val}
 		fs.emit(inst)
-		// Instance-field heap: `self.<field> = v` also stores into a per-(class,
-		// field) synthetic global so a sibling method that reads `self.<field>`
-		// observes the taint cross-method (see selfFieldGlobal). The register
-		// STORE above still handles intra-method / whole-object flow.
+		// `self.<field> = v` also stores into the per-(class, field) synthetic
+		// global (see selfFieldGlobal); the STORE above still carries intra-method
+		// / whole-object flow.
 		if g := fs.selfFieldGlobal(target); g != "" {
 			s := fs.newVoidInst(target)
 			s.Op = ir.OpCode_OP_CODE_STORE
@@ -1284,9 +1208,8 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 			fs.emit(s)
 		}
 	case "Sequence":
-		// Unpacking `a, b = rhs` (or `[a, b] = rhs`): bind each target element to
-		// the RHS value (element taint == container taint, mirroring for-loop
-		// targets and conservative for recall). Nested unpacking recurses.
+		// Unpacking `a, b = rhs`: bind each element to the whole RHS value
+		// (element taint == container taint, conservative for recall).
 		for _, elt := range target.list("elts") {
 			fs.assign(elt, val)
 		}
@@ -1298,11 +1221,8 @@ func (fs *funcState) assign(target astNode, val *ir.Value) {
 	}
 }
 
-// lowerExpr lowers an expression to a gIR Value, emitting whatever
-// instructions are needed to compute it (into the current block). Names
-// assigned as locals resolve through the Builder to their current SSA value
-// (constant, register, or an on-demand PHI); unbound names (module globals like
-// `request`, `os`, imported symbols) fall back to a GlobalName reference.
+// lowerExpr lowers an expression to a gIR Value, emitting whatever instructions
+// are needed to compute it into the current block.
 func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 	if n == nil {
 		return nil
@@ -1315,9 +1235,8 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lookupName(n.str("id"))
 
 	case "Attribute":
-		// self.request.body / .arguments / ... in a handler-class method is the
-		// untrusted Tornado request payload: emit a synthetic source instead of a
-		// plain field read (CVE-2025-47782 motioneye).
+		// The untrusted Tornado request payload: a synthetic source, not a plain
+		// field read (CVE-2025-47782).
 		if attr, ok := fs.selfRequestAccessor(n); ok {
 			return fs.emitHandlerSource(n, "self.request."+attr)
 		}
@@ -1326,11 +1245,10 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		inst.Op = ir.OpCode_OP_CODE_FIELD
 		inst.Operands = []*ir.Value{base}
 		inst.Comment = "attr:" + n.str("attr")
-		// Instance-field heap: a one-level `self.<field>` read also carries the
-		// per-(class, field) synthetic global as an operand, so readGlobalTaint
-		// seeds the result when a sibling method tainted that field (see
-		// selfFieldGlobal). visitFieldRead keys on operand 0 (the base) only, so
-		// the extra operand is inert to intra-method field-sensitivity.
+		// A one-level `self.<field>` read carries the per-(class, field) synthetic
+		// global as an extra operand, so readGlobalTaint seeds the result when a
+		// sibling method tainted it (see selfFieldGlobal). visitFieldRead keys on
+		// operand 0 only, so the extra operand is inert to field-sensitivity.
 		if g := fs.selfFieldGlobal(n); g != "" {
 			inst.Operands = append(inst.Operands, ssabuild.Global(g))
 		}
@@ -1355,12 +1273,9 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return ssabuild.Reg(inst.Name)
 
 	case "BoolOp":
-		// `a or b` / `a and b`: the result is one of the operands, so taint from
-		// any operand can reach it. Fold the operands with BIN_OP_OR so the
-		// engine's BIN_OP propagation taints the result if any operand is
-		// tainted (mirrors JS lowering `||`/`&&` as a BIN_OP). This is what makes
-		// the common `request.args.get("x") or default` defaulting idiom carry
-		// taint.
+		// `a or b` / `a and b` evaluates to one of its operands, so fold them with
+		// BIN_OP_OR and let the engine's BIN_OP propagation carry any operand's
+		// taint — what makes `request.args.get("x") or default` stay tainted.
 		var acc *ir.Value
 		for _, v := range n.list("values") {
 			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_OR, acc, fs.lowerExpr(v), n)
@@ -1371,18 +1286,15 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return acc
 
 	case "IfExp":
-		// ternary `a if cond else b`: the result is a or b, so taint from either
-		// branch can reach it. Lower `test` for its side effects (it may contain
-		// a call), then merge the two value branches with BIN_OP_OR so taint
-		// propagates from either.
+		// ternary `a if cond else b`: `test` is lowered for its side effects, then
+		// the two arms merge through BIN_OP_OR so taint propagates from either.
 		fs.lowerExpr(n.node("test"))
 		body := fs.lowerExpr(n.node("body"))
 		orelse := fs.lowerExpr(n.node("orelse"))
 		return fs.emitBinOp(ir.BinOpKind_BIN_OP_OR, body, orelse, n)
 
 	case "NamedExpr":
-		// walrus `target := value`: the expression evaluates to `value` and also
-		// binds `target`, so both the result and the bound name carry taint.
+		// walrus `target := value`: evaluates to `value` and also binds `target`.
 		val := fs.lowerExpr(n.node("value"))
 		fs.assign(n.node("target"), val)
 		return val
@@ -1392,16 +1304,13 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerExpr(n.node("value"))
 
 	case "Sequence":
-		// List/tuple/set literal — and a flattened dict literal, whose keys and
-		// values pyast.py emits as one `elts` run — as a VALUE. Lower each
-		// element and build the container as a `builtin.aggregate`, so element
-		// taint reaches a later whole-container use (`json.dumps({"k": tainted})`
-		// into a response body: the label-studio CVE-2025-47783 shape).
-		//
+		// A list/tuple/set literal — or a flattened dict literal, whose keys and
+		// values pyast.py emits as one `elts` run — used as a VALUE, built as a
+		// `builtin.aggregate` so element taint reaches a later whole-container use
+		// (`json.dumps({"k": tainted})` into a response body, CVE-2025-47783).
 		// Command injection keeps its argv precision through py-command-injection's
-		// `when:` guard rather than by erasing the container.
-		//
-		// pyast.py marks a literal that cannot pair its keys as "list".
+		// `when:` guard rather than by erasing the container. pyast.py marks a
+		// literal that cannot pair its keys as "list".
 		intrinsic := aggregateIntrinsic
 		if n.str("container") == "dict" {
 			intrinsic = aggregateMapIntrinsic
@@ -1409,18 +1318,14 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerAggregate(intrinsic, n.list("elts"), n)
 
 	case "Starred":
-		// `*x` spread (e.g. func(*args)): the spread carries x's value/taint into
-		// the call, so lower to x.
+		// `*x` spread (func(*args)) carries x's taint into the call.
 		return fs.lowerExpr(n.node("value"))
 
 	case "Comprehension":
-		// [elt for t in iter if cond ...] and dict/set/generator forms. Lower
-		// each generator (bind the loop target to the iterable's taint, like a
-		// for-loop; lower filter conditions) then the element/key/value
-		// expression, so a source or sink INSIDE the comprehension
-		// (e.g. [cursor.execute(q) for q in ...]) is lowered and fires. The
-		// result is a container built from those element expressions, so — like
-		// a literal — it carries their taint via builtin.aggregate.
+		// [elt for t in iter if cond ...] and the dict/set/generator forms. Each
+		// generator and filter is lowered so a source or sink INSIDE the
+		// comprehension (`[cursor.execute(q) for q in ...]`) fires; the result is
+		// a builtin.aggregate over the element expressions, like a literal.
 		for _, g := range n.list("generators") {
 			fs.lowerIterTarget(g)
 			for _, cond := range g.list("ifs") {
@@ -1440,9 +1345,8 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerAggregate(intrinsic, elts, n)
 
 	case "JoinedStr":
-		// f-string: fold parts left-to-right with BIN_OP_ADD (string
-		// concatenation) so taint carried by any {expr} slot propagates to
-		// the final value, same as Python's runtime semantics.
+		// f-string: fold the parts with BIN_OP_ADD so any {expr} slot's taint
+		// propagates to the final value.
 		var acc *ir.Value
 		for _, part := range n.list("values") {
 			acc = fs.foldBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(part), n)
@@ -1459,11 +1363,11 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 		return fs.lowerCall(n)
 
 	case "Compare":
-		// `a < b` / `x == y` / `k in d`: lower every operand so a source/sink/
-		// validator call inside the comparison fires; the boolean result does not
-		// carry operand taint, so emit an inert builtin.compare intrinsic over the
-		// operands (this also gives a branch condition a def-use edge for the
-		// engine's guard analysis).
+		// A boolean result carries influence, not content, so the operands go into
+		// the inert builtin.compare intrinsic rather than a BIN_OP — which is what
+		// stops `fmt.Sprint(user == "admin")` reading as an injection. The operands
+		// are still lowered (a validator call inside the comparison must fire) and
+		// the intrinsic gives a branch condition its def-use edge.
 		ops := []*ir.Value{fs.lowerExpr(n.node("left"))}
 		for _, c := range n.list("comparators") {
 			ops = append(ops, fs.lowerExpr(c))
@@ -1485,44 +1389,35 @@ func (fs *funcState) lowerExpr(n astNode) *ir.Value {
 	}
 }
 
-// lowerSubscript lowers a Subscript expression. base["key"] rooted at a
-// global/imported name or a function parameter (and never reassigned to a
-// locally-computed value) is the first opportunity to introduce taint, e.g.
-// request.args["cmd"]. Lower it to a synthetic source CALL
-// "py:<dotted-base>.__getitem__" instead of a plain OP_CODE_INDEX, so it
-// matches a source glob like "py:*request.args.__getitem__" exactly like the
-// equivalent request.args.get("cmd") call already does (see dottedName and
-// lowerCall). The base is deliberately NOT run through the general
-// fs.lowerExpr (which would emit an unconditional OP_CODE_FIELD chain for
-// e.g. the ".args" hop) -- like lowerCall never lowers its own callee
-// expression, only the purely syntactic dotted name is needed here; arg0 is a
-// symbolic reference carrying that same name.
+// lowerSubscript lowers a Subscript expression. A read rooted at an OPAQUE base
+// (a global/imported name or one of this function's parameters) is the first
+// opportunity to introduce taint, e.g. request.args["cmd"], so it becomes a
+// synthetic source CALL "py:<dotted-base>.__getitem__" rather than a plain
+// OP_CODE_INDEX — matching a source glob like "py:*request.args.__getitem__"
+// exactly as the equivalent request.args.get("cmd") call does. The base is
+// deliberately NOT run through fs.lowerExpr (which would emit an OP_CODE_FIELD
+// chain for the ".args" hop): as with a callee, only the syntactic dotted name
+// is needed, and arg0 is a symbolic reference carrying it.
 //
-// When the chain is rooted at one of THIS function's own parameters, the
-// parameter may already be tainted by an inter-procedural caller (e.g. a
-// request dict passed into a helper: config.add_camera(device_details) then
-// device_details['path'] -- CVE-2025-47782 motioneye). The synthetic getitem
-// source only seeds taint when its dotted name matches a source glob, so by
-// itself it would DROP that incoming taint. Carry the parameter register in
-// Call.Value and tag the call builtin.member_read -- the cross-frontend
-// contract for exactly this shape (see internal/analysis memberReadIntrinsic
-// and converters/javascript emitRootPropertyRead): the engine forwards the
-// base's taint to the result, while the callee glob keeps INTRODUCING taint
-// for a request-object base. A global/free root has no register to carry, so
-// it keeps the plain FuncName form.
+// A PARAMETER-rooted chain may already be tainted by an inter-procedural caller
+// (CVE-2025-47782), and the synthetic source only INTRODUCES taint when its
+// dotted name matches a source glob — so by itself it would drop the incoming
+// taint. Carrying the parameter register in Call.Value and tagging the call
+// builtin.member_read is the cross-frontend contract for this shape (see
+// internal/analysis memberReadIntrinsic and converters/javascript
+// emitRootPropertyRead): the engine forwards the base's taint to the result. A
+// global/free root has no register to carry, so it keeps the plain FuncName form.
 //
-// A Subscript rooted at a local variable (e.g. `local_list[i]`) is
-// deliberately left as OP_CODE_INDEX -- it is not itself a source, but taint
-// still flows through it via propagatingOps if the container was tainted some
-// other way.
+// A Subscript rooted at a local variable (`local_list[i]`) stays OP_CODE_INDEX:
+// not a source, but taint still flows through it via propagatingOps.
 func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 	baseNode := n.node("value")
 	var idx *ir.Value
 	if sl := n.node("slice"); sl != nil {
 		idx = fs.lowerExpr(sl)
 	} else {
-		// a[i:j] slice: no single index expression: propagate taint
-		// through the base only via a nil-constant placeholder index.
+		// a[i:j] slice: no single index expression, so a nil-constant placeholder
+		// keeps taint flowing through the base alone.
 		idx = ssabuild.Nil()
 	}
 
@@ -1539,9 +1434,7 @@ func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 				Callee: callee,
 				Args:   []*ir.Value{{Kind: &ir.Value_GlobalName{GlobalName: dotted}}, idx},
 			}
-			// Parameter-rooted base: the root register rides in Call.Value and
-			// the call is tagged builtin.member_read so incoming taint on the
-			// parameter reaches the result (see the doc comment above).
+			// Parameter-rooted base: see the doc comment above.
 			if base.GetRegName() != "" {
 				inst.Call.Value = base
 				inst.Intrinsic = "builtin.member_read"
@@ -1559,14 +1452,6 @@ func (fs *funcState) lowerSubscript(n astNode) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerCall lowers a Call node. `"...".format(args)` is special-cased into a
-// BIN_OP_ADD concatenation chain (mirroring JoinedStr) instead of an actual
-// OP_CODE_CALL, per the task's guidance that string formatting should carry
-// taint through the engine's BIN_OP auto-propagation; this means a
-// .format(...) call does not appear as a call in the IR (a documented
-// tradeoff: call-graph fidelity for .format sites is traded for guaranteed
-// taint propagation without needing a propagator rule).
-//
 // funcValueOf resolves an AST expression used as a callback TARGET to the gIR
 // value the engine can resolve to a concrete function: a bare Name that is a
 // module-level function or a function-holding parameter/local (via lookupName),
@@ -1591,23 +1476,20 @@ func (fs *funcState) funcValueOf(node astNode) *ir.Value {
 	return nil
 }
 
-// emitDeferredDispatch recognizes a thread/process dispatch construct and, when it
-// matches, emits a synthesized INDIRECT call target(forwarded-args...) so taint
-// flows into the worker the runtime will invoke later, then returns true to signal
-// that it has fully consumed the call (the caller returns an opaque handle without
-// re-lowering it — which is what keeps the forwarded args from being lowered
-// twice). The recognized APIs and their argument layouts are library knowledge
-// that belongs in the frontend; the engine only ever sees a generic indirect call
-// (empty Callee, function value in Call.Value).
+// emitDeferredDispatch recognizes a thread/process dispatch construct
+// (threading.Thread / multiprocessing.Process) and, when it matches, emits a
+// synthesized INDIRECT call target(forwarded-args...) so taint flows into the
+// worker the runtime will invoke later, then returns true: it has fully CONSUMED
+// the call, and the caller must not re-lower it or the forwarded args are lowered
+// twice. Which APIs defer, and their argument layouts, are library knowledge that
+// belongs in the frontend; the engine sees only a generic indirect call (empty
+// Callee, function value in Call.Value).
 //
-// Scoped to threading.Thread / multiprocessing.Process, whose `target=`/`args=`
-// keyword shape is highly distinctive, and gated on the target resolving to a
-// concrete named function or self-method (a FuncName). A same-named method on an
-// unrelated object, or a target that is merely a parameter holding some value, is
-// not treated as a dispatch — the unambiguous-only discipline, so a miss is a
-// false negative, never a false positive. (Executor.submit / run_in_executor use
-// the far more common `submit`/`run_in_executor` method names and need executor-
-// receiver type tracking to be FP-safe; they are a deliberate follow-up.)
+// Gated on the target resolving to a concrete named function or self-method (a
+// FuncName): a same-named method on an unrelated object, or a target that is
+// merely a parameter holding some value, is not a dispatch. Unambiguous-only, so
+// a miss is a false negative, never a false positive. (Executor.submit /
+// run_in_executor need executor-receiver type tracking to be FP-safe.)
 func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	if funcNode == nil {
 		return false
@@ -1664,10 +1546,9 @@ func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	inst.Call = cc
 	fs.emit(inst)
 
-	// Lower the remaining arguments (any positionals, other keywords, and a
-	// non-tuple args= value) for their side effects, since the caller returns
-	// without the normal call lowering. The forwarded tuple elements were already
-	// lowered above and must not be lowered again.
+	// The caller returns without the normal call lowering, so lower the remaining
+	// arguments here for their side effects — but never the forwarded tuple
+	// elements, already lowered above.
 	for _, a := range n.list("args") {
 		fs.lowerExpr(a)
 	}
@@ -1685,17 +1566,20 @@ func (fs *funcState) emitDeferredDispatch(n, funcNode astNode) bool {
 	return true
 }
 
+// lowerCall lowers a Call node. `"...".format(args)` is special-cased into a
+// BIN_OP_ADD concatenation chain (see lowerFormatCall): a .format call therefore
+// does NOT appear as a call in the IR — call-graph fidelity at those sites is
+// traded for taint propagation that needs no propagator rule.
 func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	funcNode := n.node("func")
 	if funcNode != nil && funcNode.kind() == "Attribute" && funcNode.str("attr") == "format" {
 		return fs.lowerFormatCall(n, funcNode)
 	}
 
-	// Tornado request-argument accessor via `self` in a handler-class method
-	// (self.get_argument(...) / self.get_body_argument(...)): untrusted input.
-	// Lower the arguments for their side effects, then return a synthetic source
-	// (CVE-2025-47782 motioneye). Checked before self-method resolution so it wins
-	// over an (accidental) sibling-method match.
+	// A Tornado request-argument accessor via `self` is untrusted input
+	// (CVE-2025-47782); its arguments are lowered for their side effects. Checked
+	// before self-method resolution so it wins over an accidental sibling-method
+	// match.
 	if fs.selfArgMethod(funcNode) {
 		for _, a := range n.list("args") {
 			fs.lowerExpr(a)
@@ -1706,14 +1590,10 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		return fs.emitHandlerSource(n, "self."+funcNode.str("attr"))
 	}
 
-	// Thread/process DISPATCH: threading.Thread(target=run, args=(x,)) hands a
-	// callback + its arguments to a worker the runtime invokes later. Model it as a
-	// deferred call run(x) so taint flows into the worker's parameters (the
-	// pyload-class miss). Library knowledge (which APIs defer, argument layout) lives
-	// here in the frontend; the engine sees only a generic indirect call. When it
-	// matches, the whole construct is consumed — return an opaque handle for the
-	// worker object so `t = Thread(...); t.start()` stays inert and the forwarded
-	// args are not lowered a second time by the normal call path below.
+	// Thread/process DISPATCH (see emitDeferredDispatch). When it matches, the
+	// whole construct is consumed: return an opaque handle for the worker object
+	// so `t = Thread(...); t.start()` stays inert and the normal call path below
+	// does not lower the forwarded args a second time.
 	if fs.emitDeferredDispatch(n, funcNode) {
 		return ssabuild.Reg(fs.newReg())
 	}
@@ -1721,11 +1601,9 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	c := fs.classifyCallee(funcNode)
 
 	if c.shape == callDirect || c.shape == callSelfMethod {
-		// Lower any call embedded in the callee chain, so a chained call like
-		// requests.get(url).json() still emits the inner requests.get call (an SSRF
-		// sink) even though the outer call is `.json()`. For an INVOKE the receiver
-		// was lowered during classification, which already recurses through embedded
-		// calls (and an indirect callee is a bare Name — nothing nested).
+		// For an INVOKE the receiver was already lowered during classification
+		// (which recurses through embedded calls), and an indirect callee is a bare
+		// Name with nothing nested.
 		fs.lowerNestedCallees(funcNode)
 	}
 
@@ -1763,14 +1641,6 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		appendArg(a)
 	}
 	for _, kw := range n.list("keywords") {
-		// A keyword argument's NAME is otherwise lost: gIR carries positional args
-		// only, and a call site may pass keywords in any order, so `shell=True` and
-		// `check=True` lower identically. Tag a CONSTANT-valued keyword with a
-		// builtin.kwarg marker so a rule guard can read `.Name` and distinguish a
-		// dangerous configuration flag from an innocuous one. Only constants are
-		// wrapped: a constant carries no taint, so the marker can never hide a
-		// tainted value from the engine (`**kwargs` splats have no name and are
-		// left alone).
 		a := kw.node("value")
 		name := kw.str("arg")
 		// A `**kwargs` splat has no name to record, so it stays a plain argument.
@@ -1793,9 +1663,9 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 }
 
 // callShape classifies a Call's callee into one of the four shapes lowerCall
-// emits. classifyCallee decides it ONCE, with one early return per shape (the
-// emitDeferredDispatch style), so mutual exclusivity is structural rather than
-// implicit in a chain of accumulated boolean flags.
+// emits. classifyCallee decides it ONCE, with one early return per shape, so
+// mutual exclusivity is structural rather than implicit in a chain of
+// accumulated boolean flags.
 type callShape int
 
 const (
@@ -1845,15 +1715,11 @@ func (fs *funcState) classifyCallee(funcNode astNode) classifiedCall {
 		if fs.localFuncs[id] {
 			return classifiedCall{shape: callDirect, callee: "py:" + fs.moduleName + "." + id}
 		}
-		// Indirect call through a function VALUE the current function holds — `fn(x)`
-		// where `fn` is a parameter (the higher-order-callback case) or a local bound
-		// to a function reference. The syntactic callee `py:fn` names no lowered
-		// function, so a plain CALL would drop taint at the boundary; instead emit an
-		// INDIRECT call (empty Callee, the function value in Call.Value) that the
-		// engine resolves through its function-value points-to set. Excludes local
-		// functions (already resolved to their canonical name above) and
-		// imported/builtin names (they must keep their resolved callee so sink/source
-		// globs match).
+		// Indirect call through a function VALUE this function holds — `fn(x)` where
+		// `fn` is a parameter (higher-order callback) or a local bound to a function
+		// reference. The syntactic callee `py:fn` names no lowered function, so a
+		// plain CALL would drop taint at the boundary. Imported/builtin names are
+		// excluded: they must keep their resolved callee so sink/source globs match.
 		if !fs.importedNames[id] && fs.assigned[id] {
 			if v := fs.read(id); fs.paramRegs[id] || v.GetFuncName() != "" {
 				return classifiedCall{shape: callIndirect, value: v}
@@ -1869,16 +1735,13 @@ func (fs *funcState) classifyCallee(funcNode astNode) classifiedCall {
 				return classifiedCall{shape: callSelfMethod, callee: "py:" + fs.moduleName + "." + fs.methodPrefix + funcNode.str("attr")}
 			}
 		}
-		// Object-method call `obj.method(a, b)` on a genuine object — the receiver is
-		// rooted in a local/param/self value, NOT an imported module and NOT resolved
-		// through an import/request alias. Lower it as a CHA INVOKE (receiver in
-		// Call.Value, bare method in Call.MethodName) so the engine dispatches it to
-		// every same-named user method (methodImpls), like a Go/Java instance call.
-		// Without this, taint drops at every object-method boundary because the
-		// syntactic callee `py:obj.method` names no lowered function. Library calls
-		// (subprocess.run, os.system, a module function) are excluded via importedNames
-		// and still match sink globs as plain CALLs; sink globs also match an INVOKE's
-		// Callee, so a method-named sink like `cursor.execute` still fires.
+		// Object-method call `obj.method(a, b)` on a genuine object — receiver rooted
+		// in a local/param/self value, NOT an imported module and NOT an
+		// import/request alias. A CHA INVOKE dispatches it to every same-named user
+		// method (methodImpls), like a Go/Java instance call; without it taint drops
+		// at every object-method boundary, since `py:obj.method` names no lowered
+		// function. Library calls stay plain CALLs via importedNames, and sink globs
+		// match an INVOKE's Callee too, so `cursor.execute` still fires.
 		recvNode := funcNode.node("value")
 		if root := rootName(funcNode); root != "" && !fs.importedNames[root] {
 			_, isAlias := fs.aliases[root]
@@ -1887,12 +1750,11 @@ func (fs *funcState) classifyCallee(funcNode astNode) classifiedCall {
 				return classifiedCall{shape: callInvoke, callee: callee, value: fs.lowerExpr(recvNode)}
 			}
 		} else if recvNode != nil && (recvNode.kind() == "Call" || recvNode.kind() == "Subscript") {
-			// Chained method call whose receiver is a computed VALUE, e.g.
-			// `p.strip().split(",")` or `items[0].strip()`. rootName is "" for a
-			// call/subscript-rooted chain, so the name-based branch above misses it;
-			// capture the receiver as Call.Value so a method propagator (the callee
-			// is "py:<dynamic>.<method>", which still matches "py:*.<method>") can
-			// forward taint through the chain instead of dropping it.
+			// Chained method call whose receiver is a computed VALUE
+			// (`p.strip().split(",")`, `items[0].strip()`). rootName is "" for such a
+			// chain, so the branch above misses it; capturing the receiver in
+			// Call.Value lets a method propagator forward taint through the chain
+			// (the callee "py:<dynamic>.<method>" still matches "py:*.<method>").
 			return classifiedCall{shape: callInvoke, callee: callee, value: fs.lowerExpr(recvNode)}
 		}
 	}
@@ -1900,11 +1762,10 @@ func (fs *funcState) classifyCallee(funcNode astNode) classifiedCall {
 }
 
 // lowerNestedCallees lowers any call embedded in a callee's base chain (the
-// `value` side of an Attribute), so the inner call in a chained expression like
-// requests.get(u).json() is emitted as its own instruction — and can match a
-// source/sink glob — even though only the outermost call reaches lowerCall
-// directly. Recursion through lowerExpr -> lowerCall handles deeper chains
-// (a.b(x).c(y).d()).
+// `value` side of an Attribute), so the inner call in `requests.get(u).json()`
+// is emitted as its own instruction — and can match a source/sink glob — even
+// though only the outermost call reaches lowerCall directly. Recursion through
+// lowerExpr -> lowerCall handles deeper chains.
 func (fs *funcState) lowerNestedCallees(funcNode astNode) {
 	if funcNode == nil {
 		return
@@ -1917,9 +1778,10 @@ func (fs *funcState) lowerNestedCallees(funcNode astNode) {
 	}
 }
 
+// lowerFormatCall lowers `"...".format(a, b=c)` as a concatenation of the format
+// string with every positional and keyword value, so taint from any of them
+// reaches the result.
 func (fs *funcState) lowerFormatCall(n, funcNode astNode) *ir.Value {
-	// "...".format(a, b=c) concatenates the format string with every positional
-	// and keyword argument value, so taint from any of them reaches the result.
 	acc := fs.lowerExpr(funcNode.node("value"))
 	for _, a := range n.list("args") {
 		acc = fs.emitBinOp(ir.BinOpKind_BIN_OP_ADD, acc, fs.lowerExpr(a), n)
@@ -1930,15 +1792,13 @@ func (fs *funcState) lowerFormatCall(n, funcNode astNode) *ir.Value {
 	return acc
 }
 
-// dottedName builds a canonical, purely syntactic dotted callee name from a
-// Call's `func` AST node, e.g. Attribute(Attribute(Name("request"),"args"),
-// "get") -> "request.args.get". It does not resolve values through the
-// environment (a callee name reflects source syntax, not runtime identity),
-// matching how the task describes building sink/source names. A callee
-// rooted in something other than a plain Name/Attribute chain (e.g. a nested
-// Call, Subscript, or Lambda) resolves to "<dynamic>" for that sub-path, so
-// e.g. `get_cursor().execute(x)` yields "<dynamic>.execute" -- glob patterns
-// like "py:*.execute" still match it.
+// dottedName builds a canonical, purely SYNTACTIC dotted callee name from a
+// Call's `func` node: Attribute(Attribute(Name("request"),"args"),"get") ->
+// "request.args.get". It does not resolve values through the environment — a
+// callee name reflects source syntax, not runtime identity. A chain rooted in
+// something other than a plain Name/Attribute (a nested Call, Subscript, Lambda)
+// resolves to "<dynamic>" for that sub-path, so `get_cursor().execute(x)` yields
+// "<dynamic>.execute", which glob patterns like "py:*.execute" still match.
 func dottedName(n astNode) string {
 	if n == nil {
 		return "<dynamic>"
@@ -1953,7 +1813,6 @@ func dottedName(n astNode) string {
 	}
 }
 
-// constantValue converts a pyast.py Constant node into a gIR constant Value.
 func constantValue(n astNode) *ir.Value {
 	c := &ir.Constant{}
 	switch n.str("value_type") {
@@ -2025,10 +1884,8 @@ func unOpKind(op string) ir.UnOpKind {
 	return ir.UnOpKind_UN_OP_UNSPECIFIED
 }
 
-// posFromNode reads the {"line","col"} pos object pyast.py attaches to every
-// node and converts it to a gIR Position. Returns nil if unavailable (e.g. a
-// zero position), matching converters/go's convertPos returning nil for
-// invalid token.Pos.
+// posFromNode converts the {"line","col"} pos object pyast.py attaches to every
+// node into a gIR Position, or nil when it is unavailable (a zero position).
 func posFromNode(filename string, n astNode) *ir.Position {
 	p := n.node("pos")
 	if p == nil {

@@ -25,21 +25,14 @@
 // That is what the LLM reviewer triages on, and it is deliberately independent of
 // severity, which is what the CI gate keys on.
 //
-// # Precision guards, and the failures that motivated them
+// # Precision guards
 //
-// These are the parts most likely to be "simplified" into a regression, so the
-// reasoning is recorded here rather than only at the call site:
+// These are the parts most likely to be "simplified" into a regression; each is
+// argued in full at its own definition:
 //
-//   - Sink-parameter summaries (funcResult.taintsParamSink) let user code that
-//     passes untrusted data into a dependency wrapper — func Run(cmd string) that
-//     internally reaches exec.Command — be reported at the USER call site, since
-//     the dep-internal finding is scoped out. A summary forms ONLY for a
-//     string-typed parameter: a raw string into a sink is a precise injection,
-//     whereas taint reaching a sink through an interface{}/struct parameter is
-//     usually a reflective-ORM over-approximation (xorm binds the value as a `?`
-//     placeholder rather than concatenating it) and floods. A function that is
-//     itself a modeled sink does not summarize, so its direct call site fires once
-//     instead of double-reporting.
+//   - Sink-parameter summaries (funcResult.taintsParamSink) report a flow into a
+//     dependency's sink wrapper at the USER call site, since the dep-internal
+//     finding is scoped out. String-typed parameters only.
 //
 //   - Framework-agnostic HTTP request sources come from two complementary,
 //     name-list-free mechanisms. A framework's own accessor is tainted at the CALL
@@ -49,17 +42,14 @@
 //     are default propagators, carrying request taint through internal parsing at
 //     no false-positive cost.
 //
-//   - ssrf.go supplies the hostFixed() FACT, not a decision. It reconstructs how a
-//     tainted URL was built and reports whether a constant scheme://host prefix
-//     precedes the first tainted run. Whether that suppresses anything is the
-//     RULE's choice, via `when: 'not hostFixed()'`. The engine does not branch on
-//     CWE: it used to, and a custom rule tagged anything else silently lost the
-//     reduction while open-redirect could not opt in at all.
+//   - ssrf.go supplies the hostFixed() FACT, not a decision: whether it suppresses
+//     anything is the RULE's choice, via `when: 'not hostFixed()'`. The engine
+//     must not branch on CWE — that silently denies the reduction to a custom rule
+//     tagged anything else, and to open-redirect.
 //
-//   - guards.go (dominator-based validator suppression) needs a real CFG, so it
-//     only became reachable for Python/JS/Ruby once those frontends adopted
-//     converters/ssabuild. linearFn marks branch-free functions in any language,
-//     where program order already is dominance.
+//   - guards.go (dominator-based validator suppression) needs a real CFG, which
+//     every frontend now emits. linearFn marks branch-free functions in any
+//     language, where program order already is dominance.
 //
 // # Files
 //

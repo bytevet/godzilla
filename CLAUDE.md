@@ -26,7 +26,7 @@ go test ./...
 go test ./internal/analysis/
 go test ./converters/go/ -run TestGIRv2Metadata
 
-# Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.c/.cpp file). Exit codes:
+# Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.erb/.c/.cpp file). Exit codes:
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
 go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>
@@ -189,3 +189,10 @@ cache shared by report/LLM/triage), and `internal/testsupport` (test-only interp
   `comment`/intrinsic like `unsupported instruction`; converter tests fail if one appears.
 - **Confidence drives triage.** Intra-procedural findings are High; cross-function are Medium. The LLM
   reviewer only adjudicates at/below Medium and fails open (never drops a finding on an API error).
+- **Comments are concise and carry only what the code cannot say.** Write the invariant, the failure mode,
+  or why the obvious alternative is wrong — then stop. Specifically, do NOT write: a restatement of the line
+  below it; the same rationale in two places (put it where the person who would break it is looking — often
+  a test's `expected.yaml`, not the code); narration of one repo at one commit (that belongs in the commit
+  message, where it stays true); history (`used to be X`, `an earlier version`); or a paragraph describing
+  something the code does not do. A fact stated twice is a fact that will disagree with itself. Prefer
+  making an invariant structural — a helper that enforces it, a test that pins it — over describing it.

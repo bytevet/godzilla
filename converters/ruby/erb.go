@@ -6,9 +6,9 @@ import (
 )
 
 // ERB templates are Ruby embedded in markup, and Rails puts request input in
-// them directly (`<%= params[:id] %>`), so a view is a taint source site the
-// .rb-only frontend never saw. erbToRuby turns one into plain Ruby that Ripper
-// parses and lower.go lowers unchanged.
+// them directly (`<%= params[:id] %>`), so a view is a taint source site.
+// erbToRuby turns one into plain Ruby that Ripper parses and lower.go lowers
+// unchanged.
 //
 // The markup is blanked IN PLACE -- every removed byte becomes a space, newlines
 // survive -- so a position in the output is the same line and column as in the
@@ -19,9 +19,8 @@ import (
 // emitted plainly and only fires if it bypasses escaping itself (`raw`,
 // `.html_safe` -- already sinks in ruby-xss.yaml). The unescaped `<%== %>` form
 // IS a sink, and gets one the same way a Vue `v-html` does: its delimiters are
-// rewritten to a `raw(...)` call. `<%==` and `raw(` are both four bytes and `%>`
-// closes as `) `, so the substitution is length-preserving and positions still
-// hold.
+// rewritten to a `raw(...)` call. Every such rewrite is length-preserving — see
+// copyERBTag for the widths it relies on.
 func erbToRuby(src []byte) []byte {
 	out := blankAll(src)
 	for i := 0; i < len(src); {
@@ -67,20 +66,29 @@ func copyERBTag(src, out []byte, open, tagEnd int) {
 
 	// The closing `%>` becomes a statement separator. Two tags on one line
 	// (`style="<%= a %>;<%= b %>"`) would otherwise strip to two juxtaposed
-	// expressions on that line, which is a syntax error and loses the whole
-	// template — 11% of decidim's views. `%>` is two bytes, so the separator
-	// still fits after the raw() form's closing paren.
+	// expressions, a syntax error that loses the whole template. `%>` is two
+	// bytes, so the separator still fits after the raw() form's closing paren.
 	out[tagEnd] = ';'
 	switch {
 	case src[body] == '=' && src[body+1] == '=':
-		// <%== expr %> — unescaped output. A trailing modifier
-		// (`<%== x if y %>`) cannot sit inside raw()'s parens, so it stays a
-		// plain expression: losing one tag's sink beats a syntax error losing
-		// the whole template.
-		body += 2
-		if !hasTrailingModifier(src[body:tagEnd]) {
+		body += 2 // <%== expr %> — unescaped output
+		switch {
+		case !hasTrailingModifier(src[body:tagEnd]):
 			copy(out[open:], []byte("raw("))
-			out[tagEnd], out[tagEnd+1] = ')', ';'
+			copy(out[tagEnd:], []byte(");"))
+		case src[body] == ' ' && src[tagEnd-1] == ' ':
+			// A trailing modifier (`<%== x if y %>`) cannot sit directly inside
+			// raw()'s parens, but it can inside a nested pair. `<%== ` and `raw((`
+			// are both five bytes and ` %>` and `));` both three, so the spaced
+			// form — the idiomatic one — keeps its sink at no positional cost.
+			copy(out[open:], []byte("raw(("))
+			copy(out[tagEnd-1:], []byte("));"))
+			body++
+			end--
+		default:
+			// Unspaced with a modifier (`<%==x if y%>`) has no room for the
+			// nesting, so it stays a plain expression: losing one tag's sink beats
+			// a syntax error losing the whole template.
 		}
 	case src[body] == '=':
 		body++ // <%= expr %> — auto-escaped by Rails, emitted as a plain expression
@@ -107,7 +115,6 @@ func IsERBFile(path string) bool { return strings.HasSuffix(path, ".erb") }
 // cannot appear inside a parenthesized call argument.
 var modifierKeywords = [][]byte{[]byte(" if "), []byte(" unless "), []byte(" while "), []byte(" until "), []byte(" rescue ")}
 
-// hasTrailingModifier reports whether a tag body carries a statement modifier.
 func hasTrailingModifier(body []byte) bool {
 	for _, kw := range modifierKeywords {
 		if bytes.Contains(body, kw) {

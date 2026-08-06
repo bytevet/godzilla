@@ -15,7 +15,6 @@ import (
 // the embedded JavaDump.java single-file program via it).
 func requireJava(t *testing.T) { testsupport.RequireTool(t, "java") }
 
-// eachInstr visits every lowered instruction in a program.
 func eachInstr(prog *ir.Program, visit func(*ir.Instruction)) {
 	for _, fn := range irwalk.Funcs(prog) {
 		for in := range irwalk.Instrs(fn) {
@@ -24,7 +23,6 @@ func eachInstr(prog *ir.Program, visit func(*ir.Instruction)) {
 	}
 }
 
-// eachCallee visits the callee of every CALL/INVOKE instruction.
 func eachCallee(prog *ir.Program, visit func(callee string)) {
 	for cc := range irwalk.Calls(prog) {
 		visit(cc.GetCallee())

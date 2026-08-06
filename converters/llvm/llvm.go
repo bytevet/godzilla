@@ -3,8 +3,7 @@
 // Package llvm_converter lowers LLVM IR (as produced by clang for C/C++) into
 // Godzilla's language-neutral gIR, so the one taint engine analyzes
 // native/systems code the same way it analyzes Go/Python/JS. LLVM IR is already
-// SSA, so the mapping is direct. (Rust no longer flows through this path; it has
-// a pure-Go MIR frontend in converters/rust.)
+// SSA, so the mapping is direct.
 //
 // This package is compiled only under the `llvm` build tag (it binds libLLVM via
 // cgo through tinygo.org/x/go-llvm). The C/C++ frontend provides a no-op stub
@@ -71,12 +70,10 @@ func (fl *funcLowerer) lower(fn llvm.Value) *ir.Function {
 		out.Params = append(out.Params, ssabuild.Reg(fl.reg(p)))
 	}
 
-	// The command line is attacker-controlled input. For `main(int argc, char
-	// **argv)` synthesize a source CALL whose result is bound to the argv
-	// parameter, so every `argv[i]` read carries taint (the same trick the axum /
-	// Spring frontends use for framework-provided request data). The engine only
-	// introduces taint at a CALL matching a source glob (`c*:argv`), so this makes
-	// argv a real CLI/CGI source (COV-8) with no gIR or engine change.
+	// The command line is attacker-controlled input, but the engine only
+	// introduces taint at a CALL matching a source glob. For `main(int argc, char
+	// **argv)` synthesize one whose result is bound to the argv parameter, making
+	// argv a real CLI/CGI source (`c*:argv`, COV-8) with no gIR or engine change.
 	var prologue *ir.Instruction
 	if fn.Name() == "main" && fn.ParamsCount() >= 2 {
 		argv := fn.Param(1)
@@ -101,8 +98,8 @@ func (fl *funcLowerer) lower(fn llvm.Value) *ir.Function {
 	// Lower each block and wire its CFG edges (Preds/Succs). The flow-sensitive
 	// engine (ENG-2) propagates taint in reverse-post-order over these edges, so
 	// without them a branch between a source and a sink — `l = fgets(...); if (l)
-	// system(l);` — would strand the taint in the entry block (a false negative).
-	// A terminator's successor blocks appear among its operands as block values.
+	// system(l);` — strands the taint in the entry block (a false negative). A
+	// terminator's successor blocks appear among its operands as block values.
 	preds := make([][]int32, len(bbs))
 	for i, bb := range bbs {
 		block := &ir.BasicBlock{Index: int32(i)}

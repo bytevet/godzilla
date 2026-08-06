@@ -72,12 +72,9 @@ func (b *Builder) IfDiamond(cur *BlockID, terminated *bool, cond *ir.Value, lowe
 // that always returns has no back-edge. The header is left UNSEALED while the
 // body is built, so a loop variable read in the condition or body parks an
 // incomplete PHI that is filled when the header is sealed after the back-edge
-// is wired — this is what gives loop-carried taint: a value written in the
-// body and read at the top of the next iteration flows through the header PHI
-// (which a single-block lowering could not model). The header PHI over
-// [pre-loop, back-edge] carries taint into and out of the loop. The seal
-// ORDER matters and is why every loop form shares this scaffold rather than
-// each open-coding it. Leaves *cur at the (sealed) exit block, *terminated
+// is wired — this is what gives loop-carried taint: a value written in the body
+// and read at the top of the next iteration flows through the header PHI over
+// [pre-loop, back-edge]. Leaves *cur at the (sealed) exit block, *terminated
 // false.
 //
 // A frontend puts a loop prologue (binding the iteration variable) at the top

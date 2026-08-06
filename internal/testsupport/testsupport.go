@@ -1,6 +1,6 @@
-// Package testsupport holds the small helpers the test packages across the
-// repo kept re-declaring privately: the interpreter/toolchain-presence skip
-// (RequireTool) and the one-rule RuleSet builder (OneRuleSet).
+// Package testsupport holds the small helpers shared by test packages across the
+// repo: the toolchain-presence skip (RequireTool) and the one-rule RuleSet
+// builder (OneRuleSet).
 //
 // It lives outside internal/rules on purpose: OneRuleSet must fill
 // RuleSet.DefaultPropagators from the shipped `_default-propagators.yaml`
@@ -65,11 +65,8 @@ func Validators(globs ...string) RuleOpt { return func(r *rules.Rule) { r.Valida
 func Sinks(sinks ...rules.Sink) RuleOpt { return func(r *rules.Rule) { r.Sinks = sinks } }
 
 // OneRuleSet builds a single-rule RuleSet — the shape almost every engine and
-// converter test wants — with RuleSet.DefaultPropagators always populated from
-// the shipped fragment, so a test set behaves like a real scan instead of
-// silently dropping taint at the first stdlib transform (the drift the private
-// per-file builders had: some copies carried the defaults, some did not).
-// Sink patterns may carry the usual "#idx" injection-point suffix.
+// converter test wants — with RuleSet.DefaultPropagators always populated (see
+// DefaultPropagators). Sink patterns may carry the usual "#idx" suffix.
 func OneRuleSet(t testing.TB, id, lang, cwe string, sources, sinks []string, opts ...RuleOpt) *rules.RuleSet {
 	t.Helper()
 	r := rules.Rule{

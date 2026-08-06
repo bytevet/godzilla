@@ -148,25 +148,22 @@ regexps to gIR string constants and to config files no frontend parses.
 YAML rules matched against canonical symbols (`internal/rules/`), in three kinds:
 
 - **Taint rules** (default) — a source→sink dataflow spec with
-  sanitizers/validators/propagators. A sink may pin its injection-point argument
-  with `#<index>` to avoid parameterized-query false positives.
+  sanitizers/validators/propagators, and a sink that may pin its injection-point
+  argument with `#<index>`.
 - **Dangerous-call rules** (`kind: dangerous-call`) — a non-dataflow, call-site
-  match: any call to a banned/weak API (optionally gated on a constant argument) is a
-  finding. Backs the weak-crypto packs (weak hash/cipher CWE-327, insecure
-  `math/rand` CWE-338).
+  match, optionally gated on a constant argument. Backs the weak-crypto packs
+  (weak hash/cipher CWE-327, insecure `math/rand` CWE-338).
 - **Secret rules** (`kind: secret`) — no call at all: a regexp over string
   constants and config-file lines, backing the CWE-798 pack. Keeping these as
   rules rather than a Go table means a project can add its own credential format
   through `--rules`, and `rules list|lint|test` covers them like anything else.
 
 Built-in packs live in `rulepacks/` and are embedded into the binary; `--rules`
-merges user rules on top. Shared source/sink/sanitizer/propagator lists live in
-`_`-prefixed **fragments** that a pack pulls in with `extend:`, so a language's
-request sources are defined once, not per pack. One fragment,
-`_default-propagators.yaml`, is applied to every rule by the loader instead of
-being named in `extend:` — the taint-preserving stdlib transforms
-(`strings.TrimSpace`, `str.strip`, `String.trim`) that no rule should have to
-restate.
+merges user rules on top. Shared pattern lists live in `_`-prefixed **fragments**
+that a pack pulls in with `extend:`, with one exception the loader applies to
+every rule automatically: `_default-propagators.yaml`, the taint-preserving
+stdlib transforms (`strings.TrimSpace`, `str.strip`, `String.trim`) that no rule
+should have to restate.
 Full authoring reference: [docs/writing-rules.md](docs/writing-rules.md).
 
 ## Frontends
@@ -201,7 +198,9 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
 - **Ruby** (`converters/ruby/`) — an embedded helper (`rbdump.rb`, run via `ruby`)
   parses with the stdlib **Ripper** and emits its S-expression AST as JSON;
   `lower.go` lowers that tree to a real CFG (`ssabuild`). Ripper ships with every MRI Ruby.
-  Emits `ruby:` names.
+  `.erb` templates are stripped to plain Ruby first (`erb.go`), blanking the markup IN PLACE so
+  byte offsets — and therefore positions — survive; `<%== %>` becomes the `raw()` call
+  ruby-xss.yaml already models. Emits `ruby:` names.
 - **C / C++** (`converters/cpp/` + shared `converters/llvm/`) — clang compiles each
   unit to **LLVM IR** (`-O1 -g`), parsed via libLLVM and lowered. This is the
   **opt-in cgo backend** (`-tags "llvm byollvm"`), *not* in the default binary, which
@@ -225,10 +224,8 @@ same-named functions in different files get distinct canonical names.
 
 ## Implementation status
 
-Every component described above — gIR, all seven frontends, the rule engine,
-inter-procedural taint, secrets scanning, the report, and the LLM reviewer — is
-implemented and tested end-to-end, and every vuln class is detected across the
-languages that have samples (see the
+Every component described above is implemented and tested end-to-end, and every
+vuln class is detected across the languages that have samples (see the
 [detection matrix](README.md#supported-languages--detections)). Two components are
 deliberately approximate rather than complete:
 
@@ -236,11 +233,6 @@ deliberately approximate rather than complete:
 |---|---|
 | Pointer analysis | ⚠️ approximated (CHA + value-flow); a full demand-driven points-to is a future precision upgrade |
 | Python / JS / Ruby lowering | ⚠️ real CFG + SSA, but exceptions and `break`/`continue` stay approximate (below) |
-
-Two are not in the default binary or need a toolchain: the **C/C++** frontend is
-an opt-in cgo build (`-tags "llvm byollvm"` + libLLVM; the default ships a stub),
-and Python, Ruby, Java and Rust need `python3` / `ruby` / a JDK 24+ / `rustc` on
-`PATH`, degrading to a coverage warning when absent.
 
 ### Known limitations
 

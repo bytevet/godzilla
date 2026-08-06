@@ -1,8 +1,7 @@
-// Package srclines provides the shared source-file line cache used by every
-// stage that re-reads scanned source to show or match lines: the HTML report's
-// code snippets, the LLM reviewer's code context, and the inline
-// godzilla:ignore sweep. Each previously carried its own copy of the same
-// map-with-nil-miss mechanism; this is the single implementation.
+// Package srclines is the shared source-file line cache used by every stage that
+// re-reads scanned source to show or match lines: the HTML report's code
+// snippets, the LLM reviewer's code context, and the inline godzilla:ignore
+// sweep.
 //
 // A Cache is deliberately pass-scoped (one per report render / review pass /
 // ignore sweep), never package-global, so a later scan of a changed file can

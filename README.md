@@ -153,7 +153,7 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 
 | | Go | Python | JavaScript | Java | Rust | Ruby |
 |---|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper |
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper; `.erb` templates |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -172,6 +172,9 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 - **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
   single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
   flagged as template-injection XSS (CWE-79). Pure Go, no Node.
+- **Ruby** also scans **ERB** templates (`.erb`), where a Rails view puts request
+  input on the page. Rails auto-escapes `<%= %>`, so only the escape-bypassing
+  forms — `<%== %>`, `raw`, `.html_safe` — are treated as XSS sinks.
 - **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
   JDK 24+ `java`. Maven/Gradle projects are built first so third-party deps are on
   the classpath.

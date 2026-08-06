@@ -40,10 +40,8 @@ type Reviewer interface {
 	Review(ctx context.Context, f analysis.Finding, codeContext string) (Verdict, error)
 }
 
-// ReviewStats summarizes one review pass for auditability. It lets the caller
-// report exactly what the reviewer did — how many findings it adjudicated, how
-// many it suppressed, how many it could not review — so a nondeterministic
-// model's effect on the gate is never invisible.
+// ReviewStats summarizes one review pass so a nondeterministic model's effect on
+// the gate is never invisible.
 type ReviewStats struct {
 	Reviewed   int   // findings actually sent to the reviewer
 	Suppressed int   // findings the reviewer judged false positives (retained, flagged)
@@ -85,12 +83,9 @@ func Filter(ctx context.Context, r Reviewer, findings []analysis.Finding, review
 	return FilterWithConfig(ctx, r, findings, reviewUpTo, DefaultReviewConfig())
 }
 
-// FilterWithConfig is Filter with an explicit ReviewConfig. Reviews run through
-// a bounded worker pool (order-preserving output), each under a per-call
-// timeout, capped at cfg.MaxReviews per pass; findings past the cap are kept
-// unreviewed (fail open, counted in Skipped). The two safety properties of
-// Filter still hold: fail-open on error/timeout, and never-blind on empty
-// context.
+// FilterWithConfig is Filter with an explicit ReviewConfig. Output order is
+// preserved; findings past cfg.MaxReviews are kept unreviewed (fail open,
+// counted in Skipped). Filter's two safety properties still hold.
 func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Finding, reviewUpTo analysis.Confidence, cfg ReviewConfig) ([]analysis.Finding, ReviewStats) {
 	var stats ReviewStats
 	if r == nil {
@@ -104,10 +99,8 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 		cc  string
 	}
 	var jobs []job
-	// Pass-scoped source-line cache: a finding's taint path visits many
-	// positions in the same file, and a pass builds context for every
-	// reviewable finding, so without this the same file would be read and
-	// split once per hop.
+	// Pass-scoped: a taint path visits many positions in the same file, so
+	// without this the file is read and split once per hop.
 	cache := srclines.Cache{}
 	for i := range out {
 		if !shouldReview(out[i].Confidence, reviewUpTo) {
@@ -127,9 +120,8 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 		jobs = jobs[:cfg.MaxReviews]
 	}
 
-	// Review concurrently, bounded, each under its own timeout. Only reads of
-	// out[idx] happen here; the suppression writes are applied afterward in
-	// original order, so there is no data race on out.
+	// Only reads of out[idx] happen here; the suppression writes are applied
+	// afterward in original order, so there is no data race on out.
 	conc := max(cfg.Concurrency, 1)
 	verdicts := make([]Verdict, len(jobs))
 	errs := make([]error, len(jobs))
@@ -170,9 +162,8 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 			stats.Suppressed++
 			continue
 		}
-		// Kept after review: annotate as LLM-confirmed with the reviewer's
-		// exploitability note (falling back to its reason), so a developer sees
-		// why it survived triage (LLM-7).
+		// Kept after review: annotate with the exploitability note (falling back
+		// to the reason) so a developer sees why it survived triage (LLM-7).
 		out[idx].ReviewConfirmed = true
 		if note := verdicts[k].Exploitability; note != "" {
 			out[idx].ReviewNote = note
@@ -277,9 +268,7 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	b.WriteString("Use them to trace the flow — read the tainted call's callee, any sanitizer or validation on the path, ")
 	b.WriteString("the route/handler registration — before deciding. Do not guess when a tool can settle it.\n\n")
 	writeFindingFacts(&b, f)
-	// Guard for direct callers (e.g. unit tests): the Filter path never reaches
-	// here with empty context, as it skips blank-context findings before Review.
-	if strings.TrimSpace(codeContext) != "" {
+	if strings.TrimSpace(codeContext) != "" { // see buildPrompt
 		b.WriteString("\nInitial code context:\n")
 		b.WriteString(codeContext)
 		b.WriteString("\n")
@@ -322,13 +311,10 @@ func parseVerdict(text string) (Verdict, error) {
 }
 
 // codeContextFor gathers the source lines the reviewer needs to judge a finding.
-// When the finding carries a reconstructed taint path (Steps), it snippets code
-// at EVERY hop along the path — so the reviewer can see any sanitizer/validation
-// that sits between source and sink, not just the two endpoints (the "context
-// poverty" that made interprocedural adjudication guesswork). Otherwise it falls
-// back to snippets at the sink and source. Best-effort: any file-read error is
-// skipped rather than failing the review; a fully empty context makes Filter
-// keep the finding unreviewed.
+// With a reconstructed taint path (Steps) it snippets EVERY hop, so the reviewer
+// sees any sanitizer between source and sink rather than only the two endpoints;
+// otherwise it falls back to the sink and source. Best-effort: a file-read error
+// is skipped, and a fully empty context makes Filter keep the finding unreviewed.
 func codeContextFor(cache srclines.Cache, f analysis.Finding) string {
 	var b strings.Builder
 	if len(f.Steps) >= 2 {
@@ -370,9 +356,7 @@ func codeContextFor(cache srclines.Cache, f analysis.Finding) string {
 
 // snippet returns up to ctx lines on either side of p's line, each prefixed with
 // its 1-based line number and the pointed-at line marked with ">". Returns "" on
-// any read error or invalid position. (The HTML report also snippets source, but
-// renders structured, template-escaped lines — the two share only the line cache,
-// srclines.Cache, not the rendering.)
+// any read error or invalid position.
 func snippet(cache srclines.Cache, p *ir.Position, ctx int) string {
 	if p == nil || p.GetFilename() == "" || p.GetLine() <= 0 {
 		return ""

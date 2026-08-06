@@ -28,26 +28,18 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		return findings
 	}
 
-	// The name->function index (see buildFuncIndex) and the class-hierarchy
-	// method index for interface dynamic dispatch (a bare method name -> every
-	// lowered concrete method that implements it, see buildMethodImpls). Both
-	// depend only on the immutable program, so each is built ONCE and shared by
-	// every rule AND by the call graph — rebuilding either per rule (as before)
-	// wasted O(rules x functions) work, and the call graph keeping near-duplicate
-	// private copies invited the two policies to drift.
+	// Both indexes depend only on the immutable program, so each is built ONCE and
+	// shared by every rule AND by the call graph: one index, one policy — private
+	// per-consumer copies would let the two dispatch policies drift.
 	byKey, modByKey := buildFuncIndex(prog)
 	methodImpls := buildMethodImpls(byKey)
 
 	cg := buildCallGraph(byKey, methodImpls)
 
-	// These three indexes are likewise rule-independent (derived only from the
-	// immutable call graph / function set), so build them ONCE here and share them
-	// read-only across the parallel per-rule analyses. Rebuilding them inside
-	// analyzeInterproc — as before — repeated an O(program) instruction walk and a
-	// large allocation per rule, which starved the goroutines' shared allocator and
-	// capped parallel scaling (~1.9x on 4 cores). callers is the reverse call graph;
-	// globalReaders maps a global name to the functions that read it (ENG-6); keys
-	// is the deterministic worklist seed order.
+	// Likewise rule-independent, so built once and shared read-only across the
+	// parallel per-rule analyses (see sharedIndex). callers is the reverse call
+	// graph; globalReaders maps a global name to the functions that read it
+	// (ENG-6); keys is the deterministic worklist seed order.
 	callers := buildCallers(cg)
 	globalReaders := buildGlobalReaders(byKey)
 	indirectCallees := buildIndirectCallees(byKey)
@@ -61,11 +53,9 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	}
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
-	// parallel analysis. This moves shape-classification (and the "#idx" sink
-	// parse) out of the hot per-(call-site × pattern) matching path — which then
-	// does a lock-free slice walk instead of a mutexed cache lookup per match, the
-	// dominant engine cost as rule packs grow. Doing it here (not lazily inside a
-	// goroutine) avoids a data race on the shared matcher cache.
+	// parallel analysis: matching then walks compiled patterns lock-free, and
+	// compiling here rather than lazily inside a goroutine avoids a data race on
+	// the shared matcher cache.
 	_ = e.rs.Compile() // guard-compile errors are already reported by the loader at load
 
 	// Languages actually present in this program, for the language half of
@@ -78,35 +68,25 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	}
 
 	// canProduceFinding decides whether a rule is worth a goroutine and a seeded
-	// worklist at all. A pass costs an O(functions × instructions) walk, so a rule
-	// that CANNOT yield a finding must not get one — with a 78-rule pack, 61-74% of
-	// the passes were exactly that.
+	// worklist at all: a pass costs an O(functions × instructions) walk, so a rule
+	// that CANNOT yield a finding must not get one. Three independent reasons a
+	// rule is a guaranteed no-op:
 	//
-	// Two independent reasons a rule is a guaranteed no-op:
-	//
-	//   - NO SINKS. Dataflow findings are emitted in exactly two places, and both
-	//     sit behind a sink match: the isSink branch, and the dependency
-	//     sink-wrapper path, whose summary recordSinkParam only ever writes from
-	//     inside that same branch. MatchSink over an empty sink list always returns
-	//     false, so there is no path to a finding. This is what excludes the
-	//     `kind: secret` and `kind: dangerous-call` rules — they are evaluated by
-	//     ScanSecrets and ScanDangerousCalls, not here — and it catches a malformed
-	//     rule too. Tested on the CONCRETE property (no sinks) rather than on the
-	//     kind, because that property is the actual reason.
+	//   - NO SINKS. Both places a dataflow finding is emitted sit behind a sink
+	//     match (the isSink branch, and recordSinkParam, which only ever writes
+	//     from inside it), and MatchSink over an empty sink list is always false.
+	//     This is what excludes `kind: secret` and `kind: dangerous-call` rules —
+	//     ScanSecrets and ScanDangerousCalls evaluate those. Tested on the CONCRETE
+	//     property (no sinks) rather than on the kind, because that is the reason.
 	//
 	//   - NO LANGUAGE IN COMMON with the program. enqueue rejects every function
 	//     whose module language fails AppliesTo, so the worklist would stay empty.
 	//     A rule declaring no languages applies everywhere and is never skipped.
 	//
-	//   - NO SINK CALLEE PRESENT. Every one of the rule's sink globs matches
-	//     nothing this program actually calls, so no call site can ever be a sink
-	//     for it. This is what makes a broad multi-language pack cheap on a repo
-	//     that uses few of the modeled libraries: the distinct-callee set is a
-	//     BY-PRODUCT of buildCallGraph (cg.Callees) rather than its own walk, and
-	//     it is far smaller than the instruction count (54 vs 637 on
-	//     test/go/sql_injection), so the check costs |callees| × |sink patterns|
-	//     once instead of a full worklist pass. Collecting it in a separate walk
-	//     measured +6.6% on a dependency-heavy Go scan — more than it saved.
+	//   - NO SINK CALLEE PRESENT: every sink glob matches nothing this program
+	//     calls. The distinct-callee set is a BY-PRODUCT of buildCallGraph
+	//     (cg.Callees), not its own walk — collecting it separately cost more than
+	//     the skipping saved.
 	//
 	//     Gated on SINKS ONLY, never sources. Taint also enters through seeding
 	//     that is not a callee-glob match at all — addHTTPRequestSource,
@@ -139,16 +119,13 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		return hasSinkCallee(r)
 	}
 
-	// Phase 1: decide which rules can produce a finding at all. An inert rule
-	// must cost one boolean and NEVER a goroutine — with a pack of mostly-inert
-	// rules the per-rule spawn/semaphore overhead dominated the skip it bought
-	// (Engine_InertRules regressed 2x when this check briefly ran inside the
-	// per-rule goroutines). The check is |callees| × |sink patterns| per rule,
-	// so on a dependency-heavy scan (tens of thousands of distinct callees) the
-	// serial ramp in front of the workers is real — parallelize it across a
-	// small fixed pool, but only past a size threshold so small scans and
-	// microbenchmarks keep the zero-spawn serial path. Safe concurrently:
-	// every matcher was compiled by e.rs.Compile() above, so this only reads.
+	// Phase 1: decide which rules can produce a finding at all. An inert rule must
+	// cost one boolean and NEVER a goroutine — with a mostly-inert pack the
+	// spawn/semaphore overhead dominates the skip it buys, so this must not move
+	// inside the per-rule goroutines below. The check is |callees| × |sink
+	// patterns| per rule, so past a size threshold it is worth a small fixed pool;
+	// below it the zero-spawn serial path wins. Safe concurrently: every matcher
+	// was compiled by e.rs.Compile() above, so this only reads.
 	live := make([]bool, len(e.rs.Rules))
 	if len(e.rs.Rules)*len(cg.Callees) >= 1<<15 {
 		var pre sync.WaitGroup
@@ -174,11 +151,10 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	}
 
 	// Phase 2: each live rule's analysis is independent — it reads the shared,
-	// immutable call graph / function index and writes only its own local state —
-	// so run the rules concurrently (bounded by GOMAXPROCS). Results are
-	// collected per rule index and concatenated in rule order, so output stays
-	// deterministic; a skipped rule's nil slot is exactly what an empty worklist
-	// returns.
+	// immutable indexes and writes only its own local state — so the rules run
+	// concurrently. Results are collected per rule index and concatenated in rule
+	// order, so output stays deterministic; a skipped rule's nil slot is exactly
+	// what an empty worklist returns.
 	results := make([][]Finding, len(e.rs.Rules))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
@@ -195,10 +171,8 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		}(i)
 	}
 	wg.Wait()
-	// Size the combined slice exactly and copy once. Appending each rule's results
-	// to a growing slice reallocated it by repeated doubling — copying every
-	// (large) Finding many times, the single biggest allocation in a finding-heavy
-	// scan.
+	// Size the combined slice exactly and copy once: growth by doubling copies
+	// every (large) Finding repeatedly on a finding-heavy scan.
 	total := 0
 	for _, r := range results {
 		total += len(r)
@@ -228,14 +202,11 @@ type globalEffect struct {
 
 // funcValEffect records that a FUNCTION VALUE (the concrete lowered function
 // `target`) was passed as the argument at position `param` of `callee`. It is the
-// points-to analogue of callEffect: where callEffect flows taint into a param,
-// funcValEffect flows a *callable identity* into a param, so an indirect call on
-// that param inside the callee (`fn(x)` where `fn` is a parameter) can be resolved
-// back to `target`. This is what makes higher-order-callback taint work — a
-// callback passed into a generic helper is tracked across the call boundary — and,
-// combined with a frontend that rewrites a deferral API to a synthesized indirect
-// call, also covers thread/async dispatch. Mirrors callEffect but carries a target
-// function name rather than a source origin.
+// points-to analogue of callEffect: it flows a *callable identity* into a param, so
+// an indirect call on that param inside the callee (`fn(x)` where `fn` is a
+// parameter) resolves back to `target`. This is what makes higher-order-callback
+// taint work, and — with a frontend that rewrites a deferral API to a synthesized
+// indirect call — thread/async dispatch too.
 type funcValEffect struct {
 	callee string
 	param  int
@@ -296,13 +267,10 @@ type funcResult struct {
 	findings      []Finding
 	returnsOrigin *ir.Position // non-nil if the function can return tainted data
 	callEffects   []callEffect
-	// funcEffects records that a function value was passed as an argument to a
-	// callee (see funcValEffect): the callee's matching parameter then holds that
-	// callable, so an indirect call on the parameter resolves to it. This is the
-	// cross-function channel for higher-order-callback taint. Mirrors callEffects
-	// (a points-to fact rather than taint), but its target store is a SET — a
-	// context-insensitive helper called from several sites accumulates the union of
-	// callbacks passed to it, and the engine only binds when that set is a singleton.
+	// funcEffects is the cross-function channel for higher-order-callback taint
+	// (see funcValEffect). Its target store is a SET — a context-insensitive helper
+	// called from several sites accumulates the union of callbacks passed to it,
+	// and the engine only binds when that set is a singleton.
 	funcEffects []funcValEffect
 	// funcOpaque records (callee, param) slots that received an UNRESOLVABLE value at
 	// some call site (a call-result callback, a lambda, an unmodeled import). Its
@@ -319,16 +287,14 @@ type funcResult struct {
 	// STRING parameter i flows into a sink inside its (or a callee's) body — a
 	// dependency "sink wrapper" (e.g. Run(cmd string) -> exec.Command(cmd)). The
 	// dep-internal finding is scoped out (internal/scan scopeFindings), so the
-	// caller reports the flow at ITS call site instead, where the bug actually is
-	// (user code passing untrusted data in). The value is the wrapped sink's Pos.
+	// caller reports the flow at ITS call site instead, where the bug actually is.
+	// The value is the wrapped sink's Pos.
 	//
-	// Restricted to STRING params on purpose: a raw string flowing into a sink is a
-	// precise injection flow, whereas taint reaching a sink through an interface{}/
-	// struct/slice param is usually an OVER-APPROXIMATION of reflective library code
-	// — an ORM binds the value as a bound parameter (a `?` placeholder), it does not
-	// concatenate it into the query string — so summarizing those floods findings
-	// (xorm Find/Get/Update et al.). String-only keeps the real wrapper class and
-	// drops the reflective-container noise. See the isSink branch in
+	// Restricted to STRING params on purpose: a raw string into a sink is a precise
+	// injection, whereas taint reaching a sink through an interface{}/struct/slice
+	// param is usually an OVER-APPROXIMATION of reflective library code — an ORM
+	// binds the value as a `?` placeholder rather than concatenating it — so
+	// summarizing those floods findings. See the isSink branch in
 	// funcAnalysis.handleCall.
 	taintsParamSink paramPositions
 }
@@ -460,12 +426,11 @@ func scalarArg(name string, v *ir.Value, def *ir.Instruction, defs map[string]*i
 	s, complete := constSkeleton(v, defs, map[string]bool{})
 	// constSkeleton reconstructs STRING text, so a bool/int/float constant comes
 	// back as an empty, incomplete skeleton. Render it here — in the guard path
-	// only — so a guard can read a flag argument: `shell=True` is what separates
-	// an injectable subprocess call from a safe list-argv one, and without this
-	// `arg[i].String == "true"` could never hold. Deliberately NOT pushed down
-	// into constSkeleton/constStr: those also back the SSRF host reconstruction,
-	// where a non-string operand is not part of the URL text and making one
-	// "complete" could wrongly prove a fixed host and suppress a real finding.
+	// only — so a guard can read a flag argument (`shell=True`). Deliberately NOT
+	// pushed down into constSkeleton/constStr: those also back the SSRF host
+	// reconstruction, where a non-string operand is not part of the URL text and
+	// making one "complete" could wrongly prove a fixed host and suppress a real
+	// finding.
 	if !complete {
 		if sc, ok := constScalar(v); ok {
 			s, complete = sc, true
@@ -541,13 +506,9 @@ func argType(v *ir.Value, skeleton string, def *ir.Instruction) string {
 
 // buildIndirectCallees indexes every function that CONTAINS an indirect call — a
 // CALL whose callee names no function (Callee == "") and is not an INVOKE, i.e. a
-// call through a function VALUE. A function-value points-to fact about a
-// parameter is only ever consulted at such a call site, so recording (and
-// re-enqueuing on) those facts for a function that has no indirect call is pure
-// waste. Gating the higher-order channel on this set keeps its cost off the vast
-// majority of functions — critically the large dependency closure a Go scan
-// lowers, where nearly every function receives some non-function argument but
-// almost none dispatch through a parameter.
+// call through a function VALUE. A function-value points-to fact about a parameter
+// is only ever consulted at such a call site, so gating the higher-order channel
+// on this set keeps its cost off the vast majority of functions.
 func buildIndirectCallees(byKey map[string]*ir.Function) map[string]bool {
 	has := map[string]bool{}
 	for name, fn := range byKey {
@@ -597,9 +558,8 @@ func buildFuncIndex(prog *ir.Program) (map[string]*ir.Function, map[string]*ir.M
 // method name -> every lowered concrete method exposing it. An INVOKE call names
 // a method abstractly (not a concrete function), so this lets taint flow into the
 // implementations. It over-approximates (any same-named method matches), which is
-// why such findings stay Medium confidence. It depends only on the immutable
-// function index, so it is built once and shared by every rule and by the call
-// graph's CHA edge resolution (buildCallGraph) — one index, one policy.
+// why such findings stay Medium confidence. Built once and shared by every rule
+// and by buildCallGraph's CHA edge resolution — one index, one policy.
 //
 // A frontend marks every method — Go, Python, … — with Function.method_name, so
 // the engine identifies methods and their bare name from IR alone, parsing no
@@ -619,8 +579,8 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 // sharedIndex holds the rule-independent indexes over the immutable program,
 // built once in Analyze and shared read-only across the parallel per-rule
 // analyses (no goroutine mutates them). Hoisting them here — rather than
-// rebuilding per rule — removes an O(program × rules) instruction walk and the
-// allocation that capped parallel scaling.
+// rebuilding per rule — removes an O(program × rules) instruction walk whose
+// allocation churn capped parallel scaling.
 type sharedIndex struct {
 	byKey           map[string]*ir.Function
 	modByKey        map[string]*ir.Module
@@ -634,39 +594,33 @@ type sharedIndex struct {
 	// demand-driven via callEffects. Empty seeds every function.
 	reportable map[string]bool
 	// reqSourceHosts is the set of function keys that CONTAIN a request-object
-	// source call (e.g. the Go frontend's synthetic `go:@net/http.Request`,
-	// planted at every inbound *http.Request value — including field reads deep
-	// inside a lowered framework body like beego/macaron). Such a function is a
-	// taint ORIGIN, so it must seed the worklist even when it lives in a
-	// dependency module the reportable scope would otherwise reach only
-	// demand-driven — a source that never runs produces no taint. Built once,
-	// rule-independent (the union of all rules' request_object_sources).
+	// source call (e.g. the Go frontend's synthetic `go:@net/http.Request`). Such
+	// a function is a taint ORIGIN, so it must seed the worklist even when it lives
+	// in a dependency module the reportable scope would otherwise reach only
+	// demand-driven — a source that never runs produces no taint. See
+	// buildReqSourceHosts.
 	reqSourceHosts map[string]bool
 
 	// fnIdx memoizes the per-function structural indexes, filled lazily on first
-	// use and guarded because the per-rule analyses run concurrently. A plain
-	// pre-sized map under an RWMutex, and entries stored BY VALUE: sync.Map cost
-	// an interface box plus an entry allocation per function, and a *fnIndex cost
-	// one more — together ~2.4 allocations per function that a single-rule scan
-	// has nothing to amortize them against. Copying the struct is free (two map
-	// headers), and safe because an entry is immutable once built.
+	// use and guarded because the per-rule analyses run concurrently. Entries are
+	// stored BY VALUE under a plain RWMutex rather than in a sync.Map: copying the
+	// struct is two map headers and is safe because an entry is immutable once
+	// built, whereas boxing cost ~2.4 allocations per function that a single-rule
+	// scan has nothing to amortize against.
 	fnIdxMu sync.RWMutex
 	fnIdx   map[*ir.Function]fnIndex
 }
 
 // fnIndex holds the per-function structural indexes derived ONLY from the
 // function's (immutable) body: the SSA def map, the non-escaping-alloc set,
-// and the flow-sensitive driver's CFG inputs (fnCFG; nil for a linear
-// function). A funcAnalysis visit runs once per (function × rule × worklist
-// visit), so building these there multiplied an O(instructions) walk and the
-// map allocations by the rule count — the very rebuild-per-rule cost
-// sharedIndex exists to remove for the program-wide indexes.
+// and the flow-sensitive driver's CFG inputs (fnCFG; nil for a linear function).
+// A funcAnalysis visit runs once per (function × rule × worklist visit), so
+// building these there would multiply an O(instructions) walk by the rule count.
 //
 // INVARIANT: an entry is immutable once constructed and is shared read-only
-// across the parallel per-rule goroutines (buildDefs is the only writer of defs;
-// nonEscaping and cfg are only ever read). This is what makes copying the
-// struct out of the memo safe — the copy shares the maps. A future consumer
-// that wants to mutate any of them must clone it first.
+// across the parallel per-rule goroutines. This is what makes copying the struct
+// out of the memo safe — the copy shares the maps. A future consumer that wants
+// to mutate any of them must clone it first.
 type fnIndex struct {
 	defs        map[string]*ir.Instruction
 	nonEscaping map[string]bool
@@ -697,8 +651,8 @@ func (s *sharedIndex) fnIndexFor(fn *ir.Function) fnIndex {
 }
 
 // buildReqSourceHosts returns the DEPENDENCY functions that host a request
-// source and should be seeded anyway. Such a function — beego's
-// `Controller.Input`, which reads `c.Ctx.Request` internally — generates request
+// source and should be seeded anyway. Such a function — one that reads the
+// request object internally, like beego's `Controller.Input` — generates request
 // taint but takes no tainted argument, so the demand-driven dependency scope
 // never enqueues it. Seeding its BODY (rather than tainting its call result
 // outright) is what keeps a safe accessor that reads the request and returns a
@@ -746,10 +700,8 @@ func buildReqSourceHosts(byKey map[string]*ir.Function, modByKey map[string]*ir.
 	if len(reqObjGlobs) == 0 && len(srcGlobs) == 0 {
 		return nil
 	}
-	// Precompile both lists into GlobSets: the scan below matches them against
-	// EVERY call instruction of every lowered dependency function, and a GlobSet
-	// pays the pattern compilation once up front so each match is a plain,
-	// lock-free walk over the compiled patterns.
+	// Precompiled: the scan below matches these against EVERY call instruction of
+	// every lowered dependency function.
 	srcSet := rules.NewGlobSet(srcGlobs)
 	reqObjSetGlobs := rules.NewGlobSet(reqObjGlobs)
 	// Callees invoked DIRECTLY by user code (by canonical name — byKey is keyed on
@@ -852,9 +804,8 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 
 // ruleState is one rule pass's mutable state: the cross-function summary
 // channels the worklist accumulates plus the pass-wide memos. analyzeInterproc
-// owns it — goroutine-local, one per rule pass, never shared across rules —
-// and each funcAnalysis visit reads and records through its rs pointer rather
-// than carrying every map as a separate field.
+// owns it — goroutine-local, one per rule pass, never shared across rules — and
+// each funcAnalysis visit reads and records through its rs pointer.
 type ruleState struct {
 	// paramTaint is the parameter-taint summary channel: callee -> param index
 	// -> the source origin some call site passed at that position.
@@ -863,10 +814,8 @@ type ruleState struct {
 	// the SET of concrete functions that param can hold, accumulated across every
 	// call site (context-insensitive). An indirect call on that param binds only
 	// when the set is a singleton (see the resolution branch in handleCall), the
-	// same unambiguous-only discipline untyped_dispatch uses. Higher-order channel.
-	// Each set is a small SORTED slice (near-always size 1), kept sorted on insert,
-	// so targetsOf reads it allocation-free instead of re-sorting map keys on every
-	// revisit of every indirect call site.
+	// same unambiguous-only discipline untyped_dispatch uses. Each set is a small
+	// slice kept SORTED on insert, so targetsOf reads it allocation-free.
 	paramFuncVal map[string]map[int][]string
 	// paramFuncOpaque[callee][param] is set when some call site passed an
 	// unresolvable value into that function-value slot, so its points-to set is
@@ -882,10 +831,9 @@ type ruleState struct {
 	// reported dedups findings per sink instruction across worklist revisits.
 	reported map[*ir.Instruction]bool
 	// guardMemo memoizes each function's guard/dominator index (ENG-9) for this
-	// rule: the index is purely structural — immutable body plus the rule's fixed
-	// validator list — so rebuilding it on every worklist revisit repeated the
-	// dominator computation for nothing. A nil entry (no validators / no guards)
-	// is memoized too, hence the presence check at the visit site.
+	// rule; the index is purely structural (immutable body plus the rule's fixed
+	// validator list). A nil entry (no validators / no guards) is memoized too,
+	// hence the presence check at the visit site.
 	guardMemo map[*ir.Function]*guardIndex
 	// classMemo memoizes each distinct callee's rule classification for this
 	// pass (see calleeClass), shared across every funcAnalysis visit the pass runs.
@@ -913,8 +861,7 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	var findings []Finding
 
 	// The rule is fixed for this whole pass, so decide per LANGUAGE once instead of
-	// re-running AppliesTo (a slice scan with a case-insensitive compare) on every
-	// enqueue — which happens once per function seeded and again per call edge.
+	// re-running AppliesTo (a case-insensitive slice scan) on every enqueue.
 	langOK := map[string]bool{}
 	ruleAppliesToLang := func(lang string) bool {
 		ok, seen := langOK[lang]
@@ -940,25 +887,18 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		}
 	}
 
-	// Seed the worklist. Normally every function is seeded (so an intra-procedural
-	// source->sink flow is found wherever it lives). When a reportable scope is set
-	// (dependencies were lowered), seed ONLY user-authored functions: a dependency
-	// function is then analyzed DEMAND-DRIVEN — enqueued only when taint reaches it
-	// through a call (addEffect -> enqueue below) — so we pay for library code only
-	// on the taint paths that actually traverse it, not the whole closure.
+	// Seed the worklist. An empty reportable scope seeds every function, so an
+	// intra-procedural source->sink flow is found wherever it lives. A non-empty
+	// one (dependencies were lowered) seeds ONLY its modules — a neutral module-name
+	// set the caller supplies via ScopeSeed, no language distinction — and a
+	// dependency function is then analyzed DEMAND-DRIVEN, enqueued only when taint
+	// reaches it through a call, so library code costs only what the taint paths
+	// actually traverse.
 	for _, name := range idx.keys {
-		// When a reportable scope is set, seed only its modules (user code); a
-		// module outside it is a lowered dependency, reached demand-driven. The
-		// scope is a neutral module-name set the caller supplies (ScopeSeed) — the
-		// engine makes no language distinction. An empty scope seeds everything.
 		if len(idx.reportable) > 0 {
 			if mod := idx.modByKey[name]; mod != nil && !idx.reportable[mod.Name] {
-				// A dependency function is reached demand-driven. But a source-host that
-				// user code DIRECTLY CALLS (idx.reqSourceHosts) is seeded: it generates
-				// request taint internally (no tainted arg would ever enqueue it), and
-				// analyzing its body is what correctly decides whether its RESULT is
-				// actually request-derived (vs a safe accessor that reads the request but
-				// returns a constant). Its own findings stay scoped out to user code.
+				// Exception: a request-source host generates taint internally, so no
+				// tainted argument would ever enqueue it (see reqSourceHosts).
 				if !idx.reqSourceHosts[name] {
 					continue
 				}
@@ -1023,12 +963,11 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		}
 
 		// A function value flowing into a callee parameter (higher-order channel):
-		// merge the target into paramFuncVal[callee][param] and re-enqueue the callee
-		// so an indirect call on that parameter can now resolve. Merge is first-seen
-		// per (callee, param, target) so the worklist stays monotonic and converges;
-		// a new distinct target for an already-seen param still re-enqueues, because a
-		// param that was a resolvable singleton can become ambiguous and must be
-		// re-analyzed under the singleton gate.
+		// merge the target and re-enqueue the callee so an indirect call on that
+		// parameter can now resolve. Merge is first-seen per (callee, param, target)
+		// so the worklist stays monotonic; a new distinct target for an already-seen
+		// param still re-enqueues, because a param that was a resolvable singleton
+		// can become ambiguous and must be re-analyzed under the singleton gate.
 		for _, fe := range res.funcEffects {
 			m := rs.paramFuncVal[fe.callee]
 			if m == nil {
@@ -1075,10 +1014,9 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 			rs.paramMemTaint.merge(name, res.taintsParamMemory, callers, enqueue)
 		}
 
-		// This (dependency) function routes one of its string parameters into a sink
-		// (taintsParamSink): record it on the callee's summary and re-enqueue its
-		// callers so a call passing tainted data at that position reports the flow at
-		// its own site. Mirrors the out-parameter-memory channel above.
+		// This (dependency) function routes one of its string parameters into a sink:
+		// record it so a caller passing tainted data at that position reports the flow
+		// at its own site. Mirrors the out-parameter-memory channel above.
 		if len(res.taintsParamSink) > 0 {
 			rs.paramSinkTaint.merge(name, res.taintsParamSink, callers, enqueue)
 		}
@@ -1087,12 +1025,10 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 	return findings
 }
 
-// newTaintFinding builds a source->sink Finding with the fields shared by every
-// taint report: the matched rule's identity/severity/message/globs, the enclosing
-// function's name+package (for user-code scoping), and the flow's positions. The
-// two call sites (a direct sink, and a dependency sink-wrapper reported at the
-// caller) differ only in Confidence and which positions they pass, so they share
-// this constructor to stay in lockstep as Finding evolves.
+// newTaintFinding builds a source->sink Finding. Its two call sites (a direct
+// sink, and a dependency sink-wrapper reported at the caller) differ only in
+// Confidence and which positions they pass, so they share this constructor to
+// stay in lockstep as Finding evolves.
 func newTaintFinding(rule *rules.Rule, mod *ir.Module, fn *ir.Function, srcPos, sinkPos *ir.Position, callee string, steps []*ir.Position, conf Confidence) Finding {
 	return Finding{
 		RuleID:         rule.ID,
@@ -1147,8 +1083,7 @@ func isStringType(t *ir.Type) bool {
 // value back to the seed it arrived on (origins are preserved across propagators),
 // then checks that parameter's declared type. fn.Params carries the SSA receiver
 // at index 0 for a method while Signature.Params excludes it, so the receiver is
-// shifted out. Computed on demand at a sink (rare), so no per-function state is
-// built on the hot path — see recordSinkParam.
+// shifted out.
 func stringParamOrigin(fn *ir.Function, seeds paramPositions, pos *ir.Position) (int, bool) {
 	idx := -1
 	for i, origin := range seeds {
@@ -1178,8 +1113,7 @@ func stringParamOrigin(fn *ir.Function, seeds paramPositions, pos *ir.Position) 
 // into an already-summarized callee at sinkPos — record that parameter so the
 // caller reports the flow at its own (user-code) call site. Skipped for a function
 // that is itself a modeled sink (its direct call site already fires, so summarizing
-// would double-report). A package function called only when a sink actually fires
-// on a dependency, so it adds no per-function allocation.
+// would double-report).
 func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds paramPositions, pos, sinkPos *ir.Position) {
 	k, ok := stringParamOrigin(fn, seeds, pos)
 	if !ok {
@@ -1201,10 +1135,8 @@ func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds p
 // tainted parameters. Running it (run) reports the sinks it hits, whether the
 // function returns taint, and the taint it passes to callees (res).
 // analyzeInterproc constructs a fresh one per (function × rule × worklist
-// visit); the fields down to cfg are the caller's inputs — the program-wide
-// indexes (idx), the pass's summaries and memos (rs), and the genuinely
-// per-visit values — the rest is per-visit working state shared by the
-// transfer methods.
+// visit); the fields down to cfg are the caller's inputs, the rest per-visit
+// working state shared by the transfer methods.
 type funcAnalysis struct {
 	mod  *ir.Module
 	fn   *ir.Function
@@ -1239,37 +1171,31 @@ type funcAnalysis struct {
 
 	// tainted is the CURRENT block's taint state; the flow-sensitive driver
 	// (ENG-2, see run) reassigns it to each block's entry state before visiting
-	// the block, so the transfer methods below always operate on the right
-	// per-block facts.
+	// the block.
 	tainted taintState
 	// curBlock tracks the block being visited so a sink can ask whether a
 	// validator guard dominates it on the path taken.
 	curBlock int32
 	// linearFn marks a branch-free function, in ANY language — the majority of
-	// bodies even now that every frontend emits a real CFG. In one linear block
-	// the dominance-based guard index (guards) cannot add anything, because
-	// program order IS dominance: a validator applied to a value before that
-	// value is returned guards the return just as a dominating branch would.
+	// bodies. In one linear block the dominance-based guard index cannot add
+	// anything, because program order IS dominance: a validator applied to a value
+	// before it is returned guards the return just as a dominating branch would.
 	// validated records the registers a rule validator has been applied to,
 	// consulted only in the linear case at a RET (the CFG path keeps using the
 	// precise dominator guard).
 	linearFn  bool
 	validated map[string]bool
-	// interprocOrigins records every source origin whose taint crossed a
-	// function boundary to reach this function — parameter seeds, plus taint
-	// pulled back from a callee's return summary in handleCall. A flow that
-	// enters through a parameter is inter-procedural, which lowers the
-	// confidence of any finding it feeds: confidenceFor consults this so all
-	// cross-function findings are Medium (and thus seen by the LLM reviewer).
+	// interprocOrigins records every source origin whose taint crossed a function
+	// boundary to reach this function — parameter seeds, plus taint pulled back
+	// from a callee's return summary. confidenceFor consults it so that every
+	// cross-function finding is Medium, and thus seen by the LLM reviewer.
 	interprocOrigins map[*ir.Position]bool
 	// funcVal maps a register to the SET of concrete functions it can hold (a
 	// points-to fact). It is function-scoped and monotonic — a callable identity
 	// is a property of the value, not a per-block fact — so it is NOT reset by
-	// the flow-sensitive block driver. Seeded from the caller-supplied funcSeeds
-	// (which param holds which callback), so an indirect call on a parameter can
-	// be resolved to the function value the caller passed in. Each set is the
-	// orchestrator's sorted slice, shared READ-ONLY: nothing here mutates it,
-	// and the orchestrator only merges between visits, so no clone.
+	// the flow-sensitive block driver. Each set is the orchestrator's sorted
+	// slice, shared READ-ONLY: nothing here mutates it, and the orchestrator only
+	// merges between visits, so no clone.
 	funcVal map[string][]string
 	// funcValOpaque marks a register whose function-value set is incomplete
 	// (some caller passed an unresolvable value into the parameter it was seeded
@@ -1283,11 +1209,9 @@ type funcAnalysis struct {
 	paramRegBuilt bool
 
 	// res accumulates this visit's outcome; the *Seen maps dedup the
-	// cross-function effects appended to it. All the working-state maps above
-	// and below are allocated lazily on first write: a visit runs once per
-	// (function × rule × worklist revisit) and the overwhelmingly common
-	// no-taint visit writes none of them, so eager allocation here multiplied
-	// map allocations by exactly that product for nothing.
+	// cross-function effects appended to it. All the working-state maps above and
+	// below are allocated lazily on first write, since the overwhelmingly common
+	// no-taint visit writes none of them.
 	res            funcResult
 	effectSeen     map[funcParamRef]bool
 	funcEffectSeen map[funcValEffect]bool
@@ -1299,8 +1223,7 @@ type funcAnalysis struct {
 // executes the flow-sensitive fixpoint (or the single-block fast path), and
 // returns the accumulated result.
 func (fa *funcAnalysis) run() funcResult {
-	// Count non-nil blocks once (reused by the single-block fast path below). A
-	// single-block function is linear: it has no CFG for the dominator guard, so
+	// A single-block function is linear: it has no CFG for the dominator guard, so
 	// program order stands in for dominance at a RET (see validated).
 	nBlocks := 0
 	var onlyBlock *ir.BasicBlock
@@ -1348,26 +1271,20 @@ func (fa *funcAnalysis) run() funcResult {
 		}
 	}
 
-	// Flow-sensitive intra-procedural dataflow (ENG-2). Each block's entry state
-	// is the union of its predecessors' exit states (plus the parameter seeds at
-	// the entry block); the block is then transferred forward over its
-	// instructions, with STORE giving non-escaping alloc cells strong-update
-	// (un-taint) semantics. Blocks are processed in reverse-post-order and the
-	// per-block exit states are iterated to a fixpoint. The join is a union so
-	// taint that reaches a program point on ANY path is retained — the pass is
-	// strictly more precise than the previous whole-function flat map yet never
-	// drops a real flow. Interprocedural effects and findings accumulate
-	// monotonically across passes (deduped by effectSeen / reported).
-	// Fast path: a function with a single basic block has no control-flow merges
-	// or back-edges, so its taint converges in one forward pass. Skip the whole
-	// flow-sensitive fixpoint — the per-block `in`/`blockOut` maps and the
-	// multi-pass loop (buildFnCFG likewise builds no CFG indexes for a linear
-	// function) — and just seed and visit once.
-	// This is the majority of functions (every straight-line-lowered Python / JS /
-	// Ruby / Java / Go-closure body), so it removes most of the engine's
-	// per-(rule × function) allocation. seedState is a fresh map owned by this
-	// analysis, so visiting mutates it in place harmlessly. nBlocks/onlyBlock were
-	// computed once above (also feeding linearFn).
+	// Flow-sensitive intra-procedural dataflow (ENG-2). Each block's entry state is
+	// the union of its predecessors' exit states (plus the parameter seeds at the
+	// entry block); the block is then transferred forward over its instructions,
+	// with STORE giving non-escaping alloc cells strong-update (un-taint)
+	// semantics. Blocks are processed in reverse-post-order and the per-block exit
+	// states iterated to a fixpoint. The join is a UNION, so taint reaching a
+	// program point on ANY path is retained and no real flow is dropped.
+	// Interprocedural effects and findings accumulate monotonically across passes
+	// (deduped by effectSeen / reported).
+	//
+	// Fast path: a single-block function has no merges or back-edges, so its taint
+	// converges in one forward pass — skip the fixpoint entirely (buildFnCFG
+	// likewise builds no CFG for it). seedState is a fresh map owned by this
+	// analysis, so visiting mutates it in place harmlessly.
 	if fa.linearFn {
 		if seedState == nil {
 			seedState = taintState{} // visit writes through fa.tainted, so it must be non-nil
@@ -1384,9 +1301,6 @@ func (fa *funcAnalysis) run() funcResult {
 		return fa.res
 	}
 
-	// The RPO order and the index/predecessor lookups are structural
-	// (rule-independent), so they come from the shared per-function memo
-	// (fnIndex.cfg) rather than being rebuilt per (rule × worklist visit).
 	// Non-nil here: buildFnCFG and linearFn use the same ≤1-block predicate.
 	cfg := fa.cfg
 	blockOut := map[int32]taintState{}
@@ -1434,15 +1348,13 @@ func (fa *funcAnalysis) run() funcResult {
 	return fa.res
 }
 
-// targetsOf resolves a value to the concrete lowered function(s) it may hold:
-// a FuncName is looked up directly in byKey (the make_closure resolution
-// pattern) — this covers a function passed by reference and a frontend-
-// synthesized deferral call whose target is known at the site; a RegName is
-// resolved through the function-scoped funcVal points-to set (a callback
-// received as a parameter). Anything else — an opaque/foreign callable we did
-// not lower — yields nil, so an unresolvable value binds nothing (a false
-// negative, never a false positive). The funcVal sets are already sorted (see
-// paramFuncVal), so a register lookup is allocation-free and deterministic.
+// targetsOf resolves a value to the concrete lowered function(s) it may hold: a
+// FuncName directly through byKey (a function passed by reference, or a
+// frontend-synthesized deferral call whose target is known at the site); a
+// RegName through the function-scoped funcVal points-to set (a callback received
+// as a parameter). Anything else — an opaque/foreign callable we did not lower —
+// yields nil, so an unresolvable value binds nothing: a false negative, never a
+// false positive.
 func (fa *funcAnalysis) targetsOf(v *ir.Value) []string {
 	if v == nil {
 		return nil
@@ -1486,10 +1398,9 @@ func (fa *funcAnalysis) addEffect(callee string, param int, origin *ir.Position)
 
 // addFuncEffect records that a function value flowed into a callee parameter
 // (the higher-order channel). Dedup is keyed on the full (callee, param, target)
-// effect — unlike the taint/req channels, which store a single origin per
-// (callee,param), this stores a SET, so two distinct callbacks passed to the same
-// param must BOTH be recorded (that is exactly what makes the param ambiguous and
-// disables the singleton gate).
+// effect because this channel stores a SET: two distinct callbacks passed to the
+// same param must BOTH be recorded, which is exactly what makes the param
+// ambiguous and disables the singleton gate.
 func (fa *funcAnalysis) addFuncEffect(callee string, param int, target string) {
 	if callee == "" || target == "" {
 		return
@@ -1526,10 +1437,9 @@ func (fa *funcAnalysis) addFuncOpaque(callee string, param int) {
 // recordFuncArg emits the points-to effect for a callback argument: each
 // resolved target, or an opaque marker when the value is a non-constant the
 // resolver could not pin to a concrete function. A constant can never be a
-// callable, so it contributes neither. Gated on the callee actually containing
-// an indirect call — a function that never dispatches through a parameter can
-// never consult these facts, so recording them (and re-enqueuing on them) would
-// be pure overhead on the large dependency closure a Go scan lowers.
+// callable, so it contributes neither. Gated on the callee actually containing an
+// indirect call: a function that never dispatches through a parameter can never
+// consult these facts (see buildIndirectCallees).
 func (fa *funcAnalysis) recordFuncArg(callee string, param int, arg *ir.Value) {
 	if !fa.idx.indirectCallees[callee] {
 		return
@@ -1545,11 +1455,9 @@ func (fa *funcAnalysis) recordFuncArg(callee string, param int, arg *ir.Value) {
 
 // recordGlobalStore implements half of ENG-6(a): taint through package/
 // module-level globals. A store of tainted data into a global publishes the
-// taint program-wide (recorded as a global effect the orchestrator merges);
-// readGlobalTaint is the other half, seeding a load from an already-tainted
-// global. Both cross a function boundary, so any finding they feed is Medium
-// confidence (interprocOrigins), matching the confidence contract for
-// over-approximating flows.
+// taint program-wide; readGlobalTaint is the other half, seeding a load from an
+// already-tainted global. Both cross a function boundary, so any finding they
+// feed is Medium confidence (interprocOrigins).
 func (fa *funcAnalysis) recordGlobalStore(inst *ir.Instruction) {
 	ops := inst.GetOperands()
 	if len(ops) < 2 {
@@ -1754,14 +1662,13 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	indirect := callee == ""
 	var cls calleeClass
 	if !indirect {
-		// Classify the callee once per PASS, not once per call site: the globs
-		// are the engine's hottest per-(call × rule) work (the default-propagator
-		// list alone is ~100 patterns), yet the result depends only on the
-		// (rule, callee) pair — both fixed for the whole analyzeInterproc pass —
-		// and the distinct callees are far fewer than the call sites × worklist
-		// revisits that consult them. The memo is goroutine-local (one per rule
-		// pass), so no locking; the stored guard is the same *rules.Guard
-		// MatchSink returns, preserving pointer identity.
+		// Classify the callee once per PASS, not once per call site: the result
+		// depends only on the (rule, callee) pair, both fixed for the whole
+		// analyzeInterproc pass, and the globs are the engine's hottest per-(call ×
+		// rule) work. The memo is goroutine-local, so no locking; the stored guard
+		// is the same *rules.Guard MatchSink returns, preserving pointer identity.
+		// Classification is by GLOB only — never by rule.CWE. See doc.go for why
+		// a CWE branch here silently denies a fact to custom rules.
 		var seen bool
 		cls, seen = fa.rs.classMemo[callee]
 		if !seen {
@@ -1772,13 +1679,12 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			fa.rs.classMemo[callee] = cls
 		}
 		// The Go `append` builtin propagates taint ONLY when its result is a
-		// byte/rune slice — i.e. character-level string reconstruction (the
-		// make([]byte); append(data, s[i]); string(data) idiom of a non-sanitizing
-		// normalize/snake_case helper). It is NOT a blanket propagator: append is
-		// called on every slice in a program, so tainting through slices of structs
-		// /pointers explodes the taint set in framework code (a large scan slowdown).
-		// Depends on the INSTRUCTION's result type, so it adjusts the local copy
-		// and stays out of the per-callee memo.
+		// byte/rune slice — character-level string reconstruction (the
+		// make([]byte); append(data, s[i]); string(data) idiom). It is NOT a blanket
+		// propagator: append is called on every slice in a program, so tainting
+		// through slices of structs/pointers explodes the taint set in framework
+		// code. Depends on the INSTRUCTION's result type, so it adjusts the local
+		// copy and stays out of the per-callee memo.
 		if !cls.isProp && callee == "builtin.append" && isByteOrRuneSlice(inst.GetType()) {
 			cls.isProp = true
 		}
@@ -1842,18 +1748,11 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			if fa.guards.guarded(fa.curBlock, pos, fa.tainted) {
 				break
 			}
-			// SSRF/open-redirect host-fixedness is no longer decided here. It is a
-			// rule-layer policy now: the packs that want it declare
-			// `when: 'not hostFixed()'` on their sinks, and the engine only supplies
-			// the fact (see the cls.guard call above). Branching on rule.CWE meant a
-			// custom SSRF rule tagged anything else silently lost the suppression, and
-			// open-redirect could not opt in at all.
-			// Mark reported ONLY when a finding is actually emitted (ENG-8).
-			// A suppressing guard breaks out ABOVE without setting this, which is
-			// what lets a later flow still fire: a benign host-fixed flow to this
-			// sink must not mark it reported and block a subsequent flow whose
-			// taint DOES reach the host (e.g. once an interprocedural summary
-			// taints the host segment).
+			// Mark reported ONLY when a finding is actually emitted (ENG-8). A
+			// suppressing guard breaks out ABOVE without setting this, which is what
+			// lets a later flow still fire: a benign (e.g. host-fixed) flow to this
+			// sink must not block a subsequent flow whose taint DOES reach the
+			// injection point once an interprocedural summary lands.
 			fa.rs.reported[inst] = true
 			steps := reconstructPath(fa.defs, fa.tainted, srcReg, pos, inst.Pos)
 			fa.res.findings = append(fa.res.findings, newTaintFinding(fa.rule, fa.mod, fa.fn, pos, inst.Pos, callee, steps, fa.confidenceFor(pos)))
@@ -1866,13 +1765,11 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			}
 		}
 	case cls.isProp:
-		// A propagating call carries taint from any of its operands to its
-		// result. This covers the rule's own propagators and the built-in
-		// default propagators (stdlib string/encoding transforms that real
-		// code interposes between a source and a sink; without them one
-		// `strings.TrimSpace`/`.toLowerCase()` silently drops taint). Operands
-		// include the RECEIVER of a method call (Call.Value, e.g. Java/JS
-		// `tainted.trim()`), not just the explicit arguments.
+		// A propagating call carries taint from any of its operands to its result:
+		// the rule's own propagators plus the built-in default propagators (stdlib
+		// string/encoding transforms; without them one `strings.TrimSpace` silently
+		// drops taint). Operands include the RECEIVER of a method call
+		// (Call.Value, e.g. Java/JS `tainted.trim()`), not just the arguments.
 		if inst.Name != "" {
 			markTaintFromOperands(fa.tainted, inst.Name, propagatorOperands(inst))
 		}
@@ -1880,16 +1777,13 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// A frontend-synthesized member read (builtin.member_read) off a base it
 		// kept in Call.Value: carry the base's taint to the result. Reading a
 		// property off an already-tainted object is not a transform, so no rule
-		// models it, yet it is how object-carried data is consumed once it
-		// crosses a function boundary — without this the read returns clean and
-		// the flow ends there.
+		// models it, yet it is how object-carried data is consumed once it crosses
+		// a function boundary.
 		//
-		// Placed in the DEFAULT arm on purpose: a callee that matches a
-		// sanitizer, source or sink glob keeps that meaning, since the cases
-		// above already returned. Reads Call.Value directly rather than going
-		// through propagatorOperands, which allocates a slice per call, per rule,
-		// per fixpoint pass — Args is always empty here, so that would be pure
-		// waste on a gated allocation metric.
+		// Placed in the DEFAULT arm on purpose, so a callee that matches a
+		// sanitizer, source or sink glob keeps that meaning. Reads Call.Value
+		// directly rather than through propagatorOperands, whose slice allocation
+		// would be pure waste here (Args is always empty).
 		if inst.Name != "" && inst.GetIntrinsic() == memberReadIntrinsic {
 			if pos, ok := isTainted(fa.tainted, inst.Call.GetValue()); ok {
 				markTainted(fa.tainted, inst.Name, pos)
@@ -1901,14 +1795,13 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	// pass tainted arguments into its parameters and pull back its return taint.
 	if fa.idx.byKey[callee] != nil {
 		if inst.Call.GetIsInvoke() {
-			// A concrete instance-method call (e.g. Java) whose method we
-			// lowered: the receiver lives in Call.Value and maps to param 0,
-			// and the real arguments EXCLUDE the receiver, so they map to the
-			// callee's params shifted by one. Mapping args[j]->param j here
-			// would seed the receiver slot and drop the last argument — an
-			// off-by-one that silently loses every cross-function instance
-			// flow. (Go interface INVOKEs name an abstract method absent from
-			// byKey, so they skip this and are handled by the CHA block below.)
+			// A concrete instance-method call (e.g. Java) whose method we lowered:
+			// the receiver lives in Call.Value and maps to param 0, and the real
+			// arguments EXCLUDE it, so they map to the callee's params shifted by
+			// one. Mapping args[j]->param j would seed the receiver slot and drop
+			// the last argument — an off-by-one that silently loses every
+			// cross-function instance flow. (Go interface INVOKEs name an abstract
+			// method absent from byKey, so the CHA block below handles them.)
 			fa.seedInvokeArgs(inst.Call, callee)
 		} else {
 			// Static/free function or Go method call: args already align with
@@ -1920,10 +1813,6 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 				if p, ok := isTaintedArg(fa.tainted, a); ok {
 					fa.addEffect(callee, j, p)
 				}
-				// A function value passed as an argument records a points-to fact
-				// on the callee's param, so an indirect call on that param inside
-				// the callee resolves back to it (higher-order channel); an
-				// unresolvable value marks the slot opaque (FP-safety).
 				fa.recordFuncArg(callee, j, a)
 			}
 		}
@@ -1943,9 +1832,7 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	// its string parameters into a sink internally, and that sink's own finding was
 	// scoped out. If we pass tainted data at that position, the vulnerability is
 	// HERE. In user code, report it at this call site; in another dependency,
-	// propagate it up as this function's own sink-param summary so the finding
-	// ultimately lands on user code. Uses the same arg->param mapping as the seeding
-	// above (receiver = param 0 for an INVOKE, args shifted by one; direct otherwise).
+	// propagate it up so the finding ultimately lands on user code.
 	if psk := fa.rs.paramSinkTaint[callee]; len(psk) > 0 {
 		consumeSink := func(paramIdx int, a *ir.Value) {
 			sinkPos, summarized := psk[paramIdx]
@@ -1977,26 +1864,19 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		eachArgParam(inst.Call, consumeSink)
 	}
 
-	// Inter-procedural, INDIRECT call through a function value: the callee is not
-	// a named function (byKey[callee]==nil) and this is not an INVOKE — the target
-	// is a function VALUE in Call.Value. This is the unifying primitive for
-	// higher-order callbacks (`fn(x)` where fn is a callback parameter, resolved
-	// via funcVal) and frontend-synthesized deferral/thread dispatch (target a
-	// FuncName known at the site). Resolve the value and flow the args into the
-	// target's FRONT params (no receiver shift — a plain call), then pull the
-	// target's return taint back into this call's result.
+	// Inter-procedural, INDIRECT call through a function value: the target is a
+	// function VALUE in Call.Value. This is the unifying primitive for higher-order
+	// callbacks (`fn(x)` where fn is a callback parameter, resolved via funcVal)
+	// and frontend-synthesized deferral/thread dispatch (a FuncName known at the
+	// site). Args flow into the target's FRONT params (no receiver shift).
 	//
-	// Binds ONLY when the resolved target set is a singleton — the same
-	// unambiguous-only discipline untyped_dispatch uses. A generic helper called
-	// with several distinct callbacks accumulates a union in funcVal; binding one
-	// caller's taint into a different caller's callback would be an unsound,
-	// FP-generating cross-context pairing, so an ambiguous set binds nothing.
+	// Binds ONLY when the resolved points-to set is a singleton AND complete — the
+	// same unambiguous-only discipline untyped_dispatch uses. A generic helper
+	// called with several distinct callbacks accumulates a union in funcVal, and an
+	// opaque contribution means even a lone target is not provably the only callee;
+	// binding either would pair one site's callback with another site's taint.
 	if indirect && !inst.Call.GetIsInvoke() {
 		v := inst.Call.GetValue()
-		// Bind only a singleton, COMPLETE points-to set: an opaque contribution
-		// (some caller passed an unresolvable value into this callback slot) means
-		// the lone resolved target is not provably the only callee, so binding it
-		// would risk pairing one site's callback with another site's taint.
 		if targets := fa.targetsOf(v); len(targets) == 1 && !fa.indirectOpaque(v) {
 			target := targets[0]
 			for j, a := range args {
@@ -2016,20 +1896,18 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	// params shifted by one — param 0 is the receiver.
 	if inst.Call.GetIsInvoke() {
 		// The dispatch discipline comes from IR the converter supplies, not from
-		// any language check in the engine. When the frontend resolved the call
-		// by bare method NAME with no static receiver type (untyped_dispatch —
-		// the untyped languages), apply it ONLY when the name is unambiguous:
-		// otherwise a polymorphic name like `run_query`/`execute` would seed
-		// taint into every same-named method across unrelated classes, a
-		// cross-object fan-out that floods real code with false positives. A
-		// type-resolved invoke (a Go interface method) carries the standard,
-		// type-bounded CHA over-approximation, so it fans out to every implementer.
+		// any language check in the engine. When the frontend resolved the call by
+		// bare method NAME with no static receiver type (untyped_dispatch), apply it
+		// ONLY when the name is unambiguous: otherwise a polymorphic name like
+		// `execute` would seed taint into every same-named method across unrelated
+		// classes, a cross-object fan-out that floods real code with false
+		// positives. A type-resolved invoke (a Go interface method) carries the
+		// standard type-bounded CHA over-approximation, so it fans out to every
+		// implementer.
 		impls := fa.idx.methodImpls[inst.Call.GetMethodName()]
 		if inst.Call.GetUntypedDispatch() {
 			// An ambiguous name is not always an unknown receiver: `h = C()` then
-			// `h.load(x)` names the class right there. Narrowing by it recovers the
-			// dispatch without the cross-object fan-out, and falls back to silence
-			// when the receiver is genuinely opaque.
+			// `h.load(x)` names the class right there (see receiverImpls).
 			if len(impls) > 1 {
 				impls = fa.receiverImpls(inst.Call, impls)
 			}
@@ -2052,10 +1930,9 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 // C() as h`, which the frontends bind the same way).
 //
 // This is what separates "the name is ambiguous" from "the receiver is unknown".
-// A global-uniqueness test conflates them, and in real code the second is much
-// rarer than the first: a quarter of pyload's method call sites name a method
-// two or more classes define, so the taint stops at `h.load(...)` even though the
-// line above says exactly what `h` is.
+// A global-uniqueness test conflates them, and in real code the first is far more
+// common, so taint would stop at `h.load(...)` even though the line above says
+// exactly what `h` is.
 //
 // Returns nil when the receiver is not a locally-constructed value or its class
 // implements nothing by this name — the caller then dispatches nowhere, which is
@@ -2160,17 +2037,14 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 	case ir.OpCode_OP_CODE_RET:
 		// The cheap check goes FIRST: once the function is already known
 		// taint-returning the scan cannot change the outcome, and skipping it
-		// avoids isTaintedArg's per-miss "#*" key allocation on every later
-		// worklist pass over this RET.
+		// avoids isTaintedArg's per-miss key allocation on every later pass.
 		if pos, ok := firstTaintedArg(fa.tainted, inst.GetOperands()); fa.res.returnsOrigin == nil && ok {
 			// Interprocedural ENG-9: a tainted value returned on a path a
 			// validator guard dominates (`if !valid(x) { return "" }; return x`)
 			// is validated on every returning path, so the function is not
-			// taint-returning for this rule. Suppressing the return summary
-			// stops a sanitized value from tainting callers — the cross-function
-			// analogue of the intra-procedural guarded-sink suppression below.
-			// The CFG guard covers multi-block functions; validated covers the
-			// single-block (no-CFG) straight-line case where order is dominance.
+			// taint-returning for this rule — the cross-function analogue of the
+			// guarded-sink suppression. The CFG guard covers multi-block functions;
+			// validated covers the single-block case where order is dominance.
 			retValidated := false
 			if fa.linearFn {
 				for _, op := range inst.GetOperands() {

@@ -11,13 +11,8 @@ import (
 // Engine runs taint analysis over a gIR program for a fixed set of rules.
 // Analysis is inter-procedural; see interproc.go for the orchestration.
 type Engine struct {
-	rs *rules.RuleSet
-	// reportable, when non-empty, restricts the worklist SEED to functions in
-	// these (user-authored) packages: dependency functions are then analyzed
-	// DEMAND-DRIVEN — only when taint actually reaches them via a call — instead
-	// of proactively analyzing the whole lowered dependency closure. Empty means
-	// seed every function (the default when no dependencies were lowered).
-	reportable map[string]bool
+	rs         *rules.RuleSet
+	reportable map[string]bool // see ScopeSeed
 }
 
 // NewEngine builds an Engine that will evaluate every rule in rs.
@@ -25,9 +20,10 @@ func NewEngine(rs *rules.RuleSet) *Engine {
 	return &Engine{rs: rs}
 }
 
-// ScopeSeed restricts the worklist seed to the given (user-authored) packages,
-// so lowered dependency functions are analyzed only when taint reaches them.
-// Returns the engine for chaining. A nil/empty set seeds every function.
+// ScopeSeed restricts the worklist SEED to the given (user-authored) packages: a
+// lowered dependency function is then analyzed DEMAND-DRIVEN, only when taint
+// actually reaches it via a call, instead of the whole dependency closure being
+// walked up front. A nil/empty set seeds every function. Returns e for chaining.
 func (e *Engine) ScopeSeed(reportable map[string]bool) *Engine {
 	e.reportable = reportable
 	return e
@@ -169,8 +165,7 @@ func fieldAnyKey(base string) string {
 // stored directly into it). Field reads use isTainted (precise); only cross-call
 // seeding uses this broader check.
 func isTaintedArg(tainted taintState, v *ir.Value) (*ir.Position, bool) {
-	// The empty state is the overwhelmingly common case at call sites; bail
-	// before isTainted's lookup and, more importantly, before allocating the
+	// The empty state is the common case at call sites; bail before allocating the
 	// any-field key below for a guaranteed miss.
 	if len(tainted) == 0 {
 		return nil, false
@@ -204,12 +199,11 @@ func isAggregateAccess(def *ir.Instruction) bool {
 // taintContainer walks up the address-derivation chain from reg (produced by
 // INDEX_ADDR/FIELD_ADDR/INDEX/FIELD) and records the taint a store just wrote.
 // For a one-level STRUCT field on a root base (p.f = x, where p is an
-// alloc/param), it records the precise access path base#f rather than tainting
-// the whole struct — so a later read of a DIFFERENT field is not falsely
-// tainted (ENG-3). Array elements (INDEX) stay field-insensitive (whole
-// container), since elements can't be statically distinguished (variadic slice
-// packing), and nested field accesses fall back to whole-container too (a
-// one-level path can't name them precisely), preserving recall.
+// alloc/param) it records the precise access path base#f rather than tainting the
+// whole struct, so a later read of a DIFFERENT field is not falsely tainted
+// (ENG-3). Array elements (INDEX) and nested field accesses fall back to
+// whole-container — elements can't be statically distinguished, and a one-level
+// path can't name a nested access — preserving recall.
 func taintContainer(defs map[string]*ir.Instruction, tainted taintState, reg string, pos *ir.Position) {
 	seen := map[string]bool{}
 	for reg != "" && !seen[reg] {
@@ -438,9 +432,7 @@ func isTainted(tainted taintState, v *ir.Value) (*ir.Position, bool) {
 }
 
 // firstTainted scans vals in order and returns the register and origin
-// Position of the first tainted value found. Both were previously separate
-// scans (firstTaintedReg / firstTaintedOrigin) with the identical predicate,
-// run back-to-back over the same slice on the sink path.
+// Position of the first tainted value found.
 func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Position, ok bool) {
 	for _, v := range vals {
 		if p, hit := isTainted(tainted, v); hit {
@@ -453,12 +445,11 @@ func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Pos
 // firstTaintedArg is firstTainted with the field-aware predicate: a value counts
 // as tainted when the whole register is, OR when it carries the any-field marker.
 //
-// It exists for the RETURN path. Every argument site already uses isTaintedArg, so
-// a struct with a tainted field taints the callee's parameter — but a function that
-// STORES into a field and returns the struct records only `t0#f0`/`t0#*`, never
-// `t0` (visitStore marks the FIELD_ADDR result, not the base), so a plain-register
-// check at RET saw nothing and the flow died at the return. The two directions of
-// the same boundary disagreed.
+// It exists for the RETURN path, so both directions of the same boundary agree: a
+// function that STORES into a field and returns the struct records only
+// `t0#f0`/`t0#*`, never `t0` (visitStore marks the FIELD_ADDR result, not the
+// base), so a plain-register check at RET would see nothing and the flow would die
+// at the return.
 //
 // Deliberately NOT used for the sink check, which stays field-blind: a sink fires
 // on the value actually passed, and widening it there would report a sink that

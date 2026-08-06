@@ -38,10 +38,19 @@ class Api:
         return requests.get(url)
 
 
+class UploadApi(Api):
+    # A SINGLE bare verb, which is not evidence on its own. Subclassing a
+    # confirmed dispatch layer is: frameworks routinely put the routing surface
+    # on a base class and a handful of handlers on each subclass.
+    @post
+    def upload(self, url=None):
+        return requests.get(url)
+
+
 class Helper:
-    # One bare verb, no sibling verb: `post` here is an ordinary helper
-    # decorator, not a routing table. Seeding its params would taint every such
-    # method in the program.
+    # One bare verb, no sibling verb, and no dispatch base: `post` here is an
+    # ordinary helper decorator, not a routing table. Seeding its params would
+    # taint every such method in the program.
     @post
     def fetch(self, url=None):
         return requests.get(url)

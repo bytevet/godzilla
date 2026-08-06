@@ -22,13 +22,10 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		return nil
 	}
 
-	// Precompile the dangerous-call rules. Compile also compiles the rule's
-	// optional const_arg regexp (Rule.ConstArgRe): a rule with a const_arg whose
-	// regexp cannot compile has no usable regexp, so constArgMatches rejects every
-	// call for it (its intent is unknowable) rather than silently matching
-	// everything.
-	// The rule's declared confidence is resolved ONCE here rather than per finding,
-	// so the per-call-site loop stays free of string normalization.
+	// Precompile the dangerous-call rules. Compile also compiles the rule's optional
+	// const_arg regexp (Rule.ConstArgRe); when that regexp does not compile,
+	// constArgMatches rejects every call for the rule — its intent is unknowable —
+	// rather than silently matching everything.
 	type compiled struct {
 		rule *rules.Rule
 		re   *regexp.Regexp
@@ -48,10 +45,8 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 	}
 
 	// Resolve the language filter ONCE per language rather than per (call site ×
-	// rule). AppliesTo is a slice scan with a case-insensitive compare, and it was
-	// running on the innermost loop of the whole pass; a program has a handful of
-	// languages, so memoizing the filtered slice makes it a single map lookup per
-	// function instead.
+	// rule): AppliesTo is a case-insensitive slice scan, and a program has only a
+	// handful of languages.
 	byLang := map[string][]compiled{}
 	forLang := func(lang string) []compiled {
 		if ds, ok := byLang[lang]; ok {
@@ -76,13 +71,11 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 			continue // no dangerous-call rule targets this module's language
 		}
 		// Built on first use and then shared by every rule's guard below. A
-		// dangerous-call argument is usually a literal, but it may be a keyword
-		// marker (builtin.kwarg) or a constant folded through a register, and
-		// neither resolves without the def map — a guard reading `.Name` to tell
-		// `shell=True` from `check=True` would otherwise never see a name.
-		// Lazy because the overwhelming majority of functions in a scan (the whole
-		// lowered dependency closure included) contain no call a dangerous-call
-		// rule matches, and only a const_arg or a `when:` guard ever needs the map.
+		// dangerous-call argument may be a keyword marker (builtin.kwarg) or a
+		// constant folded through a register, neither of which resolves without the
+		// def map. Lazy because the vast majority of functions contain no call a
+		// dangerous-call rule matches, and only a const_arg or a `when:` guard ever
+		// needs the map.
 		var defs map[string]*ir.Instruction
 		getDefs := func() map[string]*ir.Instruction {
 			if defs == nil {

@@ -19,12 +19,10 @@ func statesEqual(a, b taintState) bool {
 }
 
 // fnCFG is the multi-block flow-sensitive driver's structural inputs: the RPO
-// visit order plus the index->block and predecessor lookups and the entry
-// block's index. Purely structural (rule-independent), so it lives in the
-// per-function memo (fnIndex) and is built once per function per scan —
-// funcAnalysis.run used to rebuild all four per (function × rule × worklist
-// visit). nil for a linear (≤1 non-nil block) function, whose single-pass fast
-// path never consults it.
+// visit order plus the index->block and predecessor lookups and the entry block's
+// index. Purely structural (rule-independent), so it lives in the per-function
+// memo (fnIndex) and is built once per function per scan. nil for a linear (≤1
+// non-nil block) function, whose single-pass fast path never consults it.
 type fnCFG struct {
 	rpo        []int32
 	idxToBlock map[int32]*ir.BasicBlock

@@ -360,7 +360,6 @@ func inRange(pos, lo, hi int) bool {
 	return lo >= 0 && pos >= lo && pos < hi
 }
 
-// tagHasTS reports whether an opening <script ...> tag declares TypeScript.
 func tagHasTS(openTag string) bool {
 	s := strings.ToLower(openTag)
 	return strings.Contains(s, `lang="ts"`) || strings.Contains(s, "lang='ts'") ||

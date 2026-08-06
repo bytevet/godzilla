@@ -372,10 +372,9 @@ func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
 		case !c.Converted:
 			status = "FAILED"
 		case c.Skipped > 0:
-			// PARTIAL is the case a bare ok used to hide: the frontend ran, so the
-			// language is not "failed", yet some of its source never reached the
-			// engine. Printing the ratio is what makes a scan that silently dropped
-			// most of a project distinguishable from a genuinely clean one.
+			// The frontend ran, so the language is not "failed", yet some of its
+			// source never reached the engine. The ratio is what distinguishes a
+			// scan that dropped most of a project from a genuinely clean one.
 			status = fmt.Sprintf("PARTIAL(%d/%d files)", c.Files-c.Skipped, c.Files)
 		}
 		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
@@ -514,7 +513,6 @@ func summarize(prog *ir.Program) summary {
 	return s
 }
 
-// printSummary renders a human-readable report of s to w.
 func printSummary(w io.Writer, s summary) {
 	fmt.Fprintf(w, "modules: %d\n", s.modules)
 	fmt.Fprintf(w, "functions: %d (%d synthetic)\n", s.functions, s.synthetic)
@@ -540,7 +538,6 @@ func printSummary(w io.Writer, s summary) {
 	}
 }
 
-// sortedKeys returns the keys of m sorted alphabetically.
 func sortedKeys(m map[string]int) []string {
 	return slices.Sorted(maps.Keys(m))
 }
