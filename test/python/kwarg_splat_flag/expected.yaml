@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# Only dangerous() passes the flag on. This is the langflow CVE-2026-27966 shape,
+# which the pack's own rule missed while `**dict` keywords were invisible.
+# max: 1 is the assertion: resolved() must not be read as True, off() must not be
+# read as on, and rebound() must not have its stale literal expanded.
+findings:
+    - rule: py-langchain-dangerous-code
+      min: 1
+      max: 1

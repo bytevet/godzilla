@@ -623,6 +623,13 @@ type funcState struct {
 	// request-rooted chains to stay FP-safe.
 	localAlias map[string]string
 
+	// dictLit maps a local bound by a plain `d = {...}` dict literal to that
+	// literal, so a later `f(**d)` can be expanded into the same
+	// builtin.kwarg markers an explicit keyword would produce. Any rebind,
+	// subscript store, or method call on the name clears the entry -- a stale
+	// literal would let a guard read a value the call never saw.
+	dictLit map[string]astNode
+
 	// importedNames is the module's set of import-bound names (see
 	// collectImportedNames). A method call on one of these is a library call, not an
 	// object method, so lowerCall does not turn it into a CHA INVOKE.
@@ -640,6 +647,7 @@ func newFuncState(filename string) *funcState {
 		assigned:   map[string]bool{},
 		paramRegs:  map[string]bool{},
 		localAlias: map[string]string{},
+		dictLit:    map[string]astNode{},
 	}
 }
 
@@ -790,16 +798,27 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 	return &ir.Instruction{Pos: posFromNode(fs.filename, n)}
 }
 
-// emitKwargMarker tags a constant keyword-argument value with the name it was
-// passed under, as a `builtin.kwarg(<name>, <value>)` intrinsic whose result
-// stands in for the value in the call's argument list. gIR carries positional
-// arguments only, so this is what lets a rule guard tell `shell=True` from
-// `check=True`. Only CONSTANTS may be wrapped: a constant carries no taint, so
-// the marker can never hide a tainted value from the engine.
+// emitKwargMarker tags a keyword-argument value with the name it was passed
+// under, as a `builtin.kwarg(<name>, <value>)` intrinsic whose result stands in
+// for the value in the call's argument list. gIR carries positional arguments
+// only, so this is what lets a rule guard tell `shell=True` from `check=True`.
+//
+// NON-CONSTANT values are wrapped too, so a guard can tell a keyword that was
+// never passed from one passed a value we cannot read: the first leaves kwargs
+// without the name, the second records the name with a dynamic value. Without
+// that distinction a rule gated on `verify=False` reads `verify=flag` as absent
+// and stays silent.
+//
+// Because the wrapped value may now be tainted, the marker MUST propagate: the
+// value goes in Operands, which is what markTaintFromOperands reads, and
+// builtin.kwarg is in the engine's intrinsicPropagators. Omit either and taint
+// dies silently at every Python keyword argument — TestKwargMarkerPropagates
+// pins the pair together.
 func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 	inst.Intrinsic = "builtin.kwarg"
+	inst.Operands = []*ir.Value{v}
 	inst.Call = &ir.CallCommon{
 		Callee: "builtin.kwarg",
 		Args:   []*ir.Value{ssabuild.Str(name), v},
@@ -1155,13 +1174,20 @@ func (fs *funcState) lowerStmt(s astNode) {
 				} else {
 					delete(fs.localAlias, target.str("id"))
 				}
+				if valNode.kind() == "Sequence" && valNode.str("container") == "dict" {
+					fs.dictLit[target.str("id")] = valNode
+				} else {
+					delete(fs.dictLit, target.str("id"))
+				}
 			}
+			fs.killDictLit(target)
 		}
 	case "AugAssign":
 		target := s.node("target")
 		cur := fs.lowerExpr(target)
 		rhs := fs.lowerExpr(s.node("value"))
 		fs.assign(target, fs.emitBinOp(binOpKind(s.str("op")), cur, rhs, s))
+		fs.killDictLit(target)
 	case "ExprStmt":
 		fs.lowerExpr(s.node("value"))
 	case "Return":
@@ -1634,6 +1660,7 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 	case callDirect:
 		cc.Value = &ir.Value{Kind: &ir.Value_FuncName{FuncName: c.callee}}
 	}
+	var splatKwargs []*ir.Value
 	appendArg := func(a astNode) {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
@@ -1644,22 +1671,62 @@ func (fs *funcState) lowerCall(n astNode) *ir.Value {
 		a := kw.node("value")
 		name := kw.str("arg")
 		// A `**kwargs` splat has no name to record, so it stays a plain argument.
+		// Its dict literal, when one is visibly bound and unmutated, is ALSO
+		// expanded into kwarg markers appended after every positional argument,
+		// so existing `#idx` pins keep their positions.
 		if name == "" {
 			appendArg(a)
+			splatKwargs = append(splatKwargs, fs.splatMarkers(a)...)
 			continue
 		}
-		v := fs.lowerExpr(a)
-		if v.GetConstant() != nil {
-			v = fs.emitKwargMarker(name, v, kw)
-		}
-		cc.Args = append(cc.Args, v)
+		cc.Args = append(cc.Args, fs.emitKwargMarker(name, fs.lowerExpr(a), kw))
 	}
+
+	cc.Args = append(cc.Args, splatKwargs...)
 
 	inst := fs.newValueInst(n)
 	inst.Op = op
 	inst.Call = cc
 	fs.emit(inst)
 	return ssabuild.Reg(inst.Name)
+}
+
+// killDictLit drops a tracked dict literal whose binding is written through
+// anything other than a whole-name rebind (`d["k"] = v`, `d += ...`).
+func (fs *funcState) killDictLit(target astNode) {
+	if target == nil || target.kind() != "Subscript" && target.kind() != "Attribute" {
+		return
+	}
+	if base := target.node("value"); base != nil && base.kind() == "Name" {
+		delete(fs.dictLit, base.str("id"))
+	}
+}
+
+// splatMarkers expands `f(**d)` into one builtin.kwarg marker per entry of the
+// dict literal `d` was bound to, so a rule guard reads `kwargs.verify` exactly as
+// it would for an explicit `verify=False`. The splat itself stays in the argument
+// list, so this only ADDS the names; it never removes the value.
+//
+// The KEY must be a constant — a computed key names nothing a rule could match —
+// but the value need not be, matching emitKwargMarker.
+func (fs *funcState) splatMarkers(a astNode) []*ir.Value {
+	if a == nil || a.kind() != "Name" {
+		return nil
+	}
+	lit, ok := fs.dictLit[a.str("id")]
+	if !ok {
+		return nil
+	}
+	elts := lit.list("elts")
+	var out []*ir.Value
+	for i := 0; i+1 < len(elts); i += 2 {
+		k := fs.lowerExpr(elts[i]).GetConstant().GetStringVal()
+		if k == "" {
+			continue
+		}
+		out = append(out, fs.emitKwargMarker(k, fs.lowerExpr(elts[i+1]), elts[i+1]))
+	}
+	return out
 }
 
 // callShape classifies a Call's callee into one of the four shapes lowerCall

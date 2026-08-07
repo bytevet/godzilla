@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# The keyword is the ONLY path from source to sink in both functions, so this
+# fails the moment builtin.kwarg stops propagating taint — the silent false
+# negative that no other sample covers on purpose. min: 2 requires BOTH the
+# explicit keyword and the **splat form to carry.
+findings:
+    - rule: py-command-injection
+      min: 2
+      max: 2

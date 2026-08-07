@@ -1,10 +1,11 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# All three loads fire, including the pinned one: the rule is unguarded because
-# trust_remote_code arrives non-constant and so cannot be read. max: 3 pins that
-# a guard has not been added quietly — adding one would silently drop this to 0,
-# since the flag reads as absent whether or not the caller passed it.
+# load() forwards trust_remote_code and must stay clean; the other two do not and
+# must fire. That pair is the assertion: the guard reads the keyword's PRESENCE,
+# since its value comes from config and cannot be read, and max: 2 fails if the
+# guard is dropped (load() would join them) while min: 2 fails if presence stops
+# being observable (all three would go silent).
 findings:
     - rule: py-hf-dynamic-module
-      min: 3
-      max: 3
+      min: 2
+      max: 2

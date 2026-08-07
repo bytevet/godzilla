@@ -50,14 +50,20 @@ rules:
       that decision has no gate at all (vLLM CVE-2026-22807). Resolve the flag
       before the load and refuse the load when it is unset.
     callees:
-      # Deliberately UNGUARDED. The obvious guard — `kwargs.trust_remote_code`
-      # absent — cannot work: the frontend marks only CONSTANT keyword values, and
-      # the flag is threaded from config (`trust_remote_code=cfg.trust_remote_code`),
-      # so it reads as absent both before and after a fix. Verified: the guarded
-      # form still fires on the FIXED commit. Add the guard only once non-constant
-      # keywords are marked, or the rule can never go green for a user who fixed it.
+      # Guarded on the keyword's PRESENCE, not its value: the flag is threaded
+      # from config (`trust_remote_code=cfg.trust_remote_code`), so its value is
+      # unreadable and only `.Name` distinguishes "never passed" from "passed
+      # something dynamic". A caller that forwards the decision at all has a gate;
+      # one that does not, has none.
+      #
+      # Residual, measured against vLLM across 78d13ea: two of the three sites go
+      # green on the fixed commit, and one does not — that wrapper gates by calling
+      # resolve_trust_remote_code on the LINE ABOVE rather than by passing the
+      # keyword, which a call-site guard cannot see. Remediating by forwarding the
+      # keyword silences the rule; remediating by a preceding check does not.
       #
       # A bare suffix glob is safe here where it would not be for a name like
       # `.write`: this API belongs to one library and has no benign namesake. It
       # also covers `try_get_class_from_dynamic_module`, which ends with it.
       - callee: "py:*get_class_from_dynamic_module"
+        when: 'kwargs.trust_remote_code.Name == ""'

@@ -48,9 +48,12 @@ var intrinsicPropagators = map[string]bool{
 	"builtin.slice":       true,
 	aggregateIntrinsic:    true,
 	aggregateMapIntrinsic: true,
-	"go.map.lookup":       true,
-	"go.next":             true,
-	"go.range":            true,
+	// A keyword marker STANDS IN for the value it wraps, so it must pass taint
+	// through or every `f(x=tainted)` silently loses it. See kwargIntrinsic.
+	kwargIntrinsic:  true,
+	"go.map.lookup": true,
+	"go.next":       true,
+	"go.range":      true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted
