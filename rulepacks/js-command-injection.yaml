@@ -22,6 +22,10 @@ rules:
       - "js:*child_process.spawn*"
       - "js:*.execSync"
       - "js:*.execFileSync"
+      # fork() launches a Node child on a MODULE PATH; a tainted path picks which
+      # module runs. No shell, so like execFile only the program position matters.
+      - "js:*child_process.fork#0"
+      - "js:*.fork#0"
       - "js:*.spawn"
     sanitizers: []
     propagators: []

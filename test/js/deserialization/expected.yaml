@@ -1,0 +1,8 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# node-serialize revives functions; JSON.parse cannot, so it is a sanitizer and
+# must stay clean. max: 1 pins that.
+findings:
+    - rule: js-insecure-deserialization
+      min: 1
+      max: 1

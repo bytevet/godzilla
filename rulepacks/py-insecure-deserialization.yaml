@@ -28,6 +28,9 @@ rules:
       - "py:*yaml.load"
       - "py:*marshal.loads"
       - "py:*jsonpickle.decode"
+      # shelve is a pickle-backed dict on disk: opening an attacker-named shelf
+      # and reading it unpickles whatever is in the file.
+      - "py:*shelve.open"
       # Modern deserializers with the same pickle-style risk. Keep these DATAFLOW
       # sinks: as a `dangerous-call` they would fire on every trusted-local
       # `torch.load("model.pt")` in ML code.

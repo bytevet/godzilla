@@ -35,6 +35,28 @@ rules:
       - "py:os.popen"
       - "py:subprocess.*"
       - "py:*.subprocess.*"
+      # The os-level exec/spawn family. No shell is involved, so a tainted
+      # ARGUMENT is not injection — but a tainted PROGRAM PATH is: the attacker
+      # chooses which binary runs. exec* takes the path first; spawn* takes a
+      # MODE first, so its path is #1.
+      - "py:os.execv#0"
+      - "py:os.execve#0"
+      - "py:os.execvp#0"
+      - "py:os.execvpe#0"
+      - "py:os.execl#0"
+      - "py:os.execle#0"
+      - "py:os.execlp#0"
+      - "py:os.execlpe#0"
+      - "py:os.spawnv#1"
+      - "py:os.spawnve#1"
+      - "py:os.spawnvp#1"
+      - "py:os.spawnvpe#1"
+      - "py:os.spawnl#1"
+      - "py:os.spawnle#1"
+      - "py:os.spawnlp#1"
+      - "py:os.spawnlpe#1"
+      - "py:os.posix_spawn#0"
+      - "py:os.posix_spawnp#0"
     # No built-in sanitizer neutralizes tainted input for shell command
     # construction; avoid passing tainted data to a shell entirely.
     sanitizers:

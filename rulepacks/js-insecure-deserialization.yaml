@@ -1,0 +1,31 @@
+# Insecure deserialization (JavaScript/TypeScript, CWE-502): untrusted input
+# reaching a deserializer that reconstructs FUNCTIONS, not just data. Node's
+# classic RCE class — a payload carrying an IIFE in a serialized function field
+# executes the moment it is revived, with no eval in the application's own code.
+rules:
+  - id: js-insecure-deserialization
+    languages: [javascript]
+    severity: critical
+    cwe: CWE-502
+    message: >-
+      Untrusted input flows into a deserializer that can reconstruct functions,
+      which may allow remote code execution. Use JSON.parse for data; if a richer
+      format is required, choose one that cannot revive callables.
+    extend: [$_js-sources.yaml]
+    sinks:
+      # node-serialize revives a "$$ND_FUNC$$" field by eval'ing it (CVE-2017-5941),
+      # and the serialize-to-js / funcster families do the same by design.
+      - "js:*node-serialize.unserialize"
+      - "js:*unserialize"
+      - "js:*funcster.deepDeserialize"
+      - "js:*serialize-to-js.deserialize"
+      # cryo and similar "JSON but with types" revivers reconstruct prototypes.
+      - "js:*cryo.parse"
+    # JSON.parse is data-only: it cannot produce a callable, so a value that has
+    # been through it carries no executable payload.
+    #
+    # Deliberately NOT a sink: js-yaml's `load`. It was unsafe in v3, but v4 made
+    # `load` use the default schema, which cannot construct arbitrary types — so
+    # flagging it would manufacture a false positive on every modern codebase.
+    sanitizers:
+      - "js:*JSON.parse"
