@@ -4,7 +4,6 @@ module.exports = (req, res) => {
   const blob = req.query.blob;
   serialize.unserialize(blob);
 
-  // JSON.parse is data-only — it cannot produce a callable.
-  const safe = JSON.parse(blob);
-  res.json(safe);
+  serialize.unserialize(JSON.parse(blob));
+  res.end('ok');
 };

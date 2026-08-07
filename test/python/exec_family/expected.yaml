@@ -1,8 +1,8 @@
 # Expected findings for this sample (see test/README.md). Regenerate with:
 #   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
-# A tainted program path fires for both exec* (#0) and spawn* (#1); a fixed
-# program with a tainted argv element does not. max: 2 pins the index choice —
-# pinning spawn* at #0 would select the mode and silently stop firing.
+# A tainted program path fires for both exec* (#0) and spawn* (#1). max: 2 is the
+# assertion: pinning spawn* at #0 would select the mode and drop to 1, and
+# dropping either pin would let the fixed-program case make it 3.
 findings:
     - rule: py-command-injection
       min: 2

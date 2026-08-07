@@ -13,7 +13,5 @@ def spawn_chosen():
     os.spawnl(os.P_WAIT, prog, "x")
 
 
-# A fixed program with a tainted argv element: the attacker supplies data, not
-# the binary, so this must stay clean.
 def fixed_program():
     os.execv("/bin/ls", [request.args.get("a")])
