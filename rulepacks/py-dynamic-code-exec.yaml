@@ -1,13 +1,13 @@
-# Dynamic code execution (Python): eval()/exec() on a non-constant value. The
+# Dynamic code execution (Python): a call that runs code chosen at runtime. The
 # call-site twin of py-code-injection, which needs a modeled source to reach the
-# sink — this fires whatever the value's origin, catching the common case where
+# sink — these fire whatever the code's origin, catching the common case where
 # it arrives from a channel Godzilla does not model (an HTTP response body, an
-# LLM completion, a database row). When both fire on one call the richer
-# dataflow finding wins (internal/scan dropCoLocatedDangerous).
+# LLM completion, a database row, a downloaded model repository). When both fire
+# on one call the richer dataflow finding wins (internal/scan dropCoLocatedDangerous).
 #
-# `severity: low` keeps this reported without failing the default gate, since
-# "this argument is not constant" proves dynamic execution but not attacker
-# control; `confidence: medium` puts it in the LLM reviewer's range.
+# `severity: low` keeps these reported without failing the default gate, since
+# proving dynamic execution is not proving attacker control; `confidence: medium`
+# puts them in the LLM reviewer's range.
 rules:
   - id: py-dynamic-code-exec
     kind: dangerous-call
@@ -36,3 +36,34 @@ rules:
         when: "!arg[0].Complete"
       - callee: "py:exec"
         when: "!arg[0].Complete"
+
+  - id: py-hf-dynamic-module
+    kind: dangerous-call
+    languages: [python]
+    severity: low
+    confidence: medium
+    cwe: CWE-94
+    message: >-
+      This downloads a model repository's own Python and imports it, so whoever
+      chooses the repo chooses what runs in this process. Transformers gates it on
+      trust_remote_code; a caller that forwards a repo id without also forwarding
+      that decision has no gate at all (vLLM CVE-2026-22807). Resolve the flag
+      before the load and refuse the load when it is unset.
+    callees:
+      # Guarded on the keyword's PRESENCE, not its value: the flag is threaded
+      # from config (`trust_remote_code=cfg.trust_remote_code`), so its value is
+      # unreadable and only `.Name` distinguishes "never passed" from "passed
+      # something dynamic". A caller that forwards the decision at all has a gate;
+      # one that does not, has none.
+      #
+      # Residual, measured against vLLM across 78d13ea: two of the three sites go
+      # green on the fixed commit, and one does not — that wrapper gates by calling
+      # resolve_trust_remote_code on the LINE ABOVE rather than by passing the
+      # keyword, which a call-site guard cannot see. Remediating by forwarding the
+      # keyword silences the rule; remediating by a preceding check does not.
+      #
+      # A bare suffix glob is safe here where it would not be for a name like
+      # `.write`: this API belongs to one library and has no benign namesake. It
+      # also covers `try_get_class_from_dynamic_module`, which ends with it.
+      - callee: "py:*get_class_from_dynamic_module"
+        when: 'kwargs.trust_remote_code.Name == ""'

@@ -160,8 +160,8 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Insecure deserialization | — | ✅ | — | ✅ | — | — |
-| Code injection (`eval`) | — | ✅ | ✅ | — | — | — |
+| Insecure deserialization | — | ✅ | — | ✅ | — | ✅ |
+| Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
 | Weak crypto | ✅ | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by

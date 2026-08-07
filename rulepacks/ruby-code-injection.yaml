@@ -1,0 +1,46 @@
+# Code injection (Ruby, CWE-94/95): untrusted input reaching a construct that
+# evaluates it as Ruby. Distinct from command injection (CWE-78): no shell is
+# involved, the attacker's string IS the program.
+rules:
+  - id: ruby-code-injection
+    languages: [ruby]
+    severity: critical
+    cwe: CWE-94
+    message: >-
+      Untrusted input flows into Ruby code evaluation, which may allow arbitrary
+      code execution. Never eval request data; dispatch on an explicit allow-list
+      of permitted values instead of interpolating the input.
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
+    sinks:
+      - "ruby:eval"
+      - "ruby:*.eval"
+      # instance_eval/class_eval/module_eval evaluate a STRING argument in the
+      # receiver's context; the block form takes no string and cannot carry taint
+      # here, so pinning is unnecessary.
+      - "ruby:instance_eval"
+      - "ruby:*.instance_eval"
+      - "ruby:class_eval"
+      - "ruby:*.class_eval"
+      - "ruby:module_eval"
+      - "ruby:*.module_eval"
+      - "ruby:instance_exec"
+      - "ruby:*.instance_exec"
+      # An ERB template is Ruby source: a tainted TEMPLATE (not a tainted value
+      # rendered by a fixed template) executes on result/run.
+      #
+      # Every pin below is #1, not #0. A Ruby dot-call carries its RECEIVER as
+      # logical argument 0, so the first real argument is 1 — pinning #0 selects
+      # the receiver and silently never fires. Verified against the lowering; the
+      # same off-by-one already cost this rulepack a critical false negative once.
+      - "ruby:ERB.new#1"
+      - "ruby:Erubi::Engine.new#1"
+      # send/public_send dispatch by NAME, so a tainted name chooses which method
+      # runs — the shape that made gems like searchlogic remotely exploitable.
+      # Pinned to the name so passing tainted DATA to a fixed method is not
+      # flagged.
+      - "ruby:send#1"
+      - "ruby:*.send#1"
+      - "ruby:public_send#1"
+      - "ruby:*.public_send#1"
+      - "ruby:__send__#1"
+      - "ruby:*.__send__#1"

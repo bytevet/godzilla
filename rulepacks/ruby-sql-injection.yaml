@@ -25,6 +25,26 @@ rules:
       # safe parameterized forms (`where("x = ?", v)`, `where(col: v)`) never call
       # Arel.sql, so this raises no false positive on them.
       - "ruby:Arel.sql#1"
+      # ActiveRecord query methods that accept RAW SQL. These are the ordinary
+      # Rails injection vectors — `where("name = '#{params[:q]}'")` — and they
+      # were missing entirely, so the framework's own query surface was unmodeled.
+      #
+      # Pinned #1 because a Ruby dot-call carries its receiver as logical
+      # argument 0. That index is also what makes the pin precise rather than
+      # noisy: it fires on the interpolated STRING while leaving the two safe
+      # idioms alone — `where("name = ?", x)` puts the value at 2, and
+      # `where(name: x)` passes a hash. Verified against both forms.
+      - "ruby:*.where#1"
+      - "ruby:*.rewhere#1"
+      - "ruby:*.order#1"
+      - "ruby:*.reorder#1"
+      - "ruby:*.group#1"
+      - "ruby:*.having#1"
+      - "ruby:*.joins#1"
+      - "ruby:*.select#1"
+      - "ruby:*.pluck#1"
+      - "ruby:*.from#1"
+      - "ruby:*.lock#1"
     sanitizers:
       - "ruby:*.sanitize_sql"
       - "ruby:*.quote"

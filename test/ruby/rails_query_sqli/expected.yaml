@@ -1,0 +1,11 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# The AR sinks are pinned #1 because a Ruby dot-call carries its receiver as
+# logical argument 0. That index is what keeps them precise: the interpolated
+# string and the raw `order` fire, while `where("... ?", x)` (value at 2) and
+# `where(name: x)` (a hash) stay clean. max: 2 pins both directions — an
+# unpinned or #0 sink breaks this sample rather than the corpus silently.
+findings:
+    - rule: ruby-sql-injection
+      min: 2
+      max: 2
