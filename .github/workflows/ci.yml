@@ -109,7 +109,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - uses: gradle/actions/setup-gradle@v6.2.0
+      - uses: gradle/actions/setup-gradle@v6.3.0
       - uses: dtolnay/rust-toolchain@stable
       # Cache the crates.io registry + build artifacts for the one real Cargo build
       # this job runs (the rouille web sample), so its dependency tree is not
