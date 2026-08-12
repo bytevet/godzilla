@@ -1,0 +1,13 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# The two templates hold the SAME interpolation. The one under app/views is
+# escaped by ActionView and must stay clean; the one under app/cells is not,
+# because the cells gem compiles with Erbse, which has no SafeBuffer. max: 1 is
+# the assertion — it fails if the views template starts firing too, which is what
+# treating every ERB as unescaped would do.
+findings:
+    - rule: ruby-xss
+      min: 1
+      max: 1
+      line: 2
+      sink: "ruby:raw"

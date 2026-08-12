@@ -144,7 +144,7 @@ func materializeERB(files []string, out []rbFileResult) ([]string, func()) {
 			}
 		}
 		tmp := filepath.Join(dir, fmt.Sprintf("%d.rb", i))
-		if err := os.WriteFile(tmp, erbToRuby(src), 0o600); err != nil {
+		if err := os.WriteFile(tmp, erbToRuby(src, erbAutoEscapes(files[i])), 0o600); err != nil {
 			out[i].err = fmt.Errorf("ruby_converter: %w", err)
 			continue
 		}
