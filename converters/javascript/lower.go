@@ -872,6 +872,33 @@ func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
 	return out
 }
 
+// reactHTMLSink is the synthetic callee react-xss.yaml matches. Spelled with the
+// `js:` prefix because emitCall writes the callee verbatim -- sfc.go's Vue
+// equivalent gets the prefix for free by injecting source text that is then
+// lowered as an ordinary call.
+const reactHTMLSink = "js:__godzilla_react_html"
+
+// emitReactHTMLSink gives React's dangerouslySetInnerHTML a callee to match.
+// It is the framework's one documented escape from JSX auto-escaping, but unlike
+// Vue's v-html it is spelled as DATA, not a directive: esbuild lowers the JSX
+// attribute to a `{__html: x}` object literal inside a createElement props
+// argument, so nothing in the IR is a call and no sink glob can name it. Mirror
+// it the way sfc.go mirrors v-html -- emit a call carrying the value.
+//
+// Keyed on the inner `__html`, not the attribute name. __html is React's own
+// marker and the only reason to build such an object, and keying on it also
+// catches the indirect form (`const h = {__html: x}` handed to the attribute by
+// variable) that keying on the attribute would miss.
+func (fs *funcState) emitReactHTMLSink(o *ast.ObjectLiteral) {
+	for _, p := range o.Value {
+		kp, ok := p.(*ast.PropertyKeyed)
+		if !ok || propertyKeyName(kp.Key) != "__html" || kp.Value == nil {
+			continue
+		}
+		fs.emitCall(reactHTMLSink, []ast.Expression{kp.Value}, kp.Value.Idx0())
+	}
+}
+
 // propertyKeyName extracts the static field name of a destructuring property
 // key (an identifier or string literal); other computed keys yield "".
 func propertyKeyName(key ast.Expression) string {
@@ -968,6 +995,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 				vals = append(vals, pv)
 			}
 		}
+		fs.emitReactHTMLSink(v)
 		return fs.lowerAggregate(vals, v.Idx0())
 
 	case *ast.SpreadElement:
