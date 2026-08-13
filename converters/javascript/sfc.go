@@ -67,7 +67,7 @@ type directivePos struct {
 // sourcemap consumer mapping transformed positions back to the padded buffer
 // (whose script-region lines equal the SFC's), and the directive list for
 // applyDirectivePositions to relocate template-sink findings.
-func extractSFCToJS(path string, src []byte) (string, *sourcemap.Consumer, []directivePos, error) {
+func extractSFCToJS(path string, src []byte, target api.Target) (string, *sourcemap.Consumer, []directivePos, error) {
 	var (
 		script     string
 		scriptLine int
@@ -102,7 +102,7 @@ func extractSFCToJS(path string, src []byte) (string, *sourcemap.Consumer, []dir
 	if isTS {
 		loader = api.LoaderTS
 	}
-	code, consumer, err := runESBuild(b.String(), loader, filepath.Base(path))
+	code, consumer, err := runESBuild(b.String(), loader, filepath.Base(path), target)
 	if err != nil {
 		return "", nil, nil, err
 	}

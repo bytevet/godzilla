@@ -197,14 +197,14 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 	switch {
 	case isSFC(path):
 		var terr error
-		code, consumer, dirs, terr = extractSFCToJS(path, src)
+		code, consumer, dirs, terr = extractSFCToJS(path, src, primaryTarget)
 		if terr != nil {
 			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
 		}
 		transformed = true
 	case needsTransform(path):
 		var terr error
-		code, consumer, terr = transformToJS(path, src)
+		code, consumer, terr = transformToJS(path, src, primaryTarget)
 		if terr != nil {
 			return nil, "", fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
 		}
@@ -213,21 +213,36 @@ func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, 
 
 	fset := &file.FileSet{}
 	astProg, err := parser.ParseFile(fset, path, code, 0)
-	if err != nil && !transformed {
-		// goja could not read it as plain script, so it is one of the other .js
-		// dialects: run the loader ladder. The PARSE FAILURE is the trigger rather
-		// than a content sniff, because predicting the dialect fails both ways — it
-		// misses Flow annotations in a file with no import/export, and it costs every
-		// ordinary CommonJS file a scan it did not need. Failing first is exact and is
-		// paid only by files that would otherwise be lost, so it needs no size gate.
+	if err != nil {
+		// goja could not read this, so re-lower and try again. The PARSE FAILURE is
+		// the trigger rather than a content sniff, because predicting fails both ways
+		// — it misses Flow annotations in a file with no import/export, and it costs
+		// every ordinary CommonJS file a scan it did not need. Failing first is exact
+		// and is paid only by files that would otherwise be lost, so it needs no size
+		// gate.
 		//
-		// If the ladder cannot read it either, goja's original error is reported: it
+		// Two things can be wrong, and the rungs answer them in that order: WHICH
+		// DIALECT (the loader ladder, inside each attempt) and WHICH ES LEVEL goja can
+		// actually spell (fallbackTargets). The level is escalated only here, never up
+		// front, so a file that already parses keeps its modern syntax intact.
+		//
+		// If no rung can be read either, goja's original error is reported: it
 		// describes the file as written.
-		if tcode, tconsumer, terr := transformToJS(path, src); terr == nil {
-			tfset := &file.FileSet{}
-			if tprog, perr := parser.ParseFile(tfset, path, tcode, 0); perr == nil {
-				fset, astProg, consumer, err = tfset, tprog, tconsumer, nil
+		for _, target := range fallbackTargets(transformed) {
+			tcode, tconsumer, tdirs, terr := lowerAt(path, src, target)
+			if terr != nil {
+				continue
 			}
+			tfset := &file.FileSet{}
+			tprog, perr := parser.ParseFile(tfset, path, tcode, 0)
+			if perr != nil {
+				continue
+			}
+			fset, astProg, consumer, err = tfset, tprog, tconsumer, nil
+			if tdirs != nil {
+				dirs = tdirs
+			}
+			break
 		}
 	}
 	if err != nil {
