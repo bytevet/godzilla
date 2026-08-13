@@ -6,8 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dop251/goja/file"
-	"github.com/dop251/goja/parser"
+	jsast "github.com/bytevet/esbuild-jsast"
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/irwalk"
@@ -353,21 +352,27 @@ func functionNames(mod *ir.Module) []string {
 	return names
 }
 
+// mustParse parses src as plain JavaScript for the alias tests, which assert on
+// the module-level tables rather than on a lowered module.
+func mustParse(t *testing.T, src string) *jsast.File {
+	t.Helper()
+	f, errs := jsast.Parse(src, jsast.Options{})
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	return f
+}
+
 // TestCollectRequireAliases covers FE-2's require-alias table: plain, aliased,
 // destructured, and require().member bindings.
 func TestCollectRequireAliases(t *testing.T) {
-	src := `var cp = require("child_process");
+	f := mustParse(t, `var cp = require("child_process");
 var { exec, spawn } = require("child_process");
 var ex = require("child_process").execSync;
 var express = require("express");
 var local = require("./util");
-`
-	fset := &file.FileSet{}
-	prog, err := parser.ParseFile(fset, "a.js", src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	a := collectRequireAliases(prog.Body)
+`)
+	a := collectRequireAliases(f)
 	want := map[string]string{
 		"cp":      "child_process",
 		"exec":    "child_process.exec",
@@ -384,5 +389,41 @@ var local = require("./util");
 	// cross-file resolution (a caller's util.fn -> js:util.fn) is preserved.
 	if _, ok := a["local"]; ok {
 		t.Errorf("relative require ./util should not create an alias, got %q", a["local"])
+	}
+}
+
+// TestCollectImportAliases is the ESM half of FE-2. It is new surface: until the
+// frontend parsed modules directly, every import arrived already rewritten as a
+// require call, so none of these forms had their own path.
+func TestCollectImportAliases(t *testing.T) {
+	f := mustParse(t, `import cp from "child_process";
+import * as pathns from "path";
+import { exec, spawn as sp } from "child_process";
+import { default as fsd } from "fs";
+import "side-effect-only";
+import local from "./util";
+`)
+	a := map[string]string{}
+	collectImportAliases(f, a)
+	want := map[string]string{
+		"cp":     "child_process",
+		"pathns": "path",
+		"exec":   "child_process.exec",
+		"sp":     "child_process.spawn",
+		// `{default as X}` is the module's own value, not a member of it: a rule
+		// keyed on "js:fs*" matches "fs", never "fs.default".
+		"fsd": "fs",
+	}
+	for k, v := range want {
+		if a[k] != v {
+			t.Errorf("alias %q = %q, want %q", k, a[k], v)
+		}
+	}
+	// A relative import names a project module; collectRelativeDefaults owns it.
+	if _, ok := a["local"]; ok {
+		t.Errorf("relative import ./util should not create an alias, got %q", a["local"])
+	}
+	if len(a) != len(want) {
+		t.Errorf("unexpected extra aliases: %v", a)
 	}
 }

@@ -43,35 +43,6 @@ func TestDialectsAllConvert(t *testing.T) {
 	}
 }
 
-// TestKnownGapDialectsFailCleanly pins the dialects that genuinely cannot be
-// lowered today, so they stay VISIBLE instead of blending into the background of
-// per-file skips.
-//
-// Top-level await is the current member: it is only expressible in ES-module
-// output, and the lowering consumes CommonJS, so esbuild rejects it in every
-// format goja can read. That is a structural limit, not a missing rung on the
-// loader ladder — no amount of loader-guessing fixes it.
-//
-// The assertion is that the failure is CLEAN (an error, not a panic or a silently
-// empty module). If one of these starts converting, this test fails, which is the
-// signal to move the fixture into testdata/dialects where it will be held to the
-// stronger guarantee.
-func TestKnownGapDialectsFailCleanly(t *testing.T) {
-	dir := filepath.Join("testdata", "dialects_known_gaps")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read known-gaps dir: %v", err)
-	}
-	for _, e := range entries {
-		t.Run(e.Name(), func(t *testing.T) {
-			mod, _, err := NewConverter().convertJSFile(filepath.Join(dir, e.Name()), "gap")
-			if err == nil {
-				t.Fatalf("%s now converts (mod=%v) — move it into testdata/dialects", e.Name(), mod != nil)
-			}
-		})
-	}
-}
-
 // TestDialectsScanReportsFullCoverage is the end-to-end half: converting the
 // directory must skip nothing. It guards the count the scan layer reports as
 // coverage, which is what makes a partially-dropped project visible.
@@ -81,6 +52,24 @@ func TestDialectsScanReportsFullCoverage(t *testing.T) {
 		t.Fatalf("ConvertFile(dialects): %v", err)
 	}
 	if c.Skipped() != 0 {
-		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see the loader ladder", c.Skipped())
+		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see parseLadder", c.Skipped())
+	}
+}
+
+// TestConvertCorpusTreeSkipsOnlyBroken pins the skip count over the whole JS
+// corpus at exactly one — resilience/broken.js, which is deliberately
+// unparseable.
+//
+// This is the only place a ladder regression surfaces at all. A batch errors
+// only when ZERO files convert, so a rung that stops matching leaves Converted
+// true and Failed() empty; the corpus assertions then pass for every sample
+// still being read, and the dropped one simply has no findings to miss.
+func TestConvertCorpusTreeSkipsOnlyBroken(t *testing.T) {
+	c := NewConverter()
+	if _, err := c.ConvertFile(filepath.Join("..", "..", "test", "js")); err != nil {
+		t.Fatalf("ConvertFile(test/js): %v", err)
+	}
+	if c.Skipped() != 1 {
+		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.js)", c.Skipped())
 	}
 }

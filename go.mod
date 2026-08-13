@@ -4,10 +4,8 @@ go 1.26.5
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.55.0
-	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
-	github.com/evanw/esbuild v0.28.1
+	github.com/bytevet/esbuild-jsast v0.0.0-20260813172304-fb79e35b0a1e
 	github.com/expr-lang/expr v1.17.8
-	github.com/go-sourcemap/sourcemap v2.1.3+incompatible
 	github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f
 	golang.org/x/net v0.50.0
 	golang.org/x/tools v0.42.0
@@ -29,6 +27,5 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )

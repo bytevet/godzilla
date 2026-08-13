@@ -1,6 +1,6 @@
-// Type annotations in a .js file with no import/export anywhere: goja rejects it
-// at the first `:`, but nothing in the source looks like a module, so a
-// syntax-sniffing pre-check sees "plain script" and never runs the transform.
+// Type annotations in a .js file with no import/export anywhere: nothing here
+// looks like a module, so a syntax-sniffing pre-check would call it a plain
+// script and stop at the first `:`. Only trying the TS rung recovers it.
 // parse-server ships two files of exactly this shape.
 class Id {
   className: string;

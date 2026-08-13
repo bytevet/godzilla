@@ -67,13 +67,14 @@ changing one:
   parameter — see its doc comment.
 - `python/`, `ruby/` — shell out to `python3` / `ruby` for an AST dump via an embedded helper
   (`pyast.py`, `rbdump.rb`), then lower it.
-- `javascript/` — pure-Go goja parse. Extensions that always need one (`.ts/.tsx/.jsx/.mjs/.cjs`) take
-  esbuild's in-process `Transform` up front, with a source-map consumer remapping positions back
-  (`transform.go`). Plain `.js` does NOT: it is the ambiguous extension — plain script, ESM, Flow and
-  JSX all ship as `.js` — so it goes straight to goja and the PARSE FAILURE drives `loaderLadder`,
-  which is exact where predicting the dialect was not. `flowstrip.go` is that ladder's last rung:
-  Flow has no esbuild loader, so it blanks Flow-only syntax IN PLACE, every removed byte becoming a
-  space, because positions must survive and the sourcemap library cannot compose two maps.
+- `javascript/` — pure-Go parse of esbuild's own AST, via `github.com/bytevet/esbuild-jsast` (the
+  parser is walled off under esbuild's `internal/`; that module is the seam). There is NO text
+  transform and no sourcemap: TS/JSX/ESM arrive as themselves, and a node offset indexes the source
+  as written, so `dialect.go`'s `lineIndex` is the ONE place an offset becomes a position. Which
+  dialect is decided by PARSE FAILURE, not prediction — `parseLadder` walks `.js` through JS, TS,
+  TSX, which is exact where guessing the dialect was not. `flowstrip.go` is that ladder's last rung:
+  Flow is neither JS nor TS, so it blanks Flow-only syntax IN PLACE, every removed byte becoming a
+  space, because a node's position is an offset into the buffer the parser was handed.
   `.vue`/`.svelte` SFCs (`sfc.go`) lower the `<script>` block as the module body and append each
   dangerous template directive (`v-html`, `{@html}`) as a synthetic sink CALL.
 - `java/` — JVM **bytecode**, via an embedded `JavaDump.java` (JDK 24+, `java.lang.classfile`) plus an
