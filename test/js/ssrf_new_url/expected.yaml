@@ -1,0 +1,9 @@
+# Expected findings for this sample (see test/README.md).
+# max: 2 is the assertion. fixedHost puts request input inside a URL whose HOST
+# is constant, which `when: not hostFixed()` must still suppress -- so this fails
+# if new URL is treated as a source rather than as a value-carrying propagator.
+findings:
+    - rule: js-ssrf
+      min: 4
+      max: 4
+      sink: "js:fetch"

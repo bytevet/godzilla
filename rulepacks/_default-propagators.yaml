@@ -141,6 +141,14 @@ propagators:
   - "js:*encodeURI"
   - "js:*decodeURIComponent"
   - "js:*decodeURI"
+  # `new URL(x)` parses rather than transforms, but it is the same case: the
+  # result still carries x, so without it the constructor is a taint wall in the
+  # middle of the two flows most likely to cross it -- SSRF and open redirect,
+  # which are about a URL. It NORMALIZES (`..` in the path collapses) but does
+  # not CONTAIN, exactly like path.join / filepath.Clean above, so it is a
+  # propagator and not a sanitizer. next.js CVE-2026-64649 is the miss:
+  # `fetch(\`...${host}...\`)` fires and `fetch(new URL(\`...${host}...\`))` did not.
+  - "js:new:URL"
 
   # --- Java: String / StringBuilder ---
   - "java:*String.trim"

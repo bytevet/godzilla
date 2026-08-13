@@ -1286,8 +1286,26 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 // `Foo(args)` call.
 func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
-	return fs.emitCall("js:new:"+syntacticCallee(v.Callee), v.ArgumentList, v.Idx0())
+	callee := "js:new:" + syntacticCallee(v.Callee)
+	inst := fs.emitCallRecvInst(callee, nil, v.ArgumentList, v.Idx0())
+	// A URL's text is its argument's text, so mark it for ssrf.go's hostFixed():
+	// without the marker the constructor hides the constant host inside it and
+	// `fetch(new URL("https://fixed/x?q=" + tainted))` reads as a dynamic host.
+	// Taint itself flows through the js:new:URL default propagator, not here.
+	//
+	// One argument only. The two-argument form resolves against a BASE
+	// (`new URL(path, base)`) whose host wins, and Args[0] is the path, so
+	// claiming identity there would let a tainted base look constant -- a false
+	// negative. Unmarked it stays dynamic, which fires.
+	if callee == "js:new:URL" && len(v.ArgumentList) == 1 {
+		inst.Intrinsic = identityIntrinsic
+	}
+	return ssabuild.Reg(inst.Name)
 }
+
+// identityIntrinsic mirrors internal/analysis/ssrf.go: the cross-frontend marker
+// for a value whose text is its Args[0]'s text.
+const identityIntrinsic = "builtin.identity"
 
 // lowerNestedCallees walks a call/new expression's callee along the same
 // Dot/Bracket "Left" chain syntacticCallee walks and lowers any CallExpression
