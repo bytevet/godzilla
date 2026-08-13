@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/converters/ssabuild"
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // requirePython3 skips the test if python3 is not on PATH, since ConvertFile

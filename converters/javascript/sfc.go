@@ -10,7 +10,7 @@ import (
 	"github.com/go-sourcemap/sourcemap"
 	"golang.org/x/net/html"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Component single-file formats (Vue `.vue`, Svelte `.svelte`) put their JS/TS in

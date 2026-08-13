@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/rules/loader"
 )
 
 // writeSample lays out a Go sample project (go.mod + main.go + expected.yaml).

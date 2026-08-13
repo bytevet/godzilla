@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // calleeMarks walks every CALL in a module and returns callee -> the set of

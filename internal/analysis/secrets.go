@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"godzilla/internal/irwalk"
-	"godzilla/internal/rules"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // secretDetector is one compiled `kind: secret` rule. Collected once per scan so

@@ -8,8 +8,8 @@ import (
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/token"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // funcState holds the per-function lowering state. Variable values and the

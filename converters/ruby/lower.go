@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // A Ripper sexp node is a JSON value: a list (`[]interface{}` whose head is a

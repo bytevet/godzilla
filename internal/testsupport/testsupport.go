@@ -12,8 +12,8 @@ import (
 	"os/exec"
 	"testing"
 
-	"godzilla/internal/rules"
-	"godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules/loader"
 )
 
 // RequireTool skips the test when the named executable (python3, ruby, java,

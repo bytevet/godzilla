@@ -23,8 +23,8 @@ import (
 	"strings"
 	"sync"
 
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Driver is the embeddable front half of a Batch-based Converter: the

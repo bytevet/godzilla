@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 func TestConvertFile(t *testing.T) {

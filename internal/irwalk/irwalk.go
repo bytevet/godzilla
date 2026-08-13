@@ -12,7 +12,7 @@ package irwalk
 import (
 	"iter"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Funcs yields every non-nil function in prog with its owning module.

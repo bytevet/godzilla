@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godzilla/internal/analysis"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 func findingAt(rule, file string, line int32) analysis.Finding {

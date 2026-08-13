@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // buildScaleProgram builds a synthetic program of nFunc functions, each a

@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"godzilla/internal/rules"
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/ruletest"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/ruletest"
 )
 
 const rulesUsageText = `usage: godzilla rules <list|lint|test> [args]

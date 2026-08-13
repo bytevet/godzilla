@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Engine runs taint analysis over a gIR program for a fixed set of rules.

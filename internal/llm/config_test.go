@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/analysis"
 )
 
 // concurrencyProbe records the maximum number of concurrent Review calls, to

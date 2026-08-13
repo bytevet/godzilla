@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/srclines"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/srclines"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Verdict is a reviewer's judgment about a single finding. Beyond the binary

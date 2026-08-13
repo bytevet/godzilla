@@ -3,8 +3,8 @@ package analysis
 import (
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
 )
 
 // TestAnalyze_SanitizerSuppressesReturnFlow is the ENG-1 regression guard. In

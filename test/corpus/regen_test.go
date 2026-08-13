@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/scan"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/scan"
 
 	"gopkg.in/yaml.v3"
 )

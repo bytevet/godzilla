@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // convertClass turns one dumped class into a gIR module (one function per method).

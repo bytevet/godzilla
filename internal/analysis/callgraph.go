@@ -1,12 +1,12 @@
 package analysis
 
 import (
-	"godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/irwalk"
 	"maps"
 	"slices"
 	"strings"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // CallGraph is a whole-program call graph over gIR functions. The

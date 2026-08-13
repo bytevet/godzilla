@@ -184,7 +184,7 @@ const file_proto_module_proto_rawDesc = "" +
 	"\aProgram\x120\n" +
 	"\amodules\x18\x01 \x03(\v2\x16.godzilla.ir.v1.ModuleR\amodules\x123\n" +
 	"\bmain_pkg\x18\x02 \x01(\v2\x18.godzilla.ir.v1.FunctionR\amainPkg\x12\x12\n" +
-	"\x04mode\x18\x03 \x01(\tR\x04modeB\x17Z\x15godzilla/pkg/ir/v1;irb\x06proto3"
+	"\x04mode\x18\x03 \x01(\tR\x04modeB*Z(github.com/bytevet/godzilla/pkg/ir/v1;irb\x06proto3"
 
 var (
 	file_proto_module_proto_rawDescOnce sync.Once

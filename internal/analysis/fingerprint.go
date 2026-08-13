@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // fingerprintCwd memoizes os.Getwd for fingerprinting: the working directory

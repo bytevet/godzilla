@@ -6,8 +6,8 @@ import (
 	"maps"
 	"strings"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // modCtx bundles the file-scoped facts every lowered function in a module needs:

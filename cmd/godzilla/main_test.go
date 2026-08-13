@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // runCLI builds and runs the godzilla CLI (via `go run .`) with args, returning

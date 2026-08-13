@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 func cmdiRuleSet(t testing.TB, id string) *rules.RuleSet {

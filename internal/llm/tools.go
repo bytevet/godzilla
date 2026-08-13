@@ -9,9 +9,9 @@ import (
 	"regexp"
 	"strings"
 
-	"godzilla/internal/irwalk"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // ToolBox is the read-only capability set the agentic reviewer (LLM-4) can call

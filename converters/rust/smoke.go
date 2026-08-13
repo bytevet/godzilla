@@ -5,8 +5,8 @@ import (
 	"os"
 	"sync"
 
-	"godzilla/internal/irwalk"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // FE-10: rustc's textual MIR is an explicitly unstable format that this frontend

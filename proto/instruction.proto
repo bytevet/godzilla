@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package godzilla.ir.v1;
 
-option go_package = "godzilla/pkg/ir/v1;ir";
+option go_package = "github.com/bytevet/godzilla/pkg/ir/v1;ir";
 
 import "proto/common.proto";
 

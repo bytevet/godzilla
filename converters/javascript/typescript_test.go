@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // calleeNames returns every call/invoke callee in a converted program.

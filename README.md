@@ -49,7 +49,7 @@ flowchart LR
 ## Install
 
 ```bash
-go install godzilla/cmd/godzilla@latest    # or, from a clone:
+go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone:
 go build -o godzilla ./cmd/godzilla
 ```
 

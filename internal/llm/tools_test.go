@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // writeTree lays out files under a temp dir and returns the root.

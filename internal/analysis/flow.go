@@ -4,7 +4,7 @@ import (
 	"maps"
 	"slices"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // taintState maps a tainted register (or access-path key) to the source origin

@@ -9,11 +9,11 @@ import (
 	"github.com/dop251/goja/file"
 	"github.com/dop251/goja/parser"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/irwalk"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // reqSources is the untrusted-HTTP-request source glob set shared by every

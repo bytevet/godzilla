@@ -8,7 +8,7 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/go-sourcemap/sourcemap"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // IsJSFamily reports whether path is a JavaScript-family source file the frontend

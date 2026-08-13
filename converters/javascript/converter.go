@@ -79,10 +79,10 @@ import (
 	"github.com/dop251/goja/parser"
 	"github.com/go-sourcemap/sourcemap"
 
-	"godzilla/converters/frontend"
-	"godzilla/internal/irwalk"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/frontend"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Converter lowers JavaScript source files/directories into gIR: the shared

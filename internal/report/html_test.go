@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 func TestWriteHTML(t *testing.T) {

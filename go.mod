@@ -1,4 +1,4 @@
-module godzilla
+module github.com/bytevet/godzilla
 
 go 1.26.5
 

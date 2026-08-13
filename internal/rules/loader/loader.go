@@ -26,8 +26,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"godzilla/internal/rules"
-	"godzilla/rulepacks"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/rulepacks"
 )
 
 // LoadFile reads a single YAML rule file and unmarshals it into a RuleSet,

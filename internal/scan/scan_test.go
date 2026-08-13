@@ -6,11 +6,11 @@ import (
 	"slices"
 	"testing"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // TestResultFailed checks the coverage predicate that drives the strict gate:

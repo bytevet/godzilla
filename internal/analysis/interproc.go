@@ -2,7 +2,7 @@ package analysis
 
 import (
 	"fmt"
-	"godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/irwalk"
 	"maps"
 	"runtime"
 	"slices"
@@ -11,8 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Analyze runs inter-procedural taint analysis over prog for every rule in the

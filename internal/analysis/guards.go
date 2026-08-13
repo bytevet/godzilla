@@ -3,8 +3,8 @@ package analysis
 import (
 	"maps"
 
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // guardIndex answers, for a rule that declares validators, whether a sink is

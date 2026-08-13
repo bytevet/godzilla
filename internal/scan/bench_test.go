@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // benchScanLang benchmarks a full-pipeline scan of one language's sample so

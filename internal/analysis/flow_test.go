@@ -3,8 +3,8 @@ package analysis
 import (
 	"testing"
 
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // cmdiRule is a minimal command-injection rule for the flow-sensitivity tests.

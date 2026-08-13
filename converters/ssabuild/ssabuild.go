@@ -59,7 +59,7 @@ import (
 	"sort"
 	"strconv"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // BlockID identifies a basic block within one Builder. Ids are sequential ints
