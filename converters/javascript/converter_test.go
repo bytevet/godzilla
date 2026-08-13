@@ -358,7 +358,7 @@ func mustParse(t *testing.T, src string) *jsast.File {
 	t.Helper()
 	f, errs := jsast.Parse(src, jsast.Options{})
 	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
+		t.Fatalf("parse %q: %v", src, errs)
 	}
 	return f
 }

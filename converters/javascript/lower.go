@@ -157,13 +157,14 @@ func (fs *funcState) write(name string, val *ir.Value) {
 
 // identName returns the source name of an identifier expression (a plain
 // identifier or an ES-module import binding, which esbuild spells as its own
-// node), and whether e was one.
-func (fs *funcState) identName(e jsast.Expr) (string, bool) {
+// node), and whether e was one. Identifiers reach the tree as symbol Refs, so
+// this is the only route back to what the source actually said.
+func identName(f *jsast.File, e jsast.Expr) (string, bool) {
 	switch v := unwrap(e).Data.(type) {
 	case *jsast.EIdentifier:
-		return fs.src.NameOf(v.Ref), true
+		return f.NameOf(v.Ref), true
 	case *jsast.EImportIdentifier:
-		return fs.src.NameOf(v.Ref), true
+		return f.NameOf(v.Ref), true
 	}
 	return "", false
 }
@@ -178,8 +179,8 @@ func calleeCommon(callee string) *ir.CallCommon {
 }
 
 // emitCall emits an OP_CODE_CALL to callee with no receiver, lowering args in
-// order, and returns its result register. Used by lowerNew; a method call goes
-// through emitCallRecvInst directly so lowerCall can reach the instruction.
+// order, and returns its result register. A caller that needs the instruction
+// itself goes through emitCallRecvInst instead.
 func (fs *funcState) emitCall(callee string, args []jsast.Expr, loc jsast.Loc) *ir.Value {
 	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, loc).Name)
 }
@@ -433,7 +434,7 @@ func (fs *funcState) opaqueRootFor(e jsast.Expr, base *ir.Value) (string, bool) 
 	if root, ok := fs.isOpaqueBase(base); ok {
 		return root, ok
 	}
-	name, ok := fs.identName(e)
+	name, ok := identName(fs.src, e)
 	if !ok {
 		return "", false
 	}
@@ -1225,7 +1226,7 @@ func (fs *funcState) lowerUnary(loc jsast.Loc, v *jsast.EUnary) *ir.Value {
 	result := ssabuild.Reg(inst.Name)
 
 	if isIncDecOp(v.Op) {
-		if name, ok := fs.identName(v.Value); ok {
+		if name, ok := identName(fs.src, v.Value); ok {
 			fs.write(name, result)
 		}
 	}
@@ -1285,20 +1286,23 @@ func (fs *funcState) lowerCall(loc jsast.Loc, v *jsast.ECall) *ir.Value {
 	// like `.slice`/`.toLowerCase` propagate the receiver's taint to the result.
 	// lowerExpr recurses through any nested call in the base chain, so it fully
 	// subsumes lowerNestedCallees for these two callee shapes.
+	target := unwrap(v.Target)
 	var receiver *ir.Value
-	switch c := unwrap(v.Target).Data.(type) {
+	var dot *jsast.EDot
+	switch c := target.Data.(type) {
 	case *jsast.EDot:
+		dot = c
 		receiver = fs.lowerExpr(c.Target)
 	case *jsast.EIndex:
 		receiver = fs.lowerExpr(c.Target)
 	default:
 		fs.lowerNestedCallees(v.Target)
 	}
-	callee := "js:" + fs.resolveRequire(syntacticCallee(fs.src, v.Target))
+	callee := "js:" + fs.resolveRequire(syntacticCallee(fs.src, target))
 	// A bare call to a top-level function (helper(x)) must carry the module name
 	// so its callee matches the function's CanonicalName; otherwise byKey never
 	// resolves it and taint does not flow through the local helper.
-	if name, ok := fs.identName(v.Target); ok {
+	if name, ok := identName(fs.src, target); ok {
 		if canonical, found := fs.localFuncs[name]; found {
 			callee = canonical
 		} else if mod, found := fs.relativeDefaults[name]; found {
@@ -1313,7 +1317,7 @@ func (fs *funcState) lowerCall(loc jsast.Loc, v *jsast.ECall) *ir.Value {
 	// canonical name so byKey resolves it. Optimistic — a non-method `this.x`
 	// matches no function and stays unresolved (harmless). JS methods take no
 	// explicit receiver param, so the arguments already align.
-	if dot, ok := unwrap(v.Target).Data.(*jsast.EDot); ok && fs.methodClass != "" {
+	if dot != nil && fs.methodClass != "" {
 		if _, isThis := unwrap(dot.Target).Data.(*jsast.EThis); isThis {
 			callee = "js:" + fs.moduleName + "." + fs.methodClass + dot.Name
 		}

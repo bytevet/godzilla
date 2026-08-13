@@ -275,8 +275,12 @@ func (c *collector) collectExpr(e jsast.Expr, qualPrefix, preferredName string) 
 		c.collectCall(v.Target, v.Args, qualPrefix)
 	case *jsast.EBinary:
 		if isAssignOp(v.Op) {
+			// An anonymous function takes the name it is assigned to
+			// (`handler = function(){}`), so the target's name is passed down as
+			// the preferred name; a non-identifier target leaves it empty.
+			name, _ := identName(c.src, v.Left)
 			c.collectExpr(v.Left, qualPrefix, "")
-			c.collectExpr(v.Right, qualPrefix, c.assignTargetName(v.Left))
+			c.collectExpr(v.Right, qualPrefix, name)
 			return
 		}
 		c.collectExpr(v.Left, qualPrefix, "")
@@ -353,19 +357,6 @@ func (c *collector) collectCall(callee jsast.Expr, args []jsast.Expr, qualPrefix
 	for _, a := range args {
 		c.collectExpr(a, qualPrefix, "")
 	}
-}
-
-// assignTargetName returns the plain identifier name of an assignment's
-// left-hand side, used to prefer that name for an anonymous function
-// assigned to it (e.g. `handler = function(){}`).
-func (c *collector) assignTargetName(left jsast.Expr) string {
-	switch v := unwrap(left).Data.(type) {
-	case *jsast.EIdentifier:
-		return c.src.NameOf(v.Ref)
-	case *jsast.EImportIdentifier:
-		return c.src.NameOf(v.Ref)
-	}
-	return ""
 }
 
 // convertModule turns one parsed JavaScript file into a gIR Module. Every

@@ -12,14 +12,16 @@ import (
 )
 
 // IsJSFamily reports whether path is a JavaScript-family source file the frontend
-// handles. It is the single source of truth for the extension set — the
-// converter's own directory walk and internal/scan's dispatch/detection table
-// both call it — and is DERIVED from the two predicates that actually decide how
-// a file is read (isSFC, isDialectExt) plus plain .js, so adding an extension to
-// either extends this set automatically rather than leaving a third list to
-// forget.
+// handles. It is the single source of truth for the extension set: the converter's
+// own directory walk and internal/scan's dispatch/detection table both call it, so
+// an extension added here reaches every caller. A new extension also needs a rung
+// in parseLadder, which is what decides how it is read.
 func IsJSFamily(path string) bool {
-	return isSFC(path) || isDialectExt(path) || strings.ToLower(filepath.Ext(path)) == ".js"
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx":
+		return true
+	}
+	return isSFC(path)
 }
 
 // isSFC reports whether path is a component single-file format (Vue/Svelte) that
@@ -28,16 +30,6 @@ func IsJSFamily(path string) bool {
 func isSFC(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".vue", ".svelte":
-		return true
-	}
-	return false
-}
-
-// isDialectExt reports whether the extension alone narrows the dialect, i.e. it
-// is a JS-family extension other than plain .js (the ambiguous one) or an SFC.
-func isDialectExt(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".ts", ".tsx", ".jsx", ".mjs", ".cjs":
 		return true
 	}
 	return false
@@ -65,7 +57,9 @@ func parseLadder(path string) []parseMode {
 		return []parseMode{{ts: true, jsx: true}}
 	case ".jsx":
 		return []parseMode{{jsx: true}, {ts: true, jsx: true}}
-	default: // .js / .mjs / .cjs — plain script, ESM, Flow, or TS-ish
+	// .js/.mjs/.cjs, and the buffer an SFC extractor produced: plain script,
+	// ESM, Flow, or TS-ish. Order is load-bearing — see the note above.
+	default:
 		return []parseMode{{}, {ts: true}, {ts: true, jsx: true}}
 	}
 }
@@ -161,14 +155,16 @@ func (li *lineIndex) pos(loc jsast.Loc) *ir.Position {
 	if li == nil {
 		return nil
 	}
-	off := int32(loc.Start)
+	line, col := li.lineCol(int32(loc.Start))
+	return &ir.Position{Filename: li.filename, Line: line, Column: col}
+}
+
+// lineCol is pos without the gIR wrapper, for callers working in raw offsets
+// (the SFC extractor, which locates template directives in the original file).
+func (li *lineIndex) lineCol(off int32) (line, col int32) {
 	if off < 0 {
 		off = 0
 	}
-	line := sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > off })
-	return &ir.Position{
-		Filename: li.filename,
-		Line:     int32(line),
-		Column:   off - li.starts[line-1] + 1,
-	}
+	line = int32(sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > off }))
+	return line, off - li.starts[line-1] + 1
 }

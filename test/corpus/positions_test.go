@@ -24,9 +24,12 @@ import (
 // human acts on, so they get an assertion of their own.
 //
 // Regenerate deliberately after a change that is MEANT to move positions, then
-// read the diff line by line:
+// read the diff line by line. Regeneration lives in TestRegenerateManifests
+// alongside the expected.yaml rewrite, so that this test can only ever assert --
+// a gate that rewrites its own oracle when an env var is set reports green on
+// exactly the run that was supposed to show you the damage.
 //
-//	GODZILLA_REGEN=1 go test ./test/corpus/ -run TestJSFindingPositions
+//	GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
 const goldenPositions = "testdata/js_positions.golden"
 
 func TestJSFindingPositions(t *testing.T) {
@@ -40,17 +43,6 @@ func TestJSFindingPositions(t *testing.T) {
 	}
 
 	got := renderPositions(t, res.Findings)
-
-	if os.Getenv("GODZILLA_REGEN") != "" {
-		if err := os.MkdirAll(filepath.Dir(goldenPositions), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(goldenPositions, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("wrote %s (%d findings)", goldenPositions, strings.Count(got, "\n"))
-		return
-	}
 
 	want, err := os.ReadFile(goldenPositions)
 	if err != nil {

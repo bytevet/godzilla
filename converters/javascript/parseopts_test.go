@@ -14,8 +14,8 @@ import (
 // mode is silent: a dropped dead branch or an inlined const removes a sink
 // without removing a file, so coverage still reads clean.
 //
-// These four assertions are the alarm. Each names one transformation that would
-// cost findings, and asserts the tree still carries what the source wrote.
+// These assertions are the alarm — one per transformation jsast.Options names as
+// a hazard. Each asserts the tree still carries what the source wrote.
 func TestParseKeepsSourceSemantics(t *testing.T) {
 	t.Run("dead branches survive", func(t *testing.T) {
 		// Dead-code elimination would delete the only call in the file.
@@ -25,7 +25,7 @@ func TestParseKeepsSourceSemantics(t *testing.T) {
 	t.Run("consts are not inlined", func(t *testing.T) {
 		// Const inlining would replace `cmd` with the literal and, with it, the
 		// identifier the lowering binds taint to.
-		f := mustParseOK(t, `const cmd = "ls"; cp.exec(cmd);`)
+		f := mustParse(t, `const cmd = "ls"; cp.exec(cmd);`)
 		if got := calleeArgSource(t, f); got != "cmd" {
 			t.Errorf("argument lowered as %q, want the identifier cmd", got)
 		}
@@ -34,7 +34,7 @@ func TestParseKeepsSourceSemantics(t *testing.T) {
 	t.Run("class bodies keep their methods", func(t *testing.T) {
 		// Method lowering (to prototype assignments) would move every method out
 		// of the class body, where collectClass looks for handlers.
-		f := mustParseOK(t, `class C { run(cmd) { cp.exec(cmd); } }`)
+		f := mustParse(t, `class C { run(cmd) { cp.exec(cmd); } }`)
 		cls, ok := f.Stmts[0].Data.(*jsast.SClass)
 		if !ok {
 			t.Fatalf("first statement is %T, want a class declaration", f.Stmts[0].Data)
@@ -49,22 +49,28 @@ func TestParseKeepsSourceSemantics(t *testing.T) {
 		// built from those names — no glob would match anything.
 		assertCallee(t, `childProcess.execSync(userInput);`, "childProcess.execSync")
 	})
-}
 
-func mustParseOK(t *testing.T, src string) *jsast.File {
-	t.Helper()
-	f, errs := jsast.Parse(src, jsast.Options{})
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", src, errs)
-	}
-	return f
+	t.Run("module syntax is not rewritten", func(t *testing.T) {
+		// Bundle mode rewrites require/import into linker shape. Both alias tables
+		// pattern-match the source forms, so every module-anchored sink
+		// (js:child_process.exec) would stop matching while the file still parses.
+		f := mustParse(t, `const cp = require("child_process");`)
+		decl := f.Stmts[0].Data.(*jsast.SLocal).Decls[0]
+		if _, ok := unwrap(decl.ValueOrNil).Data.(*jsast.ECall); !ok {
+			t.Errorf("require lowered as %T, want a plain call", decl.ValueOrNil.Data)
+		}
+		f = mustParse(t, `import { exec } from "child_process";`)
+		if _, ok := f.Stmts[0].Data.(*jsast.SImport); !ok {
+			t.Errorf("import lowered as %T, want an import statement", f.Stmts[0].Data)
+		}
+	})
 }
 
 // assertCallee parses src and asserts the syntactic callee of the first call it
 // finds, which is exactly the string the lowering would put in Call.Callee.
 func assertCallee(t *testing.T, src, want string) {
 	t.Helper()
-	f := mustParseOK(t, src)
+	f := mustParse(t, src)
 	call, ok := firstCall(f.Stmts)
 	if !ok {
 		t.Fatalf("no call survived the parse of %q", src)
@@ -156,7 +162,7 @@ func TestLineIndexAgainstParse(t *testing.T) {
 		"  cp.exec(cmd);",
 		"}",
 	}, "\r\n")
-	f := mustParseOK(t, src)
+	f := mustParse(t, src)
 	li := newLineIndex("f.js", src)
 	fn, ok := f.Stmts[1].Data.(*jsast.SFunction)
 	if !ok {

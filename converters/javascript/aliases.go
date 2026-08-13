@@ -131,22 +131,11 @@ func requireTarget(f *jsast.File, e jsast.Expr) (mod, member string, ok bool) {
 
 // requireCallModule returns the string-literal module of a `require('m')` call.
 func requireCallModule(f *jsast.File, call *jsast.ECall) (string, bool) {
-	if name, ok := calleeIdentName(f, call.Target); !ok || name != "require" || len(call.Args) != 1 {
+	if name, ok := identName(f, call.Target); !ok || name != "require" || len(call.Args) != 1 {
 		return "", false
 	}
 	if s, ok := unwrap(call.Args[0]).Data.(*jsast.EString); ok {
 		return jsast.UTF16ToString(s.Value), true
-	}
-	return "", false
-}
-
-// calleeIdentName returns the source name of an identifier expression.
-func calleeIdentName(f *jsast.File, e jsast.Expr) (string, bool) {
-	switch v := unwrap(e).Data.(type) {
-	case *jsast.EIdentifier:
-		return f.NameOf(v.Ref), true
-	case *jsast.EImportIdentifier:
-		return f.NameOf(v.Ref), true
 	}
 	return "", false
 }
@@ -187,7 +176,7 @@ func collectIdentityWrapperAliases(f *jsast.File, aliases map[string]string) {
 		if !identityWrappers[calleeTrailingName(f, call.Target)] {
 			continue
 		}
-		arg, ok := calleeIdentName(f, call.Args[0])
+		arg, ok := identName(f, call.Args[0])
 		if !ok {
 			continue
 		}
@@ -205,7 +194,7 @@ func calleeTrailingName(f *jsast.File, e jsast.Expr) string {
 	if dot, ok := unwrap(e).Data.(*jsast.EDot); ok {
 		return dot.Name
 	}
-	name, _ := calleeIdentName(f, e)
+	name, _ := identName(f, e)
 	return name
 }
 
@@ -216,7 +205,7 @@ func calleeTrailingName(f *jsast.File, e jsast.Expr) string {
 // Deliberately NOT IsJSFamily: this is matched CASE-SENSITIVELY against a
 // specifier written in source (`require('./util.js')`), whereas IsJSFamily
 // lowercases a filesystem path — routing it through IsJSFamily would change how
-// `./util.JS` resolves. Extend it by hand alongside isDialectExt.
+// `./util.JS` resolves. Extend it by hand alongside IsJSFamily.
 var jsFamilyExts = map[string]bool{
 	".js": true, ".mjs": true, ".cjs": true,
 	".ts": true, ".tsx": true, ".jsx": true,
@@ -343,7 +332,7 @@ func isModuleExports(f *jsast.File, e jsast.Expr) bool {
 	if !ok || dot.Name != "exports" {
 		return false
 	}
-	base, ok := calleeIdentName(f, dot.Target)
+	base, ok := identName(f, dot.Target)
 	return ok && base == "module"
 }
 

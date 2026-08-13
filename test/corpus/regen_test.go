@@ -52,3 +52,28 @@ func TestRegenerateManifests(t *testing.T) {
 		t.Logf("%s -> %v", path, countByRule(res.Findings))
 	}
 }
+
+// TestRegenerateJSPositionGolden rewrites the position golden TestJSFindingPositions
+// asserts against. It lives here, behind the same GODZILLA_REGEN gate as the
+// manifests, so the gate itself stays a pure assertion.
+func TestRegenerateJSPositionGolden(t *testing.T) {
+	if os.Getenv("GODZILLA_REGEN") == "" {
+		t.Skip("set GODZILLA_REGEN=1 to regenerate the position golden")
+	}
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := scan.Scan("../js", rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := renderPositions(t, res.Findings)
+	if err := os.MkdirAll(filepath.Dir(goldenPositions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(goldenPositions, []byte(got), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %s", goldenPositions)
+}

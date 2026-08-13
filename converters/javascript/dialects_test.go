@@ -18,8 +18,8 @@ import (
 // reported ok while 165 of parse-server's 192 files were being dropped.
 //
 // Each file below is a dialect that reached production and is legal input. Adding
-// one here is how a newly-encountered dialect gets locked in; a failure means the
-// loader ladder needs another rung, not that the fixture is wrong.
+// one here is how a newly-encountered dialect gets locked in; a failure means
+// parseLadder needs another rung, not that the fixture is wrong.
 func TestDialectsAllConvert(t *testing.T) {
 	dir := filepath.Join("testdata", "dialects")
 	entries, err := os.ReadDir(dir)
@@ -71,5 +71,38 @@ func TestConvertCorpusTreeSkipsOnlyBroken(t *testing.T) {
 	}
 	if c.Skipped() != 1 {
 		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.js)", c.Skipped())
+	}
+}
+
+// TestLadderOrderKeepsRelationalArgs pins the rung ORDER, which is load-bearing
+// in a way no parse error reveals.
+//
+// `f(a < b, c > (d))` is legal under BOTH the JS and TS rungs, and they disagree
+// about what it means: JS reads two relational arguments, TS reads one argument
+// with a type-argument list. Try TS first and an argument — and whatever taint
+// flowed through it — silently leaves the IR, with nothing failing to parse.
+// A .js file is JavaScript until proven otherwise, so the plain rung goes first.
+func TestLadderOrderKeepsRelationalArgs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relational.js")
+	if err := os.WriteFile(path, []byte("sink(a < b, c > (d));\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod, _, err := NewConverter().convertJSFile(path, "relational")
+	if err != nil {
+		t.Fatalf("convertJSFile: %v", err)
+	}
+	args := -1
+	for _, fn := range mod.Functions {
+		for _, b := range fn.Blocks {
+			for _, in := range b.Instrs {
+				if in.GetCall().GetCallee() == "js:sink" {
+					args = len(in.GetCall().GetArgs())
+				}
+			}
+		}
+	}
+	if args != 2 {
+		t.Errorf("js:sink lowered with %d args, want 2 — the TS rung ran first and ate one", args)
 	}
 }
