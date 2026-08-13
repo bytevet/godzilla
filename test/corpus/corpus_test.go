@@ -121,6 +121,9 @@ func TestCorpus(t *testing.T) {
 				if got[ef.Rule] < min {
 					t.Errorf("rule %q: want >= %d finding(s), got %d", ef.Rule, min, got[ef.Rule])
 				}
+				if ef.Max > 0 && got[ef.Rule] > ef.Max {
+					t.Errorf("rule %q: want <= %d finding(s), got %d", ef.Rule, ef.Max, got[ef.Rule])
+				}
 				if !ef.matchesLocation(res.Findings) {
 					t.Errorf("rule %q: no finding matched the expected location (line=%d sink=%q)", ef.Rule, ef.Line, ef.Sink)
 				}

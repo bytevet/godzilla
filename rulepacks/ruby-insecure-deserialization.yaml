@@ -1,0 +1,40 @@
+# Insecure deserialization (Ruby, CWE-502): untrusted input reaching a
+# deserializer that can instantiate arbitrary objects. Ruby's classic RCE class —
+# Marshal and unsafe YAML both rebuild object graphs, so a crafted payload runs
+# code during load, without ever calling eval.
+rules:
+  - id: ruby-insecure-deserialization
+    languages: [ruby]
+    severity: critical
+    cwe: CWE-502
+    message: >-
+      Untrusted input flows into a deserializer that can instantiate arbitrary
+      objects, which may allow remote code execution. Use a data-only format
+      (JSON.parse) or the safe loader (YAML.safe_load with an explicit
+      permitted_classes list); never Marshal.load attacker-controlled bytes.
+    extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
+    sinks:
+      # Marshal rebuilds any object graph; there is no safe mode.
+      - "ruby:Marshal.load"
+      - "ruby:Marshal.restore"
+      # YAML.load is unsafe on older Psych and explicitly unsafe here; the safe
+      # entry points are listed as sanitizers below. Oj in its default (object)
+      # mode is the JSON equivalent.
+      - "ruby:YAML.load"
+      - "ruby:YAML.load_file"
+      - "ruby:YAML.unsafe_load"
+      - "ruby:YAML.unsafe_load_file"
+      - "ruby:Psych.load"
+      - "ruby:Psych.unsafe_load"
+      - "ruby:Oj.load"
+      - "ruby:Oj.object_load"
+    # These parse the SAME formats without instantiating arbitrary classes, so a
+    # value that has been through them cannot carry an object-graph payload.
+    # safe_load without permitted_classes is still safe for RCE; it raises on a
+    # non-permitted class rather than building it.
+    sanitizers:
+      - "ruby:YAML.safe_load"
+      - "ruby:YAML.safe_load_file"
+      - "ruby:Psych.safe_load"
+      - "ruby:JSON.parse"
+      - "ruby:Oj.safe_load"

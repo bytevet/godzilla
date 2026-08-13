@@ -872,6 +872,33 @@ func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
 	return out
 }
 
+// reactHTMLSink is the synthetic callee react-xss.yaml matches. Spelled with the
+// `js:` prefix because emitCall writes the callee verbatim -- sfc.go's Vue
+// equivalent gets the prefix for free by injecting source text that is then
+// lowered as an ordinary call.
+const reactHTMLSink = "js:__godzilla_react_html"
+
+// emitReactHTMLSink gives React's dangerouslySetInnerHTML a callee to match.
+// It is the framework's one documented escape from JSX auto-escaping, but unlike
+// Vue's v-html it is spelled as DATA, not a directive: esbuild lowers the JSX
+// attribute to a `{__html: x}` object literal inside a createElement props
+// argument, so nothing in the IR is a call and no sink glob can name it. Mirror
+// it the way sfc.go mirrors v-html -- emit a call carrying the value.
+//
+// Keyed on the inner `__html`, not the attribute name. __html is React's own
+// marker and the only reason to build such an object, and keying on it also
+// catches the indirect form (`const h = {__html: x}` handed to the attribute by
+// variable) that keying on the attribute would miss.
+func (fs *funcState) emitReactHTMLSink(o *ast.ObjectLiteral) {
+	for _, p := range o.Value {
+		kp, ok := p.(*ast.PropertyKeyed)
+		if !ok || propertyKeyName(kp.Key) != "__html" || kp.Value == nil {
+			continue
+		}
+		fs.emitCall(reactHTMLSink, []ast.Expression{kp.Value}, kp.Value.Idx0())
+	}
+}
+
 // propertyKeyName extracts the static field name of a destructuring property
 // key (an identifier or string literal); other computed keys yield "".
 func propertyKeyName(key ast.Expression) string {
@@ -968,6 +995,7 @@ func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
 				vals = append(vals, pv)
 			}
 		}
+		fs.emitReactHTMLSink(v)
 		return fs.lowerAggregate(vals, v.Idx0())
 
 	case *ast.SpreadElement:
@@ -1258,8 +1286,26 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 // `Foo(args)` call.
 func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 	fs.lowerNestedCallees(v.Callee)
-	return fs.emitCall("js:new:"+syntacticCallee(v.Callee), v.ArgumentList, v.Idx0())
+	callee := "js:new:" + syntacticCallee(v.Callee)
+	inst := fs.emitCallRecvInst(callee, nil, v.ArgumentList, v.Idx0())
+	// A URL's text is its argument's text, so mark it for ssrf.go's hostFixed():
+	// without the marker the constructor hides the constant host inside it and
+	// `fetch(new URL("https://fixed/x?q=" + tainted))` reads as a dynamic host.
+	// Taint itself flows through the js:new:URL default propagator, not here.
+	//
+	// One argument only. The two-argument form resolves against a BASE
+	// (`new URL(path, base)`) whose host wins, and Args[0] is the path, so
+	// claiming identity there would let a tainted base look constant -- a false
+	// negative. Unmarked it stays dynamic, which fires.
+	if callee == "js:new:URL" && len(v.ArgumentList) == 1 {
+		inst.Intrinsic = identityIntrinsic
+	}
+	return ssabuild.Reg(inst.Name)
 }
+
+// identityIntrinsic mirrors internal/analysis/ssrf.go: the cross-frontend marker
+// for a value whose text is its Args[0]'s text.
+const identityIntrinsic = "builtin.identity"
 
 // lowerNestedCallees walks a call/new expression's callee along the same
 // Dot/Bracket "Left" chain syntacticCallee walks and lowers any CallExpression

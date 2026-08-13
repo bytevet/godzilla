@@ -55,9 +55,11 @@ const memberReadIntrinsic = "builtin.member_read"
 // args, and a call site may pass keywords in any order, so without this marker
 // `shell=True` is indistinguishable from `check=True` once lowered.
 //
-// Frontends wrap only CONSTANT values, so the marker never hides taint: it is
-// deliberately absent from intrinsicPropagators, and everything that reads an
-// argument's constant unwraps it first (see unwrapKwarg).
+// A frontend wraps every keyword value, constant or not, so that a guard can tell
+// a keyword that was never passed (absent from kwargs) from one passed a value we
+// cannot read (present, dynamic). The marker therefore CAN carry taint, which is
+// why it is in intrinsicPropagators with its value in Operands; everything that
+// reads an argument's constant unwraps it first (see unwrapKwarg).
 const kwargIntrinsic = "builtin.kwarg"
 
 // unwrapKwarg resolves v through a kwargIntrinsic marker, returning the keyword

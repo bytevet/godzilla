@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+# eval, a tainted send() NAME, and a tainted ERB template. The pins are #1, not
+# #0: a Ruby dot-call carries its receiver as logical argument 0, so #0 selects
+# the receiver and never fires. data_to_fixed_method and constant_template must
+# stay clean — max: 3 pins both directions.
+findings:
+    - rule: ruby-code-injection
+      min: 3
+      max: 3

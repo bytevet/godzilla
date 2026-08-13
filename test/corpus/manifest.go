@@ -104,7 +104,12 @@ type Expectation struct {
 	Findings []ExpectedFinding `yaml:"findings"`
 }
 
-// ExpectedFinding says a rule must fire at least Min times (Min defaults to 1).
+// ExpectedFinding says a rule must fire at least Min times (Min defaults to 1)
+// and, when Max is set, at most Max times. Max is what pins a sample's SAFE
+// half: without it an over-count of an already-expected rule passes silently,
+// so a sanitizer that stopped sanitizing or a sink pinned at the wrong argument
+// index would go unnoticed.
+//
 // Line and Sink are OPTIONAL location assertions: when set, at least one finding
 // of that rule must land at that sink LINE and/or have a sink callee containing
 // that substring. This upgrades the oracle from "rule fired" to "rule fired at
@@ -113,6 +118,7 @@ type Expectation struct {
 type ExpectedFinding struct {
 	Rule string `yaml:"rule"`
 	Min  int    `yaml:"min"`
+	Max  int    `yaml:"max,omitempty"`
 	Line int32  `yaml:"line,omitempty"`
 	Sink string `yaml:"sink,omitempty"`
 }

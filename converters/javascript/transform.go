@@ -56,13 +56,13 @@ func needsTransform(path string) bool {
 // plus a sourcemap consumer mapping transformed positions back to the original
 // file. A build error is returned so the directory merge treats the file as a
 // skipped/failed conversion, exactly like a parse error.
-func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error) {
+func transformToJS(path string, src []byte, target api.Target) (string, *sourcemap.Consumer, error) {
 	// Hoisted: converting per rung re-copies the whole source, and a file that
 	// fails every rung is exactly the large one.
 	code, base := string(src), filepath.Base(path)
 	var firstErr error
 	for _, loader := range loaderLadder(path) {
-		out, cons, err := runESBuild(code, loader, base)
+		out, cons, err := runESBuild(code, loader, base, target)
 		if err == nil {
 			return out, cons, nil
 		}
@@ -76,7 +76,7 @@ func transformToJS(path string, src []byte) (string, *sourcemap.Consumer, error)
 	// open: a Flow file may also be an ES module or use JSX.
 	if stripped, ok := stripFlow(code); ok && stripped != code {
 		for _, loader := range loaderLadder(path) {
-			if out, cons, err := runESBuild(stripped, loader, base); err == nil {
+			if out, cons, err := runESBuild(stripped, loader, base, target); err == nil {
 				return out, cons, nil
 			}
 		}
@@ -107,24 +107,78 @@ func loaderLadder(path string) []api.Loader {
 	}
 }
 
-// esbuildSupported marks `import(...)` unsupported, and is hoisted out of
-// runESBuild so the map is not reallocated per transform. The consumer is goja,
-// not a browser, and goja cannot parse `import(...)`; ESNext otherwise counts it
-// as supported, so esbuild passes it through untouched and the file fails at
-// PARSE time instead of transform time — which reads as a broken transform when
-// it is really an unsupported construct. Declaring it unsupported makes esbuild
-// downlevel it to the require-based form the lowering already understands.
-var esbuildSupported = map[string]bool{"dynamic-import": false}
+// esbuildSupported names the constructs esbuild must downlevel because the
+// consumer is GOJA, not a browser. Hoisted out of runESBuild so the map is not
+// reallocated per transform.
+//
+// Declaring one costs nothing when it is absent -- esbuild rewrites only what the
+// file actually contains -- which is why this is always on rather than a ladder
+// rung. Left at ESNext, esbuild counts these as supported and passes them
+// through, so the file dies at PARSE time and reads as a broken transform when it
+// is really a construct goja cannot spell.
+//
+// Keyed to goja's gaps rather than to an ES year, because its support is RAGGED:
+// it reads ES2022 class fields, private methods and static blocks but not
+// ES2018's `for await`. The only year low enough to catch that is ES2017, which
+// would also rewrite object spread into a helper and lose the taint through it.
+// gojacaps_test.go pins each entry; when a goja bump makes one parse natively the
+// test fails and the entry should be REMOVED.
+//
+// Not here: top-level await. esbuild's Transform API refuses to downlevel it at
+// every target and format (it can only emulate TLA while bundling), so declaring
+// it unsupported would turn a parse failure into a transform failure without
+// rescuing the file.
+var esbuildSupported = map[string]bool{
+	"dynamic-import": false,
+	"decorators":     false, // Ember/Angular `@service`; also covers ES2025 auto-accessors
+	"for-await":      false,
+	"using":          false,
+}
+
+// The ES level esbuild emits. primaryTarget keeps modern syntax intact, since
+// goja reads nearly all of it and every downlevel is a chance to lose a flow.
+// fallbackTarget is the catch-all rung: it downlevels EVERYTHING above it, which
+// is what covers a construct esbuildSupported does not name -- including syntax
+// that does not exist yet. It costs precision (object spread becomes a helper
+// call taint does not survive), so it is reached only after goja has already
+// rejected the primary output, never speculatively.
+const (
+	primaryTarget  = api.ESNext
+	fallbackTarget = api.ES2017
+)
+
+// fallbackTargets returns the ES targets to re-lower at when goja cannot read the
+// first attempt's output. Each rung re-lowers the ORIGINAL source, so every
+// attempt carries its own sourcemap and none are ever composed (flowstrip.go).
+func fallbackTargets(transformed bool) []api.Target {
+	if transformed {
+		return []api.Target{fallbackTarget} // primary already ran
+	}
+	// A plain .js goja could not read has not been through esbuild at all yet, so
+	// the primary target is itself a rung.
+	return []api.Target{primaryTarget, fallbackTarget}
+}
+
+// lowerAt produces the JS goja will read, at the given ES target: the SFC
+// extractor for .vue/.svelte, the loader ladder otherwise. dirs is nil for
+// everything but an SFC.
+func lowerAt(path string, src []byte, target api.Target) (string, *sourcemap.Consumer, []directivePos, error) {
+	if isSFC(path) {
+		return extractSFCToJS(path, src, target)
+	}
+	code, consumer, err := transformToJS(path, src, target)
+	return code, consumer, nil, err
+}
 
 // runESBuild is the shared esbuild pass behind transformToJS and the SFC
 // extractor, so both use identical options. The returned consumer is nil if the
 // map is missing or unparseable — non-fatal, positions then stay in transformed
 // coordinates.
-func runESBuild(code string, loader api.Loader, sourcefile string) (string, *sourcemap.Consumer, error) {
+func runESBuild(code string, loader api.Loader, sourcefile string, target api.Target) (string, *sourcemap.Consumer, error) {
 	res := api.Transform(code, api.TransformOptions{
 		Loader:      loader,
 		Format:      api.FormatCommonJS,
-		Target:      api.ESNext,
+		Target:      target,
 		Sourcemap:   api.SourceMapExternal,
 		Sourcefile:  sourcefile,
 		Supported:   esbuildSupported,

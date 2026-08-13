@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+# max: 2 is the assertion. Escaped JSX children ({bio}), a DOMPurify-sanitized
+# value and a constant all sit in the same file as the two vulnerable shapes, so
+# a sink that fired on the attribute rather than on the tainted value -- or one
+# that ignored the sanitizer -- fails here rather than passing quietly.
+findings:
+    - rule: react-xss
+      min: 2
+      max: 2
+      sink: "js:__godzilla_react_html"

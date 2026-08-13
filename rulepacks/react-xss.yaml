@@ -1,0 +1,34 @@
+# React XSS: untrusted input flowing into dangerouslySetInnerHTML, the one
+# documented way out of JSX's auto-escaping. Ordinary JSX interpolation
+# (`<div>{x}</div>`) escapes and is NOT modeled as a sink.
+#
+# React spells the escape as DATA rather than as a directive, so unlike Vue's
+# v-html there is no callee in the lowered IR to name: esbuild turns the JSX
+# attribute into a `{__html: x}` object literal in a createElement props
+# argument. converters/javascript/lower.go (emitReactHTMLSink) emits a synthetic
+# `js:__godzilla_react_html(x)` call for it, which is what this rule matches --
+# so a constant or sanitized value is untainted and never fires.
+rules:
+  - id: react-xss
+    languages: [javascript]
+    # Align with js-xss / vue-xss / go-xss (same CWE-79) so the CI gate treats
+    # XSS identically regardless of source language / framework.
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input flows into React's `dangerouslySetInnerHTML`, which
+      bypasses JSX's auto-escaping and renders the value as raw HTML, allowing
+      Cross-Site Scripting (XSS). Render the value as ordinary JSX children
+      ({x}), which escapes, or sanitize it (e.g. DOMPurify.sanitize) before
+      passing it as HTML.
+    # Shared browser sources + HTML sanitizers come from the fragment; only the
+    # React-specific sources stay inline.
+    extend: $_js-sfc-xss.yaml
+    sources:
+      # react-router route params/query — the framework's request input.
+      - "js:*useParams"
+      - "js:*useSearchParams"
+      - "js:*useLocation"
+    sinks:
+      - "js:__godzilla_react_html"
+    propagators: []

@@ -2,6 +2,7 @@ package ruby_converter
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,7 +22,10 @@ import (
 // IS a sink, and gets one the same way a Vue `v-html` does: its delimiters are
 // rewritten to a `raw(...)` call. Every such rewrite is length-preserving — see
 // copyERBTag for the widths it relies on.
-func erbToRuby(src []byte) []byte {
+//
+// autoEscape false makes `<%= %>` a sink too, for template engines that do not
+// escape it (see erbAutoEscapes).
+func erbToRuby(src []byte, autoEscape bool) []byte {
 	out := blankAll(src)
 	for i := 0; i < len(src); {
 		open := bytes.Index(src[i:], []byte("<%"))
@@ -35,7 +39,7 @@ func erbToRuby(src []byte) []byte {
 		}
 		tagEnd += open
 		i = tagEnd + 2
-		copyERBTag(src, out, open, tagEnd)
+		copyERBTag(src, out, open, tagEnd, autoEscape)
 	}
 	return out
 }
@@ -54,7 +58,7 @@ func blankAll(src []byte) []byte {
 
 // copyERBTag copies one ERB tag's Ruby into out. open points at "<%", close at
 // the "%>" that ends it. Everything outside the tag is already blank.
-func copyERBTag(src, out []byte, open, tagEnd int) {
+func copyERBTag(src, out []byte, open, tagEnd int, autoEscape bool) {
 	body := open + 2 // first byte after "<%"
 	end := tagEnd    // one past the last body byte
 	if body > tagEnd {
@@ -90,6 +94,21 @@ func copyERBTag(src, out []byte, open, tagEnd int) {
 			// nesting, so it stays a plain expression: losing one tag's sink beats
 			// a syntax error losing the whole template.
 		}
+	case src[body] == '=' && !autoEscape:
+		// `<%= expr %>` in an engine that does not escape. `<%= ` and `raw(` are
+		// both four bytes and ` %>` closes as `);`, so the spaced form — the
+		// idiomatic one — becomes a sink at no positional cost. The unspaced
+		// `<%=expr%>` has only three bytes of prefix and no room, so it stays a
+		// plain expression, as does a trailing modifier (which would need the
+		// nested `raw((` the `<%==` branch above uses).
+		if src[body+1] == ' ' && src[tagEnd-1] == ' ' && !hasTrailingModifier(src[body+2:tagEnd]) {
+			copy(out[open:], []byte("raw("))
+			copy(out[tagEnd-1:], []byte(");"))
+			body += 2
+			end--
+		} else {
+			body++
+		}
 	case src[body] == '=':
 		body++ // <%= expr %> — auto-escaped by Rails, emitted as a plain expression
 	}
@@ -110,6 +129,22 @@ func copyERBTag(src, out []byte, open, tagEnd int) {
 // `<name>.html.erb` / `<name>.js.erb`; the format segment is not significant
 // here, only the .erb suffix.
 func IsERBFile(path string) bool { return strings.HasSuffix(path, ".erb") }
+
+// erbAutoEscapes reports whether `<%= %>` in this template is HTML-escaped for
+// us. An ActionView template is; a Cells view model's is NOT -- the cells gem
+// compiles with Erbse, which has no SafeBuffer and emits the value verbatim, so
+// every interpolation there is an unescaped sink.
+//
+// Decided by path because the engine is chosen by directory, not by anything in
+// the file. Decidim is the evidence: its cells escape by hand
+// (`decidim_html_escape(...)` inside app/cells), which is only necessary because
+// the template does not -- and CVE-2024-41673 is the one that got missed.
+func erbAutoEscapes(path string) bool {
+	// Both spellings matter: the directory is mid-path when a monorepo or an
+	// absolute path is scanned, and a bare prefix when the scan root IS the app.
+	s := filepath.ToSlash(path)
+	return !strings.Contains(s, "/app/cells/") && !strings.HasPrefix(s, "app/cells/")
+}
 
 // modifierKeywords end an expression and start a trailing condition, so they
 // cannot appear inside a parenthesized call argument.

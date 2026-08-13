@@ -15,5 +15,17 @@ rules:
       - "js:*.eval"
       - "js:Function"
       - "js:*.Function"
+      # The vm module compiles and runs a STRING as JavaScript. It is often
+      # mistaken for a sandbox — Node's own docs say it is not a security
+      # mechanism — so a tainted script is code execution, not isolation.
+      # Arg 1 is the context/sandbox object, so every pin is #0.
+      #
+      # vm.Script also covers `new vm.Script(...)`: the frontend names a
+      # construction `js:new:<callee>`, which this suffix glob matches.
+      - "js:*vm.runInNewContext#0"
+      - "js:*vm.runInThisContext#0"
+      - "js:*vm.runInContext#0"
+      - "js:*vm.compileFunction#0"
+      - "js:*vm.Script#0"
     sanitizers: []
     propagators: []

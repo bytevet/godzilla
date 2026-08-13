@@ -1,5 +1,91 @@
-# Shared Ruby string propagators. Pulled into the ruby-*.yaml rules with
+# Shared Ruby propagators. Pulled into the ruby-*.yaml rules with
 # `extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]`.
+#
+# BOTH forms of every name are listed. The frontend emits a receiver-qualified
+# callee only when the receiver is a NAMED base it recognises (`params.fetch`,
+# `IO.popen`); a call on any other expression lowers to the BARE method name, so
+# `params[:q].strip` is `ruby:strip`, not `ruby:x.strip`. A `ruby:*.strip`-only
+# glob therefore matches nothing in the common case — which is how the two
+# propagators this file used to hold managed to never fire.
+#
+# These RE-SHAPE a string; none makes an attacker-controlled value safe for any
+# sink, which is why they propagate rather than sanitize. Over-matching a bare
+# name is bounded: a propagator only carries taint that a source already put on
+# the receiver.
 propagators:
+  - "ruby:to_s"
   - "ruby:*.to_s"
+  - "ruby:to_str"
+  - "ruby:*.to_str"
+  - "ruby:to_sym"
+  - "ruby:*.to_sym"
+  - "ruby:join"
   - "ruby:*.join"
+  - "ruby:strip"
+  - "ruby:*.strip"
+  - "ruby:lstrip"
+  - "ruby:*.lstrip"
+  - "ruby:rstrip"
+  - "ruby:*.rstrip"
+  - "ruby:chomp"
+  - "ruby:*.chomp"
+  - "ruby:chop"
+  - "ruby:*.chop"
+  - "ruby:squish"
+  - "ruby:*.squish"
+  - "ruby:upcase"
+  - "ruby:*.upcase"
+  - "ruby:downcase"
+  - "ruby:*.downcase"
+  - "ruby:capitalize"
+  - "ruby:*.capitalize"
+  - "ruby:swapcase"
+  - "ruby:*.swapcase"
+  - "ruby:sub"
+  - "ruby:*.sub"
+  - "ruby:gsub"
+  - "ruby:*.gsub"
+  - "ruby:tr"
+  - "ruby:*.tr"
+  - "ruby:slice"
+  - "ruby:*.slice"
+  - "ruby:split"
+  - "ruby:*.split"
+  - "ruby:first"
+  - "ruby:*.first"
+  - "ruby:last"
+  - "ruby:*.last"
+  - "ruby:flatten"
+  - "ruby:*.flatten"
+  - "ruby:compact"
+  - "ruby:*.compact"
+  - "ruby:values"
+  - "ruby:*.values"
+  - "ruby:fetch"
+  - "ruby:*.fetch"
+  - "ruby:dig"
+  - "ruby:*.dig"
+  - "ruby:freeze"
+  - "ruby:*.freeze"
+  - "ruby:dup"
+  - "ruby:*.dup"
+  - "ruby:encode"
+  - "ruby:*.encode"
+  - "ruby:force_encoding"
+  - "ruby:*.force_encoding"
+  - "ruby:presence"
+  - "ruby:*.presence"
+  # Rails StrongParameters. require/permit FILTER which keys survive; the values
+  # that do are still whatever the client sent, so the result carries taint.
+  # Without these the idiomatic `params.require(:user).permit(:name)` — the way a
+  # Rails controller is supposed to read input — starts every flow untainted.
+  - "ruby:require"
+  - "ruby:*.require"
+  - "ruby:permit"
+  - "ruby:*.permit"
+  - "ruby:permit!"
+  - "ruby:*.permit!"
+  - "ruby:except"
+  - "ruby:*.except"
+  - "ruby:with_defaults"
+  - "ruby:*.with_defaults"
