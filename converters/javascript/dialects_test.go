@@ -48,12 +48,15 @@ func TestDialectsAllConvert(t *testing.T) {
 // coverage, which is what makes a partially-dropped project visible.
 func TestDialectsScanReportsFullCoverage(t *testing.T) {
 	c := NewConverter()
-	if _, err := c.ConvertFile(filepath.Join("testdata", "dialects")); err != nil {
+	prog, err := c.ConvertFile(filepath.Join("testdata", "dialects"))
+	if err != nil {
 		t.Fatalf("ConvertFile(dialects): %v", err)
 	}
 	if c.Skipped() != 0 {
 		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see parseLadder", c.Skipped())
 	}
+	// Converting is half of it: a dialect can parse and still lower to a fallback.
+	requireNoFallbackIntrinsic(t, prog, "testdata/dialects")
 }
 
 // TestConvertCorpusTreeSkipsOnlyBroken pins the skip count over the whole JS
@@ -66,12 +69,14 @@ func TestDialectsScanReportsFullCoverage(t *testing.T) {
 // still being read, and the dropped one simply has no findings to miss.
 func TestConvertCorpusTreeSkipsOnlyBroken(t *testing.T) {
 	c := NewConverter()
-	if _, err := c.ConvertFile(filepath.Join("..", "..", "test", "js")); err != nil {
+	prog, err := c.ConvertFile(filepath.Join("..", "..", "test", "js"))
+	if err != nil {
 		t.Fatalf("ConvertFile(test/js): %v", err)
 	}
 	if c.Skipped() != 1 {
 		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.js)", c.Skipped())
 	}
+	requireNoFallbackIntrinsic(t, prog, "test/js")
 }
 
 // TestLadderOrderKeepsRelationalArgs pins the rung ORDER, which is load-bearing
