@@ -585,3 +585,24 @@ func TestCollectImportAliases(t *testing.T) {
 		t.Errorf("relative import should be skipped")
 	}
 }
+
+// TestConvertCorpusTreeIsFullyModeled converts the whole Python corpus and pins
+// both halves of "this tree converted completely": exactly one file skipped
+// (resilience/broken.py, deliberately unparseable) and no instruction lowered to
+// a fallback intrinsic.
+//
+// Neither is visible otherwise. A batch errors only when ZERO files convert, so
+// a frontend can drop all but one file and still report Converted; and an
+// unmodelled construct costs findings with nothing failing.
+func TestConvertCorpusTreeIsFullyModeled(t *testing.T) {
+	requirePython3(t)
+	c := NewConverter()
+	prog, err := c.ConvertFile(filepath.Join("..", "..", "test", "python"))
+	if err != nil {
+		t.Fatalf("ConvertFile(test/python): %v", err)
+	}
+	if c.Skipped() != 1 {
+		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.py)", c.Skipped())
+	}
+	testsupport.RequireNoFallbackIntrinsic(t, prog, "py.unsupported", "test/python")
+}

@@ -83,20 +83,6 @@ func requireFinding(t *testing.T, findings []analysis.Finding, ruleID string) an
 	return analysis.Finding{}
 }
 
-// requireNoFallbackIntrinsic asserts no instruction lowered to js.unsupported.
-// A fallback marks a construct the lowering does not model, and it is silent:
-// the file still converts, so only this catches it.
-func requireNoFallbackIntrinsic(t *testing.T, prog *ir.Program, what string) {
-	t.Helper()
-	for _, fn := range irwalk.Funcs(prog) {
-		for inst := range irwalk.Instrs(fn) {
-			if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "js.unsupported" {
-				t.Errorf("%s: unsupported instruction in %s: %s", what, fn.CanonicalName, inst.Comment)
-			}
-		}
-	}
-}
-
 func TestConvertXSSSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/xss/app.js")
 

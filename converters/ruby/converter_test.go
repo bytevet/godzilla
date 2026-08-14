@@ -1,6 +1,7 @@
 package ruby_converter
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -82,4 +83,24 @@ func hasRule(findings []analysis.Finding, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestConvertCorpusTreeIsFullyModeled converts the whole Ruby corpus and pins
+// both halves of "this tree converted completely": nothing skipped, and no
+// instruction lowered to a fallback intrinsic.
+//
+// Neither is visible otherwise. A batch errors only when ZERO files convert, so
+// a frontend can drop all but one file and still report Converted; and an
+// unmodelled construct costs findings with nothing failing.
+func TestConvertCorpusTreeIsFullyModeled(t *testing.T) {
+	requireRuby(t)
+	c := NewConverter()
+	prog, err := c.ConvertFile(filepath.Join("..", "..", "test", "ruby"))
+	if err != nil {
+		t.Fatalf("ConvertFile(test/ruby): %v", err)
+	}
+	if c.Skipped() != 0 {
+		t.Errorf("Skipped() = %d, want 0", c.Skipped())
+	}
+	testsupport.RequireNoFallbackIntrinsic(t, prog, "ruby.unsupported", "test/ruby")
 }

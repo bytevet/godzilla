@@ -2,6 +2,8 @@ package js_converter
 
 import (
 	"os"
+
+	"github.com/bytevet/godzilla/internal/testsupport"
 	"path/filepath"
 	"testing"
 )
@@ -56,7 +58,7 @@ func TestDialectsScanReportsFullCoverage(t *testing.T) {
 		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see parseLadder", c.Skipped())
 	}
 	// Converting is half of it: a dialect can parse and still lower to a fallback.
-	requireNoFallbackIntrinsic(t, prog, "testdata/dialects")
+	testsupport.RequireNoFallbackIntrinsic(t, prog, "js.unsupported", "testdata/dialects")
 }
 
 // TestConvertCorpusTreeSkipsOnlyBroken pins the skip count over the whole JS
@@ -76,7 +78,7 @@ func TestConvertCorpusTreeSkipsOnlyBroken(t *testing.T) {
 	if c.Skipped() != 1 {
 		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.js)", c.Skipped())
 	}
-	requireNoFallbackIntrinsic(t, prog, "test/js")
+	testsupport.RequireNoFallbackIntrinsic(t, prog, "js.unsupported", "test/js")
 }
 
 // TestLadderOrderKeepsRelationalArgs pins the rung ORDER, which is load-bearing

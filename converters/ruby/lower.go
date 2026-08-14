@@ -381,6 +381,27 @@ func (fs *funcState) ivarGlobal(ivarName string) string {
 	return "rubyfield:" + fs.moduleName + "." + fs.classQual + ivarName
 }
 
+// assocPairs returns the `assoc_new` pairs of a hash node. Ripper spells the two
+// hash forms differently -- `bare_assoc_hash` holds the pair list directly, while
+// a braced `hash` wraps it in `assoclist_from_args` (and is nil when empty).
+func assocPairs(n interface{}) []interface{} {
+	list := at(n, 1)
+	if tag(list) == "assoclist_from_args" {
+		list = at(list, 1)
+	}
+	pairs, ok := asList(list)
+	if !ok {
+		return nil
+	}
+	var out []interface{}
+	for _, p := range pairs {
+		if tag(p) == "assoc_new" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func posFrom(filename string, n interface{}) *ir.Position {
 	if line, col, ok := firstPos(n); ok {
 		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col)}
@@ -494,7 +515,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerStringContent(n)
 	case "xstring_literal":
 		return fs.lowerBacktick(n)
-	case "@tstring_content", "@int", "@float", "@CHAR":
+	// @label is a keyword-argument key (`name:`) -- a symbol literal, like the rest.
+	case "@tstring_content", "@int", "@float", "@CHAR", "@label":
 		return ssabuild.Str(scalarText(n))
 	case "string_embexpr":
 		// `#{ stmts }` — lower the inner statements, return the last value.
@@ -576,6 +598,19 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerCondMod(n)
 	case "while_mod", "until_mod":
 		return fs.lowerLoopMod(n)
+	case "bare_assoc_hash", "hash":
+		// A keyword-argument or brace hash. Lower each key and value so a source or
+		// sink inside still fires, and leave the hash itself untainted like `array`.
+		//
+		// Untainted is not a shortcut here, it is the point: ActiveRecord's hash
+		// form (`where(name: params[:q])`) is parameterized by construction, so a
+		// hash that carried its values' taint would make every one of them a false
+		// positive.
+		for _, pair := range assocPairs(n) {
+			fs.lowerExpr(at(pair, 1))
+			fs.lowerExpr(at(pair, 2))
+		}
+		return ssabuild.Str("")
 	case "array":
 		// Lower elements (so a source/sink inside fires); the container itself is
 		// left untainted, matching the other frontends' list handling.
