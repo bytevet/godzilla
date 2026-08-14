@@ -111,8 +111,15 @@ func parseError(errs []jsast.Error) error {
 // the EXACT buffer handed to the parser (flow-stripped or SFC-padded, not the
 // file on disk), since that is what the offsets index.
 //
-// Line breaks are ECMAScript's four: LF, lone CR, CRLF (ONE break), and U+2028 /
-// U+2029. The result is a 1-based line and a 1-based BYTE column.
+// A line break is LF, lone CR, or CRLF (ONE break). Result is a 1-based line and
+// a 1-based BYTE column.
+//
+// Deliberately NOT ECMAScript's set: the grammar also ends a line at U+2028 /
+// U+2029, but those are legal INSIDE a string literal (ES2019), and every
+// consumer of the number this produces -- srclines, which feeds the report
+// snippet, the LLM reviewer and godzilla:ignore matching -- splits on "\n". Count
+// a separator they do not and a finding after one reports a line whose text is
+// some other line, silently.
 type lineIndex struct {
 	filename string
 	starts   []int32 // byte offset of each line's first byte; starts[0] == 0
@@ -129,13 +136,6 @@ func newLineIndex(filename, src string) *lineIndex {
 			if i < len(src) && src[i] == '\n' {
 				i++
 			}
-		case 0xe2: // U+2028 / U+2029 are e2 80 a8 / e2 80 a9
-			if i+2 < len(src) && src[i+1] == 0x80 && (src[i+2] == 0xa8 || src[i+2] == 0xa9) {
-				i += 3
-				break
-			}
-			i++
-			continue
 		default:
 			i++
 			continue

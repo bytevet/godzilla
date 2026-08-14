@@ -135,12 +135,13 @@ func TestLineIndexTerminators(t *testing.T) {
 		{"lf", "a\nbc", 3, [2]int32{2, 2}},
 		{"crlf counts once", "a\r\nbc", 4, [2]int32{2, 2}},
 		{"lone cr", "a\rbc", 3, [2]int32{2, 2}},
-		{"u2028", "a bc", 5, [2]int32{2, 2}},
-		{"u2029", "a bc", 5, [2]int32{2, 2}},
 		{"offset zero is line 1 col 1", "function f(){}", 0, [2]int32{1, 1}},
-		{"column is bytes, not runes", "\"é\";x", 5, [2]int32{1, 6}},
-		// U+2060 (e2 81 a0) shares U+2028's lead byte but is not a line break.
-		{"e2 that is not a separator", "\"\u2060\";\nx", 7, [2]int32{2, 1}},
+		{"column is bytes, not runes", "\"\u00e9\";x", 5, [2]int32{1, 6}},
+		// ECMAScript ends a line at U+2028/U+2029; a REPORTED line does not, because
+		// srclines and every editor split on "\n". Both are legal inside a string
+		// literal, so counting them would shift every later finding off its own text.
+		{"u2028 is not a reported line break", "\"\u2028\";x", 7, [2]int32{1, 8}},
+		{"u2029 is not a reported line break", "\"\u2029\";x", 7, [2]int32{1, 8}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
