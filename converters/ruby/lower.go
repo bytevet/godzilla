@@ -441,9 +441,14 @@ func assocPairs(n interface{}) []interface{} {
 	return out
 }
 
+// posFrom converts a Ripper node's position to a gIR one. Ripper counts columns
+// from 0 and every other frontend — and every editor a reported column is read
+// in — counts from 1, so the column is shifted here. A node with no position at
+// all keeps Line 0, which the report layer already reads as "unknown"; a
+// Column 1 alongside it would claim a precision that does not exist.
 func posFrom(filename string, n interface{}) *ir.Position {
 	if line, col, ok := firstPos(n); ok {
-		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col)}
+		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col + 1)}
 	}
 	return &ir.Position{Filename: filename}
 }

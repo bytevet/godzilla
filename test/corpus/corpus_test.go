@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	java_converter "github.com/bytevet/godzilla/converters/java"
 	"github.com/bytevet/godzilla/internal/rules/loader"
 	"github.com/bytevet/godzilla/internal/scan"
 )
@@ -28,8 +29,10 @@ func TestCorpus(t *testing.T) {
 
 	_, pyErr := exec.LookPath("python3")
 	pythonAvailable := pyErr == nil
-	_, javaErr := exec.LookPath("java")
-	javaAvailable := javaErr == nil
+	// Presence of `java` is not enough: the frontend's JDK 24 floor is enforced
+	// inside ConvertFile, so an older JDK fails every Java sample rather than
+	// skipping it. Ask the frontend the same question it will ask itself.
+	javaMajor, javaAvailable := java_converter.Usable()
 	_, clangErr := exec.LookPath("clang")
 	clangAvailable := clangErr == nil
 	_, rustcErr := exec.LookPath("rustc")
@@ -37,6 +40,7 @@ func TestCorpus(t *testing.T) {
 	_, rubyErr := exec.LookPath("ruby")
 	rubyAvailable := rubyErr == nil
 
+	positions := newPosCollector()
 	for _, dir := range dirs {
 		name := filepath.ToSlash(strings.TrimPrefix(dir, "../")) // e.g. "go/sql_injection"
 		t.Run(name, func(t *testing.T) {
@@ -52,7 +56,7 @@ func TestCorpus(t *testing.T) {
 			}
 			if strings.HasPrefix(name, "java/") {
 				if !javaAvailable {
-					t.Skip("java not on PATH; skipping Java sample")
+					t.Skipf("no usable JDK (found Java %d); skipping Java sample", javaMajor)
 				}
 				// A Java sample carrying a Maven/Gradle build is compiled by that
 				// build tool (fetching third-party deps over the network), so it is
@@ -109,6 +113,7 @@ func TestCorpus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("scan: %v", err)
 			}
+			positions.add(t, name, res.Findings)
 			got := countByRule(res.Findings)
 
 			expected := map[string]bool{}
@@ -135,4 +140,5 @@ func TestCorpus(t *testing.T) {
 			}
 		})
 	}
+	positions.assert(t)
 }

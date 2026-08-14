@@ -157,3 +157,53 @@ end
 		}
 	}
 }
+
+// TestPositionsAreOneBased pins Ruby's columns against the source they name.
+//
+// Ripper counts columns from 0; every other frontend, every editor, and every
+// tool that consumes a SARIF region counts from 1. A whole-language off-by-one
+// is invisible to a count-based oracle — it shipped for the life of the
+// frontend — so it is checked here against the actual text at the position.
+func TestPositionsAreOneBased(t *testing.T) {
+	requireRuby(t)
+
+	const src = "def handle(req)\n" +
+		"  host = req.params[:host]\n" +
+		"  system(\"ping \" + host)\n" +
+		"end\n"
+	lines := strings.Split(src, "\n")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.rb")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := NewConverter().ConvertFile(path)
+	if err != nil {
+		t.Fatalf("ConvertFile: %v", err)
+	}
+
+	want := map[string]string{"ruby:req.params": "req.params", "ruby:system": "system("}
+	seen := map[string]bool{}
+	for _, m := range prog.GetModules() {
+		for _, fn := range m.GetFunctions() {
+			for _, b := range fn.GetBlocks() {
+				for _, in := range b.GetInstrs() {
+					text, ok := want[in.GetCall().GetCallee()]
+					if !ok {
+						continue
+					}
+					seen[in.GetCall().GetCallee()] = true
+					p := in.GetPos()
+					line := lines[p.GetLine()-1]
+					if got := int(p.GetColumn()) - 1; got < 0 || !strings.HasPrefix(line[got:], text) {
+						t.Errorf("%s reported at %d:%d, which is %q — want it to start %q",
+							in.GetCall().GetCallee(), p.GetLine(), p.GetColumn(), line[max(got, 0):], text)
+					}
+				}
+			}
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("only found %v of the expected calls %v", seen, want)
+	}
+}

@@ -167,7 +167,18 @@ func countByRule(findings []analysis.Finding) map[string]int {
 
 // expectationFrom builds the Expectation that matches a scan's actual output,
 // used by the guarded manifest generator (see RegenerateManifests).
-func expectationFrom(findings []analysis.Finding) Expectation {
+//
+// `prev` is the manifest being replaced. Its Max/Line/Sink are HAND-WRITTEN --
+// nothing in a scan's output implies them -- so they are carried over for every
+// rule that still fires. Regenerating from output alone silently deletes the
+// assertions a sample was added to make, leaving a manifest that asserts only
+// what already happens.
+func expectationFrom(findings []analysis.Finding, prev Expectation) Expectation {
+	kept := map[string]ExpectedFinding{}
+	for _, ef := range prev.Findings {
+		kept[ef.Rule] = ef
+	}
+
 	counts := countByRule(findings)
 	rules := make([]string, 0, len(counts))
 	for r := range counts {
@@ -177,7 +188,11 @@ func expectationFrom(findings []analysis.Finding) Expectation {
 
 	e := Expectation{}
 	for _, r := range rules {
-		e.Findings = append(e.Findings, ExpectedFinding{Rule: r, Min: counts[r]})
+		ef := ExpectedFinding{Rule: r, Min: counts[r]}
+		if old, ok := kept[r]; ok {
+			ef.Max, ef.Line, ef.Sink = old.Max, old.Line, old.Sink
+		}
+		e.Findings = append(e.Findings, ef)
 	}
 	return e
 }
