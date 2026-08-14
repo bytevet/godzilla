@@ -86,39 +86,28 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	// `ruby:<module>.`). See localCallee for what each resolves.
 	localFuncs := map[string]bool{}
 	qualifiedFuncs := map[string]bool{}
-	var collectNames func(ss []interface{}, prefix string)
-	collectNames = func(ss []interface{}, prefix string) {
-		for _, s := range ss {
-			switch tag(s) {
-			case "def":
-				name := identName(at(s, 1))
-				localFuncs[name] = true
-				qualifiedFuncs[prefix+name] = true
-			case "class", "module":
-				cname := identName(at(at(s, 1), 1))
-				collectNames(bodyStmts(classModuleBody(s)), prefix+cname+".")
-			}
+	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+		// A singleton def is NOT recorded: its function is named `ruby:<Class>.m`,
+		// so resolving a bare self-call to `ruby:<module>.<prefix>m` here would
+		// point the callee at a function that does not exist.
+		if tag(d) == "def" && !sc.singleton {
+			name := identName(at(d, 1))
+			localFuncs[name] = true
+			qualifiedFuncs[sc.qualPrefix+name] = true
 		}
-	}
-	collectNames(stmts, "")
+	})
 
 	var functions []*ir.Function
-	var collect func(ss []interface{}, qualPrefix, className string)
-	collect = func(ss []interface{}, qualPrefix, className string) {
-		for _, s := range ss {
-			switch tag(s) {
-			case "def":
-				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs))
-			case "defs":
-				functions = append(functions, lowerDefs(s, filename, moduleName, className, qualPrefix, localFuncs, qualifiedFuncs))
-			case "class", "module":
-				// class C ... end → constant name at at(s,1) = ["const_ref",["@const","C",pos]]
-				name := identName(at(at(s, 1), 1))
-				collect(bodyStmts(classModuleBody(s)), qualPrefix+name+".", name)
-			}
+	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+		switch {
+		case tag(d) == "defs":
+			functions = append(functions, lowerDefs(d, filename, moduleName, sc.className, sc.qualPrefix, localFuncs, qualifiedFuncs))
+		case sc.singleton:
+			functions = append(functions, lowerSingletonDef(d, filename, moduleName, sc.className, sc.qualPrefix, localFuncs, qualifiedFuncs))
+		default:
+			functions = append(functions, lowerDef(d, filename, moduleName, sc.qualPrefix, localFuncs, qualifiedFuncs))
 		}
-	}
-	collect(stmts, "", "")
+	})
 
 	// The module entry point: top-level statements that are not a def/class.
 	if init := lowerModuleInit(stmts, filename, moduleName, localFuncs, qualifiedFuncs); init != nil {
@@ -127,6 +116,56 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 
 	mod.Functions = functions
 	return mod
+}
+
+// defScope is the naming context a def inherits from the nodes enclosing it.
+type defScope struct {
+	qualPrefix string // dotted class prefix after `ruby:<module>.`, e.g. "Admin.User."
+	className  string // innermost enclosing class, the namespace a class method takes
+	singleton  bool   // inside a `class << self` body: a plain def is a CLASS method
+}
+
+// walkDefs visits every `def`/`defs` in a Ripper tree with its enclosing scope.
+//
+// Only class/module/sclass open a scope; every other node is descended through
+// unchanged, so a def under `if`, `unless`, a `rescue` clause or a `do` block is
+// reached. That generality is the point: lowerStmt recurses into all of those,
+// and a def the collectors miss is lowered by NOBODY — it leaves no intrinsic
+// and fails no test, it simply is not analyzed.
+func walkDefs(n interface{}, sc defScope, visit func(def interface{}, sc defScope)) {
+	switch tag(n) {
+	case "def", "defs":
+		visit(n, sc)
+	case "class", "module":
+		// class C ... end → constant name at at(n,1) = ["const_ref",["@const","C",pos]]
+		name := identName(at(at(n, 1), 1))
+		walkDefs(classModuleBody(n), defScope{qualPrefix: sc.qualPrefix + name + ".", className: name}, visit)
+	case "sclass":
+		// `class << self; def m; end; end` — ["sclass", target, bodystmt].
+		walkDefs(at(n, 2), defScope{qualPrefix: sc.qualPrefix, className: sc.className, singleton: true}, visit)
+	default:
+		l, ok := asList(n)
+		if !ok {
+			return
+		}
+		for _, c := range l {
+			walkDefs(c, sc, visit)
+		}
+	}
+}
+
+// lowerSingletonDef lowers a plain `def` inside a `class << self` body. Ruby
+// makes it a class method, so it is named and shaped like `def self.m`: a
+// class-qualified canonical name a call on the class resolves to from another
+// file, and a receiver in parameter slot 0 to line the arguments up.
+func lowerSingletonDef(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+	fn := lowerDef(defNode, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs)
+	fn.Name = fn.ObjectName
+	if className != "" {
+		fn.CanonicalName = "ruby:" + className + "." + fn.ObjectName
+	}
+	fn.Params = append([]*ir.Value{ssabuild.Reg("self")}, fn.Params...)
+	return fn
 }
 
 // programStmts returns the top-level statement list of a `["program",[stmts]]`.
@@ -494,8 +533,8 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true
 		return v
-	case "def", "class", "module":
-		return nil // lowered separately by convertModule.collect
+	case "def", "defs", "class", "module", "sclass":
+		return nil // lowered separately by walkDefs
 	default:
 		return fs.lowerExpr(s)
 	}

@@ -606,3 +606,61 @@ func TestConvertCorpusTreeIsFullyModeled(t *testing.T) {
 	}
 	testsupport.RequireNoFallbackIntrinsic(t, prog, "py.unsupported", "test/python")
 }
+
+// TestCollectsDefsInsideControlFlow pins that a def nested in control flow
+// becomes its own ir.Function.
+//
+// The collector and lowerBody split the statement tree between them: lowerBody
+// descends into the compounds and deliberately skips defs, trusting the
+// collector to claim them. When the collector recursed only into def/class
+// bodies, a def under `if`/`try`/`with` was claimed by NEITHER — it vanished
+// with no error and no fallback intrinsic, and `if TYPE_CHECKING:`, feature
+// flags and `except ImportError:` shims all take that shape.
+func TestCollectsDefsInsideControlFlow(t *testing.T) {
+	requirePython3(t)
+
+	const src = `import sys
+if sys.version_info >= (3, 11):
+    def in_if(): pass
+    class Wrapper:
+        try:
+            def in_class_try(self): pass
+        except ImportError:
+            def in_class_except(self): pass
+        finally:
+            def in_class_finally(self): pass
+for _ in range(1):
+    pass
+else:
+    with open("f") as f:
+        def in_for_else_with(): pass
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.py")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := NewConverter().ConvertFile(path)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	got := map[string]bool{}
+	for _, m := range prog.GetModules() {
+		for _, f := range m.GetFunctions() {
+			got[f.GetCanonicalName()] = true
+		}
+	}
+	// The qualname prefix reflects the enclosing SCOPES only: control flow opens
+	// none, so a def under `try` in a class body is still `Wrapper.<name>`.
+	for _, want := range []string{
+		"py:m.in_if",
+		"py:m.Wrapper.in_class_try",
+		"py:m.Wrapper.in_class_except",
+		"py:m.Wrapper.in_class_finally",
+		"py:m.in_for_else_with",
+	} {
+		if !got[want] {
+			t.Errorf("function %q was not collected", want)
+		}
+	}
+}

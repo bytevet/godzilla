@@ -1,6 +1,7 @@
 package ruby_converter
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,4 +104,56 @@ func TestConvertCorpusTreeIsFullyModeled(t *testing.T) {
 		t.Errorf("Skipped() = %d, want 0", c.Skipped())
 	}
 	testsupport.RequireNoFallbackIntrinsic(t, prog, "ruby.unsupported", "test/ruby")
+}
+
+// TestCollectsDefsBeyondTopLevel pins the two shapes the collector used to walk
+// past: a def nested in control flow, and a `class << self` body.
+//
+// Both were claimed by nobody. walkDefs entered only class/module bodies while
+// lowerStmt recurses into if/while/case/blocks and returns nil for a def,
+// trusting the collector — so the method existed in neither, with no error and
+// no fallback intrinsic to notice. `class << self` was worse: its Ripper tag
+// appeared in no switch at all, so the whole singleton body vanished.
+func TestCollectsDefsBeyondTopLevel(t *testing.T) {
+	requireRuby(t)
+
+	const src = `class Report
+  class << self
+    def singleton; end
+  end
+  if ENV['LEGACY']
+    def in_if; end
+  end
+end
+[1].each do
+  def in_block; end
+end
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.rb")
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := NewConverter().ConvertFile(path)
+	if err != nil {
+		t.Fatalf("ConvertFile: %v", err)
+	}
+	got := map[string]int{}
+	for _, m := range prog.GetModules() {
+		for _, fn := range m.GetFunctions() {
+			got[fn.GetCanonicalName()] = len(fn.GetParams())
+		}
+	}
+	// A singleton def is a CLASS method: named like `def self.m` so a call on the
+	// class resolves to it from another file, with the receiver in slot 0.
+	if _, ok := got["ruby:Report.singleton"]; !ok {
+		t.Errorf("class << self body was dropped; got %v", got)
+	} else if n := got["ruby:Report.singleton"]; n != 1 {
+		t.Errorf("ruby:Report.singleton has %d params, want 1 (the receiver)", n)
+	}
+	for _, want := range []string{"ruby:m.Report.in_if", "ruby:m.in_block"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("function %q was not collected; got %v", want, got)
+		}
+	}
 }

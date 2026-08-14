@@ -91,6 +91,17 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 				// class-body statements are a documented limitation.
 				cn := s.str("name")
 				collect(s.list("body"), qualPrefix+cn+".", classes.ctxFor(cn), true)
+			default:
+				// A def inside control flow (`if TYPE_CHECKING:`, a feature flag, an
+				// `except ImportError` fallback) would otherwise be claimed by nobody:
+				// lowerBody descends into the compounds but deliberately skips defs,
+				// trusting this collector. Recursing over every nested statement list
+				// rather than enumerating compounds is what keeps the two in step.
+				// Control flow opens no scope, so the qualname prefix and the
+				// enclosing class context carry through unchanged.
+				for _, key := range []string{"body", "orelse", "handlers", "finalbody"} {
+					collect(s.list(key), qualPrefix, cls, inClass)
+				}
 			}
 		}
 	}
