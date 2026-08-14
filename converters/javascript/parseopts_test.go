@@ -140,7 +140,7 @@ func TestLineIndexTerminators(t *testing.T) {
 		{"offset zero is line 1 col 1", "function f(){}", 0, [2]int32{1, 1}},
 		{"column is bytes, not runes", "\"é\";x", 5, [2]int32{1, 6}},
 		// U+2060 (e2 81 a0) shares U+2028's lead byte but is not a line break.
-		{"e2 that is not a separator", "\"⁠\";\nx", 7, [2]int32{2, 1}},
+		{"e2 that is not a separator", "\"\u2060\";\nx", 7, [2]int32{2, 1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
