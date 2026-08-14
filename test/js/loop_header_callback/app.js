@@ -1,7 +1,5 @@
-// A function literal in a loop HEADER, not its body. The lowering visits the
-// header, so the collector must too: an uncollected literal there is unnamed,
-// resolves to nothing, and its body goes unanalyzed while the file still reports
-// as converted. Both sinks below live inside such a literal.
+// Command injection reached from a function literal in a loop HEADER, not its
+// body (see expected.yaml).
 const { exec } = require("child_process");
 
 function handleBatch(req, res) {

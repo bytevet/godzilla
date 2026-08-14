@@ -295,27 +295,43 @@ func functionNamesForModules(prog *ir.Program) []string {
 // every instruction in the converted samples must have a real OpCode, never the
 // generic "js.unsupported" intrinsic.
 func TestNoUnsupportedInstructions(t *testing.T) {
-	// Whole trees, not a hand-picked list: a fallback intrinsic marks a construct
-	// the lowering does not model, and the constructs most likely to produce one
-	// are the ones nobody thought to name. A hand-maintained list only ever covers
-	// yesterday's shapes -- a literal in a loop header went unmodelled under one.
+	// Whole trees, not a hand-picked list: the constructs that trip the fallback
+	// are the ones nobody thought to name.
 	for _, path := range []string{
 		"../../test/js",
 		filepath.Join("testdata", "dialects"),
 	} {
-		prog := mustConvert(t, path)
-		for _, mod := range prog.Modules {
-			for _, fn := range mod.Functions {
-				for _, blk := range fn.Blocks {
-					for _, inst := range blk.Instrs {
-						if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "js.unsupported" {
-							t.Errorf("%s: unsupported instruction in %s: %s", path, fn.CanonicalName, inst.Comment)
-						}
-					}
+		for _, fn := range irwalk.Funcs(mustConvert(t, path)) {
+			for inst := range irwalk.Instrs(fn) {
+				if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "js.unsupported" {
+					t.Errorf("%s: unsupported instruction in %s: %s", path, fn.CanonicalName, inst.Comment)
 				}
 			}
 		}
 	}
+}
+
+// TestCollectsParamDefaultLiteral pins the half of collector coverage no
+// intrinsic reports: nothing lowers a parameter default, so a literal the
+// collector misses there is silently absent rather than flagged.
+func TestCollectsParamDefaultLiteral(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pdef.js")
+	if err := os.WriteFile(path, []byte("function f(cb = (c) => eval(c)) { cb(1); }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod, _, err := NewConverter().convertJSFile(path, "pdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range mod.Functions {
+		for inst := range irwalk.Instrs(fn) {
+			if inst.GetCall().GetCallee() == "js:eval" {
+				return
+			}
+		}
+	}
+	t.Error("no js:eval call lowered — the default's literal was never collected")
 }
 
 // TestLogXSSSampleInstructions is a diagnostic test: it converts the XSS

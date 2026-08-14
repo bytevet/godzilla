@@ -1,8 +1,5 @@
-// A relative import of a .vue component. The specifier keeps its extension while
-// the walk names the module without one, so the two only meet if the resolver
-// strips exactly the extensions IsJSFamily recognizes — SFCs included. Get that
-// wrong and the cross-module edge silently disappears: no error, no skipped
-// file, just a finding that stops being reported.
+// Cross-file taint into a sink inside a .vue component, imported by a specifier
+// that keeps its extension (see expected.yaml).
 import express from "express";
 import render from "./Renderer.vue";
 

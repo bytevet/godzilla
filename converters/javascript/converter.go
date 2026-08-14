@@ -72,13 +72,14 @@
 //
 // # Collector coverage
 //
-// The collector (collect.go) must walk every expression the lowering lowers,
-// including loop headers and parameter defaults. A function literal it misses is
-// not merely unnamed: the lowering has nothing to resolve, emits js.unsupported,
-// and the literal's body goes unanalyzed while the file still reports as
-// converted. TestNoUnsupportedInstructions is the alarm, and it walks whole trees
-// rather than a named list, because the shapes that go unmodelled are the ones
-// nobody thought to name.
+// The collector (collect.go) must walk every expression the lowering lowers. A
+// literal it misses is not just unnamed -- the lowering resolves nothing, emits
+// js.unsupported, and its body goes unanalyzed while the file still reports as
+// converted. TestNoUnsupportedInstructions walks whole trees to catch that.
+//
+// A parameter default is the blind spot: nothing lowers one, so a missed literal
+// there emits no intrinsic at all and only TestCollectsParamDefaultLiteral sees
+// it.
 package js_converter
 
 import (
