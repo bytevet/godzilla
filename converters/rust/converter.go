@@ -117,12 +117,12 @@ func (c *Converter) batch() *frontend.Batch[rsFileResult] {
 			warnIfMIRDrifted()
 			return nil, nil
 		},
-		Parse: frontend.PerFile(func(_, f string) rsFileResult {
+		Parse: frontend.PerFile(func(root, f string) rsFileResult {
 			mir, err := emitMIR(f)
 			if err != nil {
 				return rsFileResult{err: err}
 			}
-			return rsFileResult{mod: lowerMIR(mir, f)}
+			return rsFileResult{mod: lowerMIR(mir, f, root)}
 		}),
 		Result: func(r *rsFileResult) (*ir.Module, error) { return r.mod, r.err },
 	}
@@ -210,7 +210,7 @@ func convertCargo(dir string) (*ir.Program, error) {
 			}
 			continue
 		}
-		prog.Modules = append(prog.Modules, lowerMIR(data, srcPath))
+		prog.Modules = append(prog.Modules, lowerMIR(data, srcPath, dir))
 	}
 	if len(prog.Modules) == 0 {
 		if firstErr != nil {
