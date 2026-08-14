@@ -1040,9 +1040,18 @@ func constFromLiteral(lit string) *ir.Value {
 // argument position. The template (rustc's `fmt::rt` encoding) is a sequence of
 // tokens: the byte 0xC0 marks an argument insertion, and a byte < 0x80 is the
 // length of a literal run that immediately follows. tok is the raw MIR operand,
-// e.g. `const b"\x14https://h/v1/\xc0\x00"`. Returns ok=false for anything that
-// is not a well-formed, UTF-8-clean byte-string template (the caller then leaves
-// the original empty constant, so a decode miss can never invent a fixed host).
+// e.g. `const b"\x14https://h/v1/\xc0\x00"`. Returns ok=false only when the
+// operand is not a decodable byte string at all.
+//
+// A token the encoding uses but this decoder does not model -- an explicit-index
+// or spec-bearing argument, `{0}` or `{:>10}` -- ends the decode at that point
+// rather than failing it: the text decoded so far came from literal-run tokens,
+// which are compile-time text and cannot carry taint, and the remainder is
+// rendered as one argument insertion, i.e. dynamic. Failing the whole decode
+// instead left an EMPTY template, which reads downstream as the positive claim
+// that the format string contains no host -- and so turned a provably safe
+// `format!("https://api.example.com/v1/{:>10}", p)` into a high-confidence
+// CWE-918 that the same code without the width specifier does not produce.
 func decodeFmtTemplate(tok string) (string, bool) {
 	tok = strings.TrimSpace(tok)
 	tok = strings.TrimSpace(strings.TrimPrefix(tok, "const "))
@@ -1070,8 +1079,9 @@ func decodeFmtTemplate(tok string) (string, bool) {
 			}
 			sb.Write(raw[i : i+int(b)])
 			i += int(b)
-		default: // unrecognized control byte (e.g. an explicit-index/spec arg)
-			return "", false
+		default: // a token this decoder does not model; the rest is unknown
+			sb.WriteString("{}")
+			i = len(raw)
 		}
 	}
 	if !utf8.ValidString(sb.String()) {
