@@ -1,0 +1,11 @@
+# Expected findings for this sample (see test/README.md).
+# The sink is in Renderer.vue but the source is in app.js, so this only fires if
+# `./Renderer.vue` resolves to the module the walk named `Renderer`. When it does
+# not, both files still convert and coverage still reads ok — the finding just
+# vanishes. That is why the assertion is pinned to the file and line.
+findings:
+    - rule: js-sqli
+      min: 1
+      max: 1
+      line: 6
+      sink: "js:some-db.query"

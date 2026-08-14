@@ -36,7 +36,7 @@ func isSFC(path string) bool {
 }
 
 // parseMode is one rung of the dialect ladder: exactly the parser's two
-// booleans, which between them spell esbuild's four loaders (JS/TS/JSX/TSX).
+// booleans, which between them spell the four JS dialects (JS/TS/JSX/TSX).
 type parseMode struct{ ts, jsx bool }
 
 // parseLadder returns the dialects to try for path, in order, stopping at the
@@ -80,8 +80,8 @@ func parseSource(path, code string) (*jsast.File, string, error) {
 			firstErr = parseError(errs)
 		}
 	}
-	// Last rung: Flow. It is not valid TypeScript and has no loader of its own, so
-	// no dialect recovers it -- the source itself has to change (flowstrip.go).
+	// Last rung: Flow. Its residue past TypeScript has no dialect of its own, so
+	// no rung recovers it -- the source itself has to change (flowstrip.go).
 	// Retrying the WHOLE ladder rather than one rung keeps the dialect question
 	// open: a Flow file may also use JSX.
 	if stripped, ok := stripFlow(code); ok && stripped != code {

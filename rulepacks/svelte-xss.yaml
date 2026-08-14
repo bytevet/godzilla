@@ -16,9 +16,9 @@ rules:
       auto-escapes, or sanitize it (e.g. DOMPurify.sanitize) before rendering it
       as HTML.
     # Shared browser sources + HTML sanitizers come from the fragment; only the
-    # SvelteKit-specific sources stay inline. (Component props via `export let`
-    # bind to CommonJS exports after the esbuild lowering, so the reliable
-    # untrusted sources are the browser URL, $page, and query parsing.)
+    # SvelteKit-specific sources stay inline. (A prop declared with `export let`
+    # lowers as an ordinary module-scope local with no source glob to match, so
+    # the reliable untrusted sources are the browser URL, $page, and query parsing.)
     extend: $_js-sfc-xss.yaml
     sources:
       - "js:*$page*"

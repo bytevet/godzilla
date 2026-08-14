@@ -135,8 +135,9 @@ func TestStripFlowOffsets(t *testing.T) {
 // TestStripFlowPreservesSinkPosition is the load-bearing test for the whole
 // approach. Blanking is only correct if a lowered instruction still reports the
 // line and column it occupies in the ORIGINAL file: positions are mandatory
-// (CLAUDE.md), esbuild's sourcemap resolves against the buffer it was handed, and
-// nothing in this repo can compose two maps. If the stripper ever shifted a byte,
+// (CLAUDE.md), and a node's Loc is a byte offset into the buffer the parser was
+// handed -- lineIndex is built from that same buffer, so a shift is unrecoverable
+// rather than merely wrong. If the stripper ever moved a byte,
 // every finding in a Flow file would be reported at the wrong place -- and the
 // dialect tests would not notice, since they only assert a module converts.
 func TestStripFlowPreservesSinkPosition(t *testing.T) {

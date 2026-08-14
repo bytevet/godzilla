@@ -15,6 +15,7 @@ js-command-injection|js:handler_param/app.<module>$anon0|js:child_process.exec|s
 js-command-injection|js:header_source/app.<module>$anon0|js:child_process.execSync|src=test/js/header_source/app.js:5:17|sink=test/js/header_source/app.js:6:5
 js-command-injection|js:koa/app.<module>$anon1|js:child_process.exec|src=test/js/koa/app.js:22:16|sink=test/js/koa/app.js:23:3
 js-command-injection|js:loop_carried_command_injection/app.handleRun|js:child_process.exec|src=test/js/loop_carried_command_injection/app.js:21:11|sink=test/js/loop_carried_command_injection/app.js:20:5
+js-command-injection|js:loop_header_callback/app.handleBatch|js:child_process.exec|src=test/js/loop_header_callback/app.js:8:21|sink=test/js/loop_header_callback/app.js:9:5
 js-command-injection|js:propagator_default/app.<module>$anon0|js:child_process.execSync|src=test/js/propagator_default/app.js:7:17|sink=test/js/propagator_default/app.js:8:5
 js-command-injection|js:try_catch_command_injection/app.handleLookup|js:child_process.exec|src=test/js/try_catch_command_injection/app.js:16:12|sink=test/js/try_catch_command_injection/app.js:19:5
 js-command-injection|js:typescript/app.<module>$anon0|js:child_process.execSync|src=test/js/typescript/app.ts:11:25|sink=test/js/typescript/app.ts:12:5
@@ -29,6 +30,7 @@ js-path-traversal|js:path_traversal_join/app.handleDownload|js:fs.readFile|src=t
 js-path-traversal|js:path_traversal_requrl_memfs/app.serve|js:context.outputFileSystem.createReadStream|src=test/js/path_traversal_requrl_memfs/app.js:14:18|sink=test/js/path_traversal_requrl_memfs/app.js:20:5
 js-path-traversal|js:path_traversal_requrl_memfs/app.serve|js:context.outputFileSystem.statSync|src=test/js/path_traversal_requrl_memfs/app.js:14:18|sink=test/js/path_traversal_requrl_memfs/app.js:18:15
 js-path-traversal|js:wdm_getfilename/getFilenameFromUrl.getFilenameFromUrl|js:outputFileSystem.statSync|src=test/js/wdm_getfilename/middleware.js:14:40|sink=test/js/wdm_getfilename/getFilenameFromUrl.js:21:10
+js-sqli|js:crossfile_sfc_import/Renderer.render|js:some-db.query|src=test/js/crossfile_sfc_import/app.js:12:14|sink=test/js/crossfile_sfc_import/Renderer.vue:6:10
 js-sqli|js:fastify/app.<module>$anon0|js:db.query|src=test/js/fastify/app.js:11:14|sink=test/js/fastify/app.js:12:22
 js-sqli|js:interproc_local_helper/app.<module>$anon0|js:some-db.query|src=test/js/interproc_local_helper/app.js:17:13|sink=test/js/interproc_local_helper/app.js:19:12
 js-sqli|js:koa/app.<module>$anon0|js:db.query|src=test/js/koa/app.js:15:14|sink=test/js/koa/app.js:17:22

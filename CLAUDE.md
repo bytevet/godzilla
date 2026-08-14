@@ -71,8 +71,8 @@ changing one:
   parser is walled off under esbuild's `internal/`; that module is the seam). There is NO text
   transform and no sourcemap: TS/JSX/ESM arrive as themselves, and a node offset indexes the source
   as written, so `dialect.go`'s `lineIndex` is the ONE place an offset becomes a position. Which
-  dialect is decided by PARSE FAILURE, not prediction — `parseLadder` walks `.js` through JS, TS,
-  TSX, which is exact where guessing the dialect was not. `flowstrip.go` is that ladder's last rung:
+  dialect is decided by PARSE FAILURE, not prediction (`parseLadder`), which is exact where
+  guessing was not; the rung ORDER is load-bearing and pinned by a test. `flowstrip.go` is that ladder's last rung:
   Flow is neither JS nor TS, so it blanks Flow-only syntax IN PLACE, every removed byte becoming a
   space, because a node's position is an offset into the buffer the parser was handed.
   `.vue`/`.svelte` SFCs (`sfc.go`) lower the `<script>` block as the module body and append each

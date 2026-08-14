@@ -1,6 +1,6 @@
 // TypeScript command injection: type annotations (: string, : void, the Request
-// interface) must be stripped by esbuild so goja can parse it, and the finding
-// must point at THIS .ts file at the correct line.
+// interface) are erased by the ladder's TS rung, and the finding must still point
+// at THIS .ts file at the correct line -- an erased annotation shifts no offset.
 const cp = require("child_process");
 
 interface Req {

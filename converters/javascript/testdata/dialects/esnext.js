@@ -1,5 +1,5 @@
-// Syntax that once had to be downlevelled because the parser could not spell it.
-// Each construct here cost a real file when it was unreadable, so they are held
+// Modern syntax whose only requirement is that it parse at all. A construct the
+// parser cannot spell costs the WHOLE file, so each one here is held
 // to the same "must convert" bar as every other dialect.
 function* ids() { yield 1; }
 async function* stream() { yield 1; }

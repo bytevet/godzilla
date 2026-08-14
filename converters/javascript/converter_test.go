@@ -295,13 +295,13 @@ func functionNamesForModules(prog *ir.Program) []string {
 // every instruction in the converted samples must have a real OpCode, never the
 // generic "js.unsupported" intrinsic.
 func TestNoUnsupportedInstructions(t *testing.T) {
+	// Whole trees, not a hand-picked list: a fallback intrinsic marks a construct
+	// the lowering does not model, and the constructs most likely to produce one
+	// are the ones nobody thought to name. A hand-maintained list only ever covers
+	// yesterday's shapes -- a literal in a loop header went unmodelled under one.
 	for _, path := range []string{
-		"../../test/js/xss/app.js",
-		"../../test/js/command_injection/app.js",
-		"../../test/js/sql_injection/app.js",
-		"../../test/js/ssrf/app.js",
-		"../../test/js/path_traversal/app.js",
-		"../../test/js/resilience/app.js",
+		"../../test/js",
+		filepath.Join("testdata", "dialects"),
 	} {
 		prog := mustConvert(t, path)
 		for _, mod := range prog.Modules {

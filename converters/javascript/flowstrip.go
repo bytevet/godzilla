@@ -4,10 +4,11 @@ import "strings"
 
 // Flow-typed JavaScript support, by BLANKING Flow-only syntax in place.
 //
-// Flow ships in plain `.js` files, so the dialect ladder reaches them, but every
-// rung fails: there is no Flow dialect, and Flow's type syntax is not valid
-// TypeScript either. Without this rung such a file is dropped whole, taking its
-// sinks with it.
+// Flow ships in plain `.js` files, so the dialect ladder reaches them. MOST Flow
+// annotations are valid TypeScript and the TS rung already carries them; what
+// reaches here is the residue that is not -- maybe-types `?T`, casts `(x: T)`,
+// bounded generics `<T: B>`, `opaque type`, `%checks`. Without this rung a file
+// using any of them is dropped whole, taking its sinks with it.
 //
 // # Why blanking, and why it may not rewrite
 //
@@ -35,7 +36,7 @@ import "strings"
 //
 // # Failure direction
 //
-// This rung only ever runs on a file that already failed every loader, so a strip
+// This rung only ever runs on a file that already failed every rung, so a strip
 // yielding something unparseable costs nothing -- the file is dropped either way.
 // The outcome to avoid is blanking VALUE code, which turns a dropped file into a
 // silently mis-lowered one. Every decision below therefore prefers to leave text
@@ -51,8 +52,9 @@ func looksLikeFlow(src string) bool {
 	if strings.Contains(src, "@flow") || strings.Contains(src, "opaque type ") {
 		return true
 	}
-	// `: ?T` (maybe-type) and `{[string]:` / `{[number]:` (unnamed indexer) are
-	// the two Flow-only shapes that appear in ordinary application code.
+	// `: ?T` is the marker that carries most real files. The indexer shapes are
+	// kept as evidence of Flow, but they cannot be why a file failed: esbuild's TS
+	// rung parses `{[string]: T}` happily, whatever tsc would say about it.
 	return strings.Contains(src, ": ?") || strings.Contains(src, ":?") ||
 		strings.Contains(src, "{[string]:") || strings.Contains(src, "{[number]:")
 }
@@ -256,8 +258,8 @@ func (s *flowScanner) run() bool {
 				s.i++
 			}
 			word := s.src[start:s.i]
-			// `opaque type X = ...` -- blanking just the keyword leaves a plain TS
-			// type alias behind, same length, no position shift.
+			// `opaque type X = ...` -- flagged here so the `type` branch below blanks
+			// the whole declaration; the keyword alone is not what makes it Flow.
 			opaqueType := word == "opaque" && s.nextWordIs("type")
 			if opaqueType {
 				s.blank(start, s.i)
@@ -283,7 +285,7 @@ func (s *flowScanner) run() bool {
 				s.identStartsMember, s.memberStart = s.memberStart, false
 			}
 			// Flow spells a type-parameter bound with `:` where TypeScript uses
-			// `extends`, so a generic declaration reaches no loader. Such a list can
+			// `extends`, so a generic declaration reaches no rung. Such a list can
 			// only follow a BINDING NAME -- an identifier introduced by `function` or
 			// `class`, or a class member's own name. A bare identifier starting a
 			// statement is an expression, not a binding, and must not qualify:
@@ -349,6 +351,10 @@ func (s *flowScanner) run() bool {
 		switch c {
 		case '{', '}', ';':
 			s.memberStart = s.top().declPos
+		// A class-body variance sigil (`class C { +x: T }`) is only stepped over,
+		// never blanked, so such a class still fails every rung -- the annotation
+		// goes but the `+` stays. Untested: the fixtures carry variance inside an
+		// object type, where the whole declaration is blanked and the sigil with it.
 		case '+', '-', '#': // variance sigil or private-field name: still at the start
 		default:
 			s.memberStart = false

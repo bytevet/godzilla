@@ -1,0 +1,12 @@
+# Expected findings for this sample (see test/README.md).
+# The flow itself is ordinary; what this sample guards is that the loop HEADERS
+# above it are collected. If they are not, the header literals go unnamed and the
+# lowering emits js.unsupported — caught by TestNoUnsupportedInstructions, which
+# walks this whole tree — while this finding still fires, so a count alone would
+# not notice.
+findings:
+    - rule: js-command-injection
+      min: 1
+      max: 1
+      line: 9
+      sink: "js:child_process.exec"

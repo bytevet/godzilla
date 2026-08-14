@@ -90,9 +90,16 @@ func bindingName(f *jsast.File, b jsast.Binding) string {
 // than one walk (an exported declaration, a default export's inner statement),
 // and registering it twice would emit two ir.Functions with the same canonical
 // name.
-func (c *collector) addFunction(node fnID, loc jsast.Loc, qualname string, body []jsast.Stmt) {
+func (c *collector) addFunction(node fnID, loc jsast.Loc, qualname string, args []jsast.Arg, body []jsast.Stmt) {
 	if _, seen := c.nameOf[node]; seen {
 		return
+	}
+	// A parameter default is an expression like any other and can hold a function
+	// literal (`function f(cb = () => {...})`). Nothing lowers it, so an
+	// uncollected literal there is not merely unnamed -- its body is never
+	// analyzed, silently.
+	for _, a := range args {
+		c.collectExpr(a.DefaultOrNil, qualname+".", "")
 	}
 	c.nameOf[node] = "js:" + c.moduleName + "." + qualname
 	c.order = append(c.order, pendingFunc{node: node, loc: loc, qualname: qualname, objectName: leafName(qualname)})
@@ -122,7 +129,7 @@ func (c *collector) collectClass(cl jsast.Class, qualPrefix, fallbackName string
 			continue
 		}
 		if name := propertyKeyName(p.Key); name != "" {
-			c.addFunction(fn, p.ValueOrNil.Loc, prefix+name, fn.Fn.Body.Block.Stmts)
+			c.addFunction(fn, p.ValueOrNil.Loc, prefix+name, fn.Fn.Args, fn.Fn.Body.Block.Stmts)
 		}
 	}
 }
@@ -153,7 +160,7 @@ func (c *collector) collectStmt(s jsast.Stmt, qualPrefix string) {
 		} else {
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addFunction(v, s.Loc, name, v.Fn.Body.Block.Stmts)
+		c.addFunction(v, s.Loc, name, v.Fn.Args, v.Fn.Body.Block.Stmts)
 	case *jsast.SLocal:
 		for _, d := range v.Decls {
 			c.collectExpr(d.ValueOrNil, qualPrefix, bindingName(c.src, d.Binding))
@@ -168,11 +175,22 @@ func (c *collector) collectStmt(s jsast.Stmt, qualPrefix string) {
 		c.collectExpr(v.Test, qualPrefix, "")
 		c.collectStmts(stmtList(v.Yes), qualPrefix)
 		c.collectStmts(stmtList(v.NoOrNil), qualPrefix)
+	// A loop HEADER is lowered like any other expression (lowerFor, lowerForRange),
+	// so it must be collected like one. Walking only the body leaves a literal in
+	// the header unnamed, and the lowering then has nothing to resolve: it emits
+	// js.unsupported and the literal's body is never analyzed at all.
 	case *jsast.SFor:
+		c.collectStmts(stmtList(v.InitOrNil), qualPrefix)
+		c.collectExpr(v.TestOrNil, qualPrefix, "")
+		c.collectExpr(v.UpdateOrNil, qualPrefix, "")
 		c.collectStmts(stmtList(v.Body), qualPrefix)
 	case *jsast.SForIn:
+		c.collectStmts(stmtList(v.Init), qualPrefix)
+		c.collectExpr(v.Value, qualPrefix, "")
 		c.collectStmts(stmtList(v.Body), qualPrefix)
 	case *jsast.SForOf:
+		c.collectStmts(stmtList(v.Init), qualPrefix)
+		c.collectExpr(v.Value, qualPrefix, "")
 		c.collectStmts(stmtList(v.Body), qualPrefix)
 	case *jsast.SWhile:
 		c.collectExpr(v.Test, qualPrefix, "")
@@ -260,7 +278,7 @@ func (c *collector) collectExpr(e jsast.Expr, qualPrefix, preferredName string) 
 		default:
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addFunction(v, e.Loc, name, v.Fn.Body.Block.Stmts)
+		c.addFunction(v, e.Loc, name, v.Fn.Args, v.Fn.Body.Block.Stmts)
 	case *jsast.EArrow:
 		name := qualPrefix
 		if preferredName != "" {
@@ -268,7 +286,7 @@ func (c *collector) collectExpr(e jsast.Expr, qualPrefix, preferredName string) 
 		} else {
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addFunction(v, e.Loc, name, v.Body.Block.Stmts)
+		c.addFunction(v, e.Loc, name, v.Args, v.Body.Block.Stmts)
 	case *jsast.ECall:
 		c.collectCall(v.Target, v.Args, qualPrefix)
 	case *jsast.ENew:

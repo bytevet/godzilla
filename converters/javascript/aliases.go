@@ -198,27 +198,20 @@ func calleeTrailingName(f *jsast.File, e jsast.Expr) string {
 	return name
 }
 
-// jsFamilyExts are the module extensions stripped when resolving a relative
-// module specifier to a scan-root-relative module name (matching moduleNameFor,
-// which strips the source file's own extension).
-//
-// Deliberately NOT IsJSFamily: this is matched CASE-SENSITIVELY against a
-// specifier written in source (`require('./util.js')`), whereas IsJSFamily
-// lowercases a filesystem path — routing it through IsJSFamily would change how
-// `./util.JS` resolves. Extend it by hand alongside IsJSFamily.
-var jsFamilyExts = map[string]bool{
-	".js": true, ".mjs": true, ".cjs": true,
-	".ts": true, ".tsx": true, ".jsx": true,
-}
-
 // resolveRelativeModule resolves a relative module specifier against the current
 // module's name. Both are scan-root-relative, slash-separated paths with the
 // extension stripped (matching moduleNameFor), so module "middleware" +
 // "./utils/getFilenameFromUrl" -> "utils/getFilenameFromUrl", and module
 // "a/b/mod" + "../util" -> "a/util".
+//
+// Only a MODULE extension is stripped, and it is IsJSFamily that decides — the
+// same predicate the walk used to name the target module, so `./Comp.vue` and
+// `./util.JS` resolve to the modules those files were actually lowered as.
+// Stripping any extension instead would break `./config.prod`, an extensionless
+// import of config.prod.js, by resolving it to "config".
 func resolveRelativeModule(moduleName, spec string) string {
-	if ext := path.Ext(spec); jsFamilyExts[ext] {
-		spec = strings.TrimSuffix(spec, ext)
+	if IsJSFamily(spec) {
+		spec = strings.TrimSuffix(spec, path.Ext(spec))
 	}
 	return path.Join(path.Dir(moduleName), spec)
 }

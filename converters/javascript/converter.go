@@ -1,5 +1,6 @@
 // Package js_converter lowers JavaScript source into gIR for the taint engine in
-// internal/analysis: parse, then lower the AST per function (lower.go).
+// internal/analysis: parse, name every function (collect.go), then lower each
+// one (lower.go).
 //
 // Parsing uses esbuild's parser through github.com/bytevet/esbuild-jsast -- no
 // cgo, no Node.js, no external process. It is a TREE parse, not a text
@@ -40,8 +41,8 @@
 // the callee expression (identifier / member / string-keyed index chains;
 // anything else is "<dynamic>") -- the name reflects source syntax, never a
 // value resolved through the environment. A chained call
-// (`axios.get(url).then(cb)`) has its inner call lowered first by
-// lowerNestedCallees, so the inner callee and args stay visible even though the
+// (`axios.get(url).then(cb)`) has its inner call lowered first — as the outer
+// call's receiver — so the inner callee and args stay visible even though the
 // outer name collapses to "<dynamic>.then".
 //
 // # Known limitations
@@ -57,18 +58,27 @@
 //   - Classes are modeled per method ("<Class>.<method>", via collectClass);
 //     only non-method class-body statements (fields, static initializers) are
 //     unmodeled.
-//   - Destructuring ASSIGNMENT targets and (non-handler) destructured parameters
-//     are dropped; a destructuring declaration does bind its names, but only for
-//     flat identifier patterns.
+//   - Destructuring ASSIGNMENT targets, (non-handler) destructured parameters,
+//     and a destructured for-in/for-of loop variable are dropped. A destructuring
+//     DECLARATION binds flat identifier names: an object pattern per KEY (a field
+//     read off the initializer, so `const {a} = req.query` is precise), an array
+//     pattern to the whole initializer (element taint == container taint).
+//     Nested patterns bind nothing.
 //   - `await x` / `yield x` lower to `x`; the wrapping is a no-op for taint.
 //   - Array/object literals collapse every element's taint into one PHI-merged
 //     register rather than tracking it per index/key.
 //   - Logical `&&`/`||`/`??` reuse the bitwise BIN_OP kinds (gIR has no logical
 //     counterpart), losing short-circuit semantics but not taint.
-//   - Only function literals reachable from a statement's top-level expression
-//     tree are discovered (see the collector in lower.go) -- enough for
-//     `app.get(url, function(req, res){...})` and `const f = () => {...}`, but
-//     not more exotic placements.
+//
+// # Collector coverage
+//
+// The collector (collect.go) must walk every expression the lowering lowers,
+// including loop headers and parameter defaults. A function literal it misses is
+// not merely unnamed: the lowering has nothing to resolve, emits js.unsupported,
+// and the literal's body goes unanalyzed while the file still reports as
+// converted. TestNoUnsupportedInstructions is the alarm, and it walks whole trees
+// rather than a named list, because the shapes that go unmodelled are the ones
+// nobody thought to name.
 package js_converter
 
 import (

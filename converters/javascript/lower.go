@@ -770,8 +770,9 @@ func (fs *funcState) lowerStmt(s jsast.Stmt) {
 		fs.lowerExpr(v.Value)
 	default:
 		// SClass, SEmpty, SBreak, SContinue, SDebugger, SComment, SDirective,
-		// SImport and the remaining export forms: no-ops / unsupported, dropped
-		// (documented limitation for classes; the rest carry no dataflow).
+		// SImport and the remaining export forms: dropped. SClass is a no-op HERE
+		// because collectClass already queued each method as its own function; the
+		// rest carry no dataflow.
 	}
 }
 
@@ -1057,7 +1058,9 @@ func (fs *funcState) funcRefValue(e jsast.Expr) *ir.Value {
 	if canonical, ok := fs.nameOf[fnID(e.Data)]; ok {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}}
 	}
-	// Unreachable — the collector visits every expression tree lowering does.
+	// Unreachable: the collector walks every expression tree the lowering lowers,
+	// loop headers and parameter defaults included. Reaching this means the two
+	// have drifted apart -- see the Collector coverage note in converter.go.
 	return fs.emitUnsupported(e.Loc, "unresolved inline function literal")
 }
 
@@ -1356,8 +1359,9 @@ const identityIntrinsic = "builtin.identity"
 
 // lowerNestedCallees walks a call/new expression's callee along the same
 // Dot/Index "Target" chain syntacticCallee walks and lowers any call it finds —
-// e.g. the `axios.get(url)` inside `axios.get(url).then(cb)` — inside-out via the
-// ordinary lowerCall path.
+// e.g. the `require('./x')` inside `new (require('./x').Client)()` — inside-out
+// via the ordinary lowerCall path. `new` is the case that needs it: a plain
+// method call lowers its receiver through lowerExpr, which already covers this.
 //
 // Without it the inner call is never visited at all: syntactic name building is
 // a pure string walk with no side effects, so the inner call's instruction (and
