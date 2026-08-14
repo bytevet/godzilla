@@ -7,8 +7,8 @@ package cpp_converter
 import (
 	"fmt"
 
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 type Converter struct{}

@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+# The flow is ordinary; what this pins is that the loop HEADERS are collected. If
+# they are not, this finding still fires -- the header literals just go unnamed
+# and lower to js.unsupported, which only TestNoUnsupportedInstructions sees.
+findings:
+    - rule: js-command-injection
+      min: 1
+      max: 1
+      line: 7
+      sink: "js:child_process.exec"

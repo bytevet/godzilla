@@ -3,7 +3,7 @@ package py_converter
 import (
 	"strings"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Module-level string constants are INLINED at their use sites (see

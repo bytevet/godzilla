@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/analysis"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // TestOpenAIReviewer_ParsesVerdict drives the OpenAI-compatible reviewer against

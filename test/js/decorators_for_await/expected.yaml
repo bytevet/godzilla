@@ -1,0 +1,9 @@
+# Expected findings for this sample (see test/README.md).
+# A file whose syntax no single ladder rung reads by extension. Both flows are
+# intra-procedural, so a count of 2 means the whole file parsed -- this pins
+# dialect coverage and nothing else. If it drops to 0, a rung stopped matching.
+findings:
+    - rule: js-code-injection
+      min: 2
+      max: 2
+      sink: "js:eval"

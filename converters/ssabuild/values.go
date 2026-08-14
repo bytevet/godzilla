@@ -1,6 +1,6 @@
 package ssabuild
 
-import ir "godzilla/pkg/ir/v1"
+import ir "github.com/bytevet/godzilla/pkg/ir/v1"
 
 // gIR value constructors shared by every frontend. Each is a one-liner, but
 // before living here the same one-liners were re-declared privately in six

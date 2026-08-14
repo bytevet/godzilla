@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/analysis"
 )
 
 // OpenAIReviewer is a Reviewer backed by any OpenAI-compatible /chat/completions

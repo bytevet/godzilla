@@ -11,17 +11,17 @@ import (
 	"slices"
 	"sync"
 
-	cpp_converter "godzilla/converters/cpp"
-	go_converter "godzilla/converters/go"
-	java_converter "godzilla/converters/java"
-	js_converter "godzilla/converters/javascript"
-	py_converter "godzilla/converters/python"
-	ruby_converter "godzilla/converters/ruby"
-	rust_converter "godzilla/converters/rust"
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	cpp_converter "github.com/bytevet/godzilla/converters/cpp"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	java_converter "github.com/bytevet/godzilla/converters/java"
+	js_converter "github.com/bytevet/godzilla/converters/javascript"
+	py_converter "github.com/bytevet/godzilla/converters/python"
+	ruby_converter "github.com/bytevet/godzilla/converters/ruby"
+	rust_converter "github.com/bytevet/godzilla/converters/rust"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // LangCoverage records what happened to one language frontend during a scan:

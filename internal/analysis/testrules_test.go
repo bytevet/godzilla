@@ -3,8 +3,8 @@ package analysis
 import (
 	"testing"
 
-	"godzilla/internal/rules"
-	"godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules/loader"
 )
 
 // builtinRuleSet returns the shipped rule set, compiled. Tests that need what

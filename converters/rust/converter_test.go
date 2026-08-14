@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/irwalk"
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // requireRustc skips when no rustc is on PATH (the frontend shells out to it to

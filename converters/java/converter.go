@@ -29,10 +29,10 @@ import (
 	"strings"
 	"sync"
 
-	"godzilla/internal/buildpolicy"
-	"godzilla/internal/proc"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/buildpolicy"
+	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 //go:embed JavaDump.java

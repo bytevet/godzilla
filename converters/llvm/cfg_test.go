@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // lowerLL writes src to a temp .ll and lowers it as C, failing the test on error.

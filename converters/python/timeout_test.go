@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"godzilla/internal/proc"
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // TestParseTimeoutKillsSubprocess is the PERF-4 guard: with a 1ms parse timeout,

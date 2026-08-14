@@ -4,10 +4,10 @@ import (
 	"sort"
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // convertSQLInjectionSample loads and converts the sql_injection sample used

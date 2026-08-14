@@ -32,7 +32,13 @@ fmt:
 	gofmt -l cmd converters internal test/corpus
 vet:
 	go vet ./...
-gate: fmt vet build test
+# CI's blocking check, and a strict superset of `go vet`. golangci-lint refuses to
+# run when it was built with an older Go than this module targets, so an outdated
+# binary fails closed with a config-load error rather than a clean report:
+#   GOTOOLCHAIN=go1.26.5 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+lint:
+	golangci-lint run
+gate: fmt vet lint build test
 
 # --- with the C/C++/Rust LLVM frontends (cgo + libLLVM) ---
 build-llvm:

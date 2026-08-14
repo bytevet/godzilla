@@ -28,10 +28,10 @@ import (
 	"slices"
 	"strings"
 
-	"godzilla/converters/frontend"
-	"godzilla/internal/proc"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/frontend"
+	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 //go:embed rbdump.rb

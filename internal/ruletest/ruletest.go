@@ -14,9 +14,9 @@ import (
 	"slices"
 	"strings"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/scan"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/scan"
 
 	"gopkg.in/yaml.v3"
 )

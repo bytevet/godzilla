@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/irwalk"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // requireJava skips when no JDK `java` launcher is on PATH (the frontend runs

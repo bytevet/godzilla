@@ -4,25 +4,23 @@ import "strings"
 
 // Flow-typed JavaScript support, by BLANKING Flow-only syntax in place.
 //
-// Flow ships in plain `.js` files, so the loader ladder reaches them, but every
-// rung fails: esbuild has no Flow loader, and Flow's type syntax is not valid
-// TypeScript either. Without this rung such a file is dropped whole, taking its
-// sinks with it.
+// Flow ships in plain `.js` files, so the dialect ladder reaches them. MOST Flow
+// annotations are valid TypeScript and the TS rung already carries them; what
+// reaches here is the residue that is not -- maybe-types `?T`, casts `(x: T)`,
+// bounded generics `<T: B>`, `opaque type`, `%checks`. Without this rung a file
+// using any of them is dropped whole, taking its sinks with it.
 //
 // # Why blanking, and why it may not rewrite
 //
-// Positions are mandatory on every instruction (CLAUDE.md), and remapPositions
-// relies on the sourcemap esbuild emits for the buffer it was HANDED. If a
-// stripper rewrote the source before esbuild, that map would resolve back to the
-// stripped buffer rather than the original file, and there is no way to compose
-// the two: go-sourcemap/sourcemap is consumer-only -- Parse and Consumer, no
-// generator -- and nothing in this repo chains maps.
+// Positions are mandatory on every instruction (CLAUDE.md), and a node's position
+// is a byte offset into the buffer the parser was HANDED. A stripper that changed
+// the source's length would put every later instruction at the wrong place in the
+// real file.
 //
 // So stripFlow is offset-preserving: every removed byte becomes a space, every
-// newline survives. Stripped line/column then equal the original's, esbuild's own
-// map is already correct, and remapPositions needs no change. sfc.go:extractSFCToJS
-// uses the same trick one dimension down. (Meta's flow-remove-types does the same,
-// for the same reason.)
+// newline survives. Stripped line/column then equal the original's and the line
+// index needs no correction. sfc.go:extractSFCToJS uses the same trick one
+// dimension down. (Meta's flow-remove-types does the same, for the same reason.)
 //
 // The corollary is that translating Flow to TypeScript is out of bounds:
 // `{[string]: T}` -> `{[k: string]: T}` adds characters and would shift every
@@ -30,15 +28,15 @@ import "strings"
 //
 // # Why blanking a whole annotation is safe
 //
-// The stripped buffer is handed to esbuild's TS loader, which ERASES types
-// outright. So a blanked annotation never has to remain meaningful -- it only has
-// to leave behind something that parses. That is what makes this tractable
-// without implementing Flow's type grammar: the scanner finds where an annotation
-// STARTS and blanks through to its terminator.
+// The stripped buffer is parsed as TypeScript, which ERASES types outright. So a
+// blanked annotation never has to remain meaningful -- it only has to leave
+// behind something that parses. That is what makes this tractable without
+// implementing Flow's type grammar: the scanner finds where an annotation STARTS
+// and blanks through to its terminator.
 //
 // # Failure direction
 //
-// This rung only ever runs on a file that already failed every loader, so a strip
+// This rung only ever runs on a file that already failed every rung, so a strip
 // yielding something unparseable costs nothing -- the file is dropped either way.
 // The outcome to avoid is blanking VALUE code, which turns a dropped file into a
 // silently mis-lowered one. Every decision below therefore prefers to leave text
@@ -48,14 +46,15 @@ import "strings"
 // looksLikeFlow reports whether a file is worth attempting a Flow strip on.
 //
 // It is not a dialect prediction -- the frontend does not predict dialects, see
-// needsTransform -- but a blast-radius limit on the LAST rung: requiring a Flow
+// parseLadder -- but a blast-radius limit on the LAST rung: requiring a Flow
 // marker keeps the scanner away from files that failed for an unrelated reason.
 func looksLikeFlow(src string) bool {
 	if strings.Contains(src, "@flow") || strings.Contains(src, "opaque type ") {
 		return true
 	}
-	// `: ?T` (maybe-type) and `{[string]:` / `{[number]:` (unnamed indexer) are
-	// the two Flow-only shapes that appear in ordinary application code.
+	// `: ?T` is the marker that carries most real files. The indexer shapes are
+	// kept as evidence of Flow, but they cannot be why a file failed: esbuild's TS
+	// rung parses `{[string]: T}` happily, whatever tsc would say about it.
 	return strings.Contains(src, ": ?") || strings.Contains(src, ":?") ||
 		strings.Contains(src, "{[string]:") || strings.Contains(src, "{[number]:")
 }
@@ -259,8 +258,8 @@ func (s *flowScanner) run() bool {
 				s.i++
 			}
 			word := s.src[start:s.i]
-			// `opaque type X = ...` -- blanking just the keyword leaves a plain TS
-			// type alias behind, same length, no position shift.
+			// `opaque type X = ...` -- flagged here so the `type` branch below blanks
+			// the whole declaration; the keyword alone is not what makes it Flow.
 			opaqueType := word == "opaque" && s.nextWordIs("type")
 			if opaqueType {
 				s.blank(start, s.i)
@@ -286,7 +285,7 @@ func (s *flowScanner) run() bool {
 				s.identStartsMember, s.memberStart = s.memberStart, false
 			}
 			// Flow spells a type-parameter bound with `:` where TypeScript uses
-			// `extends`, so a generic declaration reaches no loader. Such a list can
+			// `extends`, so a generic declaration reaches no rung. Such a list can
 			// only follow a BINDING NAME -- an identifier introduced by `function` or
 			// `class`, or a class member's own name. A bare identifier starting a
 			// statement is an expression, not a binding, and must not qualify:
@@ -352,6 +351,10 @@ func (s *flowScanner) run() bool {
 		switch c {
 		case '{', '}', ';':
 			s.memberStart = s.top().declPos
+		// A class-body variance sigil (`class C { +x: T }`) is only stepped over,
+		// never blanked, so such a class still fails every rung -- the annotation
+		// goes but the `+` stays. Untested: the fixtures carry variance inside an
+		// object type, where the whole declaration is blanked and the sigil with it.
 		case '+', '-', '#': // variance sigil or private-field name: still at the start
 		default:
 			s.memberStart = false

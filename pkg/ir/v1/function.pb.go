@@ -271,7 +271,7 @@ const file_proto_function_proto_rawDesc = "" +
 	" \x03(\v2\x15.godzilla.ir.v1.ValueR\x06locals\x12,\n" +
 	"\x06parent\x18\v \x01(\v2\x14.godzilla.ir.v1.TypeR\x06parent\x12\x1c\n" +
 	"\tsynthetic\x18\f \x01(\bR\tsynthetic\x12%\n" +
-	"\x0ecanonical_name\x18\r \x01(\tR\rcanonicalNameB\x17Z\x15godzilla/pkg/ir/v1;irb\x06proto3"
+	"\x0ecanonical_name\x18\r \x01(\tR\rcanonicalNameB*Z(github.com/bytevet/godzilla/pkg/ir/v1;irb\x06proto3"
 
 var (
 	file_proto_function_proto_rawDescOnce sync.Once

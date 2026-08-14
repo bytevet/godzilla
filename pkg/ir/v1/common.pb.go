@@ -903,7 +903,7 @@ const file_proto_common_proto_rawDesc = "" +
 	"\x1dBASIC_TYPE_KIND_UNTYPED_FLOAT\x10\x16\x12#\n" +
 	"\x1fBASIC_TYPE_KIND_UNTYPED_COMPLEX\x10\x17\x12\"\n" +
 	"\x1eBASIC_TYPE_KIND_UNTYPED_STRING\x10\x18\x12\x1f\n" +
-	"\x1bBASIC_TYPE_KIND_UNTYPED_NIL\x10\x19B\x17Z\x15godzilla/pkg/ir/v1;irb\x06proto3"
+	"\x1bBASIC_TYPE_KIND_UNTYPED_NIL\x10\x19B*Z(github.com/bytevet/godzilla/pkg/ir/v1;irb\x06proto3"
 
 var (
 	file_proto_common_proto_rawDescOnce sync.Once

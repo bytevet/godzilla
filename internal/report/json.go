@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"io"
 
-	"godzilla/internal/analysis"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Version is the tool version stamped into machine-readable reports (SARIF and

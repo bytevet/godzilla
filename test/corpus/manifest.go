@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/analysis"
 
 	"gopkg.in/yaml.v3"
 )

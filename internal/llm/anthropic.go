@@ -7,7 +7,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/analysis"
 )
 
 // AnthropicReviewer is a Reviewer backed by the Anthropic Messages API. It is

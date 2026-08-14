@@ -3,9 +3,9 @@ package java_converter
 import (
 	"testing"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // TestBranchMerge_TernaryKeepsTaint is a hermetic guard (no JDK) for FE-4. It

@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // requireRuby skips when no ruby is on PATH (the frontend shells out to it for

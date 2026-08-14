@@ -4,19 +4,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dop251/goja/ast"
-	"github.com/dop251/goja/file"
+	jsast "github.com/bytevet/esbuild-jsast"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // pendingFunc is a function AST node discovered by the collector, queued for
 // lowering into its own ir.Function once every function in the file has been
-// discovered and named.
+// discovered and named. loc is carried here because an esbuild node holds no
+// position of its own — only the Expr/Stmt wrapper reached it does.
 type pendingFunc struct {
-	// node is either *ast.FunctionLiteral (function declaration or function
-	// expression) or *ast.ArrowFunctionLiteral.
-	node       ast.Node
+	node       fnID
+	loc        jsast.Loc
 	qualname   string
 	objectName string
 }
@@ -28,19 +27,21 @@ type pendingFunc struct {
 // statement lists, because JS functions are frequently expression values
 // (`const f = function(){}`, `app.get(url, function(req,res){...})`).
 type collector struct {
+	src        *jsast.File
 	moduleName string
 	anonSeq    map[string]int
-	nameOf     map[ast.Node]string // node -> canonical name ("js:<module>.<qualname>")
+	nameOf     map[fnID]string // node -> canonical name ("js:<module>.<qualname>")
 	order      []pendingFunc
-	handlers   map[ast.Node]bool // function nodes registered as HTTP route handlers
+	handlers   map[fnID]bool // function nodes registered as HTTP route handlers
 }
 
-func newCollector(moduleName string) *collector {
+func newCollector(src *jsast.File, moduleName string) *collector {
 	return &collector{
+		src:        src,
 		moduleName: moduleName,
 		anonSeq:    map[string]int{},
-		nameOf:     map[ast.Node]string{},
-		handlers:   map[ast.Node]bool{},
+		nameOf:     map[fnID]string{},
+		handlers:   map[fnID]bool{},
 	}
 }
 
@@ -75,60 +76,58 @@ func (c *collector) nextAnon(qualPrefix string) string {
 
 // bindingName returns the plain identifier name of a binding target, or ""
 // if the target is a destructuring pattern (unsupported; see package doc).
-func bindingName(t ast.BindingTarget) string {
-	if id, ok := t.(*ast.Identifier); ok {
-		return string(id.Name)
+func bindingName(f *jsast.File, b jsast.Binding) string {
+	if id, ok := b.Data.(*jsast.BIdentifier); ok {
+		return f.NameOf(id.Ref)
 	}
 	return ""
 }
 
-// addFunctionLiteral registers a function declaration or function expression
-// node under qualname, records its canonical name, and recurses into its
-// body to find nested functions.
-func (c *collector) addFunctionLiteral(lit *ast.FunctionLiteral, qualname string) {
-	c.nameOf[lit] = "js:" + c.moduleName + "." + qualname
-	c.order = append(c.order, pendingFunc{node: lit, qualname: qualname, objectName: leafName(qualname)})
-	if lit.Body != nil {
-		c.collectStmts(lit.Body.List, qualname+".")
+// addFunction registers one function node under qualname, records its canonical
+// name, and recurses into its body to find nested functions.
+//
+// The idempotence guard is load-bearing: the same node is reachable through more
+// than one walk (an exported declaration, a default export's inner statement),
+// and registering it twice would emit two ir.Functions with the same canonical
+// name.
+func (c *collector) addFunction(node fnID, loc jsast.Loc, qualname string, args []jsast.Arg, body []jsast.Stmt) {
+	if _, seen := c.nameOf[node]; seen {
+		return
 	}
-}
-
-// addArrow registers an arrow function node under qualname, records its
-// canonical name, and recurses into its body (block or concise-expression
-// form) to find nested functions.
-func (c *collector) addArrow(fn *ast.ArrowFunctionLiteral, qualname string) {
-	c.nameOf[fn] = "js:" + c.moduleName + "." + qualname
-	c.order = append(c.order, pendingFunc{node: fn, qualname: qualname, objectName: leafName(qualname)})
-	switch body := fn.Body.(type) {
-	case *ast.BlockStatement:
-		c.collectStmts(body.List, qualname+".")
-	case *ast.ExpressionBody:
-		c.collectExpr(body.Expression, qualname+".", "")
+	// Nothing LOWERS a default, so an uncollected literal here emits no
+	// js.unsupported to notice -- it is simply never analyzed.
+	for _, a := range args {
+		c.collectExpr(a.DefaultOrNil, qualname+".", "")
 	}
+	c.nameOf[node] = "js:" + c.moduleName + "." + qualname
+	c.order = append(c.order, pendingFunc{node: node, loc: loc, qualname: qualname, objectName: leafName(qualname)})
+	c.collectStmts(body, qualname+".")
 }
 
 // collectClass registers each method of a class body as its own function under
 // "<qualPrefix><ClassName>.<method>", so class-based handlers are analyzed at all
 // and `this.method(x)` can resolve to a sibling method (see lowerCall). The class
-// name comes from the literal, or fallbackName for an anonymous class bound to a
-// name (const C = class {}).
-func (c *collector) collectClass(cl *ast.ClassLiteral, qualPrefix, fallbackName string) {
-	if cl == nil {
-		return
-	}
+// name comes from the class itself, or fallbackName for an anonymous class bound
+// to a name (const C = class {}).
+func (c *collector) collectClass(cl jsast.Class, qualPrefix, fallbackName string) {
 	className := fallbackName
 	if cl.Name != nil {
-		className = string(cl.Name.Name)
+		className = c.src.NameOf(cl.Name.Ref)
 	}
 	prefix := qualPrefix
 	if className != "" {
 		prefix = qualPrefix + className + "."
 	}
-	for _, el := range cl.Body {
-		if md, ok := el.(*ast.MethodDefinition); ok && md.Body != nil {
-			if name := propertyKeyName(md.Key); name != "" {
-				c.addFunctionLiteral(md.Body, prefix+name)
-			}
+	for _, p := range cl.Properties {
+		if !p.Kind.IsMethodDefinition() {
+			continue
+		}
+		fn, ok := unwrap(p.ValueOrNil).Data.(*jsast.EFunction)
+		if !ok {
+			continue
+		}
+		if name := propertyKeyName(p.Key); name != "" {
+			c.addFunction(fn, p.ValueOrNil.Loc, prefix+name, fn.Fn.Args, fn.Fn.Body.Block.Stmts)
 		}
 	}
 }
@@ -144,185 +143,202 @@ func leafName(qualname string) string {
 // to find nested statements/functions (without changing qualPrefix, since
 // blocks/loops/etc. do not introduce a new function scope) and into
 // function-defining statements (which do).
-func (c *collector) collectStmts(stmts []ast.Statement, qualPrefix string) {
+func (c *collector) collectStmts(stmts []jsast.Stmt, qualPrefix string) {
 	for _, s := range stmts {
 		c.collectStmt(s, qualPrefix)
 	}
 }
 
-func (c *collector) collectStmt(s ast.Statement, qualPrefix string) {
-	switch v := s.(type) {
-	case *ast.FunctionDeclaration:
+func (c *collector) collectStmt(s jsast.Stmt, qualPrefix string) {
+	switch v := s.Data.(type) {
+	case *jsast.SFunction:
 		name := qualPrefix
-		if v.Function.Name != nil {
-			name += string(v.Function.Name.Name)
+		if v.Fn.Name != nil {
+			name += c.src.NameOf(v.Fn.Name.Ref)
 		} else {
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addFunctionLiteral(v.Function, name)
-	case *ast.VariableStatement:
-		c.collectBindings(v.List, qualPrefix)
-	case *ast.LexicalDeclaration:
-		c.collectBindings(v.List, qualPrefix)
-	case *ast.ExpressionStatement:
-		c.collectExpr(v.Expression, qualPrefix, "")
-	case *ast.ReturnStatement:
-		c.collectExpr(v.Argument, qualPrefix, "")
-	case *ast.ThrowStatement:
-		c.collectExpr(v.Argument, qualPrefix, "")
-	case *ast.IfStatement:
-		c.collectExpr(v.Test, qualPrefix, "")
-		c.collectStmts(stmtList(v.Consequent), qualPrefix)
-		if v.Alternate != nil {
-			c.collectStmts(stmtList(v.Alternate), qualPrefix)
+		c.addFunction(v, s.Loc, name, v.Fn.Args, v.Fn.Body.Block.Stmts)
+	case *jsast.SLocal:
+		for _, d := range v.Decls {
+			c.collectExpr(d.ValueOrNil, qualPrefix, bindingName(c.src, d.Binding))
 		}
-	case *ast.ForStatement:
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.ForInStatement:
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.ForOfStatement:
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.WhileStatement:
+	case *jsast.SExpr:
+		c.collectExpr(v.Value, qualPrefix, "")
+	case *jsast.SReturn:
+		c.collectExpr(v.ValueOrNil, qualPrefix, "")
+	case *jsast.SThrow:
+		c.collectExpr(v.Value, qualPrefix, "")
+	case *jsast.SIf:
 		c.collectExpr(v.Test, qualPrefix, "")
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.DoWhileStatement:
+		c.collectStmt(v.Yes, qualPrefix)
+		c.collectStmt(v.NoOrNil, qualPrefix)
+	// Headers are lowered too (lowerFor/lowerForRange), so they are collected too.
+	case *jsast.SFor:
+		c.collectStmt(v.InitOrNil, qualPrefix)
+		c.collectExpr(v.TestOrNil, qualPrefix, "")
+		c.collectExpr(v.UpdateOrNil, qualPrefix, "")
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SForIn:
+		c.collectStmt(v.Init, qualPrefix)
+		c.collectExpr(v.Value, qualPrefix, "")
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SForOf:
+		c.collectStmt(v.Init, qualPrefix)
+		c.collectExpr(v.Value, qualPrefix, "")
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SWhile:
 		c.collectExpr(v.Test, qualPrefix, "")
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.BlockStatement:
-		c.collectStmts(v.List, qualPrefix)
-	case *ast.TryStatement:
-		if v.Body != nil {
-			c.collectStmts(v.Body.List, qualPrefix)
-		}
-		if v.Catch != nil && v.Catch.Body != nil {
-			c.collectStmts(v.Catch.Body.List, qualPrefix)
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SDoWhile:
+		c.collectExpr(v.Test, qualPrefix, "")
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SBlock:
+		c.collectStmts(v.Stmts, qualPrefix)
+	case *jsast.STry:
+		c.collectStmts(v.Block.Stmts, qualPrefix)
+		if v.Catch != nil {
+			c.collectStmts(v.Catch.Block.Stmts, qualPrefix)
 		}
 		if v.Finally != nil {
-			c.collectStmts(v.Finally.List, qualPrefix)
+			c.collectStmts(v.Finally.Block.Stmts, qualPrefix)
 		}
-	case *ast.SwitchStatement:
-		c.collectExpr(v.Discriminant, qualPrefix, "")
-		for _, cs := range v.Body {
-			c.collectExpr(cs.Test, qualPrefix, "")
-			c.collectStmts(cs.Consequent, qualPrefix)
+	case *jsast.SSwitch:
+		c.collectExpr(v.Test, qualPrefix, "")
+		for _, cs := range v.Cases {
+			c.collectExpr(cs.ValueOrNil, qualPrefix, "")
+			c.collectStmts(cs.Body, qualPrefix)
 		}
-	case *ast.LabelledStatement:
-		c.collectStmts(stmtList(v.Statement), qualPrefix)
-	case *ast.WithStatement:
-		c.collectExpr(v.Object, qualPrefix, "")
-		c.collectStmts(stmtList(v.Body), qualPrefix)
-	case *ast.ClassDeclaration:
+	case *jsast.SLabel:
+		c.collectStmt(v.Stmt, qualPrefix)
+	case *jsast.SWith:
+		c.collectExpr(v.Value, qualPrefix, "")
+		c.collectStmt(v.Body, qualPrefix)
+	case *jsast.SClass:
 		c.collectClass(v.Class, qualPrefix, "")
+	case *jsast.SExportDefault:
+		// The export is a wrapper around an ordinary declaration or expression;
+		// its DefaultName is the only name an anonymous default has.
+		c.collectDefaultExportStmt(v, qualPrefix)
+	case *jsast.SExportEquals:
+		c.collectExpr(v.Value, qualPrefix, "")
 	default:
-		// EmptyStatement, BranchStatement, DebuggerStatement, BadStatement:
-		// nothing to collect.
+		// SEmpty, SBreak, SContinue, SDebugger, SImport and the remaining export
+		// forms: nothing to collect.
 	}
 }
 
-// collectBindings walks the initializers of a `var`/`let`/`const` declaration
-// list, preferring each binding's target name for an anonymous function
-// assigned to it (e.g. `const f = function(){}` names the literal "f").
-func (c *collector) collectBindings(list []*ast.Binding, qualPrefix string) {
-	for _, b := range list {
-		c.collectExpr(b.Initializer, qualPrefix, bindingName(b.Target))
-	}
-}
-
-// stmtList normalizes a statement that may or may not be a BlockStatement
-// (e.g. an `if` consequent, a `for` body) into a flat statement list.
-func stmtList(s ast.Statement) []ast.Statement {
-	if s == nil {
-		return nil
-	}
-	if b, ok := s.(*ast.BlockStatement); ok {
-		return b.List
-	}
-	return []ast.Statement{s}
-}
-
-// collectExpr walks an expression tree looking for FunctionLiteral /
-// ArrowFunctionLiteral nodes. preferredName, if non-empty, names an
-// anonymous function literal found directly at this call (e.g. the RHS of
-// `const f = function(){}` prefers the name "f"); it is not propagated into
-// recursive calls.
-func (c *collector) collectExpr(e ast.Expression, qualPrefix, preferredName string) {
-	if e == nil {
+// collectDefaultExportStmt names what `export default` wraps. A declaration is
+// collected as itself; a bare expression prefers the parser-assigned default
+// name, so an anonymous `export default (req, res) => {}` is not an $anon.
+func (c *collector) collectDefaultExportStmt(v *jsast.SExportDefault, qualPrefix string) {
+	if e, ok := v.Value.Data.(*jsast.SExpr); ok {
+		c.collectExpr(e.Value, qualPrefix, c.src.NameOf(v.DefaultName.Ref))
 		return
 	}
-	switch v := e.(type) {
-	case *ast.ClassLiteral:
-		c.collectClass(v, qualPrefix, preferredName)
-	case *ast.FunctionLiteral:
+	c.collectStmt(v.Value, qualPrefix)
+}
+
+// stmtList normalizes a statement that may or may not be a block (e.g. an `if`
+// consequent, a `for` body) into a flat statement list.
+func stmtList(s jsast.Stmt) []jsast.Stmt {
+	if s.Data == nil {
+		return nil
+	}
+	if b, ok := s.Data.(*jsast.SBlock); ok {
+		return b.Stmts
+	}
+	return []jsast.Stmt{s}
+}
+
+// collectExpr walks an expression tree looking for function/arrow nodes.
+// preferredName, if non-empty, names an anonymous function literal found
+// directly at this call (e.g. the RHS of `const f = function(){}` prefers the
+// name "f"); it is not propagated into recursive calls.
+func (c *collector) collectExpr(e jsast.Expr, qualPrefix, preferredName string) {
+	e = unwrap(e)
+	if e.Data == nil {
+		return
+	}
+	switch v := e.Data.(type) {
+	case *jsast.EClass:
+		c.collectClass(v.Class, qualPrefix, preferredName)
+	case *jsast.EFunction:
 		name := qualPrefix
 		switch {
-		case v.Name != nil:
-			name += string(v.Name.Name)
+		case v.Fn.Name != nil:
+			name += c.src.NameOf(v.Fn.Name.Ref)
 		case preferredName != "":
 			name += preferredName
 		default:
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addFunctionLiteral(v, name)
-	case *ast.ArrowFunctionLiteral:
+		c.addFunction(v, e.Loc, name, v.Fn.Args, v.Fn.Body.Block.Stmts)
+	case *jsast.EArrow:
 		name := qualPrefix
 		if preferredName != "" {
 			name += preferredName
 		} else {
 			name = c.nextAnon(qualPrefix)
 		}
-		c.addArrow(v, name)
-	case *ast.CallExpression:
-		c.collectCall(v.Callee, v.ArgumentList, qualPrefix)
-	case *ast.NewExpression:
-		c.collectCall(v.Callee, v.ArgumentList, qualPrefix)
-	case *ast.AssignExpression:
-		c.collectExpr(v.Left, qualPrefix, "")
-		c.collectExpr(v.Right, qualPrefix, assignTargetName(v.Left))
-	case *ast.BinaryExpression:
+		c.addFunction(v, e.Loc, name, v.Args, v.Body.Block.Stmts)
+	case *jsast.ECall:
+		c.collectCall(v.Target, v.Args, qualPrefix)
+	case *jsast.ENew:
+		c.collectCall(v.Target, v.Args, qualPrefix)
+	case *jsast.EBinary:
+		if isAssignOp(v.Op) {
+			// An anonymous function takes the name it is assigned to
+			// (`handler = function(){}`), so the target's name is passed down as
+			// the preferred name; a non-identifier target leaves it empty.
+			name, _ := identName(c.src, v.Left)
+			c.collectExpr(v.Left, qualPrefix, "")
+			c.collectExpr(v.Right, qualPrefix, name)
+			return
+		}
 		c.collectExpr(v.Left, qualPrefix, "")
 		c.collectExpr(v.Right, qualPrefix, "")
-	case *ast.ConditionalExpression:
+	case *jsast.EIf:
 		c.collectExpr(v.Test, qualPrefix, "")
-		c.collectExpr(v.Consequent, qualPrefix, "")
-		c.collectExpr(v.Alternate, qualPrefix, "")
-	case *ast.SequenceExpression:
-		for _, x := range v.Sequence {
+		c.collectExpr(v.Yes, qualPrefix, "")
+		c.collectExpr(v.No, qualPrefix, "")
+	case *jsast.EArray:
+		for _, x := range v.Items {
 			c.collectExpr(x, qualPrefix, "")
 		}
-	case *ast.ArrayLiteral:
-		for _, x := range v.Value {
-			c.collectExpr(x, qualPrefix, "")
+	case *jsast.EObject:
+		for _, p := range v.Properties {
+			c.collectExpr(p.ValueOrNil, qualPrefix, "")
+			c.collectExpr(p.InitializerOrNil, qualPrefix, "")
 		}
-	case *ast.ObjectLiteral:
-		for _, p := range v.Value {
-			c.collectExpr(propertyValue(p), qualPrefix, "")
+	case *jsast.EUnary:
+		c.collectExpr(v.Value, qualPrefix, "")
+	case *jsast.ETemplate:
+		for _, p := range v.Parts {
+			c.collectExpr(p.Value, qualPrefix, "")
 		}
-	case *ast.UnaryExpression:
-		c.collectExpr(v.Operand, qualPrefix, "")
-	case *ast.TemplateLiteral:
-		for _, x := range v.Expressions {
-			c.collectExpr(x, qualPrefix, "")
-		}
-	case *ast.DotExpression:
-		c.collectExpr(v.Left, qualPrefix, "")
-	case *ast.BracketExpression:
-		c.collectExpr(v.Left, qualPrefix, "")
-		c.collectExpr(v.Member, qualPrefix, "")
-	case *ast.SpreadElement:
-		c.collectExpr(v.Expression, qualPrefix, "")
-	case *ast.YieldExpression:
-		c.collectExpr(v.Argument, qualPrefix, "")
-	case *ast.AwaitExpression:
-		c.collectExpr(v.Argument, qualPrefix, "")
+	case *jsast.EDot:
+		c.collectExpr(v.Target, qualPrefix, "")
+	case *jsast.EIndex:
+		c.collectExpr(v.Target, qualPrefix, "")
+		c.collectExpr(v.Index, qualPrefix, "")
+	case *jsast.ESpread:
+		c.collectExpr(v.Value, qualPrefix, "")
+	case *jsast.EYield:
+		c.collectExpr(v.ValueOrNil, qualPrefix, "")
+	case *jsast.EAwait:
+		c.collectExpr(v.Value, qualPrefix, "")
+	case *jsast.EImportCall:
+		c.collectExpr(v.Expr, qualPrefix, "")
 	default:
-		// Identifier, literals, ThisExpression, etc: no children to walk.
+		// Identifiers, literals, `this`, etc: no children to walk.
 	}
 }
 
 // collectCall walks a call/new expression's callee and argument list for
-// nested function literals (shared by the CallExpression and NewExpression
-// cases, which are structurally identical here).
-func (c *collector) collectCall(callee ast.Expression, args []ast.Expression, qualPrefix string) {
+// nested function literals (shared by the call and new cases, which are
+// structurally identical here).
+func (c *collector) collectCall(callee jsast.Expr, args []jsast.Expr, qualPrefix string) {
 	c.collectExpr(callee, qualPrefix, "")
 	// Route-handler registration: `X.<verb>("/path", …, handler)` where <verb> is
 	// an HTTP router method, a STRING-LITERAL route path is present, and a function
@@ -330,21 +346,23 @@ func (c *collector) collectCall(callee ast.Expression, args []ast.Expression, qu
 	// is treated as a taint source (COV-11). Requiring the route-path string keeps
 	// same-named non-router calls that take a callback — lodash `_.get(obj, fn)`,
 	// Vue `app.use(plugin)` — from being mistaken for a route.
-	if dot, ok := callee.(*ast.DotExpression); ok && routingVerbs[string(dot.Identifier.Name)] {
+	if dot, ok := unwrap(callee).Data.(*jsast.EDot); ok && routingVerbs[dot.Name] {
 		hasPath, hasFn := false, false
 		for _, a := range args {
-			switch a.(type) {
-			case *ast.StringLiteral:
+			switch unwrap(a).Data.(type) {
+			case *jsast.EString:
 				hasPath = true
-			case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+			case *jsast.EFunction, *jsast.EArrow:
 				hasFn = true
 			}
 		}
 		if hasPath && hasFn {
 			for _, a := range args {
-				switch a.(type) {
-				case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
-					c.handlers[a] = true
+				switch fn := unwrap(a).Data.(type) {
+				case *jsast.EFunction:
+					c.handlers[fn] = true
+				case *jsast.EArrow:
+					c.handlers[fn] = true
 				}
 			}
 		}
@@ -354,46 +372,19 @@ func (c *collector) collectCall(callee ast.Expression, args []ast.Expression, qu
 	}
 }
 
-// assignTargetName returns the plain identifier name of an assignment's
-// left-hand side, used to prefer that name for an anonymous function
-// assigned to it (e.g. `handler = function(){}`).
-func assignTargetName(left ast.Expression) string {
-	if id, ok := left.(*ast.Identifier); ok {
-		return string(id.Name)
-	}
-	return ""
-}
-
-// propertyValue extracts the value expression from an object literal
-// property (keyed, shorthand, or spread).
-func propertyValue(p ast.Property) ast.Expression {
-	switch pv := p.(type) {
-	case *ast.PropertyKeyed:
-		return pv.Value
-	case *ast.PropertyShort:
-		if pv.Initializer != nil {
-			return pv.Initializer
-		}
-		return &pv.Name
-	case *ast.SpreadElement:
-		return pv.Expression
-	}
-	return nil
-}
-
 // convertModule turns one parsed JavaScript file into a gIR Module. Every
 // function declaration / function expression / arrow function discovered by
 // the collector becomes its own ir.Function; the file's top-level statements
 // (excluding function bodies, which are lowered separately) become one
 // synthetic "<module>" ir.Function, mirroring converters/python.
-func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName string) (*ir.Module, string) {
+func convertModule(src *jsast.File, li *lineIndex, moduleName string) (*ir.Module, string) {
 	mod := &ir.Module{
 		Name:     moduleName,
 		Language: "javascript",
 	}
 
-	c := newCollector(moduleName)
-	c.collectStmts(prog.Body, "")
+	c := newCollector(src, moduleName)
+	c.collectStmts(src.Stmts, "")
 
 	// Top-level named functions: a bare call to one (helper(x)) must resolve to
 	// its canonical name so byKey matches and taint flows through the local
@@ -407,21 +398,22 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		}
 	}
 
-	// Module-level require-alias table for FE-2 (cp.exec -> child_process.exec),
+	// Module-level import-alias table for FE-2 (cp.exec -> child_process.exec),
 	// augmented with identity/memoize-wrapper aliases (memoizedParse -> url.parse).
-	moduleAliases := collectRequireAliases(prog.Body)
-	collectIdentityWrapperAliases(prog.Body, moduleAliases)
+	moduleAliases := collectRequireAliases(src)
+	collectImportAliases(src, moduleAliases)
+	collectIdentityWrapperAliases(src, moduleAliases)
 
-	// Relative-require default bindings (const f = require('./util')) so a bare
-	// call f(x) becomes a cross-module marker resolved after all files lower.
-	relativeDefaults := collectRelativeDefaults(prog.Body, moduleName)
+	// Relative default bindings (const f = require('./util'), import f from './util')
+	// so a bare call f(x) becomes a cross-module marker resolved after all files lower.
+	relativeDefaults := collectRelativeDefaults(src, moduleName)
 
-	// This module's default export (module.exports = <fn>), the rewrite target
-	// for a "js:@mod:<thisModule>" marker in some other file.
-	defaultExport := collectDefaultExport(prog.Body, localFuncs, c.nameOf)
+	// This module's default export, the rewrite target for a
+	// "js:@mod:<thisModule>" marker in some other file.
+	defaultExport := collectDefaultExport(src, localFuncs, c.nameOf)
 
 	mctx := &moduleCtx{
-		filename: filename, moduleName: moduleName, fset: fset, nameOf: c.nameOf,
+		src: src, li: li, moduleName: moduleName, nameOf: c.nameOf,
 		localFuncs: localFuncs, moduleAliases: moduleAliases,
 		relativeDefaults: relativeDefaults, handlers: c.handlers,
 	}
@@ -439,7 +431,7 @@ func convertModule(prog *ast.Program, fset *file.FileSet, filename, moduleName s
 		Synthetic:     true,
 	}
 	fs := mctx.newFuncState()
-	fs.lowerBody(prog.Body)
+	fs.lowerBody(src.Stmts)
 	moduleFn.Blocks = fs.b.Finish()
 
 	mod.Functions = append([]*ir.Function{moduleFn}, functions...)

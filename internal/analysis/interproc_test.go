@@ -3,8 +3,8 @@ package analysis
 import (
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
 )
 
 // TestAnalyze_Interprocedural validates that taint is tracked across a function

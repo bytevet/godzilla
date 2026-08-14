@@ -1,7 +1,7 @@
-// Decorators and `for await` are the two constructs goja's parser cannot spell,
-// and a .js file carrying either was previously lost WHOLE -- not analyzed with
-// reduced precision, but skipped. This sample is the end-to-end proof that the
-// esbuild downlevel recovers the flows inside them.
+// Decorators, `for await` and ESM syntax in one .js file: no single rung of the
+// dialect ladder reads all three by extension, so this pins that the ladder
+// keeps trying until one does. Both flows are intra-procedural on purpose --
+// the assertion is that the file is analyzed AT ALL, not how deeply.
 import Service from '@ember/service';
 
 export default class SessionService extends Service {

@@ -6,9 +6,11 @@ import (
 	"testing"
 )
 
-// FuzzConvertJS fuzzes the full JS frontend (goja parse + the hand-written
-// lowering) over untrusted source. A scanned repo's .js is attacker-influenced,
-// so the lowering must never panic on any parseable-or-not input.
+// FuzzConvertJS fuzzes the full JS frontend (parse + the hand-written lowering)
+// over untrusted source. A scanned repo's .js is attacker-influenced, so the
+// lowering must never panic on any parseable-or-not input -- and the parser
+// re-panics anything that is not a lexer panic, so hostile input reaches this
+// package as a panic rather than an error.
 func FuzzConvertJS(f *testing.F) {
 	f.Add("const x = req.query.id; cp.exec(x);")
 	f.Add("app.get('/', (req,res)=>{ res.send(req.query.x) })")

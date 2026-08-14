@@ -3,9 +3,9 @@ package analysis
 import (
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
-	"godzilla/internal/rules/loader"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules/loader"
 )
 
 // TestAnalyze_ReturnFlowIsMedium is the ENG-7 regression guard. In

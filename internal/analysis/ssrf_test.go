@@ -3,7 +3,7 @@ package analysis
 import (
 	"testing"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // --- constructors ------------------------------------------------------------

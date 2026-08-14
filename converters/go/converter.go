@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"

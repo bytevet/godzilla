@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/rules"
 )
 
 func TestBuiltin(t *testing.T) {

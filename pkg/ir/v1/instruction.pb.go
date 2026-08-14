@@ -864,7 +864,7 @@ const file_proto_instruction_proto_rawDesc = "" +
 	"\n" +
 	"UN_OP_ADDR\x10\x05\x12\x0f\n" +
 	"\vUN_OP_DEREF\x10\x06\x12\x0f\n" +
-	"\vUN_OP_ARROW\x10\aB\x17Z\x15godzilla/pkg/ir/v1;irb\x06proto3"
+	"\vUN_OP_ARROW\x10\aB*Z(github.com/bytevet/godzilla/pkg/ir/v1;irb\x06proto3"
 
 var (
 	file_proto_instruction_proto_rawDescOnce sync.Once

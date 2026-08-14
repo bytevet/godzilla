@@ -2,15 +2,42 @@ package js_converter
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
-	"github.com/dop251/goja/ast"
-	"github.com/dop251/goja/file"
-	"github.com/dop251/goja/token"
+	jsast "github.com/bytevet/esbuild-jsast"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
+
+// fnID identifies a function node across the collector and the lowering.
+//
+// An esbuild Expr/Stmt is a VALUE struct {Loc, Data}, so two wrappers around the
+// same node are distinct values while their Data interfaces compare equal (the
+// node types implement their marker interface on pointer receivers only). Keying
+// on Data is therefore the only identity that survives being reached twice; key
+// the wrapper and the collector's name is invisible to the lowering, which then
+// emits js.unsupported.
+//
+// The concrete values stored are *jsast.EFunction, *jsast.EArrow and
+// *jsast.SFunction.
+type fnID any
+
+// unwrap strips the transparent wrappers a TypeScript parse can leave around an
+// expression, so collect and lower key the same node pointer.
+func unwrap(e jsast.Expr) jsast.Expr {
+	for {
+		switch v := e.Data.(type) {
+		case *jsast.EInlinedEnum:
+			e = v.Value
+		case *jsast.EAnnotation:
+			e = v.Value
+		default:
+			return e
+		}
+	}
+}
 
 // funcState holds the per-function lowering state. Variable values and the
 // per-block instruction stream are owned by an ssabuild.Builder (real CFG +
@@ -23,11 +50,12 @@ import (
 // header / switch fall-through as a predecessor. `nameOf` is the collector's
 // shared node->canonical-name map, so an inline function expression/arrow used
 // as a value resolves to a FuncName reference to its already-lowered
-// ir.Function instead of being inlined again.
+// ir.Function instead of being inlined again. `src` resolves a symbol Ref to
+// its source name (esbuild stores identifiers as Refs, never strings).
 type funcState struct {
-	filename   string
-	fset       *file.FileSet
-	nameOf     map[ast.Node]string
+	src        *jsast.File
+	li         *lineIndex
+	nameOf     map[fnID]string
 	counter    int
 	b          *ssabuild.Builder
 	cur        ssabuild.BlockID
@@ -48,14 +76,15 @@ type funcState struct {
 	moduleName  string
 	methodClass string
 
-	// moduleAliases maps a require-bound name to its canonical module(.member)
+	// moduleAliases maps an import-bound name to its canonical module(.member)
 	// path (FE-2): "cp" -> "child_process" for `const cp = require('child_process')`,
-	// "exec" -> "child_process.exec" for a destructured require. resolveRequire
-	// rewrites a callee's root through it so module-anchored sink rules match.
+	// "exec" -> "child_process.exec" for a destructured require or a named ESM
+	// import. resolveRequire rewrites a callee's root through it so
+	// module-anchored sink rules match.
 	moduleAliases map[string]string
 
 	// relativeDefaults maps a name default-imported from a relative (project)
-	// require -- `const f = require('./util')` -> f -> "util" (the scan-root-
+	// module -- `const f = require('./util')` -> f -> "util" (the scan-root-
 	// relative module name) -- so a bare call `f(x)` lowers to a resolvable
 	// "js:@mod:<module>" marker instead of the unmatchable "js:f".
 	// resolveJSCrossModuleCalls rewrites that marker to the module's default
@@ -76,24 +105,8 @@ type funcState struct {
 // one of these needs no canonicalization.
 var reqConventionNames = map[string]bool{"req": true, "request": true, "ctx": true}
 
-func newFuncState(filename string, fset *file.FileSet, nameOf map[ast.Node]string, localFuncs map[string]string) *funcState {
-	b := ssabuild.NewBuilder()
-	entry := b.NewBlock()
-	b.Seal(entry) // the entry block has no predecessors, so it is sealed at once.
-	return &funcState{
-		filename:   filename,
-		fset:       fset,
-		nameOf:     nameOf,
-		b:          b,
-		cur:        entry,
-		assigned:   map[string]bool{},
-		paramRegs:  map[string]bool{},
-		localFuncs: localFuncs,
-	}
-}
-
 // resolveRequire rewrites the root component of a dotted callee name through the
-// require-alias table, so `cp.exec` becomes `child_process.exec` and a
+// module-alias table, so `cp.exec` becomes `child_process.exec` and a
 // destructured `exec` becomes `child_process.exec` (FE-2). Unaliased roots and
 // "<dynamic>" pass through unchanged.
 func (fs *funcState) resolveRequire(dotted string) string {
@@ -117,28 +130,15 @@ func (fs *funcState) newReg() string {
 	return r
 }
 
-// posForIdx resolves a goja file.Idx to a gIR Position, returning nil when
-// unavailable.
-func posForIdx(fset *file.FileSet, filename string, idx file.Idx) *ir.Position {
-	if fset == nil || idx == 0 {
-		return nil
-	}
-	p := fset.Position(idx)
-	if p.Line <= 0 {
-		return nil
-	}
-	return &ir.Position{Filename: filename, Line: int32(p.Line), Column: int32(p.Column)}
-}
-
 // newValueInst allocates a fresh instruction with a result register (for
 // value-producing ops: CALL, FIELD, INDEX, BIN_OP, UN_OP, PHI, INTRINSIC).
-func (fs *funcState) newValueInst(idx file.Idx) *ir.Instruction {
-	return &ir.Instruction{Name: fs.newReg(), Pos: posForIdx(fs.fset, fs.filename, idx)}
+func (fs *funcState) newValueInst(loc jsast.Loc) *ir.Instruction {
+	return &ir.Instruction{Name: fs.newReg(), Pos: fs.li.pos(loc)}
 }
 
 // newVoidInst allocates a fresh instruction with no result register (STORE/RET).
-func (fs *funcState) newVoidInst(idx file.Idx) *ir.Instruction {
-	return &ir.Instruction{Pos: posForIdx(fs.fset, fs.filename, idx)}
+func (fs *funcState) newVoidInst(loc jsast.Loc) *ir.Instruction {
+	return &ir.Instruction{Pos: fs.li.pos(loc)}
 }
 
 func (fs *funcState) emit(inst *ir.Instruction) { fs.b.AddInstr(fs.cur, inst) }
@@ -155,6 +155,20 @@ func (fs *funcState) write(name string, val *ir.Value) {
 	fs.assigned[name] = true
 }
 
+// identName returns the source name of an identifier expression (a plain
+// identifier or an ES-module import binding, which esbuild spells as its own
+// node), and whether e was one. Identifiers reach the tree as symbol Refs, so
+// this is the only route back to what the source actually said.
+func identName(f *jsast.File, e jsast.Expr) (string, bool) {
+	switch v := unwrap(e).Data.(type) {
+	case *jsast.EIdentifier:
+		return f.NameOf(v.Ref), true
+	case *jsast.EImportIdentifier:
+		return f.NameOf(v.Ref), true
+	}
+	return "", false
+}
+
 // calleeCommon builds a CallCommon naming callee both as its FuncName value and
 // its Callee (the syntactic name the engine matches against rule globs).
 func calleeCommon(callee string) *ir.CallCommon {
@@ -165,16 +179,16 @@ func calleeCommon(callee string) *ir.CallCommon {
 }
 
 // emitCall emits an OP_CODE_CALL to callee with no receiver, lowering args in
-// order, and returns its result register. Used by lowerNew; a method call goes
-// through emitCallRecvInst directly so lowerCall can reach the instruction.
-func (fs *funcState) emitCall(callee string, args []ast.Expression, idx file.Idx) *ir.Value {
-	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, idx).Name)
+// order, and returns its result register. A caller that needs the instruction
+// itself goes through emitCallRecvInst instead.
+func (fs *funcState) emitCall(callee string, args []jsast.Expr, loc jsast.Loc) *ir.Value {
+	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, loc).Name)
 }
 
-// emitCallRecvInst is emitCallRecv returning the instruction, so a caller that
-// needs the LOWERED argument values (rather than re-lowering the expressions,
-// which would duplicate their side effects) can read them off Call.Args.
-func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []ast.Expression, idx file.Idx) *ir.Instruction {
+// emitCallRecvInst is emitCall returning the instruction, so a caller that needs
+// the LOWERED argument values (rather than re-lowering the expressions, which
+// would duplicate their side effects) can read them off Call.Args.
+func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []jsast.Expr, loc jsast.Loc) *ir.Instruction {
 	cc := calleeCommon(callee)
 	if receiver != nil {
 		cc.Value = receiver
@@ -182,7 +196,7 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 	for _, a := range args {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
-	inst := fs.newValueInst(idx)
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = cc
 	fs.emit(inst)
@@ -204,7 +218,7 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 // work: a tainted promise yields a tainted callback parameter. Only `.then`'s
 // FIRST argument is treated this way — its second argument, and `.catch`, receive
 // the rejection reason, not the value.
-func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, call *ir.Instruction, idx file.Idx) {
+func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, call *ir.Instruction, loc jsast.Loc) {
 	if receiver == nil || !strings.HasSuffix(callee, ".then") {
 		return
 	}
@@ -215,7 +229,7 @@ func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, 
 	cc := calleeCommon("") // empty callee == indirect; the engine resolves Call.Value
 	cc.Value = args[0]
 	cc.Args = []*ir.Value{receiver}
-	inst := fs.newValueInst(idx)
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = cc
 	fs.emit(inst)
@@ -224,9 +238,9 @@ func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, 
 // emitStore emits an OP_CODE_STORE of val into the address computed from
 // baseExpr (`obj.attr = v` / `arr[i] = v`), so a tainted value written into a
 // container marks that container tainted (see visitStore in the taint engine).
-func (fs *funcState) emitStore(baseExpr ast.Expression, val *ir.Value, idx file.Idx) {
+func (fs *funcState) emitStore(baseExpr jsast.Expr, val *ir.Value, loc jsast.Loc) {
 	base := fs.lowerExpr(baseExpr)
-	inst := fs.newVoidInst(idx)
+	inst := fs.newVoidInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_STORE
 	inst.Operands = []*ir.Value{base, val}
 	fs.emit(inst)
@@ -235,8 +249,8 @@ func (fs *funcState) emitStore(baseExpr ast.Expression, val *ir.Value, idx file.
 // emitUnsupported emits the generic "js.unsupported" intrinsic placeholder for
 // an expression the converter does not model, returning its result register so
 // the parent expression still has a value to consume.
-func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
-	inst := fs.newValueInst(idx)
+func (fs *funcState) emitUnsupported(loc jsast.Loc, comment string) *ir.Value {
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 	inst.Intrinsic = "js.unsupported"
 	inst.Comment = comment
@@ -248,37 +262,48 @@ func (fs *funcState) emitUnsupported(idx file.Idx, comment string) *ir.Value {
 // module needs, so the module-scoped funcState fields are primed in exactly ONE
 // place (newFuncState below) rather than once per call site.
 type moduleCtx struct {
-	filename         string
+	src              *jsast.File
+	li               *lineIndex
 	moduleName       string
-	fset             *file.FileSet
-	nameOf           map[ast.Node]string
+	nameOf           map[fnID]string
 	localFuncs       map[string]string
 	moduleAliases    map[string]string
 	relativeDefaults map[string]string
-	handlers         map[ast.Node]bool
+	handlers         map[fnID]bool
 }
 
 // newFuncState creates a funcState for a function in this module, priming the
 // module-scoped fields. isHandler is NOT set here: it is per-function and the
 // synthetic <module> function is never a handler.
 func (m *moduleCtx) newFuncState() *funcState {
-	fs := newFuncState(m.filename, m.fset, m.nameOf, m.localFuncs)
-	fs.moduleName = m.moduleName
-	fs.moduleAliases = m.moduleAliases
-	fs.relativeDefaults = m.relativeDefaults
-	return fs
+	b := ssabuild.NewBuilder()
+	entry := b.NewBlock()
+	b.Seal(entry) // the entry block has no predecessors, so it is sealed at once.
+	return &funcState{
+		src:              m.src,
+		li:               m.li,
+		nameOf:           m.nameOf,
+		b:                b,
+		cur:              entry,
+		assigned:         map[string]bool{},
+		paramRegs:        map[string]bool{},
+		localFuncs:       m.localFuncs,
+		moduleName:       m.moduleName,
+		moduleAliases:    m.moduleAliases,
+		relativeDefaults: m.relativeDefaults,
+	}
 }
 
 // lowerFunction lowers one collected function (declaration, function expression,
 // or arrow function) into an ir.Function whose body is a REAL CFG built by an
 // ssabuild.Builder.
 func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
-	filename, fset := m.filename, m.fset
 	fn := &ir.Function{
 		Name:          pf.qualname,
 		ObjectName:    pf.objectName,
 		PackageName:   m.moduleName,
 		CanonicalName: "js:" + m.moduleName + "." + pf.qualname,
+		Pos:           m.li.pos(pf.loc),
 	}
 
 	fs := m.newFuncState()
@@ -290,39 +315,46 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 	}
 
 	switch node := pf.node.(type) {
-	case *ast.FunctionLiteral:
-		fn.Pos = posForIdx(fset, filename, node.Function)
-		if node.ParameterList != nil {
-			bindParams(fs, fn, node.ParameterList)
-		}
-		if node.Body != nil {
-			fs.lowerBody(node.Body.List)
-		}
-	case *ast.ArrowFunctionLiteral:
-		fn.Pos = posForIdx(fset, filename, node.Start)
-		if node.ParameterList != nil {
-			bindParams(fs, fn, node.ParameterList)
-		}
-		fs.lowerConciseBody(node.Body)
+	case *jsast.SFunction:
+		fs.lowerFnBody(fn, node.Fn)
+	case *jsast.EFunction:
+		fs.lowerFnBody(fn, node.Fn)
+	case *jsast.EArrow:
+		fs.bindParams(fn, node.Args, node.HasRestArg)
+		fs.lowerBody(node.Body.Block.Stmts)
 	}
 
 	fn.Blocks = fs.b.Finish()
 	return fn
 }
 
+func (fs *funcState) lowerFnBody(fn *ir.Function, f jsast.Fn) {
+	fs.bindParams(fn, f.Args, f.HasRestArg)
+	fs.lowerBody(f.Body.Block.Stmts)
+}
+
 // bindParams binds each parameter (and the rest parameter, if any) to a
-// register named after the parameter itself. Destructuring parameters
-// (ObjectPattern/ArrayPattern) get a synthetic "_argN" name so the parameter
-// list stays positionally aligned; the pattern's own bindings are not modeled.
-func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
+// register named after the parameter itself. Destructuring parameters get a
+// synthetic "_argN" name so the parameter list stays positionally aligned; the
+// pattern's own bindings are not modeled.
+//
+// esbuild puts the rest parameter LAST in Args with HasRestArg set, rather than
+// in a field of its own.
+func (fs *funcState) bindParams(fn *ir.Function, args []jsast.Arg, hasRest bool) {
 	bind := func(name string) {
 		v := ssabuild.Reg(name)
 		fn.Params = append(fn.Params, v)
 		fs.write(name, v)
 		fs.paramRegs[name] = true
 	}
-	for i, b := range params.List {
-		name := bindingName(b.Target)
+	for i, a := range args {
+		name := bindingName(fs.src, a.Binding)
+		if hasRest && i == len(args)-1 {
+			if name != "" {
+				bind(name)
+			}
+			continue
+		}
 		if name == "" {
 			name = fmt.Sprintf("_arg%d", i)
 		}
@@ -334,14 +366,9 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 			fs.reqParam = name
 			// A signature-destructured request object — `({ query, body }, res) =>`
 			// — has no `req.query` member read to seed taint from (COV-11).
-			if pat, ok := b.Target.(*ast.ObjectPattern); ok {
-				fs.bindHandlerDestructure(pat)
+			if pat, ok := a.Binding.Data.(*jsast.BObject); ok {
+				fs.bindHandlerDestructure(pat, a.Binding.Loc)
 			}
-		}
-	}
-	if params.Rest != nil {
-		if id, ok := params.Rest.(*ast.Identifier); ok {
-			bind(string(id.Name))
 		}
 	}
 }
@@ -350,27 +377,12 @@ func bindParams(fs *funcState, fn *ir.Function, params *ast.ParameterList) {
 // request parameter — `({ query, body: b }, res) => ...` — to a synthetic
 // `js:req.<key>` source read, so the local carries request taint exactly as an
 // in-body `req.query` member read would. Nested/computed patterns are skipped.
-func (fs *funcState) bindHandlerDestructure(pat *ast.ObjectPattern) {
-	for _, b := range objectPatternBindings(pat) {
+func (fs *funcState) bindHandlerDestructure(pat *jsast.BObject, loc jsast.Loc) {
+	for _, b := range objectPatternBindings(fs.src, pat) {
 		if b.Key == "" || b.Local == "" {
 			continue
 		}
-		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, nil, pat.Idx0()))
-	}
-}
-
-// lowerConciseBody lowers an arrow function's body, which is either a normal
-// block or a "concise" bare-expression body (`(x) => x + 1`); the latter is
-// treated as an implicit `return <expr>`.
-func (fs *funcState) lowerConciseBody(body ast.ConciseBody) {
-	switch b := body.(type) {
-	case *ast.BlockStatement:
-		fs.lowerBody(b.List)
-	case *ast.ExpressionBody:
-		inst := fs.newVoidInst(b.Expression.Idx0())
-		inst.Op = ir.OpCode_OP_CODE_RET
-		inst.Operands = []*ir.Value{fs.lowerExpr(b.Expression)}
-		fs.emit(inst)
+		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, nil, loc))
 	}
 }
 
@@ -418,15 +430,14 @@ func (fs *funcState) canonRoot(name string) string {
 // FIELD instead of the synthetic source CALL, dropping loop-carried request taint.
 // A free/global identifier is never tracked as a variable, so it is never
 // PHI-wrapped; only a parameter needs this.
-func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bool) {
+func (fs *funcState) opaqueRootFor(e jsast.Expr, base *ir.Value) (string, bool) {
 	if root, ok := fs.isOpaqueBase(base); ok {
 		return root, ok
 	}
-	id, ok := e.(*ast.Identifier)
+	name, ok := identName(fs.src, e)
 	if !ok {
 		return "", false
 	}
-	name := string(id.Name)
 	if fs.paramRegs[name] {
 		return fs.canonRoot(name), true
 	}
@@ -452,9 +463,9 @@ func (fs *funcState) opaqueRootFor(e ast.Expression, base *ir.Value) (string, bo
 // `use(o){sink(o.field)}` reads clean, which is the shape most request data takes
 // once it crosses a function boundary. A non-register base (a global, `this`, a
 // closure-captured free name) keeps the plain FuncName form.
-func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, idx file.Idx) *ir.Value {
+func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, loc jsast.Loc) *ir.Value {
 	callee := "js:" + root + "." + field
-	inst := fs.newValueInst(idx)
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Comment = "property-read"
 	inst.Call = calleeCommon(callee)
@@ -470,36 +481,41 @@ func (fs *funcState) emitRootPropertyRead(root, field string, base *ir.Value, id
 // PHI) via the Builder for control-flow compounds and lowering straight-line
 // statements into the current block, so a function with no branches still emits
 // exactly ONE block (the engine's linear fast path).
-func (fs *funcState) lowerBody(stmts []ast.Statement) {
+func (fs *funcState) lowerBody(stmts []jsast.Stmt) {
 	for _, s := range stmts {
-		switch v := s.(type) {
-		case *ast.IfStatement:
+		switch v := s.Data.(type) {
+		case *jsast.SIf:
 			fs.lowerIf(v)
-		case *ast.ForStatement:
+		case *jsast.SFor:
 			fs.lowerFor(v)
-		case *ast.ForInStatement:
-			fs.lowerForRange(v.Into, v.Source, v.Body)
-		case *ast.ForOfStatement:
-			fs.lowerForRange(v.Into, v.Source, v.Body)
-		case *ast.WhileStatement:
+		case *jsast.SForIn:
+			fs.lowerForRange(v.Init, v.Value, v.Body)
+		case *jsast.SForOf:
+			fs.lowerForRange(v.Init, v.Value, v.Body)
+		case *jsast.SWhile:
 			fs.lowerWhile(v)
-		case *ast.DoWhileStatement:
+		case *jsast.SDoWhile:
 			fs.lowerDoWhile(v)
-		case *ast.SwitchStatement:
+		case *jsast.SSwitch:
 			fs.lowerSwitch(v)
-		case *ast.TryStatement:
+		case *jsast.STry:
 			fs.lowerTry(v)
-		case *ast.BlockStatement:
-			fs.lowerBody(v.List)
-		case *ast.LabelledStatement:
+		case *jsast.SBlock:
+			fs.lowerBody(v.Stmts)
+		case *jsast.SLabel:
 			// A labelled loop/if is lowered as its underlying statement (the label
 			// only matters for a precise break/continue, which we do not model).
-			fs.lowerBody(stmtList(v.Statement))
-		case *ast.WithStatement:
+			fs.lowerBody(stmtList(v.Stmt))
+		case *jsast.SWith:
 			// `with (obj) body`: lower the object (for any embedded source/sink) then
 			// the body straight into the current block (no separate scope modeled).
-			fs.lowerExpr(v.Object)
+			fs.lowerExpr(v.Value)
 			fs.lowerBody(stmtList(v.Body))
+		case *jsast.SExportDefault:
+			// `export default <decl|expr>`: the export is a wrapper, so lower what it
+			// wraps. Every other export form is a FLAG on the statement it exports and
+			// needs no case at all.
+			fs.lowerBody([]jsast.Stmt{v.Value})
 		default:
 			fs.lowerStmt(s)
 		}
@@ -510,23 +526,19 @@ func (fs *funcState) lowerBody(stmts []ast.Statement) {
 // diamond via the Builder's IfDiamond scaffold, so a variable rebound on either
 // arm reconciles via an on-demand ReadVariable PHI — which is what keeps the
 // pre-branch tainted value in the "default if empty" idiom `if (!x) x = "d"`.
-// An `else if` is an IfStatement in the parent's Alternate, so a chain becomes
-// nested diamonds via the recursive lowerBody.
-func (fs *funcState) lowerIf(v *ast.IfStatement) {
+// An `else if` is an SIf in the parent's NoOrNil, so a chain becomes nested
+// diamonds via the recursive lowerBody.
+func (fs *funcState) lowerIf(v *jsast.SIf) {
 	cond := fs.lowerExpr(v.Test)
 	fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
-		func() { fs.lowerBody(stmtList(v.Consequent)) },
-		func() {
-			if v.Alternate != nil {
-				fs.lowerBody(stmtList(v.Alternate))
-			}
-		})
+		func() { fs.lowerBody(stmtList(v.Yes)) },
+		func() { fs.lowerBody(stmtList(v.NoOrNil)) })
 }
 
 // lowerWhile lowers `while (test) body` into a REAL loop CFG via the Builder's
 // HeaderLoop scaffold (header/body/exit; the header PHI is what carries
 // loop-carried taint — see the scaffold's doc).
-func (fs *funcState) lowerWhile(v *ast.WhileStatement) {
+func (fs *funcState) lowerWhile(v *jsast.SWhile) {
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
 		func() *ir.Value { return fs.lowerExpr(v.Test) }, // condition, lowered in the (unsealed) header
 		func() { fs.lowerBody(stmtList(v.Body)) })
@@ -536,7 +548,7 @@ func (fs *funcState) lowerWhile(v *ast.WhileStatement) {
 // via the Builder's BodyLoop scaffold (the body is the loop header; its
 // back-edge comes from the test block). Loop-carried taint flows through the
 // body-header PHI.
-func (fs *funcState) lowerDoWhile(v *ast.DoWhileStatement) {
+func (fs *funcState) lowerDoWhile(v *jsast.SDoWhile) {
 	fs.b.BodyLoop(&fs.cur, &fs.terminated,
 		func() { fs.lowerBody(stmtList(v.Body)) },
 		func() *ir.Value { return fs.lowerExpr(v.Test) })
@@ -547,21 +559,19 @@ func (fs *funcState) lowerDoWhile(v *ast.DoWhileStatement) {
 // traversed; the update runs at the END of the body block, before the back-edge.
 // Reassignments in the body or update flow through the header PHI, modeling
 // loop-carried taint.
-func (fs *funcState) lowerFor(v *ast.ForStatement) {
-	if v.Initializer != nil {
-		fs.lowerForInit(v.Initializer) // evaluated once in the pre-loop block
-	}
+func (fs *funcState) lowerFor(v *jsast.SFor) {
+	fs.lowerForInit(v.InitOrNil) // evaluated once in the pre-loop block
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
 		func() *ir.Value {
-			if v.Test != nil {
-				return fs.lowerExpr(v.Test) // lowered in the (unsealed) header
+			if v.TestOrNil.Data != nil {
+				return fs.lowerExpr(v.TestOrNil) // lowered in the (unsealed) header
 			}
 			return ssabuild.Str("")
 		},
 		func() {
 			fs.lowerBody(stmtList(v.Body))
-			if v.Update != nil {
-				fs.lowerExpr(v.Update) // the `i++` step, at the body's END block
+			if v.UpdateOrNil.Data != nil {
+				fs.lowerExpr(v.UpdateOrNil) // the `i++` step, at the body's END block
 			}
 		})
 }
@@ -570,33 +580,32 @@ func (fs *funcState) lowerFor(v *ast.ForStatement) {
 // CFG as lowerWhile. The loop variable is bound to the source's value at the top
 // of the BODY block each iteration (element taint == container taint, so a
 // tainted iterable taints the loop variable).
-func (fs *funcState) lowerForRange(into ast.ForInto, source ast.Expression, bodyStmt ast.Statement) {
+func (fs *funcState) lowerForRange(into jsast.Stmt, source jsast.Expr, body jsast.Stmt) {
 	src := fs.lowerExpr(source) // evaluate the iterable in the pre-loop block
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
 		func() *ir.Value { return ssabuild.Str("") }, // opaque iteration condition
 		func() {
 			fs.bindForInto(into, src) // bind the loop variable each iteration
-			fs.lowerBody(stmtList(bodyStmt))
+			fs.lowerBody(stmtList(body))
 		})
 }
 
 // bindForInto binds a for-in/for-of loop variable (the `x` in `for (x of it)` /
-// `for (const x in it)`) to val in the current block. A declared target
-// (ForIntoVar / ForDeclaration) writes a fresh local; a bare assignment target
-// (ForIntoExpression, e.g. `for (x of it)` reusing an outer `x`) rebinds through
-// assignTo. Destructuring targets are dropped (a documented limitation).
-func (fs *funcState) bindForInto(into ast.ForInto, val *ir.Value) {
-	switch t := into.(type) {
-	case *ast.ForIntoVar:
-		if name := bindingName(t.Binding.Target); name != "" {
+// `for (const x in it)`) to val in the current block. A declared target writes a
+// fresh local; a bare assignment target (`for (x of it)` reusing an outer `x`)
+// rebinds through assignTo. Destructuring targets are dropped (a documented
+// limitation).
+func (fs *funcState) bindForInto(into jsast.Stmt, val *ir.Value) {
+	switch t := into.Data.(type) {
+	case *jsast.SLocal:
+		if len(t.Decls) == 0 {
+			return
+		}
+		if name := bindingName(fs.src, t.Decls[0].Binding); name != "" {
 			fs.write(name, val)
 		}
-	case *ast.ForDeclaration:
-		if name := bindingName(t.Target); name != "" {
-			fs.write(name, val)
-		}
-	case *ast.ForIntoExpression:
-		fs.assignTo(t.Expression, val)
+	case *jsast.SExpr:
+		fs.assignTo(t.Value, val)
 	}
 }
 
@@ -607,17 +616,17 @@ func (fs *funcState) bindForInto(into ast.ForInto, val *ir.Value) {
 // to the next (the last to exit), so taint written in any case — and carried by
 // fall-through into a later case — is captured. `default` needs no special
 // handling since every case is reachable.
-func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
-	disc := fs.lowerExpr(v.Discriminant)
-	n := len(v.Body)
+func (fs *funcState) lowerSwitch(v *jsast.SSwitch) {
+	disc := fs.lowerExpr(v.Test)
+	n := len(v.Cases)
 	if n == 0 {
 		return // empty switch: discriminant already lowered for side effects
 	}
 	// Lower each case's test in the discriminant block for an embedded
 	// source/sink; the boolean result is not otherwise needed.
-	for _, cs := range v.Body {
-		if cs.Test != nil {
-			fs.lowerExpr(cs.Test)
+	for _, cs := range v.Cases {
+		if cs.ValueOrNil.Data != nil {
+			fs.lowerExpr(cs.ValueOrNil)
 		}
 	}
 
@@ -649,7 +658,7 @@ func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
 		fs.b.Seal(caseBlocks[i])
 		fs.cur = caseBlocks[i]
 		fs.terminated = false
-		fs.lowerBody(v.Body[i].Consequent)
+		fs.lowerBody(v.Cases[i].Body)
 		if fs.terminated {
 			continue // a returning case has no fall-through edge
 		}
@@ -674,16 +683,14 @@ func (fs *funcState) lowerSwitch(v *ast.SwitchStatement) {
 // the after block. A try/finally with no catch is a straight-line continuation.
 // When the body always returns there is no exception edge (the handler's body-var
 // reads are then undefined — a minor recall gap, never a false positive).
-func (fs *funcState) lowerTry(v *ast.TryStatement) {
-	if v.Body != nil {
-		fs.lowerBody(v.Body.List)
-	}
+func (fs *funcState) lowerTry(v *jsast.STry) {
+	fs.lowerBody(v.Block.Stmts)
 	bodyEnd := fs.cur
 	bodyTerm := fs.terminated
 
 	if v.Catch == nil {
 		if v.Finally != nil {
-			fs.lowerBody(v.Finally.List)
+			fs.lowerBody(v.Finally.Block.Stmts)
 		}
 		return
 	}
@@ -698,9 +705,7 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	fs.cur = handlerB
 	fs.terminated = false
 	// The catch parameter (the exception object) is not modeled as a taint source.
-	if v.Catch.Body != nil {
-		fs.lowerBody(v.Catch.Body.List)
-	}
+	fs.lowerBody(v.Catch.Block.Stmts)
 	handlerTerm := fs.terminated
 	if !handlerTerm {
 		fs.b.SetJump(fs.cur, after)
@@ -710,91 +715,85 @@ func (fs *funcState) lowerTry(v *ast.TryStatement) {
 	fs.cur = after
 	fs.terminated = bodyTerm && handlerTerm
 	if v.Finally != nil {
-		fs.lowerBody(v.Finally.List)
+		fs.lowerBody(v.Finally.Block.Stmts)
 	}
 }
 
-// lowerForInit lowers a `for(...)` loop's initializer clause, which may be a
-// bare expression, a `var` declaration list, or a `let`/`const` declaration.
-func (fs *funcState) lowerForInit(init ast.ForLoopInitializer) {
-	switch v := init.(type) {
-	case *ast.ForLoopInitializerExpression:
-		fs.lowerExpr(v.Expression)
-	case *ast.ForLoopInitializerVarDeclList:
-		for _, b := range v.List {
-			fs.lowerBinding(b)
+// lowerForInit lowers a `for(...)` loop's initializer clause, which is either a
+// declaration or a bare expression statement.
+func (fs *funcState) lowerForInit(init jsast.Stmt) {
+	switch v := init.Data.(type) {
+	case *jsast.SLocal:
+		for _, d := range v.Decls {
+			fs.lowerBinding(d)
 		}
-	case *ast.ForLoopInitializerLexicalDecl:
-		for _, b := range v.LexicalDeclaration.List {
-			fs.lowerBinding(b)
-		}
+	case *jsast.SExpr:
+		fs.lowerExpr(v.Value)
 	}
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;
 // those are flattened by lowerBody).
-func (fs *funcState) lowerStmt(s ast.Statement) {
-	switch v := s.(type) {
-	case *ast.VariableStatement:
-		for _, b := range v.List {
-			fs.lowerBinding(b)
+func (fs *funcState) lowerStmt(s jsast.Stmt) {
+	switch v := s.Data.(type) {
+	case *jsast.SLocal:
+		for _, d := range v.Decls {
+			fs.lowerBinding(d)
 		}
-	case *ast.LexicalDeclaration:
-		for _, b := range v.List {
-			fs.lowerBinding(b)
-		}
-	case *ast.ExpressionStatement:
-		fs.lowerExpr(v.Expression)
-	case *ast.ReturnStatement:
-		inst := fs.newVoidInst(s.Idx0())
+	case *jsast.SExpr:
+		fs.lowerExpr(v.Value)
+	case *jsast.SReturn:
+		inst := fs.newVoidInst(s.Loc)
 		inst.Op = ir.OpCode_OP_CODE_RET
-		if v.Argument != nil {
-			inst.Operands = []*ir.Value{fs.lowerExpr(v.Argument)}
+		if v.ValueOrNil.Data != nil {
+			inst.Operands = []*ir.Value{fs.lowerExpr(v.ValueOrNil)}
 		}
 		fs.emit(inst)
 		// A returning arm must not feed its values into a merge / loop header /
 		// switch fall-through join.
 		fs.terminated = true
-	case *ast.ThrowStatement:
+	case *jsast.SThrow:
 		// `throw x` deliberately does NOT terminate the block: leaving it
 		// non-terminated preserves the exception edge into an enclosing try's catch
 		// (see lowerTry), so taint assigned before a `throw` reaches the handler.
-		fs.lowerExpr(v.Argument)
-	case *ast.FunctionDeclaration:
+		fs.lowerExpr(v.Value)
+	case *jsast.SFunction:
 		// Converted separately (see collector); bind the name so later reads of it
 		// as a plain VALUE resolve to a function reference rather than a GlobalName.
 		// (Call callees are resolved syntactically instead — see lowerCall.)
-		if v.Function.Name != nil {
-			if canonical, ok := fs.nameOf[v.Function]; ok {
-				fs.write(string(v.Function.Name.Name), &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}})
+		if v.Fn.Name != nil {
+			if canonical, ok := fs.nameOf[fnID(v)]; ok {
+				fs.write(fs.src.NameOf(v.Fn.Name.Ref), &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}})
 			}
 		}
+	case *jsast.SExportEquals:
+		fs.lowerExpr(v.Value)
 	default:
-		// ClassDeclaration, EmptyStatement, BranchStatement,
-		// DebuggerStatement, BadStatement: no-ops / unsupported, dropped
-		// (documented limitation for classes; the rest carry no dataflow).
+		// SClass, SEmpty, SBreak, SContinue, SDebugger, SComment, SDirective,
+		// SImport and the remaining export forms: dropped. collectClass already
+		// queued each SClass method; the rest carry no dataflow.
 	}
 }
 
-// lowerBinding lowers one `var`/`let`/`const` binding, evaluating its
+// lowerBinding lowers one `var`/`let`/`const` declarator, evaluating its
 // initializer (if any) and binding the result to the target name.
-func (fs *funcState) lowerBinding(b *ast.Binding) {
-	if op, ok := b.Target.(*ast.ObjectPattern); ok {
-		fs.lowerObjectPatternBinding(op, b.Initializer)
+func (fs *funcState) lowerBinding(d jsast.Decl) {
+	switch t := d.Binding.Data.(type) {
+	case *jsast.BObject:
+		fs.lowerObjectPatternBinding(t, d.Binding.Loc, d.ValueOrNil)
+		return
+	case *jsast.BArray:
+		fs.lowerArrayPatternBinding(t, d.ValueOrNil)
 		return
 	}
-	if ap, ok := b.Target.(*ast.ArrayPattern); ok {
-		fs.lowerArrayPatternBinding(ap, b.Initializer)
-		return
-	}
-	name := bindingName(b.Target)
-	if b.Initializer == nil {
+	name := bindingName(fs.src, d.Binding)
+	if d.ValueOrNil.Data == nil {
 		if name != "" {
 			fs.write(name, ssabuild.Nil())
 		}
 		return
 	}
-	val := fs.lowerExpr(b.Initializer)
+	val := fs.lowerExpr(d.ValueOrNil)
 	if name != "" {
 		fs.write(name, val)
 	}
@@ -804,23 +803,20 @@ func (fs *funcState) lowerBinding(b *ast.Binding) {
 // (const { a, b: c, ...rest } = init) to a field read off the initializer, so
 // taint carried by the initializer (typically req.query / req.body) reaches the
 // destructured names — the common Express idiom.
-func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.Expression) {
-	if init == nil {
+func (fs *funcState) lowerObjectPatternBinding(op *jsast.BObject, loc jsast.Loc, init jsast.Expr) {
+	if init.Data == nil {
 		return
 	}
 	base := fs.lowerExpr(init)
-	bindField := func(localName, field string) {
-		if localName == "" {
-			return
+	for _, b := range objectPatternBindings(fs.src, op) {
+		if b.Local == "" {
+			continue
 		}
-		fs.write(localName, fs.emitFieldRead(base, field, op.LeftBrace))
-	}
-	for _, b := range objectPatternBindings(op) {
-		bindField(b.Local, b.Key)
+		fs.write(b.Local, fs.emitFieldRead(base, b.Key, loc))
 	}
 	// `const { ...rest } = init`: the rest object carries the initializer's taint.
-	if id, ok := op.Rest.(*ast.Identifier); ok {
-		fs.write(string(id.Name), base)
+	if name := objectPatternRest(fs.src, op); name != "" {
+		fs.write(name, base)
 	}
 }
 
@@ -828,18 +824,15 @@ func (fs *funcState) lowerObjectPatternBinding(op *ast.ObjectPattern, init ast.E
 // (const [a, b, ...rest] = init) to the initializer's value (element taint ==
 // container taint). Elisions, per-element defaults and nested patterns are not
 // modeled.
-func (fs *funcState) lowerArrayPatternBinding(ap *ast.ArrayPattern, init ast.Expression) {
-	if init == nil {
+func (fs *funcState) lowerArrayPatternBinding(ap *jsast.BArray, init jsast.Expr) {
+	if init.Data == nil {
 		return
 	}
 	base := fs.lowerExpr(init)
-	for _, el := range ap.Elements {
-		if id, ok := el.(*ast.Identifier); ok {
-			fs.write(string(id.Name), base)
+	for _, it := range ap.Items {
+		if name := bindingName(fs.src, it.Binding); name != "" {
+			fs.write(name, base)
 		}
-	}
-	if id, ok := ap.Rest.(*ast.Identifier); ok {
-		fs.write(string(id.Name), base)
 	}
 }
 
@@ -851,25 +844,34 @@ type patBinding struct{ Local, Key string }
 
 // objectPatternBindings returns the bindings an object pattern introduces, for
 // the three places that walk one: a handler's destructured request parameter, a
-// destructuring variable declaration, and `const {a, b} = require('m')`. Only
-// plain shorthand (`{query}`) and keyed-with-identifier-target (`{query: q}`)
-// properties are modeled; a nested or otherwise non-identifier target yields no
-// entry. op.Rest is deliberately NOT handled here — each caller binds it
-// differently.
-func objectPatternBindings(op *ast.ObjectPattern) []patBinding {
+// destructuring variable declaration, and `const {a, b} = require('m')`. Only a
+// plain identifier target is modeled, so a nested pattern yields no entry. The
+// rest element is deliberately NOT handled here — each caller binds it
+// differently (see objectPatternRest).
+func objectPatternBindings(f *jsast.File, op *jsast.BObject) []patBinding {
 	var out []patBinding
 	for _, p := range op.Properties {
-		switch prop := p.(type) {
-		case *ast.PropertyShort:
-			out = append(out, patBinding{Local: string(prop.Name.Name), Key: string(prop.Name.Name)})
-		case *ast.PropertyKeyed:
-			// `{ query: q }` -> field `query`, local `q`.
-			if id, ok := prop.Value.(*ast.Identifier); ok {
-				out = append(out, patBinding{Local: string(id.Name), Key: propertyKeyName(prop.Key)})
-			}
+		if p.IsSpread {
+			continue
 		}
+		local := bindingName(f, p.Value)
+		if local == "" {
+			continue
+		}
+		out = append(out, patBinding{Local: local, Key: propertyKeyName(p.Key)})
 	}
 	return out
+}
+
+// objectPatternRest returns the name bound by a pattern's `...rest` element, or
+// "" when there is none.
+func objectPatternRest(f *jsast.File, op *jsast.BObject) string {
+	for _, p := range op.Properties {
+		if p.IsSpread {
+			return bindingName(f, p.Value)
+		}
+	}
+	return ""
 }
 
 // reactHTMLSink is the synthetic callee react-xss.yaml matches. Spelled with the
@@ -880,8 +882,8 @@ const reactHTMLSink = "js:__godzilla_react_html"
 
 // emitReactHTMLSink gives React's dangerouslySetInnerHTML a callee to match.
 // It is the framework's one documented escape from JSX auto-escaping, but unlike
-// Vue's v-html it is spelled as DATA, not a directive: esbuild lowers the JSX
-// attribute to a `{__html: x}` object literal inside a createElement props
+// Vue's v-html it is spelled as DATA, not a directive: the JSX lowering turns the
+// attribute into a `{__html: x}` object literal inside a createElement props
 // argument, so nothing in the IR is a call and no sink glob can name it. Mirror
 // it the way sfc.go mirrors v-html -- emit a call carrying the value.
 //
@@ -889,24 +891,21 @@ const reactHTMLSink = "js:__godzilla_react_html"
 // marker and the only reason to build such an object, and keying on it also
 // catches the indirect form (`const h = {__html: x}` handed to the attribute by
 // variable) that keying on the attribute would miss.
-func (fs *funcState) emitReactHTMLSink(o *ast.ObjectLiteral) {
-	for _, p := range o.Value {
-		kp, ok := p.(*ast.PropertyKeyed)
-		if !ok || propertyKeyName(kp.Key) != "__html" || kp.Value == nil {
+func (fs *funcState) emitReactHTMLSink(o *jsast.EObject) {
+	for _, p := range o.Properties {
+		if propertyKeyName(p.Key) != "__html" || p.ValueOrNil.Data == nil {
 			continue
 		}
-		fs.emitCall(reactHTMLSink, []ast.Expression{kp.Value}, kp.Value.Idx0())
+		fs.emitCall(reactHTMLSink, []jsast.Expr{p.ValueOrNil}, p.ValueOrNil.Loc)
 	}
 }
 
-// propertyKeyName extracts the static field name of a destructuring property
-// key (an identifier or string literal); other computed keys yield "".
-func propertyKeyName(key ast.Expression) string {
-	switch k := key.(type) {
-	case *ast.Identifier:
-		return string(k.Name)
-	case *ast.StringLiteral:
-		return string(k.Value)
+// propertyKeyName extracts the static field name of a property key. esbuild
+// spells an identifier key and a string-literal key alike, as an EString; any
+// other key is computed and yields "".
+func propertyKeyName(key jsast.Expr) string {
+	if s, ok := unwrap(key).Data.(*jsast.EString); ok {
+		return jsast.UTF16ToString(s.Value)
 	}
 	return ""
 }
@@ -916,150 +915,167 @@ func propertyKeyName(key ast.Expression) string {
 // resolve through the Builder to their current SSA value; unbound names (free
 // variables — builtins, another function's or the module's locals, since closures
 // are not modeled) fall back to a GlobalName reference.
-func (fs *funcState) lowerExpr(e ast.Expression) *ir.Value {
-	if e == nil {
+func (fs *funcState) lowerExpr(e jsast.Expr) *ir.Value {
+	e = unwrap(e)
+	if e.Data == nil {
 		return nil
 	}
-	switch v := e.(type) {
-	case *ast.Identifier:
-		if fs.assigned[string(v.Name)] {
-			return fs.read(string(v.Name))
-		}
-		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: string(v.Name)}}
+	switch v := e.Data.(type) {
+	case *jsast.EIdentifier:
+		return fs.lowerIdent(fs.src.NameOf(v.Ref))
 
-	case *ast.StringLiteral:
-		return ssabuild.Str(string(v.Value))
+	case *jsast.EImportIdentifier:
+		return fs.lowerIdent(fs.src.NameOf(v.Ref))
 
-	case *ast.NumberLiteral:
+	case *jsast.EPrivateIdentifier:
+		return fs.lowerIdent(fs.src.NameOf(v.Ref))
+
+	case *jsast.ENameOfSymbol:
+		return ssabuild.Str(fs.src.NameOf(v.Ref))
+
+	case *jsast.EString:
+		return ssabuild.Str(jsast.UTF16ToString(v.Value))
+
+	case *jsast.ENumber:
 		return numberValue(v.Value)
 
-	case *ast.BooleanLiteral:
+	case *jsast.EBigInt:
+		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_StringVal{StringVal: v.Value}}}}
+
+	case *jsast.EBoolean:
 		return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{Value: &ir.Constant_BoolVal{BoolVal: v.Value}}}}
 
-	case *ast.NullLiteral:
+	case *jsast.ENull:
 		return ssabuild.Nil()
 
-	case *ast.RegExpLiteral:
-		return ssabuild.Str(v.Literal) // best-effort string representation
+	case *jsast.EUndefined, *jsast.EMissing:
+		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "undefined"}}
 
-	case *ast.TemplateLiteral:
-		return fs.lowerTemplateLiteral(v)
+	case *jsast.ERegExp:
+		return ssabuild.Str(v.Value) // best-effort string representation
 
-	case *ast.BinaryExpression:
-		return fs.lowerBinary(v)
+	case *jsast.ETemplate:
+		return fs.lowerTemplateLiteral(e.Loc, v)
 
-	case *ast.UnaryExpression:
-		return fs.lowerUnary(v)
+	case *jsast.EBinary:
+		return fs.lowerBinaryExpr(e.Loc, v)
 
-	case *ast.AssignExpression:
-		return fs.lowerAssign(v)
+	case *jsast.EUnary:
+		return fs.lowerUnary(e.Loc, v)
 
-	case *ast.SequenceExpression:
-		var last *ir.Value
-		for _, x := range v.Sequence {
-			last = fs.lowerExpr(x)
-		}
-		return last
-
-	case *ast.ConditionalExpression:
+	case *jsast.EIf:
 		// No branch blocks: evaluate the test for side effects/taint discovery,
 		// then merge both arms with a PHI so taint from either reaches the result.
 		fs.lowerExpr(v.Test)
-		cv := fs.lowerExpr(v.Consequent)
-		av := fs.lowerExpr(v.Alternate)
-		inst := fs.newValueInst(v.Idx0())
+		cv := fs.lowerExpr(v.Yes)
+		av := fs.lowerExpr(v.No)
+		inst := fs.newValueInst(e.Loc)
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{cv, av}
 		fs.emit(inst)
 		return ssabuild.Reg(inst.Name)
 
-	case *ast.CallExpression:
-		return fs.lowerCall(v)
+	case *jsast.ECall:
+		return fs.lowerCall(e.Loc, v)
 
-	case *ast.NewExpression:
-		return fs.lowerNew(v)
+	case *jsast.ENew:
+		return fs.lowerNew(e.Loc, v)
 
-	case *ast.DotExpression:
-		return fs.lowerDot(v)
+	case *jsast.EDot:
+		return fs.lowerDot(e.Loc, v)
 
-	case *ast.BracketExpression:
-		return fs.lowerBracket(v)
+	case *jsast.EIndex:
+		return fs.lowerBracket(e.Loc, v)
 
-	case *ast.ArrayLiteral:
-		return fs.lowerAggregate(v.Value, v.Idx0())
+	case *jsast.EArray:
+		return fs.lowerAggregate(v.Items, e.Loc)
 
-	case *ast.ObjectLiteral:
-		vals := make([]ast.Expression, 0, len(v.Value))
-		for _, p := range v.Value {
-			if pv := propertyValue(p); pv != nil {
-				vals = append(vals, pv)
+	case *jsast.EObject:
+		vals := make([]jsast.Expr, 0, len(v.Properties))
+		for _, p := range v.Properties {
+			if p.ValueOrNil.Data != nil {
+				vals = append(vals, p.ValueOrNil)
+			} else if p.InitializerOrNil.Data != nil {
+				vals = append(vals, p.InitializerOrNil)
 			}
 		}
 		fs.emitReactHTMLSink(v)
-		return fs.lowerAggregate(vals, v.Idx0())
+		return fs.lowerAggregate(vals, e.Loc)
 
-	case *ast.SpreadElement:
-		return fs.lowerExpr(v.Expression)
+	case *jsast.ESpread:
+		return fs.lowerExpr(v.Value)
 
-	case *ast.ThisExpression:
+	case *jsast.EThis:
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "this"}}
 
-	case *ast.SuperExpression:
+	case *jsast.ESuper:
 		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "super"}}
 
-	case *ast.YieldExpression:
+	case *jsast.EImportMeta:
+		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "import.meta"}}
+
+	case *jsast.ENewTarget:
+		return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: "new.target"}}
+
+	case *jsast.EYield:
 		// Generators are not modeled: `yield x` lowers to `x`.
-		if v.Argument != nil {
-			return fs.lowerExpr(v.Argument)
+		if v.ValueOrNil.Data != nil {
+			return fs.lowerExpr(v.ValueOrNil)
 		}
 		return ssabuild.Nil()
 
-	case *ast.AwaitExpression:
+	case *jsast.EAwait:
 		// `await x` lowers to `x` (see emitPromiseContinuation for `.then`).
-		return fs.lowerExpr(v.Argument)
+		return fs.lowerExpr(v.Value)
 
-	case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+	case *jsast.EImportCall:
+		// `import(spec)` is a call whose argument is the only thing that carries
+		// data; naming it keeps that argument visible to the engine.
+		return fs.emitCall("js:import", []jsast.Expr{v.Expr}, e.Loc)
+
+	case *jsast.EFunction, *jsast.EArrow:
 		return fs.funcRefValue(e)
 
-	case *ast.OptionalChain:
-		// `a?.b` yields the same value as `a.b` when it does not short-circuit.
-		return fs.lowerExpr(v.Expression)
-
-	case *ast.Optional:
-		return fs.lowerExpr(v.Expression)
-
 	default:
-		return fs.emitUnsupported(e.Idx0(), fmt.Sprintf("unsupported javascript expression: %T", e))
+		return fs.emitUnsupported(e.Loc, fmt.Sprintf("unsupported javascript expression: %T", e.Data))
 	}
+}
+
+// lowerIdent resolves a bare name: a local through the Builder, anything else
+// (a builtin, an enclosing scope's local, an import) as a GlobalName.
+func (fs *funcState) lowerIdent(name string) *ir.Value {
+	if fs.assigned[name] {
+		return fs.read(name)
+	}
+	return &ir.Value{Kind: &ir.Value_GlobalName{GlobalName: name}}
 }
 
 // funcRefValue resolves an inline function-literal/arrow expression (e.g. a
 // callback argument) to a FuncName reference to the ir.Function the collector
 // already created for it, rather than inlining its body again.
-func (fs *funcState) funcRefValue(e ast.Expression) *ir.Value {
-	if canonical, ok := fs.nameOf[e]; ok {
+func (fs *funcState) funcRefValue(e jsast.Expr) *ir.Value {
+	if canonical, ok := fs.nameOf[fnID(e.Data)]; ok {
 		return &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}}
 	}
-	// Unreachable — the collector visits every expression tree lowering does.
-	return fs.emitUnsupported(e.Idx0(), "unresolved inline function literal")
+	// Unreachable: see "Collector coverage" in converter.go.
+	return fs.emitUnsupported(e.Loc, "unresolved inline function literal")
 }
 
 // lowerDot lowers `a.b`. If the base is opaque (see isOpaqueBase), this hop
 // is the root of the chain and becomes a synthetic property-read CALL;
 // otherwise it is a normal FIELD read off the base's register.
-func (fs *funcState) lowerDot(v *ast.DotExpression) *ir.Value {
-	base := fs.lowerExpr(v.Left)
-	field := string(v.Identifier.Name)
+func (fs *funcState) lowerDot(loc jsast.Loc, v *jsast.EDot) *ir.Value {
+	base := fs.lowerExpr(v.Target)
 
-	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, field, base, v.Idx0())
+	if root, ok := fs.opaqueRootFor(v.Target, base); ok {
+		return fs.emitRootPropertyRead(root, v.Name, base, loc)
 	}
 
-	return fs.emitFieldRead(base, field, v.Idx0())
+	return fs.emitFieldRead(base, v.Name, loc)
 }
 
-func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *ir.Value {
-	inst := fs.newValueInst(idx)
+func (fs *funcState) emitFieldRead(base *ir.Value, field string, loc jsast.Loc) *ir.Value {
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_FIELD
 	inst.Operands = []*ir.Value{base}
 	inst.Comment = "field:" + field
@@ -1072,34 +1088,37 @@ func (fs *funcState) emitFieldRead(base *ir.Value, field string, idx file.Idx) *
 // root property-read's synthetic callee (so `req.query['name']` matches the
 // same source globs as `req.query.name`); any other index expression
 // contributes "*".
-func (fs *funcState) lowerBracket(v *ast.BracketExpression) *ir.Value {
-	base := fs.lowerExpr(v.Left)
-	idx := fs.lowerExpr(v.Member)
+func (fs *funcState) lowerBracket(loc jsast.Loc, v *jsast.EIndex) *ir.Value {
+	base := fs.lowerExpr(v.Target)
+	idx := fs.lowerExpr(v.Index)
 
-	if root, ok := fs.opaqueRootFor(v.Left, base); ok {
-		return fs.emitRootPropertyRead(root, bracketFieldName(v.Member), base, v.Idx0())
+	if root, ok := fs.opaqueRootFor(v.Target, base); ok {
+		return fs.emitRootPropertyRead(root, bracketFieldName(v.Index), base, loc)
 	}
 
-	inst := fs.newValueInst(v.Idx0())
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_INDEX
 	inst.Operands = []*ir.Value{base, idx}
 	fs.emit(inst)
 	return ssabuild.Reg(inst.Name)
 }
 
-func bracketFieldName(m ast.Expression) string {
-	if sl, ok := m.(*ast.StringLiteral); ok {
-		return string(sl.Value)
+func bracketFieldName(m jsast.Expr) string {
+	if s, ok := unwrap(m).Data.(*jsast.EString); ok {
+		return jsast.UTF16ToString(s.Value)
 	}
 	return "*"
 }
 
 // lowerAggregate lowers an array/object literal's element values, merging their
 // taint into one register via OP_CODE_PHI (field-insensitive; see package doc).
-func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Value {
+func (fs *funcState) lowerAggregate(exprs []jsast.Expr, loc jsast.Loc) *ir.Value {
 	var acc *ir.Value
 	for _, e := range exprs {
-		if e == nil {
+		if e.Data == nil {
+			continue
+		}
+		if _, hole := unwrap(e).Data.(*jsast.EMissing); hole {
 			continue // sparse array elision
 		}
 		v := fs.lowerExpr(e)
@@ -1107,7 +1126,7 @@ func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Va
 			acc = v
 			continue
 		}
-		inst := fs.newValueInst(idx)
+		inst := fs.newValueInst(loc)
 		inst.Op = ir.OpCode_OP_CODE_PHI
 		inst.Operands = []*ir.Value{acc, v}
 		fs.emit(inst)
@@ -1122,15 +1141,14 @@ func (fs *funcState) lowerAggregate(exprs []ast.Expression, idx file.Idx) *ir.Va
 // lowerTemplateLiteral folds a template literal's raw text chunks and
 // substituted expressions left-to-right with BIN_OP_ADD, so taint carried by any
 // ${expr} slot propagates to the final value.
-func (fs *funcState) lowerTemplateLiteral(v *ast.TemplateLiteral) *ir.Value {
-	var acc *ir.Value
-	for i, el := range v.Elements {
-		if el != nil {
-			acc = fs.concat(acc, ssabuild.Str(string(el.Parsed)), v.Idx0())
-		}
-		if i < len(v.Expressions) {
-			acc = fs.concat(acc, fs.lowerExpr(v.Expressions[i]), v.Idx0())
-		}
+//
+// A TAGGED template is deliberately not lowered as a call to its tag: treating
+// it as one would add findings the sink globs never meant to name.
+func (fs *funcState) lowerTemplateLiteral(loc jsast.Loc, v *jsast.ETemplate) *ir.Value {
+	acc := fs.concat(nil, ssabuild.Str(templateText(v.HeadRaw, v.HeadCooked)), loc)
+	for _, p := range v.Parts {
+		acc = fs.concat(acc, fs.lowerExpr(p.Value), loc)
+		acc = fs.concat(acc, ssabuild.Str(templateText(p.TailRaw, p.TailCooked)), loc)
 	}
 	if acc == nil {
 		acc = ssabuild.Str("")
@@ -1138,14 +1156,23 @@ func (fs *funcState) lowerTemplateLiteral(v *ast.TemplateLiteral) *ir.Value {
 	return acc
 }
 
-func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
+// templateText picks the text of one template chunk: cooked for an untagged
+// literal, raw for a tagged one (esbuild fills only the applicable field).
+func templateText(raw string, cooked []uint16) string {
+	if cooked != nil {
+		return jsast.UTF16ToString(cooked)
+	}
+	return raw
+}
+
+func (fs *funcState) concat(acc, val *ir.Value, loc jsast.Loc) *ir.Value {
 	if acc == nil {
 		return val
 	}
 	if val == nil {
 		return acc
 	}
-	inst := fs.newValueInst(idx)
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_BIN_OP
 	inst.BinOp = ir.BinOpKind_BIN_OP_ADD
 	inst.Operands = []*ir.Value{acc, val}
@@ -1153,19 +1180,34 @@ func (fs *funcState) concat(acc, val *ir.Value, idx file.Idx) *ir.Value {
 	return ssabuild.Reg(inst.Name)
 }
 
+// lowerBinaryExpr fans an EBinary out to the three constructs esbuild packs into
+// it: the comma operator, assignment (plain and compound), and a real binary
+// operator.
+func (fs *funcState) lowerBinaryExpr(loc jsast.Loc, v *jsast.EBinary) *ir.Value {
+	switch {
+	case v.Op == jsast.BinOpComma:
+		fs.lowerExpr(v.Left)
+		return fs.lowerExpr(v.Right)
+	case isAssignOp(v.Op):
+		return fs.lowerAssign(loc, v)
+	default:
+		return fs.lowerBinary(loc, v)
+	}
+}
+
 // lowerBinary lowers a binary expression (arithmetic, bitwise, or — approximated,
 // see package doc — logical) to a BIN_OP. A comparison instead lowers to the inert
 // builtin.compare intrinsic: a bool carries influence rather than content.
-func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
+func (fs *funcState) lowerBinary(loc jsast.Loc, v *jsast.EBinary) *ir.Value {
 	left := fs.lowerExpr(v.Left)
 	right := fs.lowerExpr(v.Right)
-	inst := fs.newValueInst(v.Idx0())
-	if isComparisonToken(v.Operator) {
+	inst := fs.newValueInst(loc)
+	if isComparisonOp(v.Op) {
 		inst.Op = ir.OpCode_OP_CODE_INTRINSIC
 		inst.Intrinsic = "builtin.compare"
 	} else {
 		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = binOpKind(v.Operator)
+		inst.BinOp = binOpKind(v.Op)
 	}
 	inst.Operands = []*ir.Value{left, right}
 	fs.emit(inst)
@@ -1174,18 +1216,18 @@ func (fs *funcState) lowerBinary(v *ast.BinaryExpression) *ir.Value {
 
 // lowerUnary lowers a unary expression. Prefix/postfix ++/-- on a plain
 // identifier also rebinds it, approximating the mutation.
-func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
-	operand := fs.lowerExpr(v.Operand)
-	inst := fs.newValueInst(v.Idx0())
+func (fs *funcState) lowerUnary(loc jsast.Loc, v *jsast.EUnary) *ir.Value {
+	operand := fs.lowerExpr(v.Value)
+	inst := fs.newValueInst(loc)
 	inst.Op = ir.OpCode_OP_CODE_UN_OP
-	inst.UnOp = unOpKind(v.Operator)
+	inst.UnOp = unOpKind(v.Op)
 	inst.Operands = []*ir.Value{operand}
 	fs.emit(inst)
 	result := ssabuild.Reg(inst.Name)
 
-	if v.Operator == token.INCREMENT || v.Operator == token.DECREMENT {
-		if id, ok := v.Operand.(*ast.Identifier); ok {
-			fs.write(string(id.Name), result)
+	if isIncDecOp(v.Op) {
+		if name, ok := identName(fs.src, v.Value); ok {
+			fs.write(name, result)
 		}
 	}
 	return result
@@ -1193,16 +1235,16 @@ func (fs *funcState) lowerUnary(v *ast.UnaryExpression) *ir.Value {
 
 // lowerAssign lowers `target = value` (and compound assignments like `+=`),
 // returning the assigned value so it can also be a sub-expression (`x = y = 5`).
-func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
+func (fs *funcState) lowerAssign(loc jsast.Loc, a *jsast.EBinary) *ir.Value {
 	var rhs *ir.Value
-	if a.Operator == token.ASSIGN {
+	if a.Op == jsast.BinOpAssign {
 		rhs = fs.lowerExpr(a.Right)
 	} else {
 		cur := fs.lowerExpr(a.Left)
 		right := fs.lowerExpr(a.Right)
-		inst := fs.newValueInst(a.Idx0())
+		inst := fs.newValueInst(loc)
 		inst.Op = ir.OpCode_OP_CODE_BIN_OP
-		inst.BinOp = binOpKindForCompoundAssign(a.Operator)
+		inst.BinOp = binOpKindForCompoundAssign(a.Op)
 		inst.Operands = []*ir.Value{cur, right}
 		fs.emit(inst)
 		rhs = ssabuild.Reg(inst.Name)
@@ -1212,19 +1254,21 @@ func (fs *funcState) lowerAssign(a *ast.AssignExpression) *ir.Value {
 }
 
 // assignTo binds a lowered value to an assignment target. A bare identifier
-// rebinds the variable. A DotExpression/BracketExpression target (`obj.attr = v`
-// / `arr[i] = v`) emits a STORE with the base object as the address operand,
-// which is what lets a tainted value written into a container mark that container
-// tainted (see visitStore in internal/analysis/taint.go). Destructuring targets
-// are dropped.
-func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
-	switch t := target.(type) {
-	case *ast.Identifier:
-		fs.write(string(t.Name), val)
-	case *ast.DotExpression:
-		fs.emitStore(t.Left, val, t.Idx0())
-	case *ast.BracketExpression:
-		fs.emitStore(t.Left, val, t.Idx0())
+// rebinds the variable. An EDot/EIndex target (`obj.attr = v` / `arr[i] = v`)
+// emits a STORE with the base object as the address operand, which is what lets
+// a tainted value written into a container mark that container tainted (see
+// visitStore in internal/analysis/taint.go). Destructuring targets are dropped.
+func (fs *funcState) assignTo(target jsast.Expr, val *ir.Value) {
+	target = unwrap(target)
+	switch t := target.Data.(type) {
+	case *jsast.EIdentifier:
+		fs.write(fs.src.NameOf(t.Ref), val)
+	case *jsast.EImportIdentifier:
+		fs.write(fs.src.NameOf(t.Ref), val)
+	case *jsast.EDot:
+		fs.emitStore(t.Target, val, target.Loc)
+	case *jsast.EIndex:
+		fs.emitStore(t.Target, val, target.Loc)
 	default:
 		// Destructuring assignment or another unsupported target shape: dropped.
 	}
@@ -1234,7 +1278,7 @@ func (fs *funcState) assignTo(target ast.Expression, val *ir.Value) {
 // syntactic dotted name (see syntacticCallee), never resolved through the
 // environment, so `child_process.exec(cmd)` resolves to "js:child_process.exec"
 // regardless of whether/how `child_process` is bound.
-func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
+func (fs *funcState) lowerCall(loc jsast.Loc, v *jsast.ECall) *ir.Value {
 	// For a method call, lower the receiver (the callee's base object) so its
 	// register can be carried in Call.Value (see emitCallRecvInst): this both
 	// evaluates the base -- which, off an opaque request object like `req.url`,
@@ -1242,27 +1286,30 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	// like `.slice`/`.toLowerCase` propagate the receiver's taint to the result.
 	// lowerExpr recurses through any nested call in the base chain, so it fully
 	// subsumes lowerNestedCallees for these two callee shapes.
+	target := unwrap(v.Target)
 	var receiver *ir.Value
-	switch c := v.Callee.(type) {
-	case *ast.DotExpression:
-		receiver = fs.lowerExpr(c.Left)
-	case *ast.BracketExpression:
-		receiver = fs.lowerExpr(c.Left)
+	var dot *jsast.EDot
+	switch c := target.Data.(type) {
+	case *jsast.EDot:
+		dot = c
+		receiver = fs.lowerExpr(c.Target)
+	case *jsast.EIndex:
+		receiver = fs.lowerExpr(c.Target)
 	default:
-		fs.lowerNestedCallees(v.Callee)
+		fs.lowerNestedCallees(v.Target)
 	}
-	callee := "js:" + fs.resolveRequire(syntacticCallee(v.Callee))
+	callee := "js:" + fs.resolveRequire(syntacticCallee(fs.src, target))
 	// A bare call to a top-level function (helper(x)) must carry the module name
 	// so its callee matches the function's CanonicalName; otherwise byKey never
 	// resolves it and taint does not flow through the local helper.
-	if id, ok := v.Callee.(*ast.Identifier); ok {
-		if canonical, found := fs.localFuncs[string(id.Name)]; found {
+	if name, ok := identName(fs.src, target); ok {
+		if canonical, found := fs.localFuncs[name]; found {
 			callee = canonical
-		} else if mod, found := fs.relativeDefaults[string(id.Name)]; found {
-			// Bare call to a name default-imported from a relative require:
-			// emit a resolvable marker naming the target module. Its default
-			// export is filled in by resolveJSCrossModuleCalls once every file
-			// is lowered (the callee function may live in a not-yet-seen file).
+		} else if mod, found := fs.relativeDefaults[name]; found {
+			// Bare call to a name default-imported from a relative module: emit a
+			// resolvable marker naming the target module. Its default export is
+			// filled in by resolveJSCrossModuleCalls once every file is lowered
+			// (the callee function may live in a not-yet-seen file).
 			callee = crossModuleMarker + mod
 		}
 	}
@@ -1270,13 +1317,13 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 	// canonical name so byKey resolves it. Optimistic — a non-method `this.x`
 	// matches no function and stays unresolved (harmless). JS methods take no
 	// explicit receiver param, so the arguments already align.
-	if dot, ok := v.Callee.(*ast.DotExpression); ok && fs.methodClass != "" {
-		if _, isThis := dot.Left.(*ast.ThisExpression); isThis {
-			callee = "js:" + fs.moduleName + "." + fs.methodClass + string(dot.Identifier.Name)
+	if dot != nil && fs.methodClass != "" {
+		if _, isThis := unwrap(dot.Target).Data.(*jsast.EThis); isThis {
+			callee = "js:" + fs.moduleName + "." + fs.methodClass + dot.Name
 		}
 	}
-	call := fs.emitCallRecvInst(callee, receiver, v.ArgumentList, v.Idx0())
-	fs.emitPromiseContinuation(callee, receiver, call, v.Idx0())
+	call := fs.emitCallRecvInst(callee, receiver, v.Args, loc)
+	fs.emitPromiseContinuation(callee, receiver, call, loc)
 	return ssabuild.Reg(call.Name)
 }
 
@@ -1284,10 +1331,10 @@ func (fs *funcState) lowerCall(v *ast.CallExpression) *ir.Value {
 // construction is indistinguishable from calling a function with the same
 // arguments); the "new" prefix keeps the callee from colliding with a plain
 // `Foo(args)` call.
-func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
-	fs.lowerNestedCallees(v.Callee)
-	callee := "js:new:" + syntacticCallee(v.Callee)
-	inst := fs.emitCallRecvInst(callee, nil, v.ArgumentList, v.Idx0())
+func (fs *funcState) lowerNew(loc jsast.Loc, v *jsast.ENew) *ir.Value {
+	fs.lowerNestedCallees(v.Target)
+	callee := "js:new:" + syntacticCallee(fs.src, v.Target)
+	inst := fs.emitCallRecvInst(callee, nil, v.Args, loc)
 	// A URL's text is its argument's text, so mark it for ssrf.go's hostFixed():
 	// without the marker the constructor hides the constant host inside it and
 	// `fetch(new URL("https://fixed/x?q=" + tainted))` reads as a dynamic host.
@@ -1297,7 +1344,7 @@ func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 	// (`new URL(path, base)`) whose host wins, and Args[0] is the path, so
 	// claiming identity there would let a tainted base look constant -- a false
 	// negative. Unmarked it stays dynamic, which fires.
-	if callee == "js:new:URL" && len(v.ArgumentList) == 1 {
+	if callee == "js:new:URL" && len(v.Args) == 1 {
 		inst.Intrinsic = identityIntrinsic
 	}
 	return ssabuild.Reg(inst.Name)
@@ -1308,53 +1355,54 @@ func (fs *funcState) lowerNew(v *ast.NewExpression) *ir.Value {
 const identityIntrinsic = "builtin.identity"
 
 // lowerNestedCallees walks a call/new expression's callee along the same
-// Dot/Bracket "Left" chain syntacticCallee walks and lowers any CallExpression
-// it finds — e.g. the `axios.get(url)` inside `axios.get(url).then(cb)` —
-// inside-out via the ordinary lowerCall path.
+// Dot/Index "Target" chain syntacticCallee walks and lowers any call it finds —
+// e.g. the `require('./x')` inside `new (require('./x').Client)()` — inside-out
+// via the ordinary lowerCall path.
 //
 // Without it the inner call is never visited at all: syntactic name building is
 // a pure string walk with no side effects, so the inner call's instruction (and
 // with it its args, its taint, and its chance to match a source/sink glob) would
 // silently disappear. Its result register is deliberately discarded — the outer
 // call is still named by syntacticCallee's "<dynamic>" fallback.
-func (fs *funcState) lowerNestedCallees(e ast.Expression) {
-	switch v := e.(type) {
-	case *ast.CallExpression:
-		fs.lowerCall(v)
-	case *ast.DotExpression:
-		fs.lowerNestedCallees(v.Left)
-	case *ast.BracketExpression:
-		fs.lowerNestedCallees(v.Left)
+func (fs *funcState) lowerNestedCallees(e jsast.Expr) {
+	e = unwrap(e)
+	switch v := e.Data.(type) {
+	case *jsast.ECall:
+		fs.lowerCall(e.Loc, v)
+	case *jsast.EDot:
+		fs.lowerNestedCallees(v.Target)
+	case *jsast.EIndex:
+		fs.lowerNestedCallees(v.Target)
 	}
 }
 
 // syntacticCallee builds a canonical, purely syntactic dotted callee name from a
 // call's callee expression, e.g. `res.locals.get`. A callee rooted in anything
-// other than a plain Identifier/Dot/string-keyed-Bracket chain (a nested call, a
-// computed index, a function expression) resolves to "<dynamic>" for that
+// other than a plain identifier / member / string-keyed-index chain (a nested
+// call, a computed index, a function expression) resolves to "<dynamic>" for that
 // sub-path, so `getHandler().process(x)` yields "<dynamic>.process" — glob
-// patterns like "js:*.process" still match it. Any CallExpression along the chain
-// has already been lowered by lowerNestedCallees, so collapsing it here costs
-// only the outer call's name.
-func syntacticCallee(e ast.Expression) string {
-	switch v := e.(type) {
-	case *ast.Identifier:
-		return string(v.Name)
-	case *ast.DotExpression:
-		return syntacticCallee(v.Left) + "." + string(v.Identifier.Name)
-	case *ast.BracketExpression:
-		if sl, ok := v.Member.(*ast.StringLiteral); ok {
-			return syntacticCallee(v.Left) + "." + string(sl.Value)
+// patterns like "js:*.process" still match it. Any call along the chain has
+// already been lowered by lowerNestedCallees, so collapsing it here costs only
+// the outer call's name.
+func syntacticCallee(f *jsast.File, e jsast.Expr) string {
+	switch v := unwrap(e).Data.(type) {
+	case *jsast.EIdentifier:
+		return f.NameOf(v.Ref)
+	case *jsast.EImportIdentifier:
+		return f.NameOf(v.Ref)
+	case *jsast.EDot:
+		return syntacticCallee(f, v.Target) + "." + v.Name
+	case *jsast.EIndex:
+		if s, ok := unwrap(v.Index).Data.(*jsast.EString); ok {
+			return syntacticCallee(f, v.Target) + "." + jsast.UTF16ToString(s.Value)
 		}
-		return syntacticCallee(v.Left) + ".<dynamic>"
-	case *ast.SequenceExpression:
-		// esbuild's ES-module interop lowers a named-import call `fn(x)` to
-		// `(0, import_mod.fn)(x)` — the callee is a comma SequenceExpression whose
-		// LAST element (import_mod.fn) carries the real name. Recover it so
-		// import-based sources/sinks (e.g. `import {execSync} from ...`) still
-		// match; without this the callee collapses to "<dynamic>".
-		if n := len(v.Sequence); n > 0 {
-			return syntacticCallee(v.Sequence[n-1])
+		return syntacticCallee(f, v.Target) + ".<dynamic>"
+	case *jsast.EBinary:
+		// Every bundler emits a named import call as `(0, mod.fn)(x)`, whose callee
+		// is a comma operator with the real name on the RIGHT. Recover it, or the
+		// callee of most calls in bundled JS collapses to "<dynamic>".
+		if v.Op == jsast.BinOpComma {
+			return syntacticCallee(f, v.Right)
 		}
 		return "<dynamic>"
 	default:
@@ -1362,103 +1410,125 @@ func syntacticCallee(e ast.Expression) string {
 	}
 }
 
-// numberValue converts a goja NumberLiteral's parsed value (int64, float64,
-// or -- for BigInt literals -- *big.Int) into a gIR constant Value.
-func numberValue(raw interface{}) *ir.Value {
+// numberValue converts a JS numeric literal to a gIR constant. esbuild stores
+// every number as a float64; an integral one is emitted as an int so the IR
+// spells `limit = 10` the way the source does.
+func numberValue(f float64) *ir.Value {
 	c := &ir.Constant{}
-	switch n := raw.(type) {
-	case int64:
-		c.Value = &ir.Constant_IntVal{IntVal: n}
-	case float64:
-		c.Value = &ir.Constant_FloatVal{FloatVal: n}
-	default:
-		c.Value = &ir.Constant_StringVal{StringVal: fmt.Sprintf("%v", n)}
+	if f == math.Trunc(f) && math.Abs(f) <= math.MaxInt64 {
+		c.Value = &ir.Constant_IntVal{IntVal: int64(f)}
+	} else {
+		c.Value = &ir.Constant_FloatVal{FloatVal: f}
 	}
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: c}}
 }
 
-// binOpKind maps a goja binary-operator token to a gIR BinOpKind. Logical
-// &&/||/?? have no gIR counterpart and are approximated as their bitwise
-// equivalents (safe for taint: either operand tainted still taints the result);
-// the right-shift variants collapse into BIN_OP_SHR.
-func binOpKind(op token.Token) ir.BinOpKind {
+// binOpKind maps a binary operator to a gIR BinOpKind. Logical &&/||/?? have no
+// gIR counterpart and are approximated as their bitwise equivalents (safe for
+// taint: either operand tainted still taints the result); the right-shift
+// variants collapse into BIN_OP_SHR. Operators with no counterpart at all
+// (`**`, `in`, `instanceof`) fall through to UNSPECIFIED, which still propagates.
+func binOpKind(op jsast.OpCode) ir.BinOpKind {
 	switch op {
-	case token.PLUS:
+	case jsast.BinOpAdd:
 		return ir.BinOpKind_BIN_OP_ADD
-	case token.MINUS:
+	case jsast.BinOpSub:
 		return ir.BinOpKind_BIN_OP_SUB
-	case token.MULTIPLY:
+	case jsast.BinOpMul:
 		return ir.BinOpKind_BIN_OP_MUL
-	case token.SLASH:
+	case jsast.BinOpDiv:
 		return ir.BinOpKind_BIN_OP_QUO
-	case token.REMAINDER:
+	case jsast.BinOpRem:
 		return ir.BinOpKind_BIN_OP_REM
-	case token.AND, token.LOGICAL_AND:
+	case jsast.BinOpBitwiseAnd, jsast.BinOpLogicalAnd:
 		return ir.BinOpKind_BIN_OP_AND
-	case token.OR, token.LOGICAL_OR, token.COALESCE:
+	case jsast.BinOpBitwiseOr, jsast.BinOpLogicalOr, jsast.BinOpNullishCoalescing:
 		return ir.BinOpKind_BIN_OP_OR
-	case token.EXCLUSIVE_OR:
+	case jsast.BinOpBitwiseXor:
 		return ir.BinOpKind_BIN_OP_XOR
-	case token.SHIFT_LEFT:
+	case jsast.BinOpShl:
 		return ir.BinOpKind_BIN_OP_SHL
-	case token.SHIFT_RIGHT, token.UNSIGNED_SHIFT_RIGHT:
+	case jsast.BinOpShr, jsast.BinOpUShr:
 		return ir.BinOpKind_BIN_OP_SHR
 	}
 	return ir.BinOpKind_BIN_OP_UNSPECIFIED
 }
 
-// isComparisonToken reports whether op yields a bool. Those lower to the
+// isComparisonOp reports whether op yields a bool. Those lower to the
 // builtin.compare intrinsic, so they never reach binOpKind.
-func isComparisonToken(op token.Token) bool {
+func isComparisonOp(op jsast.OpCode) bool {
 	switch op {
-	case token.EQUAL, token.STRICT_EQUAL, token.NOT_EQUAL, token.STRICT_NOT_EQUAL,
-		token.LESS, token.LESS_OR_EQUAL, token.GREATER, token.GREATER_OR_EQUAL:
+	case jsast.BinOpLooseEq, jsast.BinOpStrictEq, jsast.BinOpLooseNe, jsast.BinOpStrictNe,
+		jsast.BinOpLt, jsast.BinOpLe, jsast.BinOpGt, jsast.BinOpGe:
 		return true
 	}
 	return false
 }
 
-// binOpKindForCompoundAssign maps a compound-assignment token (`+=`, `-=`,
-// etc.) to the BinOpKind of its underlying operator.
-func binOpKindForCompoundAssign(op token.Token) ir.BinOpKind {
+// isAssignOp reports whether op writes to its left operand — esbuild spells
+// assignment as a binary operator, so the lowering has to split it back out.
+func isAssignOp(op jsast.OpCode) bool {
 	switch op {
-	case token.ADD_ASSIGN:
+	case jsast.BinOpAssign,
+		jsast.BinOpAddAssign, jsast.BinOpSubAssign, jsast.BinOpMulAssign,
+		jsast.BinOpDivAssign, jsast.BinOpRemAssign, jsast.BinOpPowAssign,
+		jsast.BinOpShlAssign, jsast.BinOpShrAssign, jsast.BinOpUShrAssign,
+		jsast.BinOpBitwiseAndAssign, jsast.BinOpBitwiseOrAssign, jsast.BinOpBitwiseXorAssign,
+		jsast.BinOpLogicalAndAssign, jsast.BinOpLogicalOrAssign, jsast.BinOpNullishCoalescingAssign:
+		return true
+	}
+	return false
+}
+
+// binOpKindForCompoundAssign maps a compound-assignment operator (`+=`, `-=`,
+// etc.) to the BinOpKind of its underlying operator.
+func binOpKindForCompoundAssign(op jsast.OpCode) ir.BinOpKind {
+	switch op {
+	case jsast.BinOpAddAssign:
 		return ir.BinOpKind_BIN_OP_ADD
-	case token.SUBTRACT_ASSIGN:
+	case jsast.BinOpSubAssign:
 		return ir.BinOpKind_BIN_OP_SUB
-	case token.MULTIPLY_ASSIGN:
+	case jsast.BinOpMulAssign:
 		return ir.BinOpKind_BIN_OP_MUL
-	case token.QUOTIENT_ASSIGN:
+	case jsast.BinOpDivAssign:
 		return ir.BinOpKind_BIN_OP_QUO
-	case token.REMAINDER_ASSIGN:
+	case jsast.BinOpRemAssign:
 		return ir.BinOpKind_BIN_OP_REM
-	case token.AND_ASSIGN, token.LOGICAL_AND_ASSIGN:
+	case jsast.BinOpBitwiseAndAssign, jsast.BinOpLogicalAndAssign:
 		return ir.BinOpKind_BIN_OP_AND
-	case token.OR_ASSIGN, token.LOGICAL_OR_ASSIGN, token.COALESCE_ASSIGN:
+	case jsast.BinOpBitwiseOrAssign, jsast.BinOpLogicalOrAssign, jsast.BinOpNullishCoalescingAssign:
 		return ir.BinOpKind_BIN_OP_OR
-	case token.EXCLUSIVE_OR_ASSIGN:
+	case jsast.BinOpBitwiseXorAssign:
 		return ir.BinOpKind_BIN_OP_XOR
-	case token.SHIFT_LEFT_ASSIGN:
+	case jsast.BinOpShlAssign:
 		return ir.BinOpKind_BIN_OP_SHL
-	case token.SHIFT_RIGHT_ASSIGN, token.UNSIGNED_SHIFT_RIGHT_ASSIGN:
+	case jsast.BinOpShrAssign, jsast.BinOpUShrAssign:
 		return ir.BinOpKind_BIN_OP_SHR
 	}
 	return ir.BinOpKind_BIN_OP_UNSPECIFIED
 }
 
-// unOpKind maps a goja unary-operator token to a gIR UnOpKind. ++/-- have no
-// counterpart and fall back to UN_OP_UNSPECIFIED; lowerUnary still emits the
-// UN_OP so taint propagates through it.
-func unOpKind(op token.Token) ir.UnOpKind {
+// unOpKind maps a unary operator to a gIR UnOpKind. typeof/void/delete and
+// ++/-- have no counterpart and fall back to UN_OP_UNSPECIFIED; lowerUnary
+// still emits the UN_OP so taint propagates through it.
+func unOpKind(op jsast.OpCode) ir.UnOpKind {
 	switch op {
-	case token.NOT:
+	case jsast.UnOpNot:
 		return ir.UnOpKind_UN_OP_NOT
-	case token.MINUS:
+	case jsast.UnOpNeg:
 		return ir.UnOpKind_UN_OP_NEG
-	case token.PLUS:
+	case jsast.UnOpPos:
 		return ir.UnOpKind_UN_OP_POS
-	case token.BITWISE_NOT:
+	case jsast.UnOpCpl:
 		return ir.UnOpKind_UN_OP_BIT_NOT
 	}
 	return ir.UnOpKind_UN_OP_UNSPECIFIED
+}
+
+func isIncDecOp(op jsast.OpCode) bool {
+	switch op {
+	case jsast.UnOpPreInc, jsast.UnOpPreDec, jsast.UnOpPostInc, jsast.UnOpPostDec:
+		return true
+	}
+	return false
 }

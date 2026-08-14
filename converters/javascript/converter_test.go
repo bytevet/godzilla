@@ -1,19 +1,17 @@
 package js_converter
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/dop251/goja/file"
-	"github.com/dop251/goja/parser"
+	jsast "github.com/bytevet/esbuild-jsast"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/irwalk"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // reqSources is the untrusted-HTTP-request source glob set shared by every
@@ -85,6 +83,20 @@ func requireFinding(t *testing.T, findings []analysis.Finding, ruleID string) an
 	return analysis.Finding{}
 }
 
+// requireNoFallbackIntrinsic asserts no instruction lowered to js.unsupported.
+// A fallback marks a construct the lowering does not model, and it is silent:
+// the file still converts, so only this catches it.
+func requireNoFallbackIntrinsic(t *testing.T, prog *ir.Program, what string) {
+	t.Helper()
+	for _, fn := range irwalk.Funcs(prog) {
+		for inst := range irwalk.Instrs(fn) {
+			if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "js.unsupported" {
+				t.Errorf("%s: unsupported instruction in %s: %s", what, fn.CanonicalName, inst.Comment)
+			}
+		}
+	}
+}
+
 func TestConvertXSSSample(t *testing.T) {
 	prog := mustConvert(t, "../../test/js/xss/app.js")
 
@@ -114,14 +126,6 @@ func TestConvertXSSSample(t *testing.T) {
 	requireFinding(t, findings, "js-xss")
 }
 
-func TestConvertCommandInjectionSample(t *testing.T) {
-	prog := mustConvert(t, "../../test/js/command_injection/app.js")
-
-	engine := analysis.NewEngine(commandInjectionRuleSet(t))
-	findings := engine.Analyze(prog)
-	requireFinding(t, findings, "js-command-injection")
-}
-
 // TestConvertBranchMergeDefault pins the statement-level "default if empty"
 // pattern (`if (!host) host = "localhost"`, FE-5): without the merge PHI the
 // reassignment inside the `if` kills the tainted binding on the merge path and
@@ -132,22 +136,6 @@ func TestConvertBranchMergeDefault(t *testing.T) {
 	engine := analysis.NewEngine(commandInjectionRuleSet(t))
 	findings := engine.Analyze(prog)
 	requireFinding(t, findings, "js-command-injection")
-}
-
-func TestConvertSQLInjectionSample(t *testing.T) {
-	prog := mustConvert(t, "../../test/js/sql_injection/app.js")
-
-	engine := analysis.NewEngine(sqliRuleSet(t))
-	findings := engine.Analyze(prog)
-	requireFinding(t, findings, "js-sqli")
-}
-
-func TestConvertSSRFSample(t *testing.T) {
-	prog := mustConvert(t, "../../test/js/ssrf/app.js")
-
-	engine := analysis.NewEngine(ssrfRuleSet(t))
-	findings := engine.Analyze(prog)
-	requireFinding(t, findings, "js-ssrf")
 }
 
 // TestConvertChainedAxiosCallSSRF pins the chained-call lowering: a
@@ -204,14 +192,6 @@ module.exports = app;
 	}
 }
 
-func TestConvertPathTraversalSample(t *testing.T) {
-	prog := mustConvert(t, "../../test/js/path_traversal/app.js")
-
-	engine := analysis.NewEngine(pathTraversalRuleSet(t))
-	findings := engine.Analyze(prog)
-	requireFinding(t, findings, "js-path-traversal")
-}
-
 // TestNewRulePacksDoNotCrossFire pins that the broad `js:*.<method>` sink globs
 // stay isolated to their own vulnerability class: no pack fires on another
 // pack's sample.
@@ -243,15 +223,6 @@ func TestNewRulePacksDoNotCrossFire(t *testing.T) {
 			}
 		}
 		requireFinding(t, findings, tc.want)
-	}
-}
-
-// TestConvertDirectory exercises the directory-walk path of ConvertFile
-// (both sample directories share a common parent, test/js).
-func TestConvertDirectory(t *testing.T) {
-	prog := mustConvert(t, "../../test/js")
-	if len(prog.Modules) < 2 {
-		t.Fatalf("expected at least 2 modules from directory conversion, got %d", len(prog.Modules))
 	}
 }
 
@@ -292,57 +263,27 @@ func functionNamesForModules(prog *ir.Program) []string {
 	return names
 }
 
-// TestNoUnsupportedInstructions is the absence-of-fallback check (CLAUDE.md):
-// every instruction in the converted samples must have a real OpCode, never the
-// generic "js.unsupported" intrinsic.
-func TestNoUnsupportedInstructions(t *testing.T) {
-	for _, path := range []string{
-		"../../test/js/xss/app.js",
-		"../../test/js/command_injection/app.js",
-		"../../test/js/sql_injection/app.js",
-		"../../test/js/ssrf/app.js",
-		"../../test/js/path_traversal/app.js",
-		"../../test/js/resilience/app.js",
-	} {
-		prog := mustConvert(t, path)
-		for _, mod := range prog.Modules {
-			for _, fn := range mod.Functions {
-				for _, blk := range fn.Blocks {
-					for _, inst := range blk.Instrs {
-						if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == "js.unsupported" {
-							t.Errorf("%s: unsupported instruction in %s: %s", path, fn.CanonicalName, inst.Comment)
-						}
-					}
-				}
+// TestCollectsParamDefaultLiteral pins the half of collector coverage no
+// intrinsic reports: nothing lowers a parameter default, so a literal the
+// collector misses there is silently absent rather than flagged.
+func TestCollectsParamDefaultLiteral(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pdef.js")
+	if err := os.WriteFile(path, []byte("function f(cb = (c) => eval(c)) { cb(1); }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod, _, err := NewConverter().convertJSFile(path, "pdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range mod.Functions {
+		for inst := range irwalk.Instrs(fn) {
+			if inst.GetCall().GetCallee() == "js:eval" {
+				return
 			}
 		}
 	}
-}
-
-// TestLogXSSSampleInstructions is a diagnostic test: it converts the XSS
-// sample and logs every instruction in the handleName function, so the
-// lowering shape (registers, opcodes, callees, positions) is visible in test
-// output, mirroring internal/analysis's TestLogSQLInjectionCallees.
-func TestLogXSSSampleInstructions(t *testing.T) {
-	prog := mustConvert(t, "../../test/js/xss/app.js")
-	for _, mod := range prog.Modules {
-		for _, fn := range mod.Functions {
-			t.Logf("function %s (canonical=%s, synthetic=%v)", fn.Name, fn.CanonicalName, fn.Synthetic)
-			for _, blk := range fn.Blocks {
-				for _, inst := range blk.Instrs {
-					pos := "<nil>"
-					if inst.Pos != nil {
-						pos = fmt.Sprintf("%s:%d:%d", inst.Pos.GetFilename(), inst.Pos.GetLine(), inst.Pos.GetColumn())
-					}
-					callee := ""
-					if inst.Call != nil {
-						callee = inst.Call.Callee
-					}
-					t.Logf("  name=%-4s op=%-24s callee=%-20s comment=%-20q pos=%s", inst.Name, inst.Op, callee, inst.Comment, pos)
-				}
-			}
-		}
-	}
+	t.Error("no js:eval call lowered — the default's literal was never collected")
 }
 
 func functionNames(mod *ir.Module) []string {
@@ -353,21 +294,27 @@ func functionNames(mod *ir.Module) []string {
 	return names
 }
 
+// mustParse parses src as plain JavaScript for the alias tests, which assert on
+// the module-level tables rather than on a lowered module.
+func mustParse(t *testing.T, src string) *jsast.File {
+	t.Helper()
+	f, errs := jsast.Parse(src, jsast.Options{})
+	if len(errs) > 0 {
+		t.Fatalf("parse %q: %v", src, errs)
+	}
+	return f
+}
+
 // TestCollectRequireAliases covers FE-2's require-alias table: plain, aliased,
 // destructured, and require().member bindings.
 func TestCollectRequireAliases(t *testing.T) {
-	src := `var cp = require("child_process");
+	f := mustParse(t, `var cp = require("child_process");
 var { exec, spawn } = require("child_process");
 var ex = require("child_process").execSync;
 var express = require("express");
 var local = require("./util");
-`
-	fset := &file.FileSet{}
-	prog, err := parser.ParseFile(fset, "a.js", src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	a := collectRequireAliases(prog.Body)
+`)
+	a := collectRequireAliases(f)
 	want := map[string]string{
 		"cp":      "child_process",
 		"exec":    "child_process.exec",
@@ -384,5 +331,41 @@ var local = require("./util");
 	// cross-file resolution (a caller's util.fn -> js:util.fn) is preserved.
 	if _, ok := a["local"]; ok {
 		t.Errorf("relative require ./util should not create an alias, got %q", a["local"])
+	}
+}
+
+// TestCollectImportAliases is the ESM half of FE-2. It is new surface: until the
+// frontend parsed modules directly, every import arrived already rewritten as a
+// require call, so none of these forms had their own path.
+func TestCollectImportAliases(t *testing.T) {
+	f := mustParse(t, `import cp from "child_process";
+import * as pathns from "path";
+import { exec, spawn as sp } from "child_process";
+import { default as fsd } from "fs";
+import "side-effect-only";
+import local from "./util";
+`)
+	a := map[string]string{}
+	collectImportAliases(f, a)
+	want := map[string]string{
+		"cp":     "child_process",
+		"pathns": "path",
+		"exec":   "child_process.exec",
+		"sp":     "child_process.spawn",
+		// `{default as X}` is the module's own value, not a member of it: a rule
+		// keyed on "js:fs*" matches "fs", never "fs.default".
+		"fsd": "fs",
+	}
+	for k, v := range want {
+		if a[k] != v {
+			t.Errorf("alias %q = %q, want %q", k, a[k], v)
+		}
+	}
+	// A relative import names a project module; collectRelativeDefaults owns it.
+	if _, ok := a["local"]; ok {
+		t.Errorf("relative import ./util should not create an alias, got %q", a["local"])
+	}
+	if len(a) != len(want) {
+		t.Errorf("unexpected extra aliases: %v", a)
 	}
 }

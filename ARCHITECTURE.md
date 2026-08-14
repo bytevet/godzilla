@@ -43,7 +43,7 @@ all of them.
           ┌───────── Frontends (in-process Go, one binary) ─────────┐
  Go   ────► x/tools SSA ───┐
  Python ──► python3 ast  ──┤
- JS   ────► goja AST     ──┤
+ JS   ────► esbuild AST  ──┤
  Java ────► JVM bytecode ──┤─► lower ─► gIR (core + intrinsics, canonical FQNs)
  Rust ────► rustc MIR    ──┤                            │
  Ruby ────► ruby Ripper  ──┤                            │
@@ -177,14 +177,16 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
   lives in `http.HandleFunc` closures. Emits `go:` names.
 - **Python** (`converters/python/`) — shells out to `python3` for an `ast` JSON
   dump, then lowers it to a real CFG (`ssabuild`). Emits `py:` names; requires `python3`.
-- **JavaScript** (`converters/javascript/`) — pure-Go parse via **goja**, then
-  lowers. TS/JSX/ESM are stripped/lowered in-process by esbuild (no Node), with source
-  maps remapping positions back; a plain `.js` is handed to goja first and only falls
-  back to esbuild when the parse fails, since one extension covers four dialects.
-  Flow, which esbuild cannot load at all, is blanked in place beforehand
-  (`flowstrip.go`) so byte offsets — and therefore positions — are preserved. `.vue`/`.svelte` SFCs are also
-  handled (`sfc.go`): the `<script>` block lowers as JS/TS and each dangerous template
-  directive (`v-html`, `{@html}`) compiles to a synthetic sink call. Emits `js:` names.
+- **JavaScript** (`converters/javascript/`) — pure-Go parse of **esbuild's AST**
+  (`github.com/bytevet/esbuild-jsast`, which re-exports the parser esbuild keeps under
+  `internal/`), then lowers. TypeScript, JSX and ES modules are parsed as themselves —
+  no text transform, no Node, and no sourcemap in the position path, since a node's byte
+  offset already indexes the source as written. One extension covers four dialects, so the
+  dialect is found by trying them (`parseLadder`) rather than predicted. Flow, which is
+  neither JS nor TS, is blanked in place beforehand (`flowstrip.go`) so byte offsets — and
+  therefore positions — are preserved. `.vue`/`.svelte` SFCs are also handled (`sfc.go`):
+  the `<script>` block lowers as JS/TS and each dangerous template directive (`v-html`,
+  `{@html}`) compiles to a synthetic sink call. Emits `js:` names.
 - **Java** (`converters/java/`) — analyzes JVM **bytecode**. An embedded helper
   (`JavaDump.java`, run via a JDK 24+ `java`) compiles `.java` in-process and reads
   `.class` with `java.lang.classfile`; `lower.go` simulates the operand stack to

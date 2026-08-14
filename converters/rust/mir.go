@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"godzilla/converters/ssabuild"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/ssabuild"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // This file lowers rustc's textual MIR (Mid-level IR) to gIR. MIR is the right

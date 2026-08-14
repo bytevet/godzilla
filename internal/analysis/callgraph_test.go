@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	ir "godzilla/pkg/ir/v1"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // convertSQLInjectionSampleForCallGraph loads and converts the sql_injection

@@ -49,7 +49,7 @@ flowchart LR
 ## Install
 
 ```bash
-go install godzilla/cmd/godzilla@latest    # or, from a clone:
+go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone:
 go build -o godzilla ./cmd/godzilla
 ```
 
@@ -153,7 +153,7 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 
 | | Go | Python | JavaScript | Java | Rust | Ruby |
 |---|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | goja (pure Go); TS/JSX/ESM via esbuild; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper; `.erb` templates |
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | esbuild AST (pure Go); TS/JSX/ESM natively; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper; `.erb` templates |
 | SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

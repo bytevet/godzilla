@@ -16,8 +16,8 @@ import (
 	"slices"
 	"strings"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/srclines"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/srclines"
 )
 
 // ignoreToken is the directive that suppresses a finding when it appears in a

@@ -6,17 +6,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/evanw/esbuild/pkg/api"
-	"github.com/go-sourcemap/sourcemap"
 	"golang.org/x/net/html"
 
-	ir "godzilla/pkg/ir/v1"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Component single-file formats (Vue `.vue`, Svelte `.svelte`) put their JS/TS in
 // a <script> block and their signature vulnerability — untrusted data bound to
 // Vue's `v-html` or Svelte's `{@html}`, which bypass the framework's context-aware
-// auto-escaping (CWE-79) — in the template/markup block, which goja never sees.
+// auto-escaping (CWE-79) — in the template/markup block, which the parser never sees.
 //
 // Rather than model a new IR concept, the extractor compiles the SFC to plain JS:
 // the <script> block becomes the module body, and each dangerous template
@@ -25,7 +23,7 @@ import (
 // references the same binding, taint flows through the unchanged engine, and the
 // synthetic callee (`js:__godzilla_vue_vhtml`) is matched by the vue-xss /
 // svelte-xss rulepacks — a rulepack + frontend change with no gIR/engine change.
-// This mirrors how esbuild already lowers JSX `dangerouslySetInnerHTML` to a call.
+// This mirrors how the JSX lowering already turns `dangerouslySetInnerHTML` into a call.
 // Escaped interpolation (`{{ }}`, `{ }`) is auto-escaped, so it emits nothing.
 
 // Synthetic sink function names. A directive lowers to a bare call to one of
@@ -62,25 +60,30 @@ type directivePos struct {
 
 // extractSFCToJS turns a Vue/Svelte single-file component into plain JS: the
 // <script> block padded so its lines keep their original SFC line numbers, plus
-// one synthetic sink call per dangerous template directive. It returns the
-// esbuild-transformed JS (types stripped, ES modules lowered to CommonJS), a
-// sourcemap consumer mapping transformed positions back to the padded buffer
-// (whose script-region lines equal the SFC's), and the directive list for
-// applyDirectivePositions to relocate template-sink findings.
-func extractSFCToJS(path string, src []byte, target api.Target) (string, *sourcemap.Consumer, []directivePos, error) {
+// one synthetic sink call per dangerous template directive. It returns that
+// buffer and the directive list for applyDirectivePositions to relocate
+// template-sink findings.
+//
+// The padding is what keeps positions honest: the parser sees a buffer whose
+// script-region lines are the SFC's own, so no remapping is needed afterwards.
+func extractSFCToJS(path string, src []byte) (string, []directivePos, error) {
 	var (
 		script     string
 		scriptLine int
-		isTS       bool
 		dirs       []directivePos
 	)
+	// Built over the ORIGINAL file, since template directives are located in it
+	// rather than in the extracted script buffer. Sharing lineIndex is what gives
+	// the template side the same line-terminator rules as the script side, so a
+	// CRLF or U+2028 component does not number its two halves differently.
+	li := newLineIndex(path, string(src))
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".vue":
-		script, scriptLine, isTS, dirs = extractVueSFC(src)
+		script, scriptLine, dirs = extractVueSFC(src, li)
 	case ".svelte":
-		script, scriptLine, isTS, dirs = extractSvelteSFC(src)
+		script, scriptLine, dirs = extractSvelteSFC(src, li)
 	default:
-		return "", nil, nil, fmt.Errorf("not a single-file component: %s", path)
+		return "", nil, fmt.Errorf("not a single-file component: %s", path)
 	}
 
 	// Pad so the script body starts on its true SFC line, then append the
@@ -97,63 +100,56 @@ func extractSFCToJS(path string, src []byte, target api.Target) (string, *source
 		b.WriteString(d.expr)
 		b.WriteString(");\n")
 	}
-
-	loader := api.LoaderJS
-	if isTS {
-		loader = api.LoaderTS
-	}
-	code, consumer, err := runESBuild(b.String(), loader, filepath.Base(path), target)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	return code, consumer, dirs, nil
+	return b.String(), dirs, nil
 }
 
 // extractScriptBlock returns the SFC <script> block's source, the 1-based line
-// its content starts on, whether it is TypeScript, and its [lo,hi) byte range in
-// src (lo == -1 when there is no <script>). Shared by the Vue and Svelte
-// extractors, which differ only in how they scan the surrounding template/markup.
-// lower is the lower-cased src, computed once by the caller and threaded through.
-func extractScriptBlock(src, lower []byte) (script string, scriptLine, lo, hi int, isTS bool) {
+// its content starts on, and its [lo,hi) byte range in src (lo == -1 when there
+// is no <script>). Shared by the Vue and Svelte extractors, which differ only in
+// how they scan the surrounding template/markup. lower is the lower-cased src,
+// computed once by the caller and threaded through.
+//
+// A `lang="ts"` block needs no special handling: the extracted buffer goes
+// through the same dialect ladder as any other file, whose TS rung reads it.
+func extractScriptBlock(src, lower []byte, li *lineIndex) (script string, scriptLine, lo, hi int) {
 	scriptLine, lo, hi = 1, -1, -1
-	if content, start, openTag, ok := findBlock(src, lower, "script"); ok {
+	if content, start, ok := findBlock(src, lower, "script"); ok {
 		script = string(content)
-		ln, _ := lineColOf(src, start)
+		ln, _ := li.lineCol(int32(start))
 		scriptLine = int(ln)
-		isTS = tagHasTS(openTag)
 		lo, hi = start, start+len(content)
 	}
-	return script, scriptLine, lo, hi, isTS
+	return script, scriptLine, lo, hi
 }
 
-// extractVueSFC splits a Vue SFC into its <script> block (with its start line and
-// whether it is TypeScript) and the dangerous directives found in its <template>.
-func extractVueSFC(src []byte) (script string, scriptLine int, isTS bool, dirs []directivePos) {
+// extractVueSFC splits a Vue SFC into its <script> block (with its start line)
+// and the dangerous directives found in its <template>.
+func extractVueSFC(src []byte, li *lineIndex) (script string, scriptLine int, dirs []directivePos) {
 	lower := bytes.ToLower(src)
-	script, scriptLine, _, _, isTS = extractScriptBlock(src, lower)
-	if tmpl, start, _, ok := findBlock(src, lower, "template"); ok {
-		dirs = scanVueTemplate(src, tmpl, start)
+	script, scriptLine, _, _ = extractScriptBlock(src, lower, li)
+	if tmpl, start, ok := findBlock(src, lower, "template"); ok {
+		dirs = scanVueTemplate(tmpl, start, li)
 	}
-	return script, scriptLine, isTS, dirs
+	return script, scriptLine, dirs
 }
 
 // extractSvelteSFC splits a Svelte SFC into its <script> block and the `{@html}`
 // mustaches found in the surrounding markup (everything outside <script>/<style>).
-func extractSvelteSFC(src []byte) (script string, scriptLine int, isTS bool, dirs []directivePos) {
+func extractSvelteSFC(src []byte, li *lineIndex) (script string, scriptLine int, dirs []directivePos) {
 	lower := bytes.ToLower(src)
-	script, scriptLine, scriptLo, scriptHi, isTS := extractScriptBlock(src, lower)
+	script, scriptLine, scriptLo, scriptHi := extractScriptBlock(src, lower, li)
 	styleLo, styleHi := -1, -1
-	if content, start, _, ok := findBlock(src, lower, "style"); ok {
+	if content, start, ok := findBlock(src, lower, "style"); ok {
 		styleLo, styleHi = start, start+len(content)
 	}
-	dirs = scanSvelteMarkup(src, scriptLo, scriptHi, styleLo, styleHi)
-	return script, scriptLine, isTS, dirs
+	dirs = scanSvelteMarkup(src, scriptLo, scriptHi, styleLo, styleHi, li)
+	return script, scriptLine, dirs
 }
 
 // scanVueTemplate tokenizes the template block and records every start-tag
 // attribute that matches a Vue directive, resolving each directive's position to
 // the original SFC (contentStart is the template content's byte offset in src).
-func scanVueTemplate(src, content []byte, contentStart int) []directivePos {
+func scanVueTemplate(content []byte, contentStart int, li *lineIndex) []directivePos {
 	var dirs []directivePos
 	z := html.NewTokenizer(bytes.NewReader(content))
 	off := 0
@@ -175,7 +171,7 @@ func scanVueTemplate(src, content []byte, contentStart int) []directivePos {
 			key, val, more := z.TagAttr()
 			if callee, ok := vueDirectives[strings.ToLower(string(key))]; ok {
 				if expr := strings.TrimSpace(string(val)); expr != "" {
-					ln, cl := lineColOf(src, contentStart+tokStart)
+					ln, cl := li.lineCol(int32(contentStart + tokStart))
 					dirs = append(dirs, directivePos{callee: callee, expr: expr, line: ln, col: cl})
 				}
 			}
@@ -190,7 +186,7 @@ func scanVueTemplate(src, content []byte, contentStart int) []directivePos {
 // scanSvelteMarkup finds `{@html <expr>}` mustaches in the markup — outside the
 // <script>/<style> byte ranges, which are the only places they can legitimately
 // appear — and records each as a Svelte HTML sink at its original position.
-func scanSvelteMarkup(src []byte, scriptLo, scriptHi, styleLo, styleHi int) []directivePos {
+func scanSvelteMarkup(src []byte, scriptLo, scriptHi, styleLo, styleHi int, li *lineIndex) []directivePos {
 	var dirs []directivePos
 	needle := []byte("{@html")
 	for i := 0; ; {
@@ -211,7 +207,7 @@ func scanSvelteMarkup(src []byte, scriptLo, scriptHi, styleLo, styleHi int) []di
 		if expr = strings.TrimSpace(expr); expr == "" {
 			continue
 		}
-		ln, cl := lineColOf(src, pos)
+		ln, cl := li.lineCol(int32(pos))
 		dirs = append(dirs, directivePos{callee: svelteHTMLSink, expr: expr, line: ln, col: cl})
 	}
 	return dirs
@@ -262,23 +258,22 @@ func applyDirectivePositions(mod *ir.Module, dirs []directivePos) {
 }
 
 // findBlock returns the content between the first top-level `<name ...>` and its
-// matching `</name>`, along with the content's byte offset in src and the opening
-// tag text. Same-name nesting (a Vue `<template>` slot inside the root template)
-// is handled by depth counting. A self-closing `<name/>` has no content. lower is
-// the lower-cased src, passed in so it is computed once per SFC, not per call.
-func findBlock(src, lower []byte, name string) (content []byte, contentStart int, openTag string, ok bool) {
+// matching `</name>`, along with the content's byte offset in src. Same-name
+// nesting (a Vue `<template>` slot inside the root template) is handled by depth
+// counting. A self-closing `<name/>` has no content. lower is the lower-cased
+// src, passed in so it is computed once per SFC, not per call.
+func findBlock(src, lower []byte, name string) (content []byte, contentStart int, ok bool) {
 	open := findTag(lower, name, 0, true)
 	if open < 0 {
-		return nil, 0, "", false
+		return nil, 0, false
 	}
 	gt := bytes.IndexByte(src[open:], '>')
 	if gt < 0 {
-		return nil, 0, "", false
+		return nil, 0, false
 	}
 	openEnd := open + gt + 1
-	openTag = string(src[open:openEnd])
-	if strings.HasSuffix(strings.TrimSpace(openTag), "/>") {
-		return nil, openEnd, openTag, false
+	if openTag := string(src[open:openEnd]); strings.HasSuffix(strings.TrimSpace(openTag), "/>") {
+		return nil, openEnd, false
 	}
 	depth := 1
 	i := openEnd
@@ -286,7 +281,7 @@ func findBlock(src, lower []byte, name string) (content []byte, contentStart int
 		no := findTag(lower, name, i, true)
 		nc := findTag(lower, name, i, false)
 		if nc < 0 {
-			return nil, 0, "", false
+			return nil, 0, false
 		}
 		if no >= 0 && no < nc {
 			depth++
@@ -294,7 +289,7 @@ func findBlock(src, lower []byte, name string) (content []byte, contentStart int
 		} else {
 			depth--
 			if depth == 0 {
-				return src[openEnd:nc], openEnd, openTag, true
+				return src[openEnd:nc], openEnd, true
 			}
 			i = nc + 1
 		}
@@ -358,31 +353,4 @@ func matchMustache(src []byte, open int) (expr string, end int, ok bool) {
 
 func inRange(pos, lo, hi int) bool {
 	return lo >= 0 && pos >= lo && pos < hi
-}
-
-func tagHasTS(openTag string) bool {
-	s := strings.ToLower(openTag)
-	return strings.Contains(s, `lang="ts"`) || strings.Contains(s, "lang='ts'") ||
-		strings.Contains(s, "lang=ts") || strings.Contains(s, `lang="typescript"`) ||
-		strings.Contains(s, "lang='typescript'")
-}
-
-// lineColOf returns the 1-based line and column of byte offset off in src.
-func lineColOf(src []byte, off int) (int32, int32) {
-	if off > len(src) {
-		off = len(src)
-	}
-	if off < 0 {
-		off = 0
-	}
-	line, col := int32(1), int32(1)
-	for i := 0; i < off; i++ {
-		if src[i] == '\n' {
-			line++
-			col = 1
-		} else {
-			col++
-		}
-	}
-	return line, col
 }

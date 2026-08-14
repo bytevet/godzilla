@@ -19,10 +19,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
-	"godzilla/internal/srclines"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/srclines"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 
 	"html/template"
 )

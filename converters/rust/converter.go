@@ -29,11 +29,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godzilla/converters/frontend"
-	"godzilla/internal/buildpolicy"
-	"godzilla/internal/proc"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/frontend"
+	"github.com/bytevet/godzilla/internal/buildpolicy"
+	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Converter lowers Rust source files/directories into gIR: the shared

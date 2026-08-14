@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"godzilla/internal/buildpolicy"
-	"godzilla/internal/rules/loader"
-	"godzilla/internal/scan"
+	"github.com/bytevet/godzilla/internal/buildpolicy"
+	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/scan"
 )
 
 // sampleEligible reports whether a sample can run in this environment, mirroring

@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // pathRule is a path-traversal rule with a filepath.IsLocal validator, matching

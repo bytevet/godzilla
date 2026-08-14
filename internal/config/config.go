@@ -12,8 +12,8 @@ import (
 	"regexp"
 	"strings"
 
-	"godzilla/internal/analysis"
-	"godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/rules"
 
 	"gopkg.in/yaml.v3"
 )

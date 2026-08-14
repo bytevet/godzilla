@@ -3,8 +3,8 @@ package analysis
 import (
 	"testing"
 
-	"godzilla/internal/rules"
-	"godzilla/internal/testsupport"
+	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/testsupport"
 )
 
 // ssrfRule is a minimal CWE-918 rule over net/http.Get for the ENG-8 tests.

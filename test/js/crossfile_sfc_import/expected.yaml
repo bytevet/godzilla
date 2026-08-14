@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+# Source in app.js, sink in Renderer.vue: fires only if `./Renderer.vue` resolves
+# to the module the walk named `Renderer`. When it does not, both files still
+# convert and coverage still reads ok, so the file+line pin is the only alarm.
+findings:
+    - rule: js-sqli
+      min: 1
+      max: 1
+      line: 6
+      sink: "js:some-db.query"

@@ -1,10 +1,12 @@
 // Package js_converter lowers JavaScript source into gIR for the taint engine in
-// internal/analysis: parse, then lower the AST per function (lower.go).
+// internal/analysis: parse, name every function (collect.go), then lower each
+// one (lower.go).
 //
-// Parsing uses github.com/dop251/goja's pure-Go ECMAScript parser -- no cgo, no
-// Node.js, no external process. Its file.Idx positions resolve to line/column
-// through a file.FileSet (posForIdx), which is how every emitted
-// Instruction/Function gets its Pos.
+// Parsing uses esbuild's parser through github.com/bytevet/esbuild-jsast -- no
+// cgo, no Node.js, no external process. It is a TREE parse, not a text
+// transform: TypeScript, JSX and ES modules arrive as themselves, and a node's
+// byte offset indexes the source as written, so lineIndex (dialect.go) resolves
+// every Instruction/Function Pos with no sourcemap in the path.
 //
 // # Lowering model
 //
@@ -36,11 +38,11 @@
 // for why each is needed.
 //
 // Real call expressions lower to CALL with a syntactic dotted Callee built from
-// the callee expression (Identifier/DotExpression/string-keyed Bracket chains;
+// the callee expression (identifier / member / string-keyed index chains;
 // anything else is "<dynamic>") -- the name reflects source syntax, never a
 // value resolved through the environment. A chained call
-// (`axios.get(url).then(cb)`) has its inner call lowered first by
-// lowerNestedCallees, so the inner callee and args stay visible even though the
+// (`axios.get(url).then(cb)`) has its inner call lowered first — as the outer
+// call's receiver — so the inner callee and args stay visible even though the
 // outer name collapses to "<dynamic>.then".
 //
 // # Known limitations
@@ -56,18 +58,28 @@
 //   - Classes are modeled per method ("<Class>.<method>", via collectClass);
 //     only non-method class-body statements (fields, static initializers) are
 //     unmodeled.
-//   - Destructuring ASSIGNMENT targets and (non-handler) destructured parameters
-//     are dropped; a destructuring declaration does bind its names, but only for
-//     flat identifier patterns.
+//   - Destructuring ASSIGNMENT targets, (non-handler) destructured parameters,
+//     and a destructured for-in/for-of loop variable are dropped. A destructuring
+//     DECLARATION binds flat identifier names: an object pattern per KEY (a field
+//     read off the initializer, so `const {a} = req.query` is precise), an array
+//     pattern to the whole initializer (element taint == container taint).
+//     Nested patterns bind nothing.
 //   - `await x` / `yield x` lower to `x`; the wrapping is a no-op for taint.
 //   - Array/object literals collapse every element's taint into one PHI-merged
 //     register rather than tracking it per index/key.
 //   - Logical `&&`/`||`/`??` reuse the bitwise BIN_OP kinds (gIR has no logical
 //     counterpart), losing short-circuit semantics but not taint.
-//   - Only function literals reachable from a statement's top-level expression
-//     tree are discovered (see the collector in lower.go) -- enough for
-//     `app.get(url, function(req, res){...})` and `const f = () => {...}`, but
-//     not more exotic placements.
+//
+// # Collector coverage
+//
+// The collector (collect.go) must walk every expression the lowering lowers. A
+// literal it misses is not just unnamed -- the lowering resolves nothing, emits
+// js.unsupported, and its body goes unanalyzed while the file still reports as
+// converted. TestNoUnsupportedInstructions walks whole trees to catch that.
+//
+// A parameter default is the blind spot: nothing lowers one, so a missed literal
+// there emits no intrinsic at all and only TestCollectsParamDefaultLiteral sees
+// it.
 package js_converter
 
 import (
@@ -75,14 +87,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dop251/goja/file"
-	"github.com/dop251/goja/parser"
-	"github.com/go-sourcemap/sourcemap"
-
-	"godzilla/converters/frontend"
-	"godzilla/internal/irwalk"
-	"godzilla/internal/walkignore"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/frontend"
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/walkignore"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Converter lowers JavaScript source files/directories into gIR: the shared
@@ -137,8 +145,8 @@ type jsFileResult struct {
 	err           error
 }
 
-// crossModuleMarker prefixes a callee emitted for a bare call to a relative-
-// require default binding (see funcState.relativeDefaults); the suffix is the
+// crossModuleMarker prefixes a callee emitted for a bare call to a relative
+// module's default binding (see funcState.relativeDefaults); the suffix is the
 // scan-root-relative module name whose default export is the real callee.
 const crossModuleMarker = "js:@mod:"
 
@@ -173,84 +181,36 @@ func resolveJSCrossModuleCalls(prog *ir.Program, defaultExports map[string]strin
 	}
 }
 
-// convertJSFile parses a single JavaScript file with goja's parser and lowers
-// the resulting AST into one gIR Module.
+// convertJSFile parses a single JavaScript file and lowers the resulting AST
+// into one gIR Module.
 func (c *Converter) convertJSFile(path, moduleName string) (*ir.Module, string, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("js_converter: failed to read %s: %w", path, err)
 	}
 
-	// Vue/Svelte SFCs are compiled to plain JS by the SFC extractor; extensions
-	// that always need one (.ts/.tsx/.jsx/.mjs/.cjs) are esbuild-transformed to
-	// CommonJS up front. Both return a sourcemap consumer that remaps positions
-	// back to the original file. SFCs must be intercepted BEFORE the generic
-	// transform — esbuild has no .vue/.svelte loader.
-	//
-	// .js takes NEITHER branch: it is the ambiguous extension (plain script, ESM,
-	// Flow and JSX all ship as .js), so it goes straight to goja and the parse
-	// failure below decides.
+	// A Vue/Svelte SFC is not JavaScript at all, so it is compiled to plain JS
+	// first: the <script> block newline-padded back to its original lines, plus
+	// one synthetic call per dangerous template directive.
 	code := string(src)
-	var consumer *sourcemap.Consumer
 	var dirs []directivePos
-	var transformed bool
-	switch {
-	case isSFC(path):
-		var terr error
-		code, consumer, dirs, terr = extractSFCToJS(path, src, primaryTarget)
-		if terr != nil {
-			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, terr)
+	if isSFC(path) {
+		var eerr error
+		code, dirs, eerr = extractSFCToJS(path, src)
+		if eerr != nil {
+			return nil, "", fmt.Errorf("js_converter: failed to extract %s: %w", path, eerr)
 		}
-		transformed = true
-	case needsTransform(path):
-		var terr error
-		code, consumer, terr = transformToJS(path, src, primaryTarget)
-		if terr != nil {
-			return nil, "", fmt.Errorf("js_converter: failed to transform %s: %w", path, terr)
-		}
-		transformed = true
 	}
 
-	fset := &file.FileSet{}
-	astProg, err := parser.ParseFile(fset, path, code, 0)
-	if err != nil {
-		// goja could not read this, so re-lower and try again. The PARSE FAILURE is
-		// the trigger rather than a content sniff, because predicting fails both ways
-		// — it misses Flow annotations in a file with no import/export, and it costs
-		// every ordinary CommonJS file a scan it did not need. Failing first is exact
-		// and is paid only by files that would otherwise be lost, so it needs no size
-		// gate.
-		//
-		// Two things can be wrong, and the rungs answer them in that order: WHICH
-		// DIALECT (the loader ladder, inside each attempt) and WHICH ES LEVEL goja can
-		// actually spell (fallbackTargets). The level is escalated only here, never up
-		// front, so a file that already parses keeps its modern syntax intact.
-		//
-		// If no rung can be read either, goja's original error is reported: it
-		// describes the file as written.
-		for _, target := range fallbackTargets(transformed) {
-			tcode, tconsumer, tdirs, terr := lowerAt(path, src, target)
-			if terr != nil {
-				continue
-			}
-			tfset := &file.FileSet{}
-			tprog, perr := parser.ParseFile(tfset, path, tcode, 0)
-			if perr != nil {
-				continue
-			}
-			fset, astProg, consumer, err = tfset, tprog, tconsumer, nil
-			if tdirs != nil {
-				dirs = tdirs
-			}
-			break
-		}
-	}
+	// parseSource returns the buffer it succeeded on, which is not always `code`
+	// (its Flow rung rewrites the source). Every node offset indexes THAT buffer,
+	// so the line index must be built from it and not from the file on disk.
+	tree, parsed, err := parseSource(path, code)
 	if err != nil {
 		return nil, "", fmt.Errorf("js_converter: failed to parse %s: %w", path, err)
 	}
 
-	mod, defaultExport := convertModule(astProg, fset, path, moduleName)
-	remapPositions(mod, consumer)
+	mod, defaultExport := convertModule(tree, newLineIndex(path, parsed), moduleName)
 	// Relocate template-directive sink findings from the appended synthetic calls
 	// back to their positions in the .vue/.svelte template (no-op for non-SFCs).
 	applyDirectivePositions(mod, dirs)

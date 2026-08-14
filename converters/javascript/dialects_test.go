@@ -18,8 +18,8 @@ import (
 // reported ok while 165 of parse-server's 192 files were being dropped.
 //
 // Each file below is a dialect that reached production and is legal input. Adding
-// one here is how a newly-encountered dialect gets locked in; a failure means the
-// loader ladder needs another rung, not that the fixture is wrong.
+// one here is how a newly-encountered dialect gets locked in; a failure means
+// parseLadder needs another rung, not that the fixture is wrong.
 func TestDialectsAllConvert(t *testing.T) {
 	dir := filepath.Join("testdata", "dialects")
 	entries, err := os.ReadDir(dir)
@@ -43,44 +43,71 @@ func TestDialectsAllConvert(t *testing.T) {
 	}
 }
 
-// TestKnownGapDialectsFailCleanly pins the dialects that genuinely cannot be
-// lowered today, so they stay VISIBLE instead of blending into the background of
-// per-file skips.
-//
-// Top-level await is the current member: it is only expressible in ES-module
-// output, and the lowering consumes CommonJS, so esbuild rejects it in every
-// format goja can read. That is a structural limit, not a missing rung on the
-// loader ladder — no amount of loader-guessing fixes it.
-//
-// The assertion is that the failure is CLEAN (an error, not a panic or a silently
-// empty module). If one of these starts converting, this test fails, which is the
-// signal to move the fixture into testdata/dialects where it will be held to the
-// stronger guarantee.
-func TestKnownGapDialectsFailCleanly(t *testing.T) {
-	dir := filepath.Join("testdata", "dialects_known_gaps")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read known-gaps dir: %v", err)
-	}
-	for _, e := range entries {
-		t.Run(e.Name(), func(t *testing.T) {
-			mod, _, err := NewConverter().convertJSFile(filepath.Join(dir, e.Name()), "gap")
-			if err == nil {
-				t.Fatalf("%s now converts (mod=%v) — move it into testdata/dialects", e.Name(), mod != nil)
-			}
-		})
-	}
-}
-
 // TestDialectsScanReportsFullCoverage is the end-to-end half: converting the
 // directory must skip nothing. It guards the count the scan layer reports as
 // coverage, which is what makes a partially-dropped project visible.
 func TestDialectsScanReportsFullCoverage(t *testing.T) {
 	c := NewConverter()
-	if _, err := c.ConvertFile(filepath.Join("testdata", "dialects")); err != nil {
+	prog, err := c.ConvertFile(filepath.Join("testdata", "dialects"))
+	if err != nil {
 		t.Fatalf("ConvertFile(dialects): %v", err)
 	}
 	if c.Skipped() != 0 {
-		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see the loader ladder", c.Skipped())
+		t.Errorf("Skipped() = %d, want 0 — a dialect stopped parsing; see parseLadder", c.Skipped())
+	}
+	// Converting is half of it: a dialect can parse and still lower to a fallback.
+	requireNoFallbackIntrinsic(t, prog, "testdata/dialects")
+}
+
+// TestConvertCorpusTreeSkipsOnlyBroken pins the skip count over the whole JS
+// corpus at exactly one — resilience/broken.js, which is deliberately
+// unparseable.
+//
+// This is the only place a ladder regression surfaces at all. A batch errors
+// only when ZERO files convert, so a rung that stops matching leaves Converted
+// true and Failed() empty; the corpus assertions then pass for every sample
+// still being read, and the dropped one simply has no findings to miss.
+func TestConvertCorpusTreeSkipsOnlyBroken(t *testing.T) {
+	c := NewConverter()
+	prog, err := c.ConvertFile(filepath.Join("..", "..", "test", "js"))
+	if err != nil {
+		t.Fatalf("ConvertFile(test/js): %v", err)
+	}
+	if c.Skipped() != 1 {
+		t.Errorf("Skipped() = %d, want 1 (only resilience/broken.js)", c.Skipped())
+	}
+	requireNoFallbackIntrinsic(t, prog, "test/js")
+}
+
+// TestLadderOrderKeepsRelationalArgs pins the rung ORDER, which is load-bearing
+// in a way no parse error reveals.
+//
+// `f(a < b, c > (d))` is legal under BOTH the JS and TS rungs, and they disagree
+// about what it means: JS reads two relational arguments, TS reads one argument
+// with a type-argument list. Try TS first and an argument — and whatever taint
+// flowed through it — silently leaves the IR, with nothing failing to parse.
+// A .js file is JavaScript until proven otherwise, so the plain rung goes first.
+func TestLadderOrderKeepsRelationalArgs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relational.js")
+	if err := os.WriteFile(path, []byte("sink(a < b, c > (d));\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod, _, err := NewConverter().convertJSFile(path, "relational")
+	if err != nil {
+		t.Fatalf("convertJSFile: %v", err)
+	}
+	args := -1
+	for _, fn := range mod.Functions {
+		for _, b := range fn.Blocks {
+			for _, in := range b.Instrs {
+				if in.GetCall().GetCallee() == "js:sink" {
+					args = len(in.GetCall().GetArgs())
+				}
+			}
+		}
+	}
+	if args != 2 {
+		t.Errorf("js:sink lowered with %d args, want 2 — the TS rung ran first and ate one", args)
 	}
 }

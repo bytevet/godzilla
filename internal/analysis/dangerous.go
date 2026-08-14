@@ -1,11 +1,11 @@
 package analysis
 
 import (
-	"godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/irwalk"
 	"regexp"
 
-	"godzilla/internal/rules"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/internal/rules"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // ScanDangerousCalls evaluates every `kind: dangerous-call` rule (COV-4)

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	go_converter "godzilla/converters/go"
-	"godzilla/internal/rules/loader"
+	go_converter "github.com/bytevet/godzilla/converters/go"
+	"github.com/bytevet/godzilla/internal/rules/loader"
 )
 
 // TestAnalyze_ParameterizedQueryNoFalsePositive is a regression test for the

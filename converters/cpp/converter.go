@@ -14,10 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"godzilla/converters/frontend"
-	llvm_converter "godzilla/converters/llvm"
-	"godzilla/internal/proc"
-	ir "godzilla/pkg/ir/v1"
+	"github.com/bytevet/godzilla/converters/frontend"
+	llvm_converter "github.com/bytevet/godzilla/converters/llvm"
+	"github.com/bytevet/godzilla/internal/proc"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // Converter lowers C/C++ sources into gIR: the shared frontend.Driver surface
