@@ -80,6 +80,25 @@ func parseSource(path, code string) (*jsast.File, string, error) {
 			firstErr = parseError(errs)
 		}
 	}
+	// Rung: TypeScript's legacy decorators. A decorator on a PARAMETER is a parse
+	// error without them, which loses the whole file -- NestJS and Angular sources
+	// are built out of them. Decorators on classes, methods and properties parse
+	// without the flag, so only the parameter form needs this.
+	//
+	// A rung and not a default, because the flag LOWERS: it rewrites every
+	// experimental decorator in the file into __decorateClass/__decorateParam
+	// calls emitted after the class, and Class.Decorators comes back empty. Set
+	// always, it would trade the as-written tree of every decorated file for the
+	// few that cannot parse otherwise. Reached only on failure, the lowered shape
+	// is confined to files that would contribute nothing at all.
+	for _, m := range ladder {
+		if !m.ts {
+			continue // the flag needs TypeScript; it is ignored otherwise
+		}
+		if f, errs := jsast.Parse(code, jsast.Options{TS: true, JSX: m.jsx, ExperimentalDecorators: true}); len(errs) == 0 {
+			return f, code, nil
+		}
+	}
 	// Last rung: Flow. Its residue past TypeScript has no dialect of its own, so
 	// no rung recovers it -- the source itself has to change (flowstrip.go).
 	// Retrying the WHOLE ladder rather than one rung keeps the dialect question
