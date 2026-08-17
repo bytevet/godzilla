@@ -139,11 +139,18 @@ func IsERBFile(path string) bool { return strings.HasSuffix(path, ".erb") }
 // the file. Decidim is the evidence: its cells escape by hand
 // (`decidim_html_escape(...)` inside app/cells), which is only necessary because
 // the template does not -- and CVE-2024-41673 is the one that got missed.
-func erbAutoEscapes(path string) bool {
-	// Both spellings matter: the directory is mid-path when a monorepo or an
-	// absolute path is scanned, and a bare prefix when the scan root IS the app.
+func erbAutoEscapes(path string) bool { return !isCellsPath(path) }
+
+// isCellsPath reports whether path lives under a cells directory. The one
+// predicate behind both halves of the cells model -- the unescaped template sink
+// here and the cell-argument source in lower.go -- so the two cannot come to
+// disagree about what a cell is.
+//
+// Both spellings matter: the directory is mid-path when a monorepo or an absolute
+// path is scanned, and a bare prefix when the scan root IS the app.
+func isCellsPath(path string) bool {
 	s := filepath.ToSlash(path)
-	return !strings.Contains(s, "/app/cells/") && !strings.HasPrefix(s, "app/cells/")
+	return strings.Contains(s, "/app/cells/") || strings.HasPrefix(s, "app/cells/")
 }
 
 // modifierKeywords end an expression and start a trailing condition, so they

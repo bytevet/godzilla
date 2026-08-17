@@ -1,4 +1,5 @@
 ruby/backtick_injection|ruby-command-injection|ruby:app.<module>|ruby:%x|src=test/ruby/backtick_injection/app.rb:4:10|sink=test/ruby/backtick_injection/app.rb:5:4
+ruby/cell_option_source|ruby-xss-cell-option|ruby:app/cells/report/report_cell.ReportCell.unsafe_title|ruby:raw|src=test/ruby/cell_option_source/app/cells/report/report_cell.rb:5:9|sink=test/ruby/cell_option_source/app/cells/report/report_cell.rb:5:5
 ruby/cells_xss|ruby-xss|ruby:app/cells/report/show.<module>|ruby:raw|src=test/ruby/cells_xss/app/cells/report/show.erb:2:11|sink=test/ruby/cells_xss/app/cells/report/show.erb:2:7
 ruby/code_injection|ruby-code-injection|ruby:app.AdminController.dispatch|ruby:send|src=test/ruby/code_injection/app.rb:10:18|sink=test/ruby/code_injection/app.rb:10:5
 ruby/code_injection|ruby-code-injection|ruby:app.AdminController.render_template|ruby:ERB.new|src=test/ruby/code_injection/app.rb:16:13|sink=test/ruby/code_injection/app.rb:16:5

@@ -984,13 +984,30 @@ var requestDotBases = map[string]bool{"request": true, "req": true, "params": tr
 // indexed as `base[:x]` (Rails/Sinatra `params[...]`, `cookies[...]`).
 var requestIndexBases = map[string]bool{"params": true, "cookies": true}
 
+// cellOptionSource names a read of a cell's `options[...]` -- the arguments its
+// CALLER passed. Unlike params it is not request input by construction: a cell is
+// invoked from a controller or another view, and the value may be a request
+// parameter or an internal object. That is the whole reason the rule sourcing it
+// ships at `severity: low`, advisory under the default gate, rather than joining
+// ruby-xss.
+//
+// Synthetic and `@`-marked so it can never collide with a real method named
+// `options`, and emitted only inside a cell (isCellsPath), where `options` has
+// this one meaning.
+const cellOptionSource = "ruby:@cell.options"
+
 // lowerAref lowers `base[index]`. When the base is an opaque request hash
 // (`params[:x]`, `cookies['x']`), it becomes a synthetic source CALL so the
 // engine seeds taint; otherwise it is an INDEX whose taint flows from the base.
 func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	base := at(n, 1)
-	if name, ok := fs.isOpaqueBase(base); ok && requestIndexBases[name] {
-		return fs.lowerCallExprVals("ruby:"+name, nil, n)
+	if name, ok := fs.isOpaqueBase(base); ok {
+		if requestIndexBases[name] {
+			return fs.lowerCallExprVals("ruby:"+name, nil, n)
+		}
+		if name == "options" && isCellsPath(fs.filename) {
+			return fs.lowerCallExprVals(cellOptionSource, nil, n)
+		}
 	}
 	baseVal := fs.lowerExpr(base)
 	inst := fs.newValueInst(n)
