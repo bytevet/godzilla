@@ -3,8 +3,10 @@ package ruby_converter
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/bytevet/godzilla/converters/ssabuild"
+	"github.com/bytevet/godzilla/internal/irwalk"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -607,6 +609,9 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		if fs.isKnownMethod(name) {
 			return fs.lowerCallExpr(fs.localCallee(name), nil, n)
 		}
+		if callee, ok := fs.cellTemplateCallee(name); ok {
+			return fs.lowerCallExpr(callee, nil, n)
+		}
 		return fs.lookup(name)
 	case "paren":
 		inner := at(n, 1)
@@ -995,6 +1000,99 @@ var requestIndexBases = map[string]bool{"params": true, "cookies": true}
 // `options`, and emitted only inside a cell (isCellsPath), where `options` has
 // this one meaning.
 const cellOptionSource = "ruby:@cell.options"
+
+// cellMethodMarker prefixes a callee emitted for a bare name in a cell TEMPLATE,
+// which Ruby resolves against the cell object the template renders in. The suffix
+// is "<paired class module>|<method>"; resolveCellTemplateCalls rewrites it once
+// every file is lowered, since the class may not be parsed yet.
+//
+// Without it the two halves of a cell never meet. A template's `<%= label %>` is a
+// bare name in its OWN module with no def of that name, so it lowered to an inert
+// free identifier -- decidim CVE-2024-41673 puts the source in the class and the
+// unescaped sink in the template, and the flow simply stopped at the file
+// boundary.
+const cellMethodMarker = "ruby:@cellmethod:"
+
+// cellTemplateCallee returns the marker callee for a bare name in a cell
+// template, or ok=false when this file is not one. Emitted only for a template
+// (an .erb under a cells directory): in a cell CLASS a bare name is already
+// resolved by localCallee, and outside cells the convention does not hold.
+func (fs *funcState) cellTemplateCallee(name string) (string, bool) {
+	if !isCellsPath(fs.filename) || !IsERBFile(fs.filename) {
+		return "", false
+	}
+	mod, ok := pairedCellModule(fs.moduleName)
+	if !ok {
+		return "", false
+	}
+	return cellMethodMarker + mod + "|" + name, true
+}
+
+// pairedCellModule maps a cell template's module name to its class's. The pairing
+// is the cells convention: templates live in a directory named after the cell, and
+// the class sits beside that directory with a `_cell` suffix --
+// `app/cells/foo/show` is rendered by `app/cells/foo_cell`, and decidim's
+// `.../decidim/version/show` by `.../decidim/version_cell`.
+func pairedCellModule(templateModule string) (string, bool) {
+	i := strings.LastIndex(templateModule, "/")
+	if i < 0 {
+		return "", false
+	}
+	return templateModule[:i] + "_cell", true
+}
+
+// resolveCellTemplateCalls rewrites every cellMethodMarker callee to the paired
+// cell class's method, once all files are lowered. The engine resolves calls by
+// EXACT canonical name, so an unrewritten marker links to nothing.
+//
+// A name the paired class does not define -- a Rails helper, or a method from an
+// included module -- is stripped back to the plain bare name it would have been
+// without the marker, so it can still match a rule glob (`raw`, `link_to`) instead
+// of dangling. An AMBIGUOUS name is stripped too: one file may hold several cell
+// classes, and picking either would be a guess.
+func resolveCellTemplateCalls(prog *ir.Program) {
+	byMod := map[string]map[string]string{}
+	for _, m := range prog.GetModules() {
+		if m == nil {
+			continue
+		}
+		for _, f := range m.GetFunctions() {
+			if f == nil || f.GetCanonicalName() == "" {
+				continue
+			}
+			method := f.GetName()
+			if i := strings.LastIndex(method, "."); i >= 0 {
+				method = method[i+1:]
+			}
+			mm := byMod[m.GetName()]
+			if mm == nil {
+				mm = map[string]string{}
+				byMod[m.GetName()] = mm
+			}
+			if _, dup := mm[method]; dup {
+				mm[method] = "" // ambiguous within one file: resolve to nothing
+				continue
+			}
+			mm[method] = f.GetCanonicalName()
+		}
+	}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if !strings.HasPrefix(callee, cellMethodMarker) {
+			continue
+		}
+		mod, name, found := strings.Cut(strings.TrimPrefix(callee, cellMethodMarker), "|")
+		if !found {
+			irwalk.SetCallee(cc, "ruby:"+mod)
+			continue
+		}
+		if target := byMod[mod][name]; target != "" {
+			irwalk.SetCallee(cc, target)
+			continue
+		}
+		irwalk.SetCallee(cc, "ruby:"+name)
+	}
+}
 
 // lowerAref lowers `base[index]`. When the base is an opaque request hash
 // (`params[:x]`, `cookies['x']`), it becomes a synthetic source CALL so the

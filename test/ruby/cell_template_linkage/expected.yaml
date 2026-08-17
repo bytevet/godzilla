@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+# max: 2 is the assertion. `title` and `translated` cross from the cell class into
+# its template and fire; the other two are the controls. `escaped` is neutralized,
+# and the identical `<%= title %>` under app/views must stay inert -- it is an
+# ActionView template with no paired cell, so the linkage must not reach it.
+findings:
+    - rule: ruby-xss-cell-option
+      min: 2
+      max: 2
+      sink: "ruby:raw"

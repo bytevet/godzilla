@@ -46,4 +46,19 @@ rules:
       - "ruby:*sanitize"
       - "ruby:*escape_javascript"
       - "ruby:*ERB::Util.html_escape"
-    propagators: []
+    # A translation carries what is interpolated into it, so `t(x)` returns a
+    # string containing x. Scoped to this rule rather than the shared
+    # default-propagators fragment, which has no Ruby section and documents itself
+    # as pure string/encoding transforms; ruby-xss wants the same entry, but adding
+    # it there changes a GATING rule and belongs with its own measurement.
+    #
+    # This carries the POSITIONAL form only. `t("key", name: x)` -- the form
+    # decidim CVE-2024-41673 actually uses -- does not flow, because a hash
+    # argument is lowered pairwise with the CONTAINER left untainted on purpose
+    # (ActiveRecord's hash form is parameterized by construction, so tainting it
+    # would fire on every `where(name: params[:q])`). Interpolating a translation
+    # and parameterizing a query are the same shape to the frontend, and telling
+    # them apart needs per-key taint rather than a propagator here.
+    propagators:
+      - "ruby:t"
+      - "ruby:translate"
