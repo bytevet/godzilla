@@ -62,6 +62,11 @@ type Converter struct {
 	// collectRouteHandlers alongside routeHandlers.
 	routeFormParams map[*ssa.Function][]string
 
+	// funcAliases maps a package-level variable that holds a FUNCTION to that
+	// function, so a call through the variable gets a callee name. Populated by
+	// collectFuncAliases.
+	funcAliases map[*ssa.Global]*ssa.Function
+
 	// targetPkgs is the set of user-authored (scanned) package import paths.
 	// Dependency bodies are lowered so taint flows through them, but findings are
 	// scoped back to these packages so a sink reached inside a library is not
@@ -137,6 +142,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// between route-handler detection and the grouping below.
 	allFns := ssautil.AllFunctions(prog)
 	c.routeHandlers, c.routeFormParams = collectRouteHandlers(allFns)
+	c.funcAliases = collectFuncAliases(allFns)
 
 	// Lower only the functions REACHABLE from user (reportable) code. A whole
 	// dependency closure runs to tens of thousands of functions, but the
@@ -459,6 +465,11 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 // typeCache/fnNames, so it can lower functions concurrently without locking or
 // racing on the shared caches. targetPkgs is intentionally NOT copied: it is read
 // only via TargetPackages() on the top-level converter, never on the worker path.
+// worker returns a Converter for one lowering goroutine. Every whole-program
+// analysis result computed once in convertProgram has to be carried across here:
+// a worker builds its own maps, so a field left out is silently EMPTY during
+// lowering rather than nil-panicking, and the analysis it represents just stops
+// having an effect.
 func (c *Converter) worker() *Converter {
 	w := NewConverter()
 	w.fset = c.fset
@@ -466,6 +477,7 @@ func (c *Converter) worker() *Converter {
 	w.baseNames = c.fnNames
 	w.routeHandlers = c.routeHandlers
 	w.routeFormParams = c.routeFormParams
+	w.funcAliases = c.funcAliases
 	return w
 }
 
@@ -757,6 +769,75 @@ var routingVerbs = map[string]bool{
 // (r.GET("/x", h), mux.HandleFunc(..., h), e.Use(mw), …) — and maps each to the
 // register name of its request/context parameter, plus its bound-form parameter
 // registers (see formParams).
+// collectFuncAliases maps each package-level variable that holds a FUNCTION to
+// that function. A package re-exporting another's function as a variable --
+// `var Params = macaron.Params`, how grafana's pkg/web surfaces macaron -- turns
+// every call through it into an INDIRECT call: SSA loads the global and calls the
+// loaded value, so there is no static callee and convertCall leaves the name
+// empty. An unnamed callee matches no source, sink or propagator glob, so the
+// call is invisible to every rule; grafana CVE-2021-43798 reaches os.Open through
+// exactly that alias.
+//
+// Only a variable with EXACTLY ONE store program-wide is mapped, and only when
+// that store's value is a function. A second store means the variable is
+// reassigned -- a mock swapped in by a test, a hook rebound at init -- and the
+// call site no longer has one answer, so naming either would be a guess. Counting
+// every store rather than only the function-valued ones is what makes the guard
+// hold: a var later set to nil or to a different function is excluded, not
+// silently resolved to its first value.
+func collectFuncAliases(allFns map[*ssa.Function]bool) map[*ssa.Global]*ssa.Function {
+	type record struct {
+		fn     *ssa.Function
+		stores int
+	}
+	seen := map[*ssa.Global]*record{}
+	for fn := range allFns {
+		for _, b := range fn.Blocks {
+			for _, instr := range b.Instrs {
+				st, ok := instr.(*ssa.Store)
+				if !ok {
+					continue
+				}
+				g, ok := st.Addr.(*ssa.Global)
+				if !ok {
+					continue
+				}
+				r := seen[g]
+				if r == nil {
+					r = &record{}
+					seen[g] = r
+				}
+				r.stores++
+				if target, ok := st.Val.(*ssa.Function); ok {
+					r.fn = target
+				}
+			}
+		}
+	}
+	out := map[*ssa.Global]*ssa.Function{}
+	for g, r := range seen {
+		if r.stores == 1 && r.fn != nil {
+			out[g] = r.fn
+		}
+	}
+	return out
+}
+
+// aliasedFunc returns the function an indirect call's callee value resolves to
+// when that value is a load of a function-holding package-level variable, or nil.
+// A load is UnOp(MUL) over the global.
+func (c *Converter) aliasedFunc(v ssa.Value) *ssa.Function {
+	load, ok := v.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return nil
+	}
+	g, ok := load.X.(*ssa.Global)
+	if !ok {
+		return nil
+	}
+	return c.funcAliases[g]
+}
+
 func collectRouteHandlers(allFns map[*ssa.Function]bool) (map[*ssa.Function]string, map[*ssa.Function][]string) {
 	handlers := map[*ssa.Function]string{}
 	forms := map[*ssa.Function][]string{}
@@ -1174,6 +1255,15 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		}
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
 		cc.Callee = "builtin." + b.Name()
+	} else if fn := c.aliasedFunc(call.Value); fn != nil {
+		// A call through a function-holding package-level variable. Named with the
+		// function it resolves to rather than the variable, because that is the Go
+		// frontend's convention throughout -- callees are semantic FQNs from SSA,
+		// never the syntax at the call site. See collectFuncAliases.
+		cc.Callee = c.canonicalFunc(fn)
+		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+			cc.MethodName = fn.Name()
+		}
 	}
 	if n := len(call.Args); n > 0 {
 		cc.Args = make([]*ir.Value, n)

@@ -17,6 +17,8 @@ go/framework_dep_wrapper_nested|go-command-injection|go:godzilla/test/go/framewo
 go/framework_dep_wrapper|go-command-injection|go:godzilla/test/go/framework_dep_wrapper.main$1|go:os/exec.Command|src=test/go/framework_dep_wrapper/requtil/util.go:8:16|sink=test/go/framework_dep_wrapper/main.go:22:25
 go/framework_field_source|go-command-injection|go:godzilla/test/go/framework_field_source.main$1|go:os/exec.Command|src=test/go/framework_field_source/beegostub/beegostub.go:17:15|sink=test/go/framework_field_source/main.go:16:15
 go/framework_route_param|go-path-traversal|go:frameworkrouteparam.getAsset|go:os.Open|src=test/go/framework_route_param/main.go:19:29|sink=test/go/framework_route_param/main.go:21:19
+go/func_alias_source|go-path-traversal|go:funcaliassource.direct|go:os.Open|src=test/go/func_alias_source/main.go:24:73|sink=test/go/func_alias_source/main.go:24:17
+go/func_alias_source|go-path-traversal|go:funcaliassource.viaAlias|go:os.Open|src=test/go/func_alias_source/main.go:18:69|sink=test/go/func_alias_source/main.go:18:17
 go/gin_gorm|go-command-injection|go:godzilla/test/go/gin_gorm.main$3|go:os/exec.Command|src=test/go/gin_gorm/main.go:42:18|sink=test/go/gin_gorm/main.go:43:25
 go/gin_gorm|go-sql-injection|go:godzilla/test/go/gin_gorm.main$1|go:(*gorm.io/gorm.DB).Raw|src=test/go/gin_gorm/main.go:26:16|sink=test/go/gin_gorm/main.go:28:9
 go/gin_gorm|go-sql-injection|go:godzilla/test/go/gin_gorm.main$2|go:(*gorm.io/gorm.DB).Where|src=test/go/gin_gorm/main.go:34:16|sink=test/go/gin_gorm/main.go:36:11

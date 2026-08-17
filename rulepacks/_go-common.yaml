@@ -24,6 +24,11 @@ sources:
   - "go:*go-chi/chi*.URLParam"
   - "go:*gorilla/mux.Vars"
   - "go:*web.Params" # macaron/grafana free-function route params
+  # macaron's own name for the same accessor. Both spellings are needed: a caller
+  # may reach it through a re-exporting variable (`var Params = macaron.Params`,
+  # grafana's pkg/web), and callee names are SEMANTIC, so such a call resolves to
+  # the function rather than to the variable the source wrote.
+  - "go:*macaron.Params"
   - "go:*gofiber/fiber*.Ctx*.Query"
   - "go:*gofiber/fiber*.Ctx*.Params"
   - "go:*gofiber/fiber*.Ctx*.FormValue"
