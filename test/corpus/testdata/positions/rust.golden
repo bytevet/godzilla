@@ -10,6 +10,6 @@ rust/path_traversal|rust-path-traversal|rust:handle|rust:std::fs::read_to_string
 rust/sql_injection|rust-sql-injection|rust:handle|rust:Connection::execute|src=test/rust/sql_injection/main.rs:20:14|sink=test/rust/sql_injection/main.rs:22:5
 rust/ssrf_reqwest|rust-ssrf|rust:handle|rust:reqwest::blocking::get|src=-|sink=-
 rust/ssrf|rust-ssrf|rust:handle|rust:Client::get|src=test/rust/ssrf/main.rs:16:18|sink=test/rust/ssrf/main.rs:17:5
-rust/web_bin_command_injection|rust-command-injection|rust:main|rust:Command::arg|src=-|sink=-
-rust/web_command_injection|rust-command-injection|rust:handle|rust:Command::arg|src=-|sink=-
+rust/web_bin_command_injection|rust-command-injection|rust:main|rust:Command::arg|src=test/rust/web_bin_command_injection/src/main.rs:6:15|sink=test/rust/web_bin_command_injection/src/main.rs:7:13
+rust/web_command_injection|rust-command-injection|rust:handle|rust:Command::arg|src=test/rust/web_command_injection/src/lib.rs:16:16|sink=test/rust/web_command_injection/src/lib.rs:17:5
 rust/web_rouille|rust-command-injection|rust:handle|rust:Command::arg|src=-|sink=-

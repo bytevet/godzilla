@@ -774,6 +774,14 @@ func (st *lowerState) span(comment string) *ir.Position {
 	file := m[1]
 	if file == "" {
 		file = st.filename
+	} else if !filepath.IsAbs(file) && st.root != "" {
+		// A cargo build runs rustc IN the crate directory, so its spans are
+		// crate-relative ("src/lib.rs"). Stored verbatim that names no particular
+		// file -- every crate in a workspace has one -- and neither srclines nor a
+		// SARIF consumer can open it. Resolving against the crate directory (the
+		// root this module was lowered with) is what makes the built path agree
+		// with the source-lowered one, which reports absolute paths.
+		file = filepath.Join(st.root, file)
 	}
 	// Anything expanded from a macro carries a span into rustc's OWN sysroot
 	// (`/rustc/<hash>/library/alloc/src/macros.rs` for everything through
