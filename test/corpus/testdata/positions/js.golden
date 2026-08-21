@@ -34,6 +34,10 @@ js/path_traversal|js-path-traversal|js:app.handleServe|js:res.sendFile|src=test/
 js/path_traversal|js-path-traversal|js:app.handleStream|js:fs.createReadStream|src=test/js/path_traversal/app.js:22:18|sink=test/js/path_traversal/app.js:23:16
 js/promise_then|js-xss|js:app.<module>$anon0$anon0|js:res.send|src=test/js/promise_then/app.js:9:10|sink=test/js/promise_then/app.js:14:5
 js/propagator_default|js-command-injection|js:app.<module>$anon0|js:child_process.execSync|src=test/js/propagator_default/app.js:7:17|sink=test/js/propagator_default/app.js:8:5
+js/react_props_xss|react-xss-props|js:app.Bio.render|js:__godzilla_react_html|src=test/js/react_props_xss/app.jsx:18:51|sink=test/js/react_props_xss/app.jsx:18:51
+js/react_props_xss|react-xss-props|js:app.Card|js:__godzilla_react_html|src=test/js/react_props_xss/app.jsx:31:49|sink=test/js/react_props_xss/app.jsx:31:49
+js/react_props_xss|react-xss-props|js:app.Note|js:__godzilla_react_html|src=test/js/react_props_xss/app.jsx:25:22|sink=test/js/react_props_xss/app.jsx:26:49
+js/react_props_xss|react-xss-props|js:app.SignupPage.render|js:__godzilla_react_html|src=test/js/react_props_xss/app.jsx:10:42|sink=test/js/react_props_xss/app.jsx:11:51
 js/react_xss|react-xss|js:app.Bio|js:__godzilla_react_html|src=test/js/react_xss/app.jsx:7:15|sink=test/js/react_xss/app.jsx:8:65
 js/react_xss|react-xss|js:app.IndirectBio|js:__godzilla_react_html|src=test/js/react_xss/app.jsx:13:25|sink=test/js/react_xss/app.jsx:13:25
 js/resilience|js-xss|js:app.handleGreeting|js:res.send|src=test/js/resilience/app.js:10:18|sink=test/js/resilience/app.js:11:3

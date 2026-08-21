@@ -1,0 +1,5 @@
+# Expected findings for this sample (see test/README.md).
+# The false-positive control for react-xss-props: a lowercase helper's parameter
+# is not a props source, and a prop that only reaches escaped JSX children emits
+# no sink at all.
+findings: []

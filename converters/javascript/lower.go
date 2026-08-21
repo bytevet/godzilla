@@ -98,6 +98,10 @@ type funcState struct {
 	// parameter (`(rq, res) => ...`) still matches the request-source globs (COV-11).
 	isHandler bool
 	reqParam  string
+
+	// isComponent marks this function as usable as a React component (see
+	// isComponentName), which makes its first parameter the props object.
+	isComponent bool
 }
 
 // reqConventionNames are the request-object parameter names the source globs
@@ -270,6 +274,7 @@ type moduleCtx struct {
 	moduleAliases    map[string]string
 	relativeDefaults map[string]string
 	handlers         map[fnID]bool
+	components       map[fnID]bool
 }
 
 // newFuncState creates a funcState for a function in this module, priming the
@@ -308,6 +313,7 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 
 	fs := m.newFuncState()
 	fs.isHandler = m.handlers[pf.node]
+	fs.isComponent = m.components[pf.node]
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -362,27 +368,44 @@ func (fs *funcState) bindParams(fn *ir.Function, args []jsast.Arg, hasRest bool)
 		// A route handler's first parameter is the framework request object;
 		// remember it so property reads off it are canonicalized to `req` and match
 		// the request-source globs regardless of the parameter's actual name.
-		if i == 0 && fs.isHandler {
-			fs.reqParam = name
-			// A signature-destructured request object — `({ query, body }, res) =>`
-			// — has no `req.query` member read to seed taint from (COV-11).
-			if pat, ok := a.Binding.Data.(*jsast.BObject); ok {
-				fs.bindHandlerDestructure(pat, a.Binding.Loc)
+		if i == 0 {
+			pat, destructured := a.Binding.Data.(*jsast.BObject)
+			switch {
+			case fs.isHandler:
+				fs.reqParam = name
+				// A signature-destructured request object — `({ query, body }, res) =>`
+				// — has no `req.query` member read to seed taint from (COV-11).
+				if destructured {
+					fs.bindDestructuredParam("req", pat, a.Binding.Loc)
+				}
+			case fs.isComponent && destructured:
+				// `function Note({html})` — the dominant React idiom, and until this
+				// existed the reason react-xss could not fire in the field: the pattern
+				// binds no identifier, so the parameter took an `_arg0` name and `html`
+				// read as an unbound global, untainted. reqParam stays unset on purpose:
+				// it drives canonRoot's request-name canonicalization, which would
+				// rewrite a component's own parameter reads into request sources.
+				fs.bindDestructuredParam("props", pat, a.Binding.Loc)
 			}
 		}
 	}
 }
 
-// bindHandlerDestructure binds each property of a route handler's destructured
-// request parameter — `({ query, body: b }, res) => ...` — to a synthetic
-// `js:req.<key>` source read, so the local carries request taint exactly as an
-// in-body `req.query` member read would. Nested/computed patterns are skipped.
-func (fs *funcState) bindHandlerDestructure(pat *jsast.BObject, loc jsast.Loc) {
+// bindDestructuredParam binds each property of a destructured first parameter —
+// `({ query, body: b }, res) => ...` — to a synthetic `js:<root>.<key>` read, so
+// the local carries taint exactly as an in-body `req.query` member read would.
+// Nested/computed patterns are skipped.
+//
+// The root is the CALLER's decision, not this function's: a route handler's
+// parameter is the request object ("req"), a component's is its props ("props").
+// They are separate roots because they are separate rule surfaces — a props read
+// must not match a request-source glob.
+func (fs *funcState) bindDestructuredParam(root string, pat *jsast.BObject, loc jsast.Loc) {
 	for _, b := range objectPatternBindings(fs.src, pat) {
 		if b.Key == "" || b.Local == "" {
 			continue
 		}
-		fs.write(b.Local, fs.emitRootPropertyRead("req", b.Key, nil, loc))
+		fs.write(b.Local, fs.emitRootPropertyRead(root, b.Key, nil, loc))
 	}
 }
 

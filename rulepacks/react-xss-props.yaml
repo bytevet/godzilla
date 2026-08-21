@@ -1,0 +1,64 @@
+# XSS through a React component's own boundary: a value the PARENT handed this
+# component — a prop, or context — reaching dangerouslySetInnerHTML.
+#
+# This is the source half of the React model whose sink half is in react-xss.
+# Ghost CVE-2026-24778 is the shape: a site setting arrives as
+# `this.context.site.portal_signup_terms_html` and is rendered as raw HTML.
+#
+# Why this is a SEPARATE rule at severity: low rather than sources added to
+# react-xss. A prop is not request input by construction — a component is invoked
+# by another component, so the value may be request-derived or entirely internal,
+# and the frontend cannot tell which. This is the same trade
+# ruby-xss-cell-option makes for a cell argument, and it keeps a component that
+# renders its own argument out of the default `-fail-on medium` gate while still
+# reporting it. A cross-function flow lands at Medium confidence, so the LLM
+# reviewer adjudicates it.
+#
+# Raising this to medium is a gate change, not a tuning knob: measure the finding
+# count on a large React application first.
+rules:
+  - id: react-xss-props
+    languages: [javascript]
+    severity: low
+    cwe: CWE-79
+    message: >-
+      A value passed into this component — a prop or React context — reaches
+      `dangerouslySetInnerHTML`, which bypasses JSX's auto-escaping and renders
+      it as raw HTML. If the parent passes request-derived data, this is
+      Cross-Site Scripting. Render it as ordinary JSX children ({x}), which
+      escapes, or sanitize it (e.g. DOMPurify.sanitize) first.
+    # Deliberately NO `extend: $_js-sfc-xss.yaml`. That fragment carries the
+    # ordinary browser sources (location, cookies), and pulling it in would make
+    # this rule a duplicate of react-xss on every one of them -- the mistake
+    # ruby-xss-cell-option made and paid six corpus false positives for. The
+    # component boundary is the ONLY source here; that is the entire point of the
+    # split. The sanitizers below are inlined for the same reason.
+    sources:
+      # A class component's external inputs. `this` lowers to a global, so the
+      # FIRST hop off it is a synthetic property-read CALL and the rest are field
+      # reads carrying the base's taint -- which is why one exact glob covers
+      # `this.context.site.terms_html`. Exact, not prefixed: the callee is always
+      # this whole string, so a `*` would only add `this.propsCache`.
+      #
+      # `this.state` is absent on purpose. State is derived -- usually from props
+      # or a fetch this rule already sees at its origin -- so sourcing it
+      # double-counts; what is genuinely fresh in it is the component's own form
+      # input, which is self-XSS.
+      - "js:this.props"
+      - "js:this.context"
+      # A function component's props, named (`function C(props)`) or destructured
+      # (`function C({html})`, bound to this root by the frontend). A prefix
+      # match, so it reaches only a property read rooted at a base named `props`.
+      #
+      # NOT `js:*props*`: a glob's `*` crosses `/` and `.` and is matched against
+      # every callee, so that spelling would turn any module path or method
+      # containing "props" -- `js:src/utils/props.format` -- into a taint source.
+      - "js:props.*"
+    sinks:
+      - "js:__godzilla_react_html"
+    sanitizers:
+      - "js:*DOMPurify*"
+      - "js:*.sanitize"
+      - "js:*sanitizeHtml"
+      - "js:*escapeHtml"
+      - "js:*xss"

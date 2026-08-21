@@ -1,0 +1,11 @@
+# Expected findings for this sample (see test/README.md).
+# max: 4 is the assertion: the four component-boundary spellings fire (context
+# through a field chain, this.props, a destructured prop, a named props param)
+# while the sanitized prop and the escaped JSX children in the same file stay
+# silent. severity is low by design (see the rulepack): a prop may or may not be
+# request-derived.
+findings:
+    - rule: react-xss-props
+      min: 4
+      max: 4
+      sink: "js:__godzilla_react_html"
