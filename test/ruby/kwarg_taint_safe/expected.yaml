@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md).
+# The false-positive control for Ruby keyword taint: five ordinary Rails idioms
+# pass a request value as a KEYWORD to a sink whose dangerous argument is
+# positional. Each is a different rule (open-redirect, path-traversal x2, ssrf,
+# sql-injection), so this fails as soon as any one of their #idx pins is dropped.
+findings: []

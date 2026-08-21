@@ -24,8 +24,12 @@ rules:
       - "ruby:IO.read"
       - "ruby:IO.binread"
       - "ruby:IO.readlines"
-      - "ruby:send_file"            # Rails ActionController#send_file
-      - "ruby:send_data"
+      # Pinned to the path/body (logical 0 -- both are bare fcalls, no receiver).
+      # `send_data csv, filename: params[:name]` is the idiomatic Rails download,
+      # and `filename:` is a Content-Disposition header value, not a filesystem
+      # path; unpinned, every argument is an injection point and it reports.
+      - "ruby:send_file#0"          # Rails ActionController#send_file
+      - "ruby:send_data#0"
       - "ruby:open"                 # Kernel#open(path)
       - "ruby:Kernel.open"
       - "ruby:FileUtils.*"          # cp/mv/rm/copy/move/... all take path args

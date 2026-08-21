@@ -14,24 +14,35 @@ rules:
       request.
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     when: 'not hostFixed()'
+    # Every sink pins the URL argument. Unpinned, each of these treats EVERY
+    # argument as an injection point, which since the frontend started carrying
+    # keyword taint includes the options hash -- and
+    # `HTTParty.get("https://api.example.com/items", query: params[:q])` is the
+    # PARAMETERIZED, safe idiom. The `when: 'not hostFixed()'` guard makes that
+    # worse rather than better: a tainted keyword is not a scheme://host prefix,
+    # so the host reads as controllable and the rule fires.
+    #
+    # The index differs by call shape and that is not a typo: a Ruby dot-call
+    # carries its receiver as logical argument 0, so the URL is #1, while a bare
+    # `open(url)` has no receiver and its URL is #0.
     sinks:
       # net/http (canonical const-path names are scoped by the frontend).
-      - "ruby:Net::HTTP.get"
-      - "ruby:Net::HTTP.post"
-      - "ruby:Net::HTTP.get_response"
-      - "ruby:Net::HTTP.start"
+      - "ruby:Net::HTTP.get#1"
+      - "ruby:Net::HTTP.post#1"
+      - "ruby:Net::HTTP.get_response#1"
+      - "ruby:Net::HTTP.start#1"
       # open-uri (URI.open / Kernel#open with an http(s) URL).
-      - "ruby:URI.open"
-      - "ruby:URI.parse"
-      - "ruby:open"
-      - "ruby:Kernel.open"
+      - "ruby:URI.open#1"
+      - "ruby:URI.parse#1"
+      - "ruby:open#0"
+      - "ruby:Kernel.open#1"
       # Popular HTTP client gems.
-      - "ruby:HTTParty.get"
-      - "ruby:HTTParty.post"
-      - "ruby:Faraday.get"
-      - "ruby:Faraday.post"
-      - "ruby:RestClient.get"
-      - "ruby:RestClient.post"
+      - "ruby:HTTParty.get#1"
+      - "ruby:HTTParty.post#1"
+      - "ruby:Faraday.get#1"
+      - "ruby:Faraday.post#1"
+      - "ruby:RestClient.get#1"
+      - "ruby:RestClient.post#1"
     # No built-in sanitizer neutralizes tainted input for a request URL; the fix
     # is allow-listing the destination host, not escaping.
     sanitizers: []

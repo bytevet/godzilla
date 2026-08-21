@@ -14,6 +14,10 @@ rules:
       redirecting to a user-controlled URL.
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
-      - "ruby:redirect_to"          # Rails ActionController#redirect_to
-      - "ruby:redirect"             # Sinatra redirect
+      # Pinned to the destination. Both are bare fcalls, so with no receiver in
+      # front of it the URL is logical argument 0. Unpinned, every argument is an
+      # injection point, and `redirect_to root_path, notice: params[:msg]` -- the
+      # ordinary Rails flash idiom -- reports its MESSAGE as a redirect target.
+      - "ruby:redirect_to#0"        # Rails ActionController#redirect_to
+      - "ruby:redirect#0"           # Sinatra redirect
     sanitizers: []

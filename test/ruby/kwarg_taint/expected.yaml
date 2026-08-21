@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+# max: 1 is the assertion. `render` is Rails' most keyword-heavy call, so the
+# sink's `when:` guard naming html/inline/plain/text/body is what separates the
+# one HTML-output keyword from locals: and json: in the same file. Dropping or
+# widening that guard fails here rather than in a real application.
+findings:
+    - rule: ruby-xss
+      min: 1
+      max: 1
+      sink: "ruby:render"
