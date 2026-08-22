@@ -9,6 +9,7 @@ import (
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/scaninfo"
 	"github.com/bytevet/godzilla/internal/testsupport"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -190,6 +191,27 @@ func TestDropCoLocatedDangerous(t *testing.T) {
 	}
 }
 
+// TestScanDiagnosticsOptIn: telemetry is collected only when asked for, because
+// nothing but the HTML report reads it and it costs a second read pass over the
+// source plus a glob of every callee against every rule.
+func TestScanDiagnosticsOptIn(t *testing.T) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("loader.Builtin: %v", err)
+	}
+	dir := filepath.Join("..", "..", "test", "go", "sql_injection")
+	res, err := Scan(dir, rs)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res.Findings) == 0 {
+		t.Fatal("expected findings; the sample is vulnerable")
+	}
+	if res.Diag != (scaninfo.Info{}) {
+		t.Errorf("Diag collected without WithDiagnostics: %+v", res.Diag)
+	}
+}
+
 // TestScanDiagnostics pins that the report's diagnostics panel gets real
 // numbers on both entry points. ScanFiles is the one that would silently read
 // zero: runAnalyses is handed no scan root and no inventory there, so the file
@@ -205,9 +227,9 @@ func TestScanDiagnostics(t *testing.T) {
 		name string
 		run  func() (Result, error)
 	}{
-		{"Scan", func() (Result, error) { return Scan(dir, rs) }},
+		{"Scan", func() (Result, error) { return Scan(dir, rs, WithDiagnostics()) }},
 		{"ScanFiles", func() (Result, error) {
-			return ScanFiles([]string{filepath.Join(dir, "main.go")}, rs)
+			return ScanFiles([]string{filepath.Join(dir, "main.go")}, rs, WithDiagnostics())
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

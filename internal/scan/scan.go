@@ -60,6 +60,28 @@ type Result struct {
 	Diag scaninfo.Info
 }
 
+// Option configures a scan.
+type Option func(*config)
+
+type config struct{ diagnostics bool }
+
+// WithDiagnostics collects the telemetry behind the HTML report's scan
+// diagnostics panel. Off by default: it is a second read pass over the source
+// for the line count, plus a glob of every distinct callee against every rule,
+// and nothing but that panel reads it — a gate run, `rules test` over every
+// sample, and the corpus loop would all pay for a number they discard.
+func WithDiagnostics() Option {
+	return func(c *config) { c.diagnostics = true }
+}
+
+func newConfig(opts []Option) config {
+	var c config
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
 // Failed returns the languages that were detected but failed to convert (so
 // their code went un-analyzed). A CI gate can use this to fail closed instead
 // of reporting a false "clean".
@@ -80,16 +102,23 @@ func (r Result) Failed() []LangCoverage {
 // is converted and merged). The returned findings are pre-LLM-review; the CLI
 // applies that optional stage. Result.Coverage records which frontends ran and
 // which failed.
-func Scan(path string, rs *rules.RuleSet) (Result, error) {
+func Scan(path string, rs *rules.RuleSet, opts ...Option) (Result, error) {
+	cfg := newConfig(opts)
 	start := time.Now()
 	prog, coverage, targetPkgs, inv, err := convert(path)
 	convertDur := time.Since(start)
 	if err != nil {
 		return Result{}, err
 	}
-	raw, diag := runAnalyses(prog, rs, sourceFiles(path, inv), path, inv, targetPkgs)
+	var srcFiles []string
+	if cfg.diagnostics {
+		srcFiles = sourceFiles(path, inv)
+	}
+	raw, diag := runAnalyses(prog, rs, srcFiles, path, inv, targetPkgs, cfg)
 	findings := scopeFindings(raw, targetPkgs)
-	finishDiag(&diag, start, convertDur, prog, coverage)
+	if cfg.diagnostics {
+		finishDiag(&diag, start, convertDur, prog, coverage)
+	}
 	return Result{Findings: findings, Program: prog, Coverage: coverage, Diag: diag}, nil
 }
 
@@ -139,7 +168,7 @@ func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
 // skips the raw-file secrets scan (for callers that already did it); a non-nil
 // inv (directory scans) feeds that scan from the cached walk instead of
 // re-walking filePath.
-func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool) ([]analysis.Finding, scaninfo.Info) {
+func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool, cfg config) ([]analysis.Finding, scaninfo.Info) {
 	_ = rs.Compile() // guard-compile errors are already reported by the loader at load
 	start := time.Now()
 	var (
@@ -153,13 +182,18 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePat
 	// reaches them) when deps were lowered; a nil/empty set seeds every function.
 	go func() {
 		defer wg.Done()
-		taint, stats = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).AnalyzeWithStats(prog)
+		e := analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs))
+		if cfg.diagnostics {
+			taint, stats = e.AnalyzeWithStats(prog)
+		} else {
+			taint = e.Analyze(prog)
+		}
 	}()
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
 	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
 	// Line counting joins the same WaitGroup: re-reading the source the frontends
 	// already read is far cheaper than the taint engine, so alongside it it costs
-	// no measurable wall time.
+	// no measurable wall time. srcFiles is empty unless diagnostics were asked for.
 	go func() { defer wg.Done(); lines = countLines(srcFiles) }()
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
@@ -176,6 +210,9 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePat
 	}
 	wg.Wait()
 
+	if !cfg.diagnostics {
+		return slices.Concat(taint, dropCoLocatedDangerous(danger, taint), secrets, fileSecrets), scaninfo.Info{}
+	}
 	diag := scaninfo.Info{
 		Files:       len(srcFiles),
 		Lines:       lines,
@@ -243,7 +280,8 @@ func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding
 // is warned on stderr and skipped rather than aborting the batch, since
 // pre-commit hands over mixed file types. A batch with no analyzable source
 // returns cleanly rather than erroring, so a docs-only commit does not fail.
-func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
+func ScanFiles(paths []string, rs *rules.RuleSet, opts ...Option) (Result, error) {
+	cfg := newConfig(opts)
 	start := time.Now()
 	merged := &ir.Program{}
 	var coverage []LangCoverage
@@ -286,10 +324,12 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 		// root and no inventory on this path — and because a path whose conversion
 		// failed was not analysed. A non-directory p passed the fileFrontend check
 		// above, so it is already known to be source and needs no re-stat.
-		if info.IsDir() {
-			srcFiles = append(srcFiles, sourceFiles(p, inv)...)
-		} else {
-			srcFiles = append(srcFiles, p)
+		if cfg.diagnostics {
+			if info.IsDir() {
+				srcFiles = append(srcFiles, sourceFiles(p, inv)...)
+			} else {
+				srcFiles = append(srcFiles, p)
+			}
 		}
 		for pkg := range tp {
 			targetPkgs[pkg] = true
@@ -297,9 +337,11 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 	}
 	// The per-path raw-file secrets scan already ran in the loop above, so pass an
 	// empty path to skip it here.
-	raw, diag := runAnalyses(merged, rs, srcFiles, "", nil, targetPkgs)
+	raw, diag := runAnalyses(merged, rs, srcFiles, "", nil, targetPkgs, cfg)
 	findings = append(findings, scopeFindings(raw, targetPkgs)...)
-	finishDiag(&diag, start, convertDur, merged, coverage)
+	if cfg.diagnostics {
+		finishDiag(&diag, start, convertDur, merged, coverage)
+	}
 	return Result{Findings: findings, Program: merged, Coverage: coverage, Diag: diag}, nil
 }
 

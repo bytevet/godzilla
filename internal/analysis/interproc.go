@@ -24,7 +24,7 @@ import (
 // and a function that can return tainted data taints its callers' call
 // results. A worklist re-analyzes functions until this state stabilizes.
 func (e *Engine) Analyze(prog *ir.Program) []Finding {
-	findings, _ := e.AnalyzeWithStats(prog)
+	findings, _ := e.analyze(prog, false)
 	return findings
 }
 
@@ -33,6 +33,13 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 // as a return value rather than engine state, which would make concurrent or
 // repeated use of one Engine unsafe.
 func (e *Engine) AnalyzeWithStats(prog *ir.Program) ([]Finding, Stats) {
+	return e.analyze(prog, true)
+}
+
+// analyze is Analyze's body. countSites gates the only measurement that is not
+// free — globbing every distinct callee against every rule — so a caller that
+// discards the Stats does not pay |callees| x |rules| for it.
+func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	var findings []Finding
 	var stats Stats
 	if e == nil || e.rs == nil || prog == nil {
@@ -172,20 +179,22 @@ func (e *Engine) AnalyzeWithStats(prog *ir.Program) ([]Finding, Stats) {
 	// Source/sink workload for the report, over the SAME distinct-callee set the
 	// prefilter above just used — the counts are per call site, which is why
 	// cg.Callees carries them.
-	for callee, sites := range cg.Callees {
-		if callee == "" {
-			continue // an unresolved dynamic call names nothing a glob should match
-		}
-		for i := range e.rs.Rules {
-			if e.rs.Rules[i].IsSource(callee) {
-				stats.SourceSites += sites
-				break
+	if countSites {
+		for callee, sites := range cg.Callees {
+			if callee == "" {
+				continue // an unresolved dynamic call names nothing a glob should match
 			}
-		}
-		for i := range e.rs.Rules {
-			if e.rs.Rules[i].IsSink(callee) {
-				stats.SinkSites += sites
-				break
+			for i := range e.rs.Rules {
+				if e.rs.Rules[i].IsSource(callee) {
+					stats.SourceSites += sites
+					break
+				}
+			}
+			for i := range e.rs.Rules {
+				if e.rs.Rules[i].IsSink(callee) {
+					stats.SinkSites += sites
+					break
+				}
 			}
 		}
 	}

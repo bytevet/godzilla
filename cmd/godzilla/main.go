@@ -238,11 +238,16 @@ func runScan(args []string) {
 	}
 	ruleSet = cfg.ApplyRules(ruleSet) // disable rules / apply severity overrides (no-op if cfg nil)
 
+	// Only the HTML report renders scan diagnostics, so only it pays to collect them.
+	var scanOpts []scan.Option
+	if *htmlPath != "" {
+		scanOpts = append(scanOpts, scan.WithDiagnostics())
+	}
 	var res scan.Result
 	if filesMode {
-		res, err = scan.ScanFiles(paths, ruleSet)
+		res, err = scan.ScanFiles(paths, ruleSet, scanOpts...)
 	} else {
-		res, err = scan.Scan(path, ruleSet)
+		res, err = scan.Scan(path, ruleSet, scanOpts...)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -251,9 +256,11 @@ func runScan(args []string) {
 	// Sampled here rather than inside Scan: ReadMemStats stops the world, and a
 	// library caller in a loop must not pay that per iteration. Sys only grows, so
 	// reading it the moment the scan returns is the same high-water mark.
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	res.Diag.PeakBytes = ms.Sys
+	if *htmlPath != "" {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		res.Diag.PeakBytes = ms.Sys
+	}
 
 	if !*quiet {
 		printCoverage(os.Stdout, res.Coverage)

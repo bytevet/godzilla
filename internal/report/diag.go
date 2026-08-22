@@ -37,7 +37,9 @@ type phaseRow struct {
 // zeros. build is how long assembling the report's view model took, which is
 // the one phase the report can measure about itself.
 func newDiagView(info scaninfo.Info, build time.Duration) *diagView {
-	if info == (scaninfo.Info{}) {
+	// Wall, not the whole struct: the CLI sets Target before handing the Info over,
+	// so a scan that collected nothing would otherwise render a panel of blanks.
+	if info.Wall == 0 {
 		return nil
 	}
 	d := &diagView{
