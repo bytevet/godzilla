@@ -480,6 +480,13 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 
 // summary holds the aggregate counts and histograms computed from a
 // converted ir.Program, ready to be rendered by printSummary.
+//
+// These are gIR-level figures for someone working on a FRONTEND — did my
+// lowering emit this opcode, did it leave an `unsupported instruction`
+// intrinsic behind. They are not the HTML report's scan diagnostics, and
+// `functions` in particular is not that panel's "functions in call graph":
+// this counts every lowered function, that counts call-graph nodes, which
+// collapse on a shared canonical name.
 type summary struct {
 	modules      int
 	functions    int
@@ -532,7 +539,7 @@ func summarize(prog *ir.Program) summary {
 
 func printSummary(w io.Writer, s summary) {
 	fmt.Fprintf(w, "modules: %d\n", s.modules)
-	fmt.Fprintf(w, "functions: %d (%d synthetic)\n", s.functions, s.synthetic)
+	fmt.Fprintf(w, "lowered functions: %d (%d synthetic)\n", s.functions, s.synthetic)
 	fmt.Fprintf(w, "basic blocks: %d\n", s.blocks)
 	fmt.Fprintf(w, "instructions: %d\n", s.instructions)
 
