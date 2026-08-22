@@ -123,6 +123,41 @@ coverage: go=ok
 2 finding(s); 2 at/above "medium"; 0 suppressed.
 ```
 
+### Playground
+
+A rule matches a **canonical name** and pins its injection point by **logical
+argument index** (`go:*gorm*.DB*.Raw#0`); neither is visible in the source, and a
+wrong `#<n>` fails silently — it selects a real argument, just not the intended
+one ([docs/writing-rules.md](docs/writing-rules.md)). `godzilla-playground` is a
+second binary that lowers a target once and serves a local web UI for exploring
+the gIR and debugging rules against it; the scan pipeline is unchanged.
+
+Three columns — file tree · source · gIR — with the source and gIR sides kept in
+step, so clicking either highlights the other. Every call shows its canonical
+name, and each argument's logical index is a badge you click to get the pattern;
+a statically-resolved method call's receiver is drawn as `recv` and never
+numbered, which is the off-by-one removed. A drawer at the bottom tests a
+canonical pattern against the loaded module and reports how many calls it matches
+and which argument each `#<n>` pins. Sink/source badges and the tester both run
+through the real `internal/rules` matcher server-side, so the UI shows the
+engine's own verdict rather than a second implementation of it. A file the walk
+found but no frontend lowered is listed and flagged — such a file is invisible to
+every rule.
+
+```bash
+go run ./cmd/godzilla-playground <path>          # or: godzilla-playground <path>
+
+  -rules <path>         additional YAML rule file — or directory of rulepacks — to load alongside the built-in rules
+  -addr <host:port>     listen address (default 127.0.0.1:0 — an ephemeral port)
+  -open=false           do not open a browser
+  -allow-build          allow running the scanned project's build tool (Maven/Gradle/Cargo)
+  -parse-timeout <dur>  deadline per per-file parse/dump subprocess
+  -build-timeout <dur>  deadline for a whole-project build under -allow-build
+```
+
+It binds loopback only and lowers once per invocation — no watching, no
+re-lowering. `make build` and `go build ./...` build both binaries.
+
 ### Environment variables
 
 Everything routine is a CLI flag (`godzilla scan -h`); the environment only

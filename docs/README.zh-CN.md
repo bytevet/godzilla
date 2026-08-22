@@ -118,6 +118,36 @@ coverage: go=ok
 2 finding(s); 2 at/above "medium"; 0 suppressed.
 ```
 
+### 演练场
+
+规则匹配的是**规范名**，并以**逻辑参数下标**钉住注入点（`go:*gorm*.DB*.Raw#0`）；这两者
+在源码里都看不见，而写错的 `#<n>` 会静默失效 —— 它选中的确实是某个真实参数，只不过不是
+你想要的那个（参见 [docs/writing-rules.md](writing-rules.md)）。`godzilla-playground` 是
+第二个二进制：它把目标下沉一次，然后起一个本地 Web UI，用来浏览 gIR 并在其上调试规则；
+扫描流水线本身不变。
+
+界面分三栏 —— 文件树 · 源码 · gIR —— 源码侧与 gIR 侧保持同步，点其中一侧会高亮另一侧。
+每个调用都会显示自己的规范名，每个参数的逻辑下标是一枚可点击的徽标，点一下就得到对应的
+模式串；静态解析的方法调用，其接收者画作 `recv` 且从不参与编号，那个 off-by-one 就此
+消失。底部的抽屉可以把一条规范名模式拿到已加载的模块上试匹配，报告它命中了多少个调用，
+以及每个 `#<n>` 各自钉住的是哪个参数。汇点/污点源徽标与模式测试器都在服务端走真正的
+`internal/rules` 匹配器，因此界面给出的是引擎自己的判断，而不是另一套实现。被目录遍历
+发现、却没有任何前端下沉的文件会被单独列出并标记 —— 这样的文件对所有规则都是不可见的。
+
+```bash
+go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground <path>
+
+  -rules <path>         额外加载的 YAML 规则文件 —— 或规则包目录 —— 与内置规则一同生效
+  -addr <host:port>     监听地址（默认 127.0.0.1:0 —— 由系统分配的临时端口）
+  -open=false           不要自动打开浏览器
+  -allow-build          允许运行被扫项目的构建工具（Maven/Gradle/Cargo）
+  -parse-timeout <dur>  每个文件的解析/导出子进程的超时
+  -build-timeout <dur>  -allow-build 下整项目构建的超时
+```
+
+它只绑定本地回环地址，且每次启动只下沉一次 —— 不监听文件变化，也不会重新下沉。
+`make build` 与 `go build ./...` 会同时构建这两个二进制。
+
 ### 环境变量
 
 日常用的东西都是命令行参数（`godzilla scan -h`）；环境变量只承载运维层面的关注点：
