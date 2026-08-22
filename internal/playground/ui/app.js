@@ -470,7 +470,7 @@
           var lbl = i < shift ? "args[" + i + "] recv" : "args[" + i + "] &rarr; #" + (i - shift);
           row(lbl, valHTML(a) + (a.name ? ' <span class="nmeta">kw ' + esc(a.name) + "</span>" : ""));
         });
-        if (shift) rows.push(["", '<span class="nmeta">receiver excluded from logical numbering, ' +
+        if (shift) rows.push(["", '<span class="nmeta">receiver excluded, ' +
           'so a rule pins #0 for args[1]</span>']);
       }
       row("function", '<span class="nmeta">' + esc(rec.fn.canonical_name) + "</span>");
@@ -604,6 +604,16 @@
      stays here is only the rendering of the answer. */
   var matchSeq = 0, matchTimer = null;
 
+  /* A module's language is the frontend's tag ("python"); a pattern's is its
+     canonical-name prefix ("py:"). They only compare through this table —
+     without it every py:/js: pattern reads as aimed at the wrong language. */
+  var LANGPFX = { go: "go", python: "py", javascript: "js", java: "java",
+                  rust: "rust", ruby: "ruby", c: "c", cpp: "cpp" };
+  function langName(pfx) {
+    for (var k in LANGPFX) if (LANGPFX[k] === pfx) return k;
+    return pfx;
+  }
+
   function requestMatch() {
     var p = pattern.trim(), seq = ++matchSeq;
     if (!p || !file) { matched = null; renderMatches(p, null); renderIR(); return; }
@@ -615,6 +625,7 @@
     }).catch(function (e) {
       if (seq !== matchSeq) return;
       matched = null;
+      markMatches(); renderIR();
       $("#pat-res").innerHTML = "<b>\u2014</b>";
       $("#pat-res").className = "res none";
       $("#pat-matches").innerHTML = '<div class="nomatch">' + esc(String(e)) + "</div>";
@@ -645,8 +656,17 @@
       return;
     }
     if (!r) { res.textContent = ""; res.className = "res"; box.innerHTML = ""; return; }
+    /* A pattern the loader would REJECT must not read as "loads and never
+       fires" — that is the opposite of what it does. */
+    if (r.error) {
+      res.innerHTML = "<b>\u2014</b>";
+      res.className = "res none";
+      box.innerHTML = '<div class="nomatch">' + esc(r.error) + "</div>";
+      return;
+    }
     var n = r.count || 0, hits = r.matches || [];
-    var wrongLang = !!(r.patternLang && r.moduleLang && r.patternLang !== r.moduleLang);
+    var modPfx = LANGPFX[r.moduleLang];
+    var wrongLang = !!(r.patternLang && modPfx && r.patternLang !== modPfx);
     if (wrongLang && !n) {
       res.innerHTML = "<b>0</b> \u00b7 " + esc(r.patternLang) + ": pattern, " + esc(r.moduleLang) + " module";
       res.className = "res none";
@@ -662,7 +682,7 @@
       box.innerHTML = '<div class="nomatch">' + (wrongLang
         ? "This pattern targets <b>" + esc(r.patternLang) + "</b> but the loaded module is <b>" +
           esc(r.moduleLang) + "</b>, so it cannot match here \u2014 open a " + esc(r.patternLang) +
-          " file to test it. A rule also needs <code>languages: [" + esc(r.moduleLangName || r.moduleLang) +
+          " file to test it. A rule also needs <code>languages: [" + esc(langName(r.patternLang)) +
           "]</code> to agree with its patterns."
         : "Nothing in this module matches. As a rule entry this would load, lint clean, and never fire.") +
         "</div>";
@@ -795,7 +815,7 @@
     }
     $("#tree").innerHTML = html + "</div>";
     var tc = $("#tree-count");
-    if (tc) tc.textContent = treeFilter ? total + " of " + files.length : String(files.length);
+    if (tc) tc.textContent = treeFilter ? total + " of " + files.length : "";
     var clr = $("#tree-filter-clear");
     if (clr) clr.hidden = !treeFilter;
     $$("#tree .dir").forEach(function (b) {
@@ -853,7 +873,7 @@
     $("#code").innerHTML = skeleton(14);
     $("#ir").innerHTML = skeleton(18);
     $("#ir").style.height = "";
-    $("#ir-count").textContent = "loading\u2026";
+    $("#ir-count").textContent = "lowering\u2026";
     $("#stepper").hidden = true;
     renderInspector(null);
     var seq = ++fileSeq;
