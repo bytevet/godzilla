@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -203,6 +204,46 @@ func TestWriteHTML_NoUnsafeInterpolation(t *testing.T) {
 	// The payload must not appear raw anywhere (it is escaped in the DOM).
 	if strings.Contains(out, payload) {
 		t.Error("raw finding payload appears unescaped in the report")
+	}
+}
+
+// TestFooterRootIsRelative: a report is routinely uploaded as a CI artifact, and
+// the footer naming the anchor directory was the one place an absolute path —
+// the runner's filesystem — reached the document.
+func TestFooterRootIsRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	src := filepath.Join(dir, "pkg", "svc")
+	f := analysis.Finding{
+		RuleID:   "GO-SQLI",
+		Severity: rules.SeverityHigh,
+		SinkPos:  &ir.Position{Filename: filepath.Join(src, "a.go"), Line: 1, Column: 1},
+		SourcePos: &ir.Position{
+			Filename: filepath.Join(src, "b.go"), Line: 2, Column: 1,
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteHTML(&buf, []analysis.Finding{f}); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, dir) {
+		t.Errorf("the scan machine's absolute path reached the report:\n%s", out[:min(400, len(out))])
+	}
+	if !strings.Contains(out, "paths relative to <code>pkg/svc</code>") {
+		t.Error("footer did not name the anchor relative to the working directory")
+	}
+}
+
+// TestRelativeRootFallback: a root the working directory does not contain would
+// render as a "../../.." chain, which is worse than useless — use its name.
+func TestRelativeRootFallback(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if got := relativeRoot("/somewhere/else/proj"); got != "proj" {
+		t.Errorf("relativeRoot(outside cwd) = %q, want %q", got, "proj")
+	}
+	if got := relativeRoot(""); got != "" {
+		t.Errorf("relativeRoot(\"\") = %q, want empty", got)
 	}
 }
 

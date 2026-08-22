@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"slices"
 	"sort"
@@ -90,7 +91,7 @@ func WriteHTML(w io.Writer, findings []analysis.Finding, opts ...HTMLOption) err
 		Generated:      time.Now().Format(time.RFC1123),
 		Target:         displayTarget(cfg.info.Target, root),
 		Nonce:          newNonce(),
-		Root:           root,
+		Root:           relativeRoot(root),
 		Total:          total,
 		SeverityCells:  severityCells(counts, total),
 		Critical:       counts[string(rules.SeverityCritical)],
@@ -139,7 +140,7 @@ type reportData struct {
 	Generated string
 	Target    string
 	Nonce     string
-	Root      string // common path prefix stripped from displayed locations
+	Root      string // the anchor locations are relative to, itself shown relative to cwd
 
 	Total          int
 	Critical, High int // the masthead verdict
@@ -162,13 +163,27 @@ type sevCell struct {
 
 // displayTarget names the scanned project in the masthead: the scan root when
 // the caller knows it, else the findings' common directory, else the working
-// directory.
+// directory. The fallback goes through relativeRoot for the same reason the
+// footer does — it reaches the title, the heading and the masthead, so a caller
+// that supplies no target would otherwise print the scanning machine's paths
+// three more times.
 func displayTarget(target, root string) string {
 	if target != "" {
+		// An absolute target is the caller's own argument, but `scan
+		// "$GITHUB_WORKSPACE"` is an ordinary CI invocation, so echoing it puts the
+		// runner's filesystem in the title. Relative-to-cwd where that says
+		// something, else the directory's own name — which is what the reader
+		// recognises anyway.
+		if strings.HasPrefix(target, "/") {
+			if rel := relativeRoot(target); rel != "" && rel != "." {
+				return rel
+			}
+			return path.Base(target)
+		}
 		return target
 	}
-	if root != "" {
-		return root
+	if rel := relativeRoot(root); rel != "" {
+		return rel
 	}
 	return "."
 }
@@ -507,6 +522,34 @@ func commonRoot(findings []analysis.Finding) string {
 		return ""
 	}
 	return strings.Join(common, "/")
+}
+
+// relativeRoot renders the anchor the locations hang off, without naming the
+// machine the scan ran on. commonRoot is absolute because the frontends emit
+// absolute positions, and a report is routinely uploaded as a CI artifact or
+// attached to a ticket — "/home/runner/work/repo/repo" tells that reader nothing
+// and is the only part of the document that does not survive leaving the host.
+//
+// Anchoring is unaffected: displayPath still resolves against the real root, and
+// this only changes how that directory is named. Falls back to the base name for
+// a root outside the working directory, where a "../../.." chain would be worse
+// than useless.
+func relativeRoot(root string) string {
+	if root == "" {
+		return ""
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return path.Base(root)
+	}
+	switch {
+	case root == wd:
+		return "."
+	case strings.HasPrefix(root, wd+"/"):
+		return root[len(wd)+1:]
+	default:
+		return path.Base(root)
+	}
 }
 
 // displayPath renders filename relative to root; a Go module-cache path becomes
