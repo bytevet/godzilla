@@ -9,7 +9,7 @@ highest-severity claims went through adversarial re-verification (18 confirmed, 
 IDs are stable. Fix-order convention (per `CLAUDE.md`): intrinsic + engine teaching → YAML rule edit →
 frontend lowering → engine change; touch `proto/*.proto` only as a last resort.
 
-**Status:** ✅ done · 🟡 partial (note says what's left) · ⏸ deferred with rationale.
+**Status:** ✅ done · 🟡 partial (note says what's left) · ⏸ deferred with rationale · 📋 planned, not started.
 Every CRITICAL/HIGH from the original audit is done. A **real-world CVE benchmark** (11 famous projects
 at known-CVE commits, ~1.02M LOC) then caught **0/12** despite a 1.000 corpus F1, opening a new class of
 high-severity **breadth** gaps (COV-11, TRUST-10) — modeling coverage, not engine defects. The rest is
@@ -99,6 +99,7 @@ toolchain-gated, net-new frontends, or deferred perf work.
 | CI-7 | med | ✅ `6acc72f` | `rules list`/`lint`/`test` author tooling. |
 | CI-8 | med | ✅ `0fce6df` | Version subcommand + version in SARIF/JSON. |
 | CI-9 | low | ✅ `c05af2f`,`38cd351` | `-quiet`, usage cleanup, and changed-files/pre-commit mode (`ScanFiles`). |
+| CI-10 | med | 📋 | **Canonical-name discovery for rule authors.** Writing a rule means globbing a canonical FQN, and nothing prints the ones a frontend actually emits for a target. `--summary` was documented in `docs/writing-rules.md` as exactly this and never did it — it printed module/function/block tallies, an opcode histogram and intrinsic names, not callee names — so it was removed (`e609e74`) rather than fixed in place. The remaining workaround is backwards for discovery: scan with a deliberately wide glob and read the `sink:` lines, which only surfaces names that ALREADY match a rule. Shape: a `godzilla names <path>` subcommand (or `scan -dump-callees`) listing distinct callee names with their call-site counts, each flagged by whether a loaded rule's source/sink glob already matches it — so "what is reachable that I am not covering" is one read. Most of it exists: `CallGraph.Callees` is already `map[string]int` (callee → site count) and `AnalyzeWithStats` already globs that exact set for `SourceSites`/`SinkSites`, so the data and the matching loop are both there; `distinctCallees` in `internal/analysis/taint_test.go` is the test-only precedent. Two things to get right: scope output to user code by default (a Go scan lowers dependency bodies, so the raw set runs to tens of thousands of names), and sort by call-site count so the names worth modeling come first. |
 
 ## LLM reviewer (LLM)
 
