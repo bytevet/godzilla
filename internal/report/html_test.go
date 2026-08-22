@@ -316,10 +316,10 @@ func TestWriteHTML_DiagnosticsOptional(t *testing.T) {
 func TestSortKeyOrdersNumerically(t *testing.T) {
 	nine := sortKey("", &ir.Position{Filename: "f.go", Line: 9, Column: 1})
 	ten := sortKey("", &ir.Position{Filename: "f.go", Line: 10, Column: 1})
-	if !(nine < ten) {
+	if nine >= ten {
 		t.Errorf("sortKey(line 9)=%q should sort before sortKey(line 10)=%q", nine, ten)
 	}
-	if unknown := sortKey("", nil); !(ten < unknown) {
+	if unknown := sortKey("", nil); ten >= unknown {
 		t.Errorf("an unknown position (%q) should sort last, after %q", unknown, ten)
 	}
 }

@@ -99,7 +99,7 @@ func linesIn(path string, buf []byte) int {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	lines, lastByte := 0, byte('\n')
 	for {
 		n, err := f.Read(buf)
