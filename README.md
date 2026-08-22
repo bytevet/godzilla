@@ -38,11 +38,13 @@ flowchart LR
 - **Batteries included.** Built-in packs for the classes in the
   [detection matrix](#supported-languages--detections), plus non-dataflow checks
   for **weak crypto** and **hardcoded secrets**.
-- **CI-friendly output.** Human-readable findings, a self-contained **HTML
-  report**, **JSON** and **SARIF 2.1.0** (for GitHub code scanning), and a
-  severity-gated **exit code**.
-- **Optional LLM review.** A pluggable, off-by-default stage sends low-confidence
-  findings to Claude to trim false positives; it fails open.
+- **CI-friendly output.** Human-readable findings, a single-file **HTML report**
+  (filterable and sortable, with taint-flow snippets, syntax highlighting and a
+  scan-diagnostics panel), **JSON** and **SARIF 2.1.0** (for GitHub code
+  scanning), and a severity-gated **exit code**.
+- **Optional LLM review.** A pluggable, off-by-default stage sends findings at or
+  below **medium** confidence to Claude to trim false positives; High-confidence
+  findings are never reviewed, and the stage fails open.
 - **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
@@ -73,7 +75,9 @@ godzilla scan --sarif results.sarif --json results.json ./path/to/project
 # Add your own rules on top of the built-ins, and print the gIR summary
 godzilla scan --rules myrules.yaml --summary ./path/to/project
 
-# Triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
+# Triage medium/low-confidence findings with an LLM (needs ANTHROPIC_API_KEY).
+# A scan whose findings are all High reports "0 reviewed" — that is the gate
+# working, not a failure.
 godzilla scan --llm-review ./path/to/project
 
 # Changed-files mode: gate only what a commit touched (one process, one gate)
@@ -93,12 +97,21 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 
 ```
 $ godzilla scan ./test/go/sql_injection
+coverage: go=ok
+
+[high] go-sql-injection (CWE-89, confidence: medium)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
+  source: .../main.go:43:6
+  in:     go:(*.../sql_injection.User).GetByID
+
 [high] go-sql-injection (CWE-89, confidence: high)
   Untrusted input flows into a database/sql query without parameterized arguments...
   sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
-  source: .../main.go:59:26
+  source: .../main.go:58:27
   in:     go:.../sql_injection.main$1
-1 finding(s); 1 at/above "medium".
+
+2 finding(s); 2 at/above "medium"; 0 suppressed.
 ```
 
 ### Environment variables
@@ -160,8 +173,12 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Insecure deserialization | — | ✅ | — | ✅ | — | ✅ |
+| Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
 | Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
+| Server-side template injection | — | ✅ | — | — | — | — |
+| LDAP / XPath injection | — | ✅ | — | — | — | — |
+| Zip slip | — | ✅ | — | — | — | — |
+| Insecure framework config | — | ✅ | — | — | — | — |
 | Weak crypto | ✅ | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by
@@ -239,4 +256,4 @@ language frontend, or better frontend fidelity.
 
 ## License
 
-[MIT](LICENSE) © 2026 SYM01
+[MIT](LICENSE) © 2026 Byte.Vet
