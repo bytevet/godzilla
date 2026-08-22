@@ -366,3 +366,27 @@ func TestDiagRendersZeros(t *testing.T) {
 		t.Error("an optional diagnostics row rendered with nothing to report")
 	}
 }
+
+// TestDiagDropsUnknownRows: a figure nobody measured is absent, not blank. Peak
+// memory is the live case — the CLI samples it after the scan returns, so a
+// library caller rendering its own scan's telemetry has none, and a label with
+// an empty value beside it reads as a bug in the tool.
+func TestDiagDropsUnknownRows(t *testing.T) {
+	var buf bytes.Buffer
+	// Wall and Lines set, memory never sampled and so no derivable speed.
+	if err := WriteHTML(&buf, nil, WithScanInfo(scaninfo.Info{Files: 3, Wall: time.Second})); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+	for _, label := range []string{"peak memory (runtime)", "scan speed"} {
+		if strings.Contains(out, label) {
+			t.Errorf("row %q rendered with nothing to show", label)
+		}
+	}
+	if !strings.Contains(out, "wall time") {
+		t.Error("wall time was measured and must still render")
+	}
+	if strings.Contains(out, `class="dv"></span>`) {
+		t.Error("a diagnostics row rendered a blank value")
+	}
+}

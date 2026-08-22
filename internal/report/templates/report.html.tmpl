@@ -641,7 +641,7 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
 
   {{with .Diag}}
   <details class="diag">
-    <summary>Scan diagnostics<span class="hint">{{.Wall}} &middot; {{.Lines}} lines &middot; {{.Speed}}</span></summary>
+    <summary>Scan diagnostics<span class="hint">{{.Hint}}</span></summary>
     <div class="panel">
       <div class="subhead">Workload</div>
       <div class="diag-grid">
@@ -660,9 +660,9 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
       {{end}}
       <div class="subhead">Throughput &amp; environment</div>
       <div class="diag-grid">
-        <div class="dfact"><span class="dk">wall time</span><span class="dv">{{.Wall}}</span></div>
-        <div class="dfact"><span class="dk">scan speed</span><span class="dv">{{.Speed}}</span></div>
-        <div class="dfact"><span class="dk">peak memory (runtime)</span><span class="dv">{{.PeakMem}}</span></div>
+        {{if .Wall}}<div class="dfact"><span class="dk">wall time</span><span class="dv">{{.Wall}}</span></div>{{end}}
+        {{if .Speed}}<div class="dfact"><span class="dk">scan speed</span><span class="dv">{{.Speed}}</span></div>{{end}}
+        {{if .PeakMem}}<div class="dfact"><span class="dk">peak memory (runtime)</span><span class="dv">{{.PeakMem}}</span></div>{{end}}
         <div class="dfact"><span class="dk">worker threads</span><span class="dv">{{.Workers}}</span></div>
         <div class="dfact"><span class="dk">engine</span><span class="dv">{{.Engine}}</span></div>
         <div class="dfact"><span class="dk">toolchain</span><span class="dv">{{.Toolchain}}</span></div>

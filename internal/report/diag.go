@@ -21,6 +21,7 @@ type diagView struct {
 	SourceSites, SinkSites        string
 	Wall, Speed, PeakMem, Workers string
 	Engine, Toolchain             string
+	Hint                          string // the collapsed summary line
 	Phases                        []phaseRow
 }
 
@@ -39,7 +40,7 @@ func newDiagView(info scaninfo.Info, build time.Duration) *diagView {
 	if info == (scaninfo.Info{}) {
 		return nil
 	}
-	return &diagView{
+	d := &diagView{
 		Files:       count(info.Files),
 		Skipped:     optCount(info.Skipped),
 		Lines:       count(info.Lines),
@@ -57,6 +58,31 @@ func newDiagView(info scaninfo.Info, build time.Duration) *diagView {
 		Toolchain:   runtime.Version(),
 		Phases:      phases(info, build),
 	}
+	d.Hint = hint(d)
+	return d
+}
+
+// hint is the one-line summary on the collapsed <details>. Built here rather
+// than in the template so an absent figure drops its separator too, instead of
+// leaving " · " with nothing either side.
+func hint(d *diagView) string {
+	parts := make([]string, 0, 3)
+	for _, p := range []string{d.Wall, plural(d.Lines, "line"), d.Speed} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+func plural(n, unit string) string {
+	if n == "" {
+		return ""
+	}
+	if n == "1" {
+		return n + " " + unit
+	}
+	return n + " " + unit + "s"
 }
 
 // phases turns the recorded spans into bars that add up. The analysis passes
