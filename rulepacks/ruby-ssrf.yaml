@@ -14,24 +14,28 @@ rules:
       request.
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     when: 'not hostFixed()'
+    # Each sink pins the URL. Unpinned, a keyword like `query:` is an injection
+    # point too, and the `not hostFixed()` guard then reads it as a controllable
+    # host (test/ruby/kwarg_taint_safe). The bare `open` is #0 and the dot-calls
+    # are #1 -- see the receiver convention in docs/writing-rules.md.
     sinks:
       # net/http (canonical const-path names are scoped by the frontend).
-      - "ruby:Net::HTTP.get"
-      - "ruby:Net::HTTP.post"
-      - "ruby:Net::HTTP.get_response"
-      - "ruby:Net::HTTP.start"
+      - "ruby:Net::HTTP.get#1"
+      - "ruby:Net::HTTP.post#1"
+      - "ruby:Net::HTTP.get_response#1"
+      - "ruby:Net::HTTP.start#1"
       # open-uri (URI.open / Kernel#open with an http(s) URL).
-      - "ruby:URI.open"
-      - "ruby:URI.parse"
-      - "ruby:open"
-      - "ruby:Kernel.open"
+      - "ruby:URI.open#1"
+      - "ruby:URI.parse#1"
+      - "ruby:open#0"
+      - "ruby:Kernel.open#1"
       # Popular HTTP client gems.
-      - "ruby:HTTParty.get"
-      - "ruby:HTTParty.post"
-      - "ruby:Faraday.get"
-      - "ruby:Faraday.post"
-      - "ruby:RestClient.get"
-      - "ruby:RestClient.post"
+      - "ruby:HTTParty.get#1"
+      - "ruby:HTTParty.post#1"
+      - "ruby:Faraday.get#1"
+      - "ruby:Faraday.post#1"
+      - "ruby:RestClient.get#1"
+      - "ruby:RestClient.post#1"
     # No built-in sanitizer neutralizes tainted input for a request URL; the fix
     # is allow-listing the destination host, not escaping.
     sanitizers: []

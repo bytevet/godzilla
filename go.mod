@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.55.0
-	github.com/bytevet/esbuild-jsast v0.0.0-20260813172304-fb79e35b0a1e
+	github.com/bytevet/esbuild-jsast v0.0.0-20260815021104-e020fc022d6a
 	github.com/expr-lang/expr v1.17.8
 	github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f
 	golang.org/x/net v0.50.0

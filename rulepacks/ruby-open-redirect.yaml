@@ -14,6 +14,8 @@ rules:
       redirecting to a user-controlled URL.
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     sinks:
-      - "ruby:redirect_to"          # Rails ActionController#redirect_to
-      - "ruby:redirect"             # Sinatra redirect
+      # Pinned to the destination: unpinned, a `notice:` flash message reads as a
+      # redirect target (test/ruby/kwarg_taint_safe).
+      - "ruby:redirect_to#0"        # Rails ActionController#redirect_to
+      - "ruby:redirect#0"           # Sinatra redirect
     sanitizers: []

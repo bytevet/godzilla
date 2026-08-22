@@ -54,6 +54,15 @@ rules:
 - **Sink pinning** `#<index>` fires only when taint reaches that logical
   (receiver-excluded) argument; a bare pattern treats every argument as an
   injection point. This keeps parameterized queries clean.
+  - Ruby is the exception to "receiver-excluded": its frontend sets no
+    `MethodName`, so a dot-call's receiver stays at index 0 and its first real
+    argument is `#1`, while a bare call's is `#0` (`ruby:open#0` next to
+    `ruby:Kernel.open#1`). A wrong index fails silently — it selects a real
+    argument, just not the intended one.
+  - A pin names a POSITION, so it excludes keyword arguments, which frontends
+    append after the positional ones. That is what keeps
+    `send_data csv, filename: x` off a path-traversal sink. To key on a keyword
+    instead, guard the sink with `when: 'kwargs.<name>.Tainted'`.
 - **Sanitizers** return a cleaned value (taint stops); **validators** are boolean
   guards (e.g. `filepath.IsLocal`) that clear taint on the path they dominate;
   **propagators** pass taint arg → result (`+` and `fmt.Sprintf` propagate by

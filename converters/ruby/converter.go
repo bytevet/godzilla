@@ -86,6 +86,9 @@ func (c *Converter) batch() *frontend.Batch[rbFileResult] {
 			convertRubyChunk(rubyExe, scriptPath, root, files, out)
 		},
 		Result: func(r *rbFileResult) (*ir.Module, error) { return r.mod, r.err },
+		PostProgram: func(prog *ir.Program, _ bool) {
+			resolveCellTemplateCalls(prog)
+		},
 	}
 }
 

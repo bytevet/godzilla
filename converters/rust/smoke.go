@@ -64,7 +64,7 @@ func warnIfMIRDrifted() {
 		if err != nil {
 			return // compile failed (no/old rustc) — surfaced elsewhere
 		}
-		prog := &ir.Program{Mode: "mir", Modules: []*ir.Module{lowerMIR(mir, tmp.Name())}}
+		prog := &ir.Program{Mode: "mir", Modules: []*ir.Module{lowerMIR(mir, tmp.Name(), "")}}
 		if !verifyMIRShape(prog) {
 			fmt.Fprintf(os.Stderr, "warning: rust: this rustc's MIR did not lower to the expected shapes — "+
 				"the MIR text format may have changed and Rust findings could be silently incomplete; "+

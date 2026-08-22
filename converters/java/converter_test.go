@@ -11,9 +11,19 @@ import (
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
-// requireJava skips when no JDK `java` launcher is on PATH (the frontend runs
-// the embedded JavaDump.java single-file program via it).
-func requireJava(t *testing.T) { testsupport.RequireTool(t, "java") }
+// requireJava skips unless the `java` on PATH is one the frontend can use.
+//
+// Presence alone is the wrong predicate: the JDK 24 floor is enforced inside
+// ConvertFile, so an older JDK passes a presence guard and then fails every
+// test — red that reads as a broken frontend rather than a toolchain this
+// machine does not have.
+func requireJava(t *testing.T) {
+	t.Helper()
+	testsupport.RequireTool(t, "java")
+	if major, ok := Usable(); !ok {
+		t.Skipf("found Java %d; the frontend requires JDK %d+", major, minJDK)
+	}
+}
 
 func eachInstr(prog *ir.Program, visit func(*ir.Instruction)) {
 	for _, fn := range irwalk.Funcs(prog) {

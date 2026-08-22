@@ -22,9 +22,15 @@ rules:
       - "ruby:*.html_safe"
       - "ruby:concat"               # ERB/helper concat(user_html)
       - "ruby:safe_concat"
-      # render html:/inline:/text: interpolates the value straight into the body
-      # (unlike render :template, which passes a symbol constant, not taint).
-      - "ruby:render"
+      # Only these keywords put the value in the response body as HTML; `locals:`
+      # feeds an auto-escaping template and `json:` is not HTML (test/ruby/
+      # kwarg_taint). A `when:` is required-confirmation, so this also drops the
+      # positional `render(x)` -- a tainted template NAME, which is template
+      # injection and ruby-code-injection's business, not XSS.
+      - sink: "ruby:render"
+        when: >-
+          kwargs.html.Tainted or kwargs.inline.Tainted or kwargs.plain.Tainted
+          or kwargs.text.Tainted or kwargs.body.Tainted
     # Rails/Ruby output-escaping helpers neutralize the value for HTML.
     sanitizers:
       - "ruby:h"                    # ERB::Util#h shorthand

@@ -3,8 +3,10 @@ package ruby_converter
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/bytevet/godzilla/converters/ssabuild"
+	"github.com/bytevet/godzilla/internal/irwalk"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -86,39 +88,28 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	// `ruby:<module>.`). See localCallee for what each resolves.
 	localFuncs := map[string]bool{}
 	qualifiedFuncs := map[string]bool{}
-	var collectNames func(ss []interface{}, prefix string)
-	collectNames = func(ss []interface{}, prefix string) {
-		for _, s := range ss {
-			switch tag(s) {
-			case "def":
-				name := identName(at(s, 1))
-				localFuncs[name] = true
-				qualifiedFuncs[prefix+name] = true
-			case "class", "module":
-				cname := identName(at(at(s, 1), 1))
-				collectNames(bodyStmts(classModuleBody(s)), prefix+cname+".")
-			}
+	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+		// A singleton def is NOT recorded: its function is named `ruby:<Class>.m`,
+		// so resolving a bare self-call to `ruby:<module>.<prefix>m` here would
+		// point the callee at a function that does not exist.
+		if tag(d) == "def" && !sc.singleton {
+			name := identName(at(d, 1))
+			localFuncs[name] = true
+			qualifiedFuncs[sc.qualPrefix+name] = true
 		}
-	}
-	collectNames(stmts, "")
+	})
 
 	var functions []*ir.Function
-	var collect func(ss []interface{}, qualPrefix, className string)
-	collect = func(ss []interface{}, qualPrefix, className string) {
-		for _, s := range ss {
-			switch tag(s) {
-			case "def":
-				functions = append(functions, lowerDef(s, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs))
-			case "defs":
-				functions = append(functions, lowerDefs(s, filename, moduleName, className, qualPrefix, localFuncs, qualifiedFuncs))
-			case "class", "module":
-				// class C ... end → constant name at at(s,1) = ["const_ref",["@const","C",pos]]
-				name := identName(at(at(s, 1), 1))
-				collect(bodyStmts(classModuleBody(s)), qualPrefix+name+".", name)
-			}
+	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+		switch {
+		case tag(d) == "defs":
+			functions = append(functions, lowerDefs(d, filename, moduleName, sc.className, sc.qualPrefix, localFuncs, qualifiedFuncs))
+		case sc.singleton:
+			functions = append(functions, lowerSingletonDef(d, filename, moduleName, sc.className, sc.qualPrefix, localFuncs, qualifiedFuncs))
+		default:
+			functions = append(functions, lowerDef(d, filename, moduleName, sc.qualPrefix, localFuncs, qualifiedFuncs))
 		}
-	}
-	collect(stmts, "", "")
+	})
 
 	// The module entry point: top-level statements that are not a def/class.
 	if init := lowerModuleInit(stmts, filename, moduleName, localFuncs, qualifiedFuncs); init != nil {
@@ -127,6 +118,56 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 
 	mod.Functions = functions
 	return mod
+}
+
+// defScope is the naming context a def inherits from the nodes enclosing it.
+type defScope struct {
+	qualPrefix string // dotted class prefix after `ruby:<module>.`, e.g. "Admin.User."
+	className  string // innermost enclosing class, the namespace a class method takes
+	singleton  bool   // inside a `class << self` body: a plain def is a CLASS method
+}
+
+// walkDefs visits every `def`/`defs` in a Ripper tree with its enclosing scope.
+//
+// Only class/module/sclass open a scope; every other node is descended through
+// unchanged, so a def under `if`, `unless`, a `rescue` clause or a `do` block is
+// reached. That generality is the point: lowerStmt recurses into all of those,
+// and a def the collectors miss is lowered by NOBODY — it leaves no intrinsic
+// and fails no test, it simply is not analyzed.
+func walkDefs(n interface{}, sc defScope, visit func(def interface{}, sc defScope)) {
+	switch tag(n) {
+	case "def", "defs":
+		visit(n, sc)
+	case "class", "module":
+		// class C ... end → constant name at at(n,1) = ["const_ref",["@const","C",pos]]
+		name := identName(at(at(n, 1), 1))
+		walkDefs(classModuleBody(n), defScope{qualPrefix: sc.qualPrefix + name + ".", className: name}, visit)
+	case "sclass":
+		// `class << self; def m; end; end` — ["sclass", target, bodystmt].
+		walkDefs(at(n, 2), defScope{qualPrefix: sc.qualPrefix, className: sc.className, singleton: true}, visit)
+	default:
+		l, ok := asList(n)
+		if !ok {
+			return
+		}
+		for _, c := range l {
+			walkDefs(c, sc, visit)
+		}
+	}
+}
+
+// lowerSingletonDef lowers a plain `def` inside a `class << self` body. Ruby
+// makes it a class method, so it is named and shaped like `def self.m`: a
+// class-qualified canonical name a call on the class resolves to from another
+// file, and a receiver in parameter slot 0 to line the arguments up.
+func lowerSingletonDef(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+	fn := lowerDef(defNode, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs)
+	fn.Name = fn.ObjectName
+	if className != "" {
+		fn.CanonicalName = "ruby:" + className + "." + fn.ObjectName
+	}
+	fn.Params = append([]*ir.Value{ssabuild.Reg("self")}, fn.Params...)
+	return fn
 }
 
 // programStmts returns the top-level statement list of a `["program",[stmts]]`.
@@ -260,11 +301,23 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 	return fn
 }
 
-// paramNames extracts the positional parameter names from a `params` node
-// (`["params", [reqs], [opts], rest, …]`) in source order: required first, then
-// optional (defaulted). The optionals matter for taint — a classic vulnerable
-// signature is `def m(filter = nil)`, and unbound its tainted argument maps to no
-// parameter and drops. Keyword/splat/block params are out of scope.
+// kwargSlotParam mirrors, on the callee, the inert placeholder a caller leaves in
+// the keyword hash's positional slot (appendArgList). The engine binds arguments
+// to parameters by POSITION, so without it every appended marker lands one slot
+// early. Never written or read; '@' cannot start a Ruby local, so it cannot
+// collide.
+const kwargSlotParam = "@kwargs"
+
+// paramNames extracts the parameter names from a `params` node
+// (`["params", [reqs], [opts], rest, [post], [keywords], kwrest, block]`) in the
+// order a CALLER supplies them. The optionals matter for taint — a classic
+// vulnerable signature is `def m(filter = nil)`, and unbound its tainted argument
+// maps to no parameter and drops.
+//
+// Keyword binding is positional, so it is exact only when the call passes every
+// declared positional: the caller's placeholder sits after the positionals
+// PASSED, this one after those declared. `*rest` and post-required params are
+// omitted because they shift the same alignment.
 func paramNames(n interface{}) []string {
 	// def may wrap params in `paren`: ["paren", ["params", …]].
 	if tag(n) == "paren" {
@@ -281,14 +334,40 @@ func paramNames(n interface{}) []string {
 		}
 	}
 	// Optionals: index 2 is a list of [identNode, defaultExpr] pairs.
-	opts, _ := asList(at(n, 2))
-	for _, o := range opts {
-		pair, ok := asList(o)
+	out = append(out, pairParamNames(at(n, 2))...)
+	kws := keywordParamNames(n)
+	if len(kws) == 0 {
+		return out
+	}
+	return append(append(out, kwargSlotParam), kws...)
+}
+
+// keywordParamNames returns a def's keyword parameters (index 5) followed by its
+// `**rest` (index 6), in declaration order.
+func keywordParamNames(n interface{}) []string {
+	out := pairParamNames(at(n, 5))
+	// `**rest` arrives wrapped: [kwrest_param, [@ident, "rest"]]. An anonymous
+	// `**` has nil inside and yields no name.
+	if name := identName(at(at(n, 6), 1)); name != "" {
+		out = append(out, name)
+	}
+	return out
+}
+
+// pairParamNames reads a `[identNode, defaultOrFalse]` pair list — how Ripper
+// spells both the optional (index 2) and keyword (index 5) parameter lists. A
+// keyword's ident is an `@label` carrying its trailing colon; a positional name
+// can never end in one, so the trim is unconditional.
+func pairParamNames(list interface{}) []string {
+	items, _ := asList(list)
+	var out []string
+	for _, it := range items {
+		pair, ok := asList(it)
 		if !ok || len(pair) == 0 {
 			continue
 		}
 		if name := identName(pair[0]); name != "" {
-			out = append(out, name)
+			out = append(out, strings.TrimSuffix(name, ":"))
 		}
 	}
 	return out
@@ -381,9 +460,81 @@ func (fs *funcState) ivarGlobal(ivarName string) string {
 	return "rubyfield:" + fs.moduleName + "." + fs.classQual + ivarName
 }
 
+// assocPairs returns the `assoc_new` pairs of a hash node. Ripper spells the two
+// hash forms differently -- `bare_assoc_hash` holds the pair list directly, while
+// a braced `hash` wraps it in `assoclist_from_args` (and is nil when empty).
+func assocPairs(n interface{}) []interface{} {
+	return assocNodes(n, "assoc_new")
+}
+
+// assocSplats returns the `assoc_splat` entries of a hash node -- the `**rest` in
+// `t(key, **params, scope: s)`. Emitted after assocPairs and never interleaved:
+// markers bind to parameters by position, and paramNames puts `**rest` last.
+func assocSplats(n interface{}) []interface{} {
+	return assocNodes(n, "assoc_splat")
+}
+
+func assocNodes(n interface{}, want string) []interface{} {
+	list := at(n, 1)
+	if tag(list) == "assoclist_from_args" {
+		list = at(list, 1)
+	}
+	pairs, ok := asList(list)
+	if !ok {
+		return nil
+	}
+	var out []interface{}
+	for _, p := range pairs {
+		if tag(p) == want {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// assocKeyName returns the keyword a pair was written under, or "" for a computed
+// key. Ripper spells `index: x` as an `@label` whose text INCLUDES the trailing
+// colon, so it is trimmed; `:index => x` arrives as a symbol literal instead.
+//
+// A nameless key still gets a marker: the name is only rule metadata, while the
+// operand is the taint channel, and a computed key loses the former without
+// losing the latter.
+func assocKeyName(pair interface{}) string {
+	k := at(pair, 1)
+	switch tag(k) {
+	case "@label":
+		return labelName(k)
+	case "symbol_literal":
+		return symbolText(k)
+	case "@tstring_content":
+		return scalarText(k)
+	case "string_literal":
+		if inner := at(k, 1); tag(inner) == "string_content" {
+			if parts, ok := asList(at(inner, 1)); ok && len(parts) == 1 {
+				return scalarText(parts[0])
+			}
+		}
+	}
+	return ""
+}
+
+// symbolText returns a `symbol_literal`'s bare name. Ripper wraps it twice --
+// [symbol_literal, [symbol, [@ident, "html"]]] -- and reading it at one level
+// yields a list, not a name. A `dyna_symbol` (`:"#{x}"`) names nothing.
+func symbolText(n interface{}) string { return identName(at(at(n, 1), 1)) }
+
+// labelName returns a keyword key's name. Ripper's `@label` text carries the
+// trailing colon (`html:`), and every consumer wants it gone.
+func labelName(n interface{}) string { return strings.TrimSuffix(scalarText(n), ":") }
+
+// posFrom converts a Ripper node's position to a gIR one. Ripper counts columns
+// from 0 and every other frontend — and every editor a reported column is read
+// in — counts from 1, so the column is shifted here. A node with no position at
+// all keeps Line 0, which the report layer already reads as "unknown"; a
+// Column 1 alongside it would claim a precision that does not exist.
 func posFrom(filename string, n interface{}) *ir.Position {
 	if line, col, ok := firstPos(n); ok {
-		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col)}
+		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col + 1)}
 	}
 	return &ir.Position{Filename: filename}
 }
@@ -473,8 +624,8 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
 		fs.terminated = true
 		return v
-	case "def", "class", "module":
-		return nil // lowered separately by convertModule.collect
+	case "def", "defs", "class", "module", "sclass":
+		return nil // lowered separately by walkDefs
 	default:
 		return fs.lowerExpr(s)
 	}
@@ -494,7 +645,8 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerStringContent(n)
 	case "xstring_literal":
 		return fs.lowerBacktick(n)
-	case "@tstring_content", "@int", "@float", "@CHAR":
+	// @label is a keyword-argument key (`name:`) -- a symbol literal, like the rest.
+	case "@tstring_content", "@int", "@float", "@CHAR", "@label":
 		return ssabuild.Str(scalarText(n))
 	case "string_embexpr":
 		// `#{ stmts }` — lower the inner statements, return the last value.
@@ -505,7 +657,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		// receiver of `Net::HTTP.get` off the ruby.unsupported path.
 		return ssabuild.Str(constPathName(n))
 	case "symbol_literal":
-		return ssabuild.Str(identName(at(at(n, 1), 1)))
+		return ssabuild.Str(symbolText(n))
 	case "dyna_symbol":
 		return ssabuild.Str("")
 	case "var_ref":
@@ -540,6 +692,9 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		}
 		if fs.isKnownMethod(name) {
 			return fs.lowerCallExpr(fs.localCallee(name), nil, n)
+		}
+		if callee, ok := fs.cellTemplateCallee(name); ok {
+			return fs.lowerCallExpr(callee, nil, n)
 		}
 		return fs.lookup(name)
 	case "paren":
@@ -576,6 +731,24 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		return fs.lowerCondMod(n)
 	case "while_mod", "until_mod":
 		return fs.lowerLoopMod(n)
+	case "bare_assoc_hash", "hash":
+		// A keyword-argument or brace hash. Lower each key and value so a source or
+		// sink inside still fires, and leave the hash itself untainted like `array`.
+		//
+		// Untainted is not a shortcut here, it is the point: ActiveRecord's hash
+		// form (`where(name: params[:q])`) is parameterized by construction, so a
+		// hash that carried its values' taint would make every one of them a false
+		// positive.
+		for _, pair := range assocPairs(n) {
+			fs.lowerExpr(at(pair, 1))
+			fs.lowerExpr(at(pair, 2))
+		}
+		// A `**splat` entry too, so a hash in VALUE position sees what one in
+		// argument position does (appendArgList).
+		for _, sp := range assocSplats(n) {
+			fs.lowerExpr(at(sp, 1))
+		}
+		return ssabuild.Str("")
 	case "array":
 		// Lower elements (so a source/sink inside fires); the container itself is
 		// left untainted, matching the other frontends' list handling.
@@ -905,13 +1078,123 @@ var requestDotBases = map[string]bool{"request": true, "req": true, "params": tr
 // indexed as `base[:x]` (Rails/Sinatra `params[...]`, `cookies[...]`).
 var requestIndexBases = map[string]bool{"params": true, "cookies": true}
 
+// cellOptionSource names a read of a cell's `options[...]` -- the arguments its
+// CALLER passed. Unlike params it is not request input by construction: a cell is
+// invoked from a controller or another view, and the value may be a request
+// parameter or an internal object. That is the whole reason the rule sourcing it
+// ships at `severity: low`, advisory under the default gate, rather than joining
+// ruby-xss.
+//
+// Synthetic and `@`-marked so it can never collide with a real method named
+// `options`, and emitted only inside a cell (isCellsPath), where `options` has
+// this one meaning.
+const cellOptionSource = "ruby:@cell.options"
+
+// cellMethodMarker prefixes a callee emitted for a bare name in a cell TEMPLATE,
+// which Ruby resolves against the cell object the template renders in. The suffix
+// is "<paired class module>|<method>"; resolveCellTemplateCalls rewrites it once
+// every file is lowered, since the class may not be parsed yet.
+//
+// Without it the two halves of a cell never meet. A template's `<%= label %>` is a
+// bare name in its OWN module with no def of that name, so it lowered to an inert
+// free identifier -- decidim CVE-2024-41673 puts the source in the class and the
+// unescaped sink in the template, and the flow simply stopped at the file
+// boundary.
+const cellMethodMarker = "ruby:@cellmethod:"
+
+// cellTemplateCallee returns the marker callee for a bare name in a cell
+// template, or ok=false when this file is not one. Emitted only for a template
+// (an .erb under a cells directory): in a cell CLASS a bare name is already
+// resolved by localCallee, and outside cells the convention does not hold.
+func (fs *funcState) cellTemplateCallee(name string) (string, bool) {
+	if !isCellsPath(fs.filename) || !IsERBFile(fs.filename) {
+		return "", false
+	}
+	mod, ok := pairedCellModule(fs.moduleName)
+	if !ok {
+		return "", false
+	}
+	return cellMethodMarker + mod + "|" + name, true
+}
+
+// pairedCellModule maps a cell template's module name to its class's. The pairing
+// is the cells convention: templates live in a directory named after the cell, and
+// the class sits beside that directory with a `_cell` suffix --
+// `app/cells/foo/show` is rendered by `app/cells/foo_cell`, and decidim's
+// `.../decidim/version/show` by `.../decidim/version_cell`.
+func pairedCellModule(templateModule string) (string, bool) {
+	i := strings.LastIndex(templateModule, "/")
+	if i < 0 {
+		return "", false
+	}
+	return templateModule[:i] + "_cell", true
+}
+
+// resolveCellTemplateCalls rewrites every cellMethodMarker callee to the paired
+// cell class's method, once all files are lowered. The engine resolves calls by
+// EXACT canonical name, so an unrewritten marker links to nothing.
+//
+// A name the paired class does not define -- a Rails helper, or a method from an
+// included module -- is stripped back to the plain bare name it would have been
+// without the marker, so it can still match a rule glob (`raw`, `link_to`) instead
+// of dangling. An AMBIGUOUS name is stripped too: one file may hold several cell
+// classes, and picking either would be a guess.
+func resolveCellTemplateCalls(prog *ir.Program) {
+	byMod := map[string]map[string]string{}
+	for _, m := range prog.GetModules() {
+		if m == nil {
+			continue
+		}
+		for _, f := range m.GetFunctions() {
+			if f == nil || f.GetCanonicalName() == "" {
+				continue
+			}
+			method := f.GetName()
+			if i := strings.LastIndex(method, "."); i >= 0 {
+				method = method[i+1:]
+			}
+			mm := byMod[m.GetName()]
+			if mm == nil {
+				mm = map[string]string{}
+				byMod[m.GetName()] = mm
+			}
+			if _, dup := mm[method]; dup {
+				mm[method] = "" // ambiguous within one file: resolve to nothing
+				continue
+			}
+			mm[method] = f.GetCanonicalName()
+		}
+	}
+	for cc := range irwalk.Calls(prog) {
+		callee := cc.GetCallee()
+		if !strings.HasPrefix(callee, cellMethodMarker) {
+			continue
+		}
+		mod, name, found := strings.Cut(strings.TrimPrefix(callee, cellMethodMarker), "|")
+		if !found {
+			irwalk.SetCallee(cc, "ruby:"+mod)
+			continue
+		}
+		if target := byMod[mod][name]; target != "" {
+			irwalk.SetCallee(cc, target)
+			continue
+		}
+		irwalk.SetCallee(cc, "ruby:"+name)
+	}
+}
+
 // lowerAref lowers `base[index]`. When the base is an opaque request hash
 // (`params[:x]`, `cookies['x']`), it becomes a synthetic source CALL so the
 // engine seeds taint; otherwise it is an INDEX whose taint flows from the base.
 func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 	base := at(n, 1)
-	if name, ok := fs.isOpaqueBase(base); ok && requestIndexBases[name] {
-		return fs.lowerCallExprVals("ruby:"+name, nil, n)
+	if name, ok := fs.isOpaqueBase(base); ok {
+		if requestIndexBases[name] {
+			return fs.lowerCallExprVals("ruby:"+name, nil, n)
+		}
+		if name == "options" && isCellsPath(fs.filename) {
+			return fs.lowerCallExprVals(cellOptionSource, nil, n)
+		}
 	}
 	baseVal := fs.lowerExpr(base)
 	inst := fs.newValueInst(n)
@@ -942,10 +1225,8 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 			callee = "ruby:" + base + "." + method
 		}
 	}
-	argVals := []*ir.Value{recvVal} // receiver as operand 0 (rules pin the tainted arg with #1)
-	for _, a := range args {
-		argVals = append(argVals, fs.lowerExpr(a))
-	}
+	// Receiver as operand 0 (rules pin the tainted arg with #1).
+	argVals := fs.appendArgList(append(make([]*ir.Value, 0, len(args)+1), recvVal), args)
 	return fs.lowerCallExprVals(callee, argVals, n)
 }
 
@@ -1083,12 +1364,56 @@ func extractArgs(n interface{}) []interface{} {
 	return nil
 }
 
-func (fs *funcState) lowerCallExpr(callee string, args []interface{}, n interface{}) *ir.Value {
-	var argVals []*ir.Value
+func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n interface{}) *ir.Value {
+	inst := fs.newValueInst(n)
+	ssabuild.SetKwargMarker(inst, name, v)
+	fs.emit(inst)
+	return ssabuild.Reg(inst.Name)
+}
+
+// appendArgList lowers a call's argument nodes into dst, turning a trailing
+// keyword list into markers APPENDED after every positional argument.
+//
+// The hash keeps its own inert placeholder in the positional slot, and that is
+// load-bearing rather than tidy: a rule pins an injection point by logical index
+// (`ruby:*.where#1`), and `User.where(name: params[:q])` puts its hash at exactly
+// that index. Let a tainted value occupy the slot and every parameterized
+// ActiveRecord query becomes an injection finding. Appending leaves each existing
+// pin looking at the value it looks at today, which is the same reason the Python
+// frontend appends its `**`-splat markers.
+//
+// Values are lowered ONCE. Routing a pair through lowerExpr and then re-lowering
+// it for the marker would emit a second copy of any synthetic source call inside
+// it, and duplicate a finding.
+func (fs *funcState) appendArgList(dst []*ir.Value, args []interface{}) []*ir.Value {
+	var markers []*ir.Value
 	for _, a := range args {
-		argVals = append(argVals, fs.lowerExpr(a))
+		if t := tag(a); t != "bare_assoc_hash" && t != "hash" {
+			dst = append(dst, fs.lowerExpr(a))
+			continue
+		}
+		for _, pair := range assocPairs(a) {
+			name := assocKeyName(pair)
+			if name == "" {
+				// Only a COMPUTED key needs lowering, for a source or sink inside it.
+				// A literal one lowers to a constant nothing reads.
+				fs.lowerExpr(at(pair, 1))
+			}
+			markers = append(markers, fs.emitKwargMarker(name, fs.lowerExpr(at(pair, 2)), pair))
+		}
+		// `**rest` names no single keyword, so it stays a plain value -- the same
+		// treatment Python gives an unexpandable splat. Without it the forwarding
+		// idiom `def m(**o) = t(k, **o)` drops taint at the forward.
+		for _, sp := range assocSplats(a) {
+			markers = append(markers, fs.lowerExpr(at(sp, 1)))
+		}
+		dst = append(dst, ssabuild.Str(""))
 	}
-	return fs.lowerCallExprVals(callee, argVals, n)
+	return append(dst, markers...)
+}
+
+func (fs *funcState) lowerCallExpr(callee string, args []interface{}, n interface{}) *ir.Value {
+	return fs.lowerCallExprVals(callee, fs.appendArgList(nil, args), n)
 }
 
 func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interface{}) *ir.Value {

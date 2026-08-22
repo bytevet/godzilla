@@ -23,7 +23,18 @@ func benchScanLang(b *testing.B, dir, tool string) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// One scan OUTSIDE the loop, because the first scan in a process pays
+	// once-per-process costs the rest do not: the Java frontend compiles its dump
+	// helper and caches it, and every subprocess frontend memoizes its toolchain
+	// probe. A scan this slow never gets past b.N=1 or 2, so that fixed cost is
+	// charged whole at b.N=1 and halved at b.N=2 — reported B/op swings ~2x on
+	// iteration count alone (3.6Mi vs 1.9Mi for Java), which benchstat reads as a
+	// regression when the two revisions happen to land on different b.N.
+	if _, err := Scan(dir, rs); err != nil {
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := Scan(dir, rs); err != nil {
 			b.Fatal(err)

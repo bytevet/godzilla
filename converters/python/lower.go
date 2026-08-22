@@ -91,6 +91,17 @@ func convertModule(root astNode, filename, moduleName string, classes routeClass
 				// class-body statements are a documented limitation.
 				cn := s.str("name")
 				collect(s.list("body"), qualPrefix+cn+".", classes.ctxFor(cn), true)
+			default:
+				// A def inside control flow (`if TYPE_CHECKING:`, a feature flag, an
+				// `except ImportError` fallback) would otherwise be claimed by nobody:
+				// lowerBody descends into the compounds but deliberately skips defs,
+				// trusting this collector. Recursing over every nested statement list
+				// rather than enumerating compounds is what keeps the two in step.
+				// Control flow opens no scope, so the qualname prefix and the
+				// enclosing class context carry through unchanged.
+				for _, key := range []string{"body", "orelse", "handlers", "finalbody"} {
+					collect(s.list(key), qualPrefix, cls, inClass)
+				}
 			}
 		}
 	}
@@ -809,20 +820,11 @@ func (fs *funcState) newVoidInst(n astNode) *ir.Instruction {
 // that distinction a rule gated on `verify=False` reads `verify=flag` as absent
 // and stays silent.
 //
-// Because the wrapped value may now be tainted, the marker MUST propagate: the
-// value goes in Operands, which is what markTaintFromOperands reads, and
-// builtin.kwarg is in the engine's intrinsicPropagators. Omit either and taint
-// dies silently at every Python keyword argument — TestKwargMarkerPropagates
-// pins the pair together.
+// The two channels the marker must fill are ssabuild.SetKwargMarker's business;
+// TestKwargMarkerPropagates pins the engine half.
 func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n astNode) *ir.Value {
 	inst := fs.newValueInst(n)
-	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-	inst.Intrinsic = "builtin.kwarg"
-	inst.Operands = []*ir.Value{v}
-	inst.Call = &ir.CallCommon{
-		Callee: "builtin.kwarg",
-		Args:   []*ir.Value{ssabuild.Str(name), v},
-	}
+	ssabuild.SetKwargMarker(inst, name, v)
 	fs.emit(inst)
 	return ssabuild.Reg(inst.Name)
 }

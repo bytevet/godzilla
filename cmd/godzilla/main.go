@@ -160,7 +160,15 @@ func runScan(args []string) {
 	buildTimeout := fs.Duration("build-timeout", proc.BuildTimeout(), "deadline for a whole-project build subprocess (only runs with -allow-build)")
 	_ = fs.Parse(args)
 
-	buildpolicy.SetAllowed(*allowBuild)
+	// Only an EXPLICIT -allow-build decides the policy. Calling SetAllowed
+	// unconditionally made the flag's false default UNSET GODZILLA_ALLOW_BUILD, so
+	// the environment variable this flag's own help text offers as the alternative
+	// could never take effect through the CLI.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "allow-build" {
+			buildpolicy.SetAllowed(*allowBuild)
+		}
+	})
 	proc.SetTimeouts(*parseTimeout, *buildTimeout)
 	report.Version = version // stamp the tool version into SARIF/JSON reports
 

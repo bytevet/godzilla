@@ -3,6 +3,7 @@ package rust_converter
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,10 +26,15 @@ import (
 // for the straight-line source→sink handler shape that matters for taint.
 
 // lowerMIR parses the MIR dump `text` for source file `filename` into a module.
-func lowerMIR(text, filename string) *ir.Module {
+// `root` is the tree being scanned; spans outside it are rustc's own and are not
+// reported (see lowerState.span). An empty root disables that filter.
+func lowerMIR(text, filename, root string) *ir.Module {
 	mod := &ir.Module{Name: filename, Language: "rust"}
+	if abs, err := filepath.Abs(root); root != "" && err == nil {
+		root = abs
+	}
 	for _, body := range splitFns(text) {
-		if fn := lowerFn(body, filename); fn != nil {
+		if fn := lowerFn(body, filename, root); fn != nil {
 			mod.Functions = append(mod.Functions, fn)
 		}
 	}
@@ -64,12 +70,14 @@ func splitFns(text string) [][]string {
 
 type lowerState struct {
 	filename string
+	root     string // absolute scan root; a span outside it is rustc's own
 	counter  int
 	env      map[string]*ir.Value   // MIR local ("_5") -> current gIR value
 	agg      map[string][]*ir.Value // MIR local -> aggregate element values (for field folding)
 	intr     map[string]string      // gIR reg name -> builtin.* marker its defining call carries
 	instrs   []*ir.Instruction
 	firstPos *ir.Position
+	lastPos  *ir.Position // last span accepted as user code
 }
 
 var (
@@ -95,12 +103,12 @@ var (
 	unOps = map[string]bool{"Neg": true, "Not": true, "PtrMetadata": true}
 )
 
-func lowerFn(body []string, filename string) *ir.Function {
+func lowerFn(body []string, filename, root string) *ir.Function {
 	name, params := parseHeader(body[0])
 	if name == "" {
 		return nil
 	}
-	st := &lowerState{filename: filename, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{}}
+	st := &lowerState{filename: filename, root: root, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{}}
 	fn := &ir.Function{
 		Name:          name,
 		ObjectName:    name,
@@ -446,7 +454,15 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 		st.setAgg(dst, structFields(expr[brace:]), "builtin.aggregate", pos)
 		return
 	}
-	st.env[dst] = ssabuild.Str("")
+	// Unmodelled rvalue. It must NOT become a constant: a constant is clean data,
+	// so taint dies here and the result reads as a legitimately safe value —
+	// silence that costs findings. The intrinsic is what the coverage check sees.
+	name := st.reg()
+	st.instrs = append(st.instrs, &ir.Instruction{
+		Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC,
+		Intrinsic: "rust.unsupported", Comment: expr, Pos: pos,
+	})
+	st.env[dst] = ssabuild.Reg(name)
 }
 
 // emitCall lowers a MIR call terminator. Method and free-function calls alike
@@ -758,12 +774,43 @@ func (st *lowerState) span(comment string) *ir.Position {
 	file := m[1]
 	if file == "" {
 		file = st.filename
+	} else if !filepath.IsAbs(file) && st.root != "" {
+		// A cargo build runs rustc IN the crate directory, so its spans are
+		// crate-relative ("src/lib.rs"). Stored verbatim that names no particular
+		// file -- every crate in a workspace has one -- and neither srclines nor a
+		// SARIF consumer can open it. Resolving against the crate directory (the
+		// root this module was lowered with) is what makes the built path agree
+		// with the source-lowered one, which reports absolute paths.
+		file = filepath.Join(st.root, file)
+	}
+	// Anything expanded from a macro carries a span into rustc's OWN sysroot
+	// (`/rustc/<hash>/library/alloc/src/macros.rs` for everything through
+	// `format!`, i.e. most string-building Rust). That file does not exist on the
+	// scanning machine, so a finding pinned there is unreadable and GitHub code
+	// scanning cannot annotate it. The last accepted span is the macro's call
+	// site, which is the line the reader wants.
+	if !st.underRoot(file) {
+		return st.lastPos
 	}
 	pos := &ir.Position{Filename: file, Line: int32(atoi(m[2])), Column: int32(atoi(m[3]))}
 	if st.firstPos == nil {
 		st.firstPos = pos
 	}
+	st.lastPos = pos
 	return pos
+}
+
+// underRoot reports whether a span's file lies inside the tree being scanned.
+func (st *lowerState) underRoot(file string) bool {
+	if st.root == "" {
+		return true
+	}
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(st.root, abs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // --- text helpers ---
@@ -1001,9 +1048,18 @@ func constFromLiteral(lit string) *ir.Value {
 // argument position. The template (rustc's `fmt::rt` encoding) is a sequence of
 // tokens: the byte 0xC0 marks an argument insertion, and a byte < 0x80 is the
 // length of a literal run that immediately follows. tok is the raw MIR operand,
-// e.g. `const b"\x14https://h/v1/\xc0\x00"`. Returns ok=false for anything that
-// is not a well-formed, UTF-8-clean byte-string template (the caller then leaves
-// the original empty constant, so a decode miss can never invent a fixed host).
+// e.g. `const b"\x14https://h/v1/\xc0\x00"`. Returns ok=false only when the
+// operand is not a decodable byte string at all.
+//
+// A token the encoding uses but this decoder does not model -- an explicit-index
+// or spec-bearing argument, `{0}` or `{:>10}` -- ends the decode at that point
+// rather than failing it: the text decoded so far came from literal-run tokens,
+// which are compile-time text and cannot carry taint, and the remainder is
+// rendered as one argument insertion, i.e. dynamic. Failing the whole decode
+// instead left an EMPTY template, which reads downstream as the positive claim
+// that the format string contains no host -- and so turned a provably safe
+// `format!("https://api.example.com/v1/{:>10}", p)` into a high-confidence
+// CWE-918 that the same code without the width specifier does not produce.
 func decodeFmtTemplate(tok string) (string, bool) {
 	tok = strings.TrimSpace(tok)
 	tok = strings.TrimSpace(strings.TrimPrefix(tok, "const "))
@@ -1031,8 +1087,9 @@ func decodeFmtTemplate(tok string) (string, bool) {
 			}
 			sb.Write(raw[i : i+int(b)])
 			i += int(b)
-		default: // unrecognized control byte (e.g. an explicit-index/spec arg)
-			return "", false
+		default: // a token this decoder does not model; the rest is unknown
+			sb.WriteString("{}")
+			i = len(raw)
 		}
 	}
 	if !utf8.ValidString(sb.String()) {

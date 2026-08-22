@@ -66,7 +66,7 @@ func TestFormatMarkerAnchoredMatch(t *testing.T) {
 		"        return;\n" +
 		"    }\n" +
 		"}\n"
-	marks := calleeMarks(lowerMIR(std, "std.rs"))
+	marks := calleeMarks(lowerMIR(std, "std.rs", ""))
 	requireMark(t, marks, "rust:Arguments::new", "builtin.format")
 	// format(Arguments) is only recognized by its ARGUMENT being the tagged
 	// Arguments::new result — the name alone cannot be anchored.
@@ -94,7 +94,7 @@ func TestFormatMarkerAnchoredMatch(t *testing.T) {
 		"        return;\n" +
 		"    }\n" +
 		"}\n"
-	marks = calleeMarks(lowerMIR(user, "user.rs"))
+	marks = calleeMarks(lowerMIR(user, "user.rs", ""))
 	requireMark(t, marks, "rust:my_into", "")
 	requireMark(t, marks, "rust:W::clone", "")
 	requireMark(t, marks, "rust:format", "")

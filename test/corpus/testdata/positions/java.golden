@@ -1,0 +1,15 @@
+java/branch_merge_ternary|java-command-injection|java:Handler.handle|java:java/lang/Runtime.exec|src=test/java/branch_merge_ternary/Handler.java:12:0|sink=test/java/branch_merge_ternary/Handler.java:14:0
+java/command_injection|java-command-injection|java:Handler.handle|java:java/lang/Runtime.exec|src=test/java/command_injection/Handler.java:7:0|sink=test/java/command_injection/Handler.java:8:0
+java/insecure_deserialization|java-insecure-deserialization|java:Handler.handle|java:java/io/ObjectInputStream.<init>|src=test/java/insecure_deserialization/Handler.java:7:0|sink=test/java/insecure_deserialization/Handler.java:7:0
+java/interproc_instance|java-command-injection|java:Runner.run|java:java/lang/Runtime.exec|src=test/java/interproc_instance/Handler.java:8:0|sink=test/java/interproc_instance/Runner.java:8:0
+java/jaxrs|java-command-injection|java:Handler.ping|java:java/lang/Runtime.exec|src=test/java/jaxrs/Handler.java:19:0|sink=test/java/jaxrs/Handler.java:19:0
+java/jaxrs|java-sql-injection|java:Handler.getUser|java:java/sql/Statement.executeQuery|src=test/java/jaxrs/Handler.java:15:0|sink=test/java/jaxrs/Handler.java:15:0
+java/open_redirect|java-open-redirect|java:Handler.handle|java:javax/servlet/http/HttpServletResponse.sendRedirect|src=test/java/open_redirect/Handler.java:6:0|sink=test/java/open_redirect/Handler.java:7:0
+java/path_traversal|java-path-traversal|java:Handler.readNio|java:java/nio/file/Files.readAllBytes|src=test/java/path_traversal/Handler.java:16:0|sink=test/java/path_traversal/Handler.java:17:0
+java/path_traversal|java-path-traversal|java:Handler.readStream|java:java/io/FileInputStream.<init>|src=test/java/path_traversal/Handler.java:10:0|sink=test/java/path_traversal/Handler.java:11:0
+java/spring_annotation|java-command-injection|java:Handler.ping|java:java/lang/Runtime.exec|src=test/java/spring_annotation/Handler.java:19:0|sink=test/java/spring_annotation/Handler.java:19:0
+java/spring_annotation|java-sql-injection|java:Handler.getUser|java:java/sql/Statement.executeQuery|src=test/java/spring_annotation/Handler.java:15:0|sink=test/java/spring_annotation/Handler.java:15:0
+java/sql_injection|java-sql-injection|java:Dao.run|java:java/sql/Statement.executeQuery|src=test/java/sql_injection/Dao.java:7:0|sink=test/java/sql_injection/Dao.java:8:0
+java/ssrf|java-ssrf|java:Handler.handle|java:java/net/URL.<init>|src=test/java/ssrf/Handler.java:7:0|sink=test/java/ssrf/Handler.java:8:0
+java/weak_cipher_ecb|java-ecb-mode|java:EcbCipher.weak|java:javax/crypto/Cipher.getInstance|src=-|sink=test/java/weak_cipher_ecb/EcbCipher.java:9:0
+java/xss|java-xss|java:Handler.handle|java:java/io/PrintWriter.println|src=test/java/xss/Handler.java:7:0|sink=test/java/xss/Handler.java:8:0

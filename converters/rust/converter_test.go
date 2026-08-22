@@ -1,10 +1,12 @@
 package rust_converter
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/buildpolicy"
 	"github.com/bytevet/godzilla/internal/irwalk"
 	"github.com/bytevet/godzilla/internal/rules/loader"
 	"github.com/bytevet/godzilla/internal/testsupport"
@@ -145,7 +147,7 @@ func TestLowerMIR_AxumSourceSynthesis(t *testing.T) {
 	mir := "fn handler(_1: axum::extract::Query<Params>) -> () {\n" +
 		"    _0 = Command::new(move _1) -> [return: bb1, unwind continue];\n" +
 		"}\n"
-	mod := lowerMIR(mir, "handler.rs")
+	mod := lowerMIR(mir, "handler.rs", "")
 
 	// The synthetic source CALL must be present.
 	prog := &ir.Program{Modules: []*ir.Module{mod}}
@@ -161,7 +163,7 @@ func TestAxumTaintFlow_EndToEnd(t *testing.T) {
 	mir := "fn handler(_1: axum::extract::Query<Params>) -> () {\n" +
 		"    _0 = Command::new(move _1) -> [return: bb1, unwind continue];\n" +
 		"}\n"
-	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "handler.rs")}}
+	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "handler.rs", "")}}
 
 	rs, err := loader.Builtin()
 	if err != nil {
@@ -201,7 +203,7 @@ func TestLowerMIR_BranchMergeKeepsTaint(t *testing.T) {
 		"        _0 = Command::new(move _1) -> [return: bb4, unwind continue];\n" +
 		"    }\n" +
 		"}\n"
-	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "run.rs")}}
+	prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "run.rs", "")}}
 
 	rs, err := loader.Builtin()
 	if err != nil {
@@ -348,7 +350,7 @@ func TestLowerMIR_UserCommandLookalikeNotAliased(t *testing.T) {
 			"        _0 = sink(move _2) -> [return: bb2, unwind continue];\n" +
 			"    }\n" +
 			"}\n"
-		prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "f.rs")}}
+		prog := &ir.Program{Modules: []*ir.Module{lowerMIR(mir, "f.rs", "")}}
 		for _, fn := range irwalk.Funcs(prog) {
 			for inst := range irwalk.Instrs(fn) {
 				cc := inst.GetCall()
@@ -388,5 +390,86 @@ func TestLowerMIR_UserCommandLookalikeNotAliased(t *testing.T) {
 	}
 	if got := sinkArg.GetRegName(); got == argCallReg {
 		t.Errorf("sink arg = %q, the call's own result — std Command step lost its receiver aliasing", got)
+	}
+}
+
+// TestConvertCorpusIsFullyModeled converts every Rust sample the way the corpus
+// does — one crate at a time, so cargo resolves each crate's dependencies — and
+// requires that nothing lowered to a fallback intrinsic.
+//
+// An unmodelled rvalue used to become an empty string constant, i.e. CLEAN DATA:
+// taint died at it and the result read as a legitimately safe value, with no
+// error and nothing failing. This is the check that makes the marker worth
+// emitting.
+func TestConvertCorpusIsFullyModeled(t *testing.T) {
+	requireRustc(t)
+	testsupport.RequireTool(t, "cargo")
+	t.Setenv(buildpolicy.EnvAllowBuild, "1")
+
+	dirs, err := filepath.Glob(filepath.Join("..", "..", "test", "rust", "*"))
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no rust samples found: %v", err)
+	}
+	for _, dir := range dirs {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			c := NewConverter()
+			prog, err := c.ConvertFile(dir)
+			if err != nil {
+				t.Fatalf("ConvertFile(%s): %v", dir, err)
+			}
+			if c.Skipped() != 0 {
+				t.Errorf("Skipped() = %d, want 0", c.Skipped())
+			}
+			testsupport.RequireNoFallbackIntrinsic(t, prog, "rust.unsupported", dir)
+		})
+	}
+}
+
+// TestUnmodelledRvalueIsVisible pins the fallback itself: a form assignRvalue
+// does not understand must leave a marker, not a constant.
+func TestUnmodelledRvalueIsVisible(t *testing.T) {
+	st := &lowerState{env: map[string]*ir.Value{}}
+	// Any rvalue form the parser does not recognize; the shape of the fallback is
+	// what is being pinned, not this particular string.
+	st.assignOperator("_1", "some_future_rvalue", nil)
+	if v := st.env["_1"]; v.GetConstant() != nil {
+		t.Fatalf("unmodelled rvalue became the constant %q — taint dies at it", v.GetConstant().GetStringVal())
+	}
+	if len(st.instrs) != 1 || st.instrs[0].Intrinsic != "rust.unsupported" {
+		t.Fatalf("expected one rust.unsupported instruction, got %v", st.instrs)
+	}
+}
+
+// TestSpansOutsideScanRootAreRejected pins that a span pointing into rustc's own
+// sysroot never reaches a position.
+//
+// Everything expanded from a macro carries one — `/rustc/<hash>/library/alloc/
+// src/macros.rs` for anything through `format!`, i.e. most string-building Rust.
+// The file does not exist on the scanning machine, so a taint-path step or a
+// SARIF artifact URI pinned there is unresolvable: GitHub code scanning cannot
+// annotate it and a reviewer cannot open it. The macro's call site is the last
+// span accepted from user code, which is the line the reader wants anyway.
+func TestSpansOutsideScanRootAreRejected(t *testing.T) {
+	root := t.TempDir()
+	user := filepath.Join(root, "main.rs")
+	mir := "fn run() -> () {\n" +
+		"    bb0: {\n" +
+		"        _1 = std::env::args() -> [return: bb1]; // scope 0 at " + user + ":7:13\n" +
+		"    }\n" +
+		"    bb1: {\n" +
+		"        _2 = Vec::new(move _1) -> [return: bb2]; " +
+		"// scope 0 at /rustc/8bab26f4/library/alloc/src/macros.rs:114:33\n" +
+		"    }\n" +
+		"}\n"
+	mod := lowerMIR(mir, user, root)
+
+	for _, fn := range mod.GetFunctions() {
+		for _, b := range fn.GetBlocks() {
+			for _, in := range b.GetInstrs() {
+				if f := in.GetPos().GetFilename(); f != "" && f != user {
+					t.Errorf("instruction %q got position in %s, want the user file or none", in.GetName(), f)
+				}
+			}
+		}
 	}
 }

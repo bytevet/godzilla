@@ -11,7 +11,7 @@ func FuzzLowerMIR(f *testing.F) {
 	f.Add("fn f() {\n    let _1: i32;\n    _1 = const 5_i32;\n    _0 = move _1;\n}\n")
 	f.Add("bb0: {\n  _2 = Add(move _3, const b\"\\xc0\");\n}\n")
 	f.Fuzz(func(t *testing.T, text string) {
-		_ = lowerMIR(text, "fuzz.rs") // must not panic
+		_ = lowerMIR(text, "fuzz.rs", "") // must not panic
 	})
 }
 

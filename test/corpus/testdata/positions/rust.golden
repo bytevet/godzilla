@@ -1,0 +1,15 @@
+rust/axum_rawquery|rust-command-injection|rust:handle|rust:Command::arg|src=test/rust/axum_rawquery/main.rs:16:15|sink=test/rust/axum_rawquery/main.rs:18:18
+rust/branch_merge_default|rust-command-injection|rust:main|rust:Command::arg|src=test/rust/branch_merge_default/main.rs:10:20|sink=test/rust/branch_merge_default/main.rs:14:5
+rust/command_injection_args|rust-command-injection|rust:handle|rust:Command::arg|src=test/rust/command_injection_args/main.rs:17:15|sink=test/rust/command_injection_args/main.rs:19:5
+rust/command_injection_argv|rust-command-injection|rust:handle|rust:Command::args|src=test/rust/command_injection_argv/main.rs:21:15|sink=test/rust/command_injection_argv/main.rs:22:5
+rust/command_injection_helper|rust-command-injection|rust:run_shell|rust:Command::arg|src=test/rust/command_injection_helper/main.rs:23:22|sink=test/rust/command_injection_helper/main.rs:19:5
+rust/command_injection|rust-command-injection|rust:handle|rust:Command::arg|src=test/rust/command_injection/main.rs:23:16|sink=test/rust/command_injection/main.rs:24:18
+rust/db_rusqlite|rust-sql-injection|rust:handle|rust:Connection::execute|src=-|sink=-
+rust/path_traversal_open|rust-path-traversal|rust:handle|rust:File::open|src=test/rust/path_traversal_open/main.rs:19:16|sink=test/rust/path_traversal_open/main.rs:20:17
+rust/path_traversal|rust-path-traversal|rust:handle|rust:std::fs::read_to_string|src=test/rust/path_traversal/main.rs:18:16|sink=test/rust/path_traversal/main.rs:20:20
+rust/sql_injection|rust-sql-injection|rust:handle|rust:Connection::execute|src=test/rust/sql_injection/main.rs:20:14|sink=test/rust/sql_injection/main.rs:22:5
+rust/ssrf_reqwest|rust-ssrf|rust:handle|rust:reqwest::blocking::get|src=-|sink=-
+rust/ssrf|rust-ssrf|rust:handle|rust:Client::get|src=test/rust/ssrf/main.rs:16:18|sink=test/rust/ssrf/main.rs:17:5
+rust/web_bin_command_injection|rust-command-injection|rust:main|rust:Command::arg|src=test/rust/web_bin_command_injection/src/main.rs:6:15|sink=test/rust/web_bin_command_injection/src/main.rs:7:13
+rust/web_command_injection|rust-command-injection|rust:handle|rust:Command::arg|src=test/rust/web_command_injection/src/lib.rs:16:16|sink=test/rust/web_command_injection/src/lib.rs:17:5
+rust/web_rouille|rust-command-injection|rust:handle|rust:Command::arg|src=-|sink=-

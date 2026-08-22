@@ -1,0 +1,64 @@
+# Stored/passed-in XSS through a cell argument: a value the CALLER handed the
+# cell reaching an unescaped template interpolation.
+#
+# This is the source half of the cells model whose sink half is in ruby-xss (a
+# cells template does not auto-escape, so `<%= %>` there is a raw sink). Decidim
+# CVE-2024-41673 is the shape: a controller passes a request-derived value as a
+# cell option, the cell interpolates it into a translation, and the template
+# renders it unescaped.
+#
+# Why this is a SEPARATE rule at severity: low rather than a source added to
+# ruby-xss. `options[...]` is not request input by construction -- a cell is
+# invoked from a controller or another view, so the value may be a request
+# parameter or an entirely internal object, and the frontend cannot tell which.
+# Seeding it inside ruby-xss would put every cell that renders an argument into
+# the default `-fail-on medium` gate; decidim-core alone interpolates in 137 cell
+# templates. severity: low keeps these advisory under that gate while still
+# reporting them, the same trade py-insecure-config makes, and a cross-function
+# flow lands at Medium confidence so the LLM reviewer adjudicates it.
+#
+# Raising this to medium is a gate change, not a tuning knob: measure the finding
+# count on a large cells app first.
+rules:
+  - id: ruby-xss-cell-option
+    languages: [ruby]
+    severity: low
+    cwe: CWE-79
+    message: >-
+      A value passed into this cell (`options[...]`) reaches an unescaped
+      template interpolation. A cells template is compiled by Erbse, which has
+      no SafeBuffer, so `<%= %>` renders raw HTML — if the caller passes
+      request-derived data, this is Cross-Site Scripting. Escape it at the point
+      of use (e.g. `decidim_html_escape`) rather than relying on the template.
+    # Deliberately NO `extend: $_ruby-sources.yaml`. That fragment carries the
+    # ordinary request sources (params, cookies), and pulling it in made this rule
+    # a duplicate of ruby-xss on every `raw(params[:x])` -- six corpus false
+    # positives, in files that are not cells at all. The cell option is the ONLY
+    # source here; that is the entire point of the split.
+    sources:
+      - "ruby:@cell.options"
+    sinks:
+      - "ruby:raw"
+      - "ruby:html_safe"
+      - "ruby:raw#1"
+    sanitizers:
+      - "ruby:*html_escape"
+      - "ruby:*sanitize"
+      - "ruby:*escape_javascript"
+      - "ruby:*ERB::Util.html_escape"
+    # A translation carries what is interpolated into it, so `t(x)` returns a
+    # string containing x. Scoped to this rule rather than the shared
+    # default-propagators fragment, which has no Ruby section and documents itself
+    # as pure string/encoding transforms; ruby-xss wants the same entry, but adding
+    # it there changes a GATING rule and belongs with its own measurement.
+    #
+    # This carries the POSITIONAL form only. `t("key", name: x)` -- the form
+    # decidim CVE-2024-41673 actually uses -- does not flow, because a hash
+    # argument is lowered pairwise with the CONTAINER left untainted on purpose
+    # (ActiveRecord's hash form is parameterized by construction, so tainting it
+    # would fire on every `where(name: params[:q])`). Interpolating a translation
+    # and parameterizing a query are the same shape to the frontend, and telling
+    # them apart needs per-key taint rather than a propagator here.
+    propagators:
+      - "ruby:t"
+      - "ruby:translate"

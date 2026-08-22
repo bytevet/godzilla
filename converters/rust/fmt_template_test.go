@@ -18,6 +18,13 @@ func TestDecodeFmtTemplate(t *testing.T) {
 		{"arg-first", `const b"\xc0\x0b.host.com/x\x00"`, "{}.host.com/x", true},
 		{"arg+suffix", `const b"\thttp://h/\xc0\x05/tail\x00"`, "http://h/{}/tail", true},
 		{"two-args", `const b"\nhttps://h/\xc0\x01/\xc0\x00"`, "https://h/{}/{}", true},
+		// A spec-bearing or explicit-index argument uses a control byte this decoder
+		// does not model. What precedes it is literal text rustc emitted and stands;
+		// the rest becomes one insertion, which reads as dynamic. Dropping the
+		// literal prefix instead is what made a safe `format!("https://h/v1/{:>10}")`
+		// a high-confidence CWE-918 -- an empty template claims "no host here".
+		{"spec arg keeps the literal prefix", `const b"\x14https://host.com/v1/\xc3 \x00"`, "https://host.com/v1/{}", true},
+		{"spec arg before the host proves nothing", `const b"\xc3 \x00\x05/tail"`, "{}", true},
 		{"no b-prefix (plain string)", `"https://h/"`, "", false},
 		{"truncated length run", `const b"\x14https://h/"`, "", false},
 		{"bad hex escape", `const b"\xzz"`, "", false},

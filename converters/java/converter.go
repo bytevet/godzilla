@@ -217,6 +217,22 @@ func resolveJavaSource(scanPath string, idx map[string]string, source string) st
 	return scanPath
 }
 
+// Usable reports whether the `java` on PATH is one ConvertFile will accept, and
+// the major version it found (0 when the probe could not determine one).
+//
+// It is the SAME predicate ConvertFile enforces, exported so a test can skip on
+// what would otherwise fail. Guarding on mere presence of `java` disagrees: an
+// old JDK passes the guard and then fails the conversion, which reads as a
+// broken frontend rather than a missing toolchain.
+func Usable() (int, bool) {
+	javaExe, err := exec.LookPath("java")
+	if err != nil {
+		return 0, false
+	}
+	major, ok := javaMajorCached(javaExe)
+	return major, !ok || major >= minJDK
+}
+
 // javaMajorCached memoizes javaMajor per launcher path for the process
 // lifetime: the JDK under a fixed path does not change mid-run, and the probe
 // costs a full JVM spawn.

@@ -566,12 +566,23 @@ func buildFuncIndex(prog *ir.Program) (map[string]*ir.Function, map[string]*ir.M
 // canonical name. The DISPATCH policy (fan out to all implementers vs. resolve
 // only when the name is unambiguous) is likewise chosen from IR at the call site,
 // via CallCommon.untyped_dispatch, not from any language check here.
+//
+// Each implementer list is SORTED, and so is every other name list the worklist
+// iterates (buildCallers, buildGlobalReaders). These are built by ranging over a
+// map, so the append order is Go's randomized iteration order, and the worklist
+// visits functions in it; because every summary channel is first-seen-wins
+// (returnTaint, paramTaint), the order decides which origin a callee's summary
+// keeps and therefore whether a flow reports at all. Unsorted, a scan returned a
+// different finding count on each run.
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
 		if bare := fn.GetMethodName(); bare != "" {
 			methodImpls[bare] = append(methodImpls[bare], name)
 		}
+	}
+	for _, impls := range methodImpls {
+		slices.Sort(impls)
 	}
 	return methodImpls
 }
@@ -772,6 +783,11 @@ func buildCallers(cg *CallGraph) map[string][]string {
 			callers[callee] = append(callers[callee], caller)
 		}
 	}
+	// Sorted, for the determinism reason on buildMethodImpls: the worklist
+	// enqueues a callee's callers in this order once the callee returns taint.
+	for _, cs := range callers {
+		slices.Sort(cs)
+	}
 	return callers
 }
 
@@ -798,6 +814,12 @@ func buildGlobalReaders(byKey map[string]*ir.Function) map[string][]string {
 				}
 			}
 		}
+	}
+	// Sorted for the determinism reason on buildMethodImpls, and deduplicated
+	// because a function reading the same global twice would otherwise appear twice.
+	for g, rs := range globalReaders {
+		slices.Sort(rs)
+		globalReaders[g] = slices.Compact(rs)
 	}
 	return globalReaders
 }
@@ -1078,34 +1100,41 @@ func isStringType(t *ir.Type) bool {
 	}
 }
 
-// stringParamOrigin reports whether a tainted value with origin `pos` entered fn
-// through a STRING parameter, returning that parameter's index. It attributes the
-// value back to the seed it arrived on (origins are preserved across propagators),
-// then checks that parameter's declared type. fn.Params carries the SSA receiver
-// at index 0 for a method while Signature.Params excludes it, so the receiver is
-// shifted out.
-func stringParamOrigin(fn *ir.Function, seeds paramPositions, pos *ir.Position) (int, bool) {
-	idx := -1
-	for i, origin := range seeds {
-		if origin == pos {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return 0, false
-	}
+// stringParamOrigins returns the STRING parameters of fn that a tainted value
+// with origin `pos` could have entered through, in ascending index order. It
+// attributes the value back to the seeds it arrived on (origins are preserved
+// across propagators), then keeps those whose declared type is a string.
+// fn.Params carries the SSA receiver at index 0 for a method while
+// Signature.Params excludes it, so the receiver is shifted out.
+//
+// EVERY match, not one: a single origin seeds several parameters whenever one
+// call site passed the same tainted value twice (`f(x, x)`), and the engine
+// cannot tell which one carried it to the sink, so summarizing only one drops a
+// caller that taints the other. There is also no deterministic one to pick —
+// seeds is a map, so stopping at the first match returned a different parameter
+// on each run.
+func stringParamOrigins(fn *ir.Function, seeds paramPositions, pos *ir.Position) []int {
 	sig := fn.GetSignature()
 	off := 0
 	if sig.GetRecv() != nil {
 		off = 1
 	}
 	sp := sig.GetParams()
-	si := idx - off
-	if si < 0 || si >= len(sp) {
-		return 0, false // receiver or captured free variable: not a wrapper param
+	var out []int
+	for i, origin := range seeds {
+		if origin != pos {
+			continue
+		}
+		si := i - off
+		if si < 0 || si >= len(sp) {
+			continue // receiver or captured free variable: not a wrapper param
+		}
+		if isStringType(sp[si]) {
+			out = append(out, i)
+		}
 	}
-	return idx, isStringType(sp[si])
+	slices.Sort(out)
+	return out
 }
 
 // recordSinkParam summarizes a dependency sink wrapper: when a tainted value that
@@ -1115,8 +1144,8 @@ func stringParamOrigin(fn *ir.Function, seeds paramPositions, pos *ir.Position) 
 // that is itself a modeled sink (its direct call site already fires, so summarizing
 // would double-report).
 func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds paramPositions, pos, sinkPos *ir.Position) {
-	k, ok := stringParamOrigin(fn, seeds, pos)
-	if !ok {
+	ks := stringParamOrigins(fn, seeds, pos)
+	if len(ks) == 0 {
 		return
 	}
 	if rule.IsSink(fn.CanonicalName) {
@@ -1125,8 +1154,10 @@ func recordSinkParam(res *funcResult, fn *ir.Function, rule *rules.Rule, seeds p
 	if res.taintsParamSink == nil {
 		res.taintsParamSink = paramPositions{}
 	}
-	if _, exists := res.taintsParamSink[k]; !exists {
-		res.taintsParamSink[k] = sinkPos
+	for _, k := range ks {
+		if _, exists := res.taintsParamSink[k]; !exists {
+			res.taintsParamSink[k] = sinkPos
+		}
 	}
 }
 

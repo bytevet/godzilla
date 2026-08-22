@@ -9,6 +9,8 @@
 package testsupport
 
 import (
+	"github.com/bytevet/godzilla/internal/irwalk"
+	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 	"os/exec"
 	"testing"
 
@@ -82,4 +84,23 @@ func OneRuleSet(t testing.TB, id, lang, cwe string, sources, sinks []string, opt
 		o(&r)
 	}
 	return &rules.RuleSet{DefaultPropagators: DefaultPropagators(t), Rules: []rules.Rule{r}}
+}
+
+// RequireNoFallbackIntrinsic asserts that no instruction in prog lowered to a
+// frontend's fallback intrinsic ("js.unsupported", "py.unsupported", …).
+//
+// A fallback marks a construct the lowering does not model, and it is SILENT:
+// the file still converts and the language still reports coverage=ok, so a
+// dropped construct costs findings with nothing failing. Call this over a whole
+// tree rather than a named file list — the constructs that trip it are the ones
+// nobody thought to name.
+func RequireNoFallbackIntrinsic(t testing.TB, prog *ir.Program, intrinsic, what string) {
+	t.Helper()
+	for _, fn := range irwalk.Funcs(prog) {
+		for inst := range irwalk.Instrs(fn) {
+			if inst.Op == ir.OpCode_OP_CODE_INTRINSIC && inst.Intrinsic == intrinsic {
+				t.Errorf("%s: %s in %s: %s", what, intrinsic, fn.CanonicalName, inst.Comment)
+			}
+		}
+	}
 }
