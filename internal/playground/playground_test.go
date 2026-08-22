@@ -329,11 +329,11 @@ func TestHTTPEndpoints(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
 		return resp
 	}
 
 	index := get("/")
-	defer index.Body.Close()
 	if index.StatusCode != http.StatusOK {
 		t.Fatalf("GET / = %d", index.StatusCode)
 	}
@@ -344,7 +344,6 @@ func TestHTTPEndpoints(t *testing.T) {
 	}
 
 	tree := get("/api/tree")
-	defer tree.Body.Close()
 	var got struct {
 		Files []struct {
 			ID    string `json:"id"`
@@ -360,7 +359,6 @@ func TestHTTPEndpoints(t *testing.T) {
 	}
 
 	file := get("/api/file?p=main.go")
-	defer file.Body.Close()
 	if file.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/file = %d", file.StatusCode)
 	}
@@ -373,7 +371,6 @@ func TestHTTPEndpoints(t *testing.T) {
 	}
 
 	missing := get("/api/file?p=nope.go")
-	defer missing.Body.Close()
 	if missing.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown file = %d, want 404", missing.StatusCode)
 	}
@@ -383,7 +380,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer match.Body.Close()
+	t.Cleanup(func() { _ = match.Body.Close() })
 	var mr matchResult
 	if err := json.NewDecoder(match.Body).Decode(&mr); err != nil {
 		t.Fatal(err)
