@@ -32,12 +32,14 @@ type CallGraph struct {
 	// callers, so it never appears as an Edges key.
 	Edges map[string][]string
 
-	// Callees is the set of DISTINCT callee names this program calls, including the
-	// unresolved ones Edges drops (unlowered stdlib, dynamic dispatch). The engine
-	// uses it to skip a rule whose sink globs match nothing the program calls; it
-	// is collected here rather than by a separate walk because this pass already
-	// visits every instruction, and a second walk cost more than the skipping saved.
-	Callees map[string]bool
+	// Callees maps each DISTINCT callee name this program calls to how many call
+	// SITES name it, including the unresolved ones Edges drops (unlowered stdlib,
+	// dynamic dispatch). The engine uses the key set to skip a rule whose sink
+	// globs match nothing the program calls, and the counts feed the report's
+	// source/sink workload figures; both are collected here rather than by a
+	// separate walk because this pass already visits every instruction, and a
+	// second walk cost more than the skipping saved.
+	Callees map[string]int
 }
 
 // buildCallGraph builds a whole-program CallGraph from every CALL, INVOKE, and
@@ -61,7 +63,7 @@ func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]stri
 	g := &CallGraph{
 		Funcs:   byKey,
 		Edges:   map[string][]string{},
-		Callees: map[string]bool{},
+		Callees: map[string]int{},
 	}
 
 	edgeSets := map[string]map[string]bool{}
@@ -75,7 +77,7 @@ func buildCallGraph(byKey map[string]*ir.Function, methodImpls map[string][]stri
 			// Collect callees for EVERY function, including the "__local<N>"-keyed
 			// ones excluded as callers below: they are still analyzed, so a sink
 			// inside one must keep its rule from being prefiltered away.
-			g.Callees[inst.Call.GetCallee()] = true
+			g.Callees[inst.Call.GetCallee()]++
 			if caller == "" {
 				continue
 			}

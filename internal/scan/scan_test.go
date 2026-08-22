@@ -9,6 +9,7 @@ import (
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/rules/loader"
+	"github.com/bytevet/godzilla/internal/scaninfo"
 	"github.com/bytevet/godzilla/internal/testsupport"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -187,5 +188,84 @@ func TestDropCoLocatedDangerous(t *testing.T) {
 	want := []string{"line", "nest", "nopos"}
 	if !slices.Equal(got, want) {
 		t.Errorf("dropCoLocatedDangerous kept %v, want %v", got, want)
+	}
+}
+
+// TestScanDiagnosticsOptIn: telemetry is collected only when asked for, because
+// nothing but the HTML report reads it and it costs a second read pass over the
+// source plus a glob of every callee against every rule.
+func TestScanDiagnosticsOptIn(t *testing.T) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("loader.Builtin: %v", err)
+	}
+	dir := filepath.Join("..", "..", "test", "go", "sql_injection")
+	res, err := Scan(dir, rs)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res.Findings) == 0 {
+		t.Fatal("expected findings; the sample is vulnerable")
+	}
+	if res.Diag != (scaninfo.Info{}) {
+		t.Errorf("Diag collected without WithDiagnostics: %+v", res.Diag)
+	}
+}
+
+// TestScanDiagnostics pins that the report's diagnostics panel gets real
+// numbers on both entry points. ScanFiles is the one that would silently read
+// zero: runAnalyses is handed no scan root and no inventory there, so the file
+// list has to be accumulated by ScanFiles itself.
+func TestScanDiagnostics(t *testing.T) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		t.Fatalf("loader.Builtin: %v", err)
+	}
+	dir := filepath.Join("..", "..", "test", "go", "sql_injection")
+
+	for _, tc := range []struct {
+		name string
+		run  func() (Result, error)
+	}{
+		{"Scan", func() (Result, error) { return Scan(dir, rs, WithDiagnostics()) }},
+		{"ScanFiles", func() (Result, error) {
+			return ScanFiles([]string{filepath.Join(dir, "main.go")}, rs, WithDiagnostics())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tc.run()
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			d := res.Diag
+			if d.Files == 0 || d.Lines == 0 {
+				t.Errorf("Files=%d Lines=%d; both must be counted", d.Files, d.Lines)
+			}
+			if d.Lines < d.Files {
+				t.Errorf("Lines=%d < Files=%d; a source file has at least one line", d.Lines, d.Files)
+			}
+			if d.Packages == 0 || d.Functions == 0 || d.Rules == 0 {
+				t.Errorf("Packages=%d Functions=%d Rules=%d; none may be zero", d.Packages, d.Functions, d.Rules)
+			}
+			if d.SinkSites == 0 {
+				t.Error("SinkSites = 0, but this sample calls a sink")
+			}
+			if d.Wall <= 0 || d.Convert <= 0 || d.Analysis <= 0 {
+				t.Errorf("Wall=%v Convert=%v Analysis=%v; all must be timed", d.Wall, d.Convert, d.Analysis)
+			}
+			// Index/RuleSel/Taint are sub-spans of Analysis, and Convert plus
+			// Analysis are sub-spans of Wall. The report's phase bars assume both.
+			if sub := d.Index + d.RuleSel + d.Taint; sub > d.Analysis {
+				t.Errorf("engine sub-spans %v exceed Analysis %v", sub, d.Analysis)
+			}
+			if d.Convert+d.Analysis > d.Wall {
+				t.Errorf("Convert+Analysis %v exceeds Wall %v", d.Convert+d.Analysis, d.Wall)
+			}
+			// Memory is deliberately NOT sampled by a scan: ReadMemStats stops
+			// the world, and this is a library call. The CLI samples it.
+			if d.PeakBytes != 0 {
+				t.Errorf("PeakBytes = %d; a scan must not call ReadMemStats", d.PeakBytes)
+			}
+		})
 	}
 }

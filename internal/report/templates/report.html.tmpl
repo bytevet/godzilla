@@ -1,138 +1,1017 @@
-<!DOCTYPE html>
+{{/*
+  Godzilla SAST report. The data shape is reportData in ../html.go, which
+  pre-formats every value so this file stays logic-free.
+
+  The stylesheet and script are written out literally below rather than
+  injected, so this template is the only file the binary embeds. Neither
+  carries finding data: every hole below is escaped by html/template, and the
+  script reads only already-rendered data-* attributes and textContent.
+*/}}<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}}</title>
-<style>{{.CSS}}</style>
+{{/* Strict CSP. .Nonce must be a fresh 128-bit random value per render
+     (crypto/rand, base64) — it pins the inline stylesheet and script without
+     needing 'unsafe-inline'. style-src-attr covers the style="width:NN%"
+     attributes on the summary bars. Google Fonts is the only external source —
+     the highlighter is inlined, so dropping the two fonts.* sources gives a fully
+     offline artifact: the report falls back to the system sans/mono and
+     highlighting is unaffected. */}}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{.Nonce}}'; style-src 'nonce-{{.Nonce}}' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src data:; base-uri 'none'; form-action 'none'; object-src 'none';">
+<title>Godzilla SAST &mdash; {{.Target}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style nonce="{{.Nonce}}">
+/* Godzilla SAST report — self-contained styling.
+   Palette, type and spacing are the NotYet UI token set (dark-first ink ramp,
+   IBM Plex, teal accent) restated as plain custom properties so the report stays
+   a single dependency-free HTML file. Contains no finding data.
+
+   Severity is one variable, not five rule sets: .s-<level> sets --sev and
+   --sev-tint, and every severity-coloured part reads those. */
+
+:root {
+  /* ramps and type: theme-independent */
+  --ink-0:#0b0c0e; --ink-1:#14161a; --ink-2:#1b1e23; --ink-3:#21252c;
+  --ink-4:#252a32; --ink-5:#333a45; --ink-6:#5f6672; --ink-7:#8b929e; --ink-8:#e9ebee;
+  --paper-0:#f7f6f3; --paper-1:#ffffff; --paper-2:#f2f1ec; --paper-3:#ecebe4;
+  --paper-4:#e4e1d9; --paper-5:#cfcabd; --paper-6:#9aa0a8; --paper-7:#6c727c; --paper-8:#191b1e;
+  --accent:#2fbfa8;
+
+  --sans:"IBM Plex Sans","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r-xs:2px; --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:12px; --r-full:999px;
+}
+
+/* dark is the default palette */
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:var(--ink-0); --surface:var(--ink-1); --sunken:var(--ink-2); --hover:var(--ink-3);
+  --line:var(--ink-4); --line-strong:var(--ink-5);
+  --text:var(--ink-8); --muted:var(--ink-7); --subtle:var(--ink-6);
+  --accent-text:#78e3d2; --accent-tint:#102b26; --accent-border:#267367;
+  --crit:#e0554a; --crit-tint:#2b1310;
+  --high:#e0703f; --high-tint:#2b1a10;
+  --med:#d3982f;  --med-tint:#2b2110;
+  --low:#4c8dd0;  --low-tint:#101d2b;
+  --info:#8b929e; --info-tint:#1a1d21;
+}
+/* …but a light device gets the light palette before any script runs, so the
+   report never paints dark and then flips. data-theme (set only by an explicit
+   click, persisted in localStorage) wins over the device preference. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+  color-scheme: light;
+  --bg:var(--paper-0); --surface:var(--paper-1); --sunken:var(--paper-2); --hover:var(--paper-3);
+  --line:var(--paper-4); --line-strong:var(--paper-5);
+  --text:var(--paper-8); --muted:var(--paper-7); --subtle:var(--paper-6);
+  --accent-text:#147566; --accent-tint:#e3f7f4; --accent-border:#359f8e;
+  --crit:#a8241a; --crit-tint:#f7e5e3;
+  --high:#a24a17; --high-tint:#f7ebe3;
+  --med:#785311;  --med-tint:#f7f0e3;
+  --low:#164474;  --low-tint:#e3edf7;
+  --info:#6c727c; --info-tint:#ebedef;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:var(--paper-0); --surface:var(--paper-1); --sunken:var(--paper-2); --hover:var(--paper-3);
+  --line:var(--paper-4); --line-strong:var(--paper-5);
+  --text:var(--paper-8); --muted:var(--paper-7); --subtle:var(--paper-6);
+  --accent-text:#147566; --accent-tint:#e3f7f4; --accent-border:#359f8e;
+  --crit:#a8241a; --crit-tint:#f7e5e3;
+  --high:#a24a17; --high-tint:#f7ebe3;
+  --med:#785311;  --med-tint:#f7f0e3;
+  --low:#164474;  --low-tint:#e3edf7;
+  --info:#6c727c; --info-tint:#ebedef;
+}
+
+.s-critical { --sev: var(--crit); --sev-tint: var(--crit-tint); }
+.s-high     { --sev: var(--high); --sev-tint: var(--high-tint); }
+.s-medium   { --sev: var(--med);  --sev-tint: var(--med-tint); }
+.s-low      { --sev: var(--low);  --sev-tint: var(--low-tint); }
+.s-info     { --sev: var(--info); --sev-tint: var(--info-tint); }
+
+* { box-sizing: border-box; }
+html { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { color: var(--accent); text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.eyebrow, .cell .k, th, .fact dt, .subhead {
+  font: 600 10px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--subtle);
+}
+.eyebrow { font-size: 11px; letter-spacing: .12em; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+/* ── shell ───────────────────────────────────────────────────────────── */
+.col-list { padding: 28px 20px 64px; max-width: 900px; margin: 0 auto; container-type: inline-size; }
+.col-detail { display: none; }
+
+/* ── masthead ────────────────────────────────────────────────────────── */
+.mast { display: flex; align-items: flex-start; gap: 16px; }
+.mast h1 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; margin: 6px 0 10px; }
+.mast .grow { flex: 1 1 auto; min-width: 0; }
+.verdict {
+  flex: none; height: 28px;
+  display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  font: 600 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  padding: 0 10px; border-radius: var(--r-full);
+  background: var(--crit-tint); color: var(--crit);
+  border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent);
+}
+.verdict.pass { background: var(--accent-tint); color: var(--accent-text); border-color: var(--accent-border); }
+.verdict .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 20px; font: 400 12px/1.6 var(--mono); color: var(--subtle); }
+.meta b { color: var(--muted); font-weight: 500; }
+
+.icon-btn {
+  flex: none; width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--muted); cursor: pointer;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+.theme-toggle svg { width: 14px; height: 14px; display: none; }
+.theme-toggle[data-eff="dark"] .ico-moon,
+.theme-toggle[data-eff="light"] .ico-sun { display: block; }
+@media (prefers-color-scheme: dark) { .theme-toggle:not([data-eff]) .ico-moon { display: block; } }
+@media (prefers-color-scheme: light) { .theme-toggle:not([data-eff]) .ico-sun { display: block; } }
+
+/* ── severity strip ──────────────────────────────────────────────────── */
+/* 1px gaps over a hairline-coloured background: the rules between cells are the
+   gaps themselves, so a wrapped row is separated exactly like a column and the
+   strip reads as a grid at any width (it wraps 6 → 3+3 → 2+2+2). */
+.strip {
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px; margin: 24px 0 0; overflow: hidden;
+  background: var(--line); border: 1px solid var(--line); border-radius: var(--r-xl);
+}
+/* six cells, so wrap only into factors of six — 6 → 3+3 → 2+2+2. auto-fit left a
+   half-empty trailing row once the list column narrowed. Measured against the
+   column, not the viewport, because the detail pane takes half the screen. */
+@container (max-width: 800px) { .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (max-width: 430px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 430px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.cell {
+  padding: 13px 15px 12px; min-width: 0;
+  background: var(--surface); color: var(--sev, var(--text));
+}
+.cell .v { font: 500 24px/1.1 var(--mono); letter-spacing: -.02em; margin-top: 8px; color: currentColor; }
+.cell .bar { height: 2px; margin-top: 10px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.cell .bar i { display: block; height: 100%; background: currentColor; }
+.cell.zero .v { color: var(--subtle); }
+.cell.zero .bar i { background: var(--line-strong); }
+
+/* ── panels & tables ─────────────────────────────────────────────────── */
+h2 { font: 600 13px/1 var(--sans); margin: 34px 0 10px; color: var(--muted); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-xl); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); }
+th { background: var(--sunken); }
+tr:last-child td { border-bottom: 0; }
+td.r, th.r { text-align: right; }
+tbody tr:hover, tbody tr.picked { background: var(--hover); }
+.rule-name { font: 500 12.5px/1 var(--mono); }
+.rule-pick {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer;
+}
+.rule-pick .mag { width: 12px; height: 12px; color: var(--subtle); opacity: 0; transition: opacity .12s ease; }
+tbody tr:hover .mag, .rule-pick:focus-visible .mag { opacity: 1; }
+tbody tr.picked .rule-name, tbody tr.picked .mag { color: var(--accent-text); opacity: 1; }
+.rule-bar { display: flex; align-items: center; gap: 10px; justify-content: flex-end; color: var(--sev, var(--muted)); }
+.rule-bar .track { width: 84px; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.rule-bar .track i, .phase .track i { display: block; height: 100%; background: currentColor; }
+.rule-bar .n { font: 500 12.5px/1 var(--mono); min-width: 1.5em; text-align: right; }
+
+/* ── chips & meter ───────────────────────────────────────────────────── */
+.sev {
+  font: 600 10px/1 var(--mono); letter-spacing: .09em; text-transform: uppercase;
+  padding: 4px 7px; border-radius: var(--r-sm); white-space: nowrap;
+  color: var(--sev); background: var(--sev-tint);
+}
+.tag {
+  font: 500 11px/1 var(--mono); color: var(--muted); white-space: nowrap;
+  padding: 4px 6px; border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.tag.rule { color: var(--accent-text); border-color: var(--line-strong); }
+/* a suppressed finding is kept, not dropped (see analysis.Finding.Suppressed):
+   dimmed and struck through, so it reads as adjudicated rather than active. */
+.tag.sup { color: var(--info); border-style: dashed; }
+.finding.suppressed > .row .sev, .finding.suppressed > .row .msg { opacity: .55; }
+.finding.suppressed > .row .loc { text-decoration: line-through; }
+.warn { color: var(--high); }
+/* confidence: 3 ticks filled 3/2/1 — ink for filled, hairline outline for the
+   rest, so confidence never competes with the severity colours. */
+.meter { position: relative; display: inline-flex; gap: 2px; align-items: center; }
+.meter i { width: 4px; height: 11px; border-radius: 1px; border: 1px solid var(--line-strong); }
+.meter i.on { background: var(--text); border-color: var(--text); }
+.meter[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; top: calc(100% + 7px); left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  z-index: 50; width: max-content; max-width: 280px;
+  padding: 7px 9px; border-radius: var(--r-sm);
+  background: var(--surface); border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 18px rgb(0 0 0 / .28);
+  color: var(--text); font: 400 11.5px/1.45 var(--sans); text-transform: none; letter-spacing: 0;
+  opacity: 0; pointer-events: none; transition: opacity .12s ease, transform .12s ease;
+}
+.meter[data-tip]:hover::after, .row:focus-visible .meter[data-tip]::after {
+  opacity: 1; transform: translateX(-50%);
+}
+
+/* ── controls ────────────────────────────────────────────────────────── */
+.controls {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 10px 0 12px; padding: 8px 0;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.sevfilter { display: flex; align-items: center; gap: 3px; }
+.sevfilter label {
+  display: inline-flex; align-items: center; height: 26px; padding: 0 8px;
+  font: 600 9.5px/1 var(--mono); letter-spacing: .08em;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--sev, var(--muted));
+  cursor: pointer; user-select: none;
+}
+.sevfilter label.off { color: var(--subtle); background: transparent; }
+.sevfilter label.off span { text-decoration: line-through; opacity: .7; }
+.sevfilter label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sevfilter input, .dd-menu input { position: absolute; opacity: 0; pointer-events: none; }
+select, input[type="search"], .dd > summary {
+  height: 26px; padding: 0 8px;
+  font: 400 12px/1 var(--sans); color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+input[type="search"] { flex: 1 1 170px; min-width: 110px; }
+.count { font: 500 10.5px/1 var(--mono); color: var(--subtle); white-space: nowrap; }
+/* confidence picker: a <details> dropdown, so its options can show the same
+   3-tick meter as the rows (a native <select> can only hold text). */
+.dd { position: relative; }
+.dd > summary {
+  list-style: none; display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; white-space: nowrap;
+}
+.dd > summary::-webkit-details-marker, .step > summary::-webkit-details-marker,
+.diag > summary::-webkit-details-marker { display: none; }
+.dd > summary:hover, .dd[open] > summary { border-color: var(--line-strong); }
+.dd .dd-caret {
+  width: 0; height: 0; margin-left: 2px;
+  border-top: 4px solid var(--subtle);
+  border-left: 3.5px solid transparent; border-right: 3.5px solid transparent;
+}
+.dd-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 200;
+  min-width: 186px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); box-shadow: 0 8px 24px rgb(0 0 0 / .3);
+}
+.dd-menu label {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; border-radius: var(--r-xs);
+  font: 400 12px/1 var(--sans); color: var(--muted); cursor: pointer;
+}
+.dd-menu label:hover, .dd-menu label:has(input:checked) { background: var(--hover); color: var(--text); }
+.clear-btn {
+  width: 26px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted); background: none;
+  border: 1px solid var(--line); border-radius: var(--r-sm); cursor: pointer;
+}
+.clear-btn svg { width: 11px; height: 11px; }
+.clear-btn:hover { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 45%, var(--line)); }
+.clear-btn[hidden] { display: none; }
+
+/* ── findings list ───────────────────────────────────────────────────── */
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-xl); }
+/* .r-top / .r-bot are set by the filter pass on the first and last VISIBLE
+   finding — structural selectors can't see which rows a filter has hidden. */
+.finding.r-top > .row {
+  border-top-left-radius: var(--r-xl); border-top-right-radius: var(--r-xl);
+}
+.finding.r-bot > .row {
+  border-bottom-left-radius: var(--r-xl); border-bottom-right-radius: var(--r-xl);
+}
+.finding.r-bot.open > .row {
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+}
+.finding.r-bot > .body {
+  border-bottom-left-radius: var(--r-xl); border-bottom-right-radius: var(--r-xl);
+}
+.finding + .finding { border-top: 1px solid var(--line); }
+.finding[hidden] { display: none; }
+.row {
+  width: 100%; display: grid; gap: 4px;
+  padding: 12px 15px 13px 13px;
+  border: 0; border-left: 2px solid color-mix(in srgb, var(--sev, transparent) 55%, transparent);
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.row:hover { background: var(--hover); }
+.finding.active > .row { background: var(--hover); border-left-color: var(--accent); }
+.row .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.row .loc { margin-left: auto; font: 500 11.5px/1 var(--mono); color: var(--muted); }
+.row .msg {
+  color: var(--muted); font-size: 13px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.finding.active .row .msg { color: var(--text); }
+.empty { padding: 40px 16px; text-align: center; color: var(--subtle); font-size: 13px; }
+
+/* clean-scan empty state */
+.clean { padding: 52px 24px; text-align: center; }
+.clean .mark {
+  width: 34px; height: 34px; margin: 0 auto 16px;
+  display: grid; place-items: center; border-radius: 50%;
+  background: var(--accent-tint); color: var(--accent-text); border: 1px solid var(--accent-border);
+}
+.clean .mark svg { width: 16px; height: 16px; }
+.clean h3 { margin: 0 0 8px; font: 600 15px/1.3 var(--sans); }
+.clean p { margin: 0 auto; max-width: 48ch; color: var(--muted); font-size: 13px; }
+.clean .rules-run { margin-top: 18px; font: 400 11.5px/1.7 var(--mono); color: var(--subtle); }
+
+/* ── detail ──────────────────────────────────────────────────────────── */
+.body { display: none; border-top: 1px solid var(--line); padding: 4px 15px 18px; }
+.finding.open > .body { display: block; }
+.pane { padding: 22px 24px 64px; }
+.pane-empty { padding: 26px 24px; color: var(--subtle); font-size: 13px; }
+.d-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.list .body .d-head .sev, .list .body .d-head .tag { display: none; }
+.d-msg { margin: 12px 0 0; max-width: 62ch; }
+.facts { margin: 18px 0 0; border-top: 1px solid var(--line); }
+.fact { display: grid; grid-template-columns: 88px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.fact dt { line-height: 1.6; }
+.fact dd { margin: 0; font: 400 12.5px/1.5 var(--mono); word-break: break-all; }
+.fact dd .sink { color: var(--crit); }
+.fact dd .ok { color: var(--accent-text); }
+.subhead { letter-spacing: .11em; margin: 24px 0 8px; }
+
+/* taint flow — numbered rail */
+.flow { position: relative; padding-left: 26px; }
+.flow::before { content: ""; position: absolute; left: 8px; top: 8px; bottom: 8px; width: 1px; background: var(--line-strong); }
+.step {
+  position: relative; margin: 0 0 8px; overflow: hidden;
+  background: var(--sunken); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
+.step::before {
+  content: attr(data-idx);
+  position: absolute; left: -26px; top: 8px;
+  width: 17px; height: 17px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: 600 9.5px/1 var(--mono);
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--muted);
+}
+.step.source::before { border-color: var(--accent-border); color: var(--accent-text); }
+.step.sink::before { border-color: color-mix(in srgb, var(--crit) 55%, transparent); color: var(--crit); background: var(--crit-tint); }
+.step > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 10px; font: 500 11.5px/1.4 var(--mono);
+}
+.step > summary:hover { background: var(--hover); }
+.step .kind { font: 600 9.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--subtle); }
+.step.source .kind { color: var(--accent-text); }
+.step.sink .kind { color: var(--crit); }
+.step .loc { color: var(--text); }
+.step .chev { margin-left: auto; color: var(--subtle); font-size: 10px; transition: transform .15s ease; }
+.step[open] .chev { transform: rotate(90deg); }
+
+/* ── snippets ────────────────────────────────────────────────────────── */
+.snippet {
+  margin: 0; padding: 8px 0; overflow-x: auto;
+  font: 400 12px/1.55 var(--mono);
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+/* Go token colours, painted by the tokenizer in the script below. */
+.snippet .t-com { color: var(--subtle); }
+.snippet .t-str { color: var(--med); }
+.snippet .t-kw  { color: var(--accent-text); }
+.snippet .t-num,
+.snippet .t-fn  { color: var(--low); }
+.snippet .t-op  { color: var(--subtle); }
+/* .src is as wide as the LONGEST line in the block, so every line is that wide
+   too and a highlighted line stays filled while the snippet scrolls sideways. */
+.snippet .src { display: block; min-width: max-content; }
+.snippet .line { display: block; white-space: pre; padding: 0 10px; }
+.snippet .ln {
+  display: inline-block; width: 2.2em; margin-right: 10px; text-align: right;
+  color: var(--subtle); user-select: none;
+}
+.snippet .hl {
+  background: color-mix(in srgb, var(--high) 20%, transparent);
+  box-shadow: inset 2px 0 0 var(--high);
+}
+.snippet .hl .ln { color: var(--high); }
+.snippet .caret { color: var(--high); background: none; user-select: none; }
+.snippet .caret .ln { opacity: 0; }
+.snippet-missing { padding: 8px 12px; color: var(--subtle); font-size: 12px; }
+
+/* ── scan diagnostics ────────────────────────────────────────────────── */
+.diag { margin-top: 32px; }
+.diag > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 0; font: 600 13px/1 var(--sans); color: var(--muted);
+}
+/* drawn triangle rather than a glyph: no font baseline to fight */
+.diag > summary::before {
+  content: ""; flex: none; align-self: center;
+  width: 0; height: 0; margin: 0 2px;
+  border-left: 6px solid var(--muted);
+  border-top: 4.5px solid transparent; border-bottom: 4.5px solid transparent;
+  transition: transform .15s ease;
+}
+.diag[open] > summary::before { transform: rotate(90deg); }
+.diag > summary:hover { color: var(--text); }
+.diag > summary:hover::before { border-left-color: var(--text); }
+.diag .hint { margin-left: auto; font: 400 11.5px/1 var(--mono); color: var(--subtle); }
+.diag .panel { padding: 4px 18px 18px; }
+.diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0 32px; }
+.dfact {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+  font: 400 12px/1.5 var(--mono);
+}
+.dfact .dk { color: var(--subtle); }
+.dfact .dv { white-space: nowrap; }
+.phase {
+  display: grid; grid-template-columns: minmax(120px, 160px) 1fr 62px;
+  align-items: center; gap: 12px;
+  padding: 5px 0; font: 400 11.5px/1.6 var(--mono); color: var(--muted);
+}
+.phase .track { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; color: var(--accent); }
+.phase .t { text-align: right; color: var(--text); }
+
+footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line); font: 400 11.5px/1.6 var(--mono); color: var(--subtle); }
+
+/* ── wide: list + detail ─────────────────────────────────────────────── */
+@media (min-width: 1000px) {
+  .app { display: flex; align-items: stretch; min-height: 100dvh; }
+  .col-list { flex: 1 1 auto; min-width: 0; max-width: none; padding: 30px 28px 56px; }
+  .col-detail {
+    display: block; flex: 0 0 44%; min-width: 400px; max-width: 720px;
+    background: var(--surface); border-left: 1px solid var(--line);
+  }
+  .col-detail .pane, .col-detail .pane-empty {
+    position: sticky; top: 0; max-height: 100dvh; overflow-y: auto;
+  }
+  .list .body, .row .chev-row { display: none; }
+}
+@media (max-width: 999px) {
+  .row .chev-row { margin-left: 8px; color: var(--subtle); font-size: 13px; transition: transform .15s ease; }
+  .finding.open .row .chev-row { transform: rotate(90deg); color: var(--accent-text); }
+}
+@media (max-width: 560px) {
+  .col-list { padding: 22px 14px 48px; }
+  .mast h1 { font-size: 19px; }
+  .row .loc, .count { margin-left: 0; flex-basis: 100%; }
+}
+@media print {
+  .controls, .icon-btn, .col-detail { display: none !important; }
+  .finding > .body { display: block !important; }
+}
+</style>
 </head>
 <body>
-<div class="wrap">
-  <div class="layout{{if not .Findings}} single{{end}}">
-  <div class="main">
-  <header>
-    <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
-      <span class="ico-sun" aria-hidden="true">&#9788;</span><span class="ico-moon" aria-hidden="true">&#9789;</span>
-    </button>
-    <div class="eyebrow">Godzilla &middot; SAST</div>
-    <h1>Godzilla SAST Report</h1>
-    <p class="lede">Generated {{.GeneratedAt}}. Total findings: <strong>{{.Total}}</strong>{{if .Total}} &mdash; sorted worst-severity first.{{end}}
-    {{if .Root}}<br><span class="muted">Paths shown relative to <code>{{.Root}}</code>.</span>{{end}}</p>
-  </header>
-  <section class="summary">
-    <h2>Summary</h2>
-    <div class="tiles">
-      {{range .Tiles}}
-      <div class="tile{{if .Lead}} lead{{end}}{{if .Class}} {{.Class}}{{end}}">
-        <div class="n">{{.Count}}</div>
-        <div class="l">{{.Label}}</div>
+<div class="app">
+<main class="col-list">
+  <div class="mast">
+    <div class="grow">
+      <div class="eyebrow">Godzilla &middot; static analysis</div>
+      <h1>{{.Target}} &mdash; Code Security Report</h1>
+      <div class="meta">
+        <span><b>target</b> {{.Target}}</span>
+        <span><b>generated</b> {{.Generated}}</span>
       </div>
+    </div>
+    {{if .Total}}
+    <span class="verdict"><span class="dot"></span>{{.Critical}} critical &middot; {{.High}} high</span>
+    {{else}}
+    <span class="verdict pass"><span class="dot"></span>no findings</span>
+    {{end}}
+    <button id="theme-toggle" class="icon-btn theme-toggle" type="button" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
+      <svg class="ico-sun" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.2v1.5M8 13.3v1.5M1.2 8h1.5M13.3 8h1.5M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+      <svg class="ico-moon" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M13.1 10.4A5.7 5.7 0 0 1 5.6 2.9 5.7 5.7 0 1 0 13.1 10.4Z"/></svg>
+    </button>
+  </div>
+
+  <div class="strip">
+    <div class="cell total">
+      <div class="k">Findings</div>
+      <div class="v">{{.Total}}</div>
+      <div class="bar"><i style="width:100%;background:var(--accent)"></i></div>
+    </div>
+    {{range .SeverityCells}}
+    <div class="cell s-{{.Key}}{{if not .Count}} zero{{end}}">
+      <div class="k">{{.Key}}</div>
+      <div class="v">{{.Count}}</div>
+      <div class="bar"><i style="width:{{.Pct}}%"></i></div>
+    </div>
+    {{end}}
+    <div class="cell">
+      <div class="k">Files hit</div>
+      <div class="v">{{.FilesAffected}}</div>
+      <div class="bar"><i style="width:100%;background:var(--line-strong)"></i></div>
+    </div>
+  </div>
+
+  {{if .Rules}}
+  <h2>Findings by rule</h2>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Rule</th><th>CWE</th><th class="r">Findings</th></tr>
+      </thead>
+      <tbody>
+        {{range .Rules}}
+        <tr class="s-{{.TopSeverity}}">
+          <td><button class="rule-pick" type="button" data-rule="{{.Name}}" title="Filter findings by this rule"><span class="rule-name">{{.Name}}</span><svg class="mag" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2l3.3 3.3"/></svg></button></td>
+          <td><span class="mono muted" style="font-size:12px">{{.CWE}}</span></td>
+          <td class="r"><span class="rule-bar"><span class="track"><i style="width:{{.Pct}}%"></i></span><span class="n">{{.Count}}</span></span></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+
+  <h2>Findings</h2>
+  {{if .Findings}}
+  <div class="controls">
+    <div class="sevfilter">
+      {{range .SeverityFilter}}
+      <label class="s-{{.Key}}"><input type="checkbox" data-sev="{{.Key}}" checked><span>{{.Label}}</span></label>
       {{end}}
     </div>
-
-    {{if .ByRule}}
-    <h2>Findings by rule</h2>
-    <div class="panel scroll">
-      <table>
-        <thead><tr><th>Rule</th><th>CWE</th><th class="num">Count</th></tr></thead>
-        <tbody>
-        {{range .ByRule}}
-          <tr>
-            <td><span class="klass">{{.RuleID}}</span></td>
-            <td class="mono muted">{{.CWE}}</td>
-            <td class="num {{.SevClass}}">{{.Count}}</td>
-          </tr>
-        {{end}}
-        </tbody>
-      </table>
-    </div>
-    {{end}}
-  </section>
-
-  <section class="findings">
-    <h2>Details</h2>
-    {{if not .Findings}}
-      <p class="no-findings">No findings.</p>
-    {{else}}
-    <p class="hint">Select a finding to view its source, taint flow, and sink.</p>
-    <div class="controls">
-      <div class="grp">
-        {{range .SeverityFilter}}
-        <label class="sev {{.Class}}"><input type="checkbox" data-sev="{{.Key}}" checked>{{.Label}}</label>
-        {{end}}
+    <select id="f-rule" aria-label="Filter by rule">
+      <option value="">All rules</option>
+      {{range .Rules}}<option value="{{.Name}}">{{.Name}} ({{.Count}})</option>{{end}}
+    </select>
+    <details class="dd" id="f-conf">
+      <summary aria-label="Minimum confidence"><span class="meter"><i class=""></i><i class=""></i><i class=""></i></span><span class="dd-cur">Any confidence</span><span class="dd-caret" aria-hidden="true"></span></summary>
+      <div class="dd-menu" role="group" aria-label="Minimum confidence">
+        <label><input type="radio" name="conf" value="" checked><span class="meter"><i class=""></i><i class=""></i><i class=""></i></span><span>Any confidence</span></label>
+        <label><input type="radio" name="conf" value="high"><span class="meter"><i class="on"></i><i class="on"></i><i class="on"></i></span><span>High only</span></label>
+        <label><input type="radio" name="conf" value="medium"><span class="meter"><i class="on"></i><i class="on"></i><i class=""></i></span><span>Medium and up</span></label>
       </div>
-      <div class="grp">
-        <select id="f-rule" aria-label="Filter by rule">
-          <option value="">All rules</option>
-          {{range .ByRule}}
-          <option value="{{.RuleID}}">{{.RuleID}} ({{.Count}})</option>
-          {{end}}
-        </select>
-      </div>
-      <input id="f-search" type="search" placeholder="Search file, message, callee…" aria-label="Search findings">
-      <span class="count" id="f-count">{{.Total}} / {{.Total}} shown</span>
-    </div>
+    </details>
+    <select id="f-sort" aria-label="Sort findings">
+      <option value="severity">Sort: severity</option>
+      <option value="file">Sort: file</option>
+      <option value="rule">Sort: rule</option>
+    </select>
+    <input id="f-search" type="search" placeholder="Search file, message, callee&hellip;  ( / )" aria-label="Search findings">
+    <button id="f-clear" class="clear-btn" type="button" hidden title="Clear all filters" aria-label="Clear all filters"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/></svg></button>
+    <span class="count" id="f-count">{{.Total}} of {{.Total}}</span>
+  </div>
 
-    <div class="list" role="list">
-        {{range .Findings}}
-        <div class="finding {{.SeverityClass}}{{if .Suppressed}} suppressed{{end}}" id="{{.AnchorID}}"
-             data-severity="{{.SevKey}}" data-rule="{{.RuleID}}" data-cwe="{{.CWE}}" data-conf="{{.ConfKey}}">
-          <button class="item" type="button" aria-expanded="false">
-            <span class="item-head">
-              <span class="chip {{.SeverityClass}}">{{.SeverityLabel}}</span>
-              <span class="klass">{{.RuleID}}</span>
-              {{if .CWE}}<span class="chip cwe">{{.CWE}}</span>{{end}}
-              <span class="conf {{.ConfidenceClass}}" title="confidence{{if .ConfidenceNote}}: {{.ConfidenceNote}}{{end}}"><span class="conf-k">confidence</span>{{.ConfidenceLabel}}</span>
-              {{if .Suppressed}}<span class="chip suppressed" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
-              <span class="chev" aria-hidden="true">&rsaquo;</span>
-            </span>
-            <span class="msg">{{.Message}}</span>
-            <span class="sink-loc">{{.SinkLocation}}</span>
-          </button>
-          <div class="body">
-            <div class="meta-line">
-              in <code>{{.Function}}</code>{{if .Language}} &middot; <span class="muted">{{.Language}}</span>{{end}}
-              &middot; sink <span class="callee">{{.SinkCallee}}</span>
-            </div>
-            <div class="meta-line">
-              confidence <b>{{.ConfidenceLabel}}</b>{{if .ConfidenceNote}} &mdash; {{.ConfidenceNote}}{{end}}
-              {{if .ReviewConfirmed}}<br><span class="muted">LLM review confirmed: {{.ReviewNote}}</span>{{end}}
-            </div>
-
-            {{if .HasFlow}}
-            <div class="subhead">Taint spread flow</div>
-            <p class="flow-note">Source &rarr; sink, expanded by default; intermediate steps collapsed.{{if .FlowEndpointsOnly}} Endpoints only — the intermediate path crossed a function boundary and was not reconstructed.{{end}}</p>
-            <div class="flow">
-              {{range .Flow}}
-              <details class="step{{if .Kind}} endpoint{{end}}"{{if .Open}} open{{end}}>
-                <summary>
-                  <span class="idx">{{.Index}}</span>
-                  {{if .Kind}}<span class="kind {{.Kind}}">{{.Kind}}</span>{{else}}<span class="kind step-mid">step</span>{{end}}
-                  <span class="loc">{{.Location}}</span>
-                </summary>
-                {{if .Snippet}}{{template "snippet" .Snippet}}{{else}}<div class="snippet-missing">Snippet unavailable.</div>{{end}}
-              </details>
-              {{end}}
-            </div>
-            {{else}}
-            <div class="snippet-missing">No location information for this finding.</div>
-            {{end}}
-          </div>
+  <div class="list">
+    {{range .Findings}}
+    <div class="finding s-{{.Severity}}{{if .Suppressed}} suppressed{{end}}" id="f-{{.ID}}"
+         data-severity="{{.Severity}}" data-rule="{{.Rule}}" data-conf="{{.Confidence}}" data-loc="{{.SortKey}}">
+      <button class="row" type="button" aria-expanded="false">
+        <span class="head">
+          <span class="sev s-{{.Severity}}">{{.SeverityLabel}}</span>
+          <span class="tag rule">{{.Rule}}</span>
+          <span class="tag">{{.CWE}}</span>
+          <span class="meter" data-tip="Confidence {{.Confidence}}{{with .ConfidenceNote}} &mdash; {{.}}{{end}}"><i class="on"></i><i class="{{if ne .Confidence "low"}}on{{end}}"></i><i class="{{if eq .Confidence "high"}}on{{end}}"></i></span>
+          {{if .Suppressed}}<span class="tag sup" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
+          <span class="loc">{{.SinkLoc}}</span>
+          <span class="chev-row" aria-hidden="true">&rsaquo;</span>
+        </span>
+        <span class="msg">{{.Short}}</span>
+      </button>
+      <div class="body" data-lex="{{.Lex}}" data-fid="f-{{.ID}}">
+        <div class="d-head">
+          <span class="sev s-{{.Severity}}">{{.SeverityLabel}}</span>
+          <span class="tag rule">{{.Rule}}</span>
+          <span class="tag">{{.CWE}}</span>
+          {{if .Suppressed}}<span class="tag sup" title="{{.SuppressionReason}}">SUPPRESSED</span>{{end}}
         </div>
+        <p class="d-msg">{{.Message}}</p>
+        <dl class="facts">
+          <div class="fact"><dt>Sink at</dt><dd>{{.SinkLoc}}</dd></div>
+          <div class="fact"><dt>Function</dt><dd>{{.Function}}</dd></div>
+          <div class="fact"><dt>Callee</dt><dd><span class="sink">{{.Callee}}</span></dd></div>
+          <div class="fact"><dt>Confidence</dt><dd><span class="ok">{{.Confidence}}</span>{{with .ConfidenceNote}} &middot; {{.}}{{end}}</dd></div>
+          {{if .ReviewConfirmed}}<div class="fact"><dt>LLM review</dt><dd><span class="ok">confirmed</span>{{with .ReviewNote}} &middot; {{.}}{{end}}</dd></div>{{end}}
+          {{if .Suppressed}}<div class="fact"><dt>Suppressed</dt><dd><span class="sink">{{.SuppressedBy}}</span>{{with .SuppressionReason}} &middot; {{.}}{{end}}</dd></div>{{end}}
+        </dl>
+        {{if .Flow}}
+        <div class="subhead">Taint flow &middot; {{len .Flow}} step{{if ne (len .Flow) 1}}s{{end}}{{if .FlowEndpointsOnly}} &middot; endpoints only{{end}}</div>
+        <div class="flow">
+          {{range .Flow}}
+          <details class="step {{if eq .Kind "source"}}source{{else if eq .Kind "sink"}}sink{{else}}mid{{end}}" data-idx="{{.Index}}"{{if ne .Kind "step"}} open{{end}}>
+            <summary><span class="kind">{{.Kind}}</span><span class="loc">{{.Loc}}</span><span class="chev" aria-hidden="true">&#9656;</span></summary>
+            {{if .Snippet}}<pre class="snippet"><code class="src">{{template "snippet" .Snippet}}</code></pre>{{else}}<div class="snippet-missing">source not available</div>{{end}}
+          </details>
+          {{end}}
+        </div>
+        {{else}}
+        <div class="snippet-missing">No location information for this finding.</div>
         {{end}}
+      </div>
     </div>
     {{end}}
-  </section>
-  <footer>Generated by Godzilla SAST.</footer>
-  </div><!-- /.main -->
-  {{if .Findings}}
-  <aside class="detail">
-    <div class="pane-empty">Select a finding to view its source, taint flow, and sink.</div>
-  </aside>
+    <p class="empty" hidden>No findings match these filters.</p>
+  </div>
+  {{else}}
+  <div class="panel">
+    <div class="clean">
+      <div class="mark"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.4l3 3 6-6.8"/></svg></div>
+      <h3>No findings</h3>
+      <p>Nothing reached a sink on any analysed path. Sources were tracked through the call graph and no tainted value arrived at a dangerous callee.</p>
+      {{with $.Diag}}<div class="rules-run">{{.Rules}} rules evaluated &middot; {{.Files}} files analysed</div>{{end}}
+    </div>
+  </div>
   {{end}}
-  </div><!-- /.layout -->
+
+  {{with .Diag}}
+  <details class="diag">
+    <summary>Scan diagnostics<span class="hint">{{.Hint}}</span></summary>
+    <div class="panel">
+      <div class="subhead">Workload</div>
+      <div class="diag-grid">
+        <div class="dfact"><span class="dk">files analysed</span><span class="dv">{{.Files}}{{if .Skipped}} <span class="warn">({{.Skipped}} skipped)</span>{{end}}</span></div>
+        <div class="dfact"><span class="dk">lines of source</span><span class="dv">{{.Lines}}</span></div>
+        <div class="dfact"><span class="dk">modules loaded</span><span class="dv">{{.Packages}}</span></div>
+        <div class="dfact"><span class="dk">functions in call graph</span><span class="dv">{{.Functions}}</span></div>
+        <div class="dfact"><span class="dk">rules evaluated</span><span class="dv">{{.Rules}}{{if .RulesLive}} <span class="muted">({{.RulesLive}} dataflow)</span>{{end}}</span></div>
+        <div class="dfact"><span class="dk">source / sink call sites</span><span class="dv">{{.SourceSites}} / {{.SinkSites}}</span></div>
+      </div>
+      {{if .Phases}}
+      <div class="subhead">Time</div>
+      {{range .Phases}}
+      <div class="phase"><span>{{.Label}}</span><span class="track"><i style="width:{{.Pct}}%"></i></span><span class="t">{{.Time}}</span></div>
+      {{end}}
+      {{end}}
+      <div class="subhead">Throughput &amp; environment</div>
+      <div class="diag-grid">
+        {{if .Wall}}<div class="dfact"><span class="dk">wall time</span><span class="dv">{{.Wall}}</span></div>{{end}}
+        {{if .Speed}}<div class="dfact"><span class="dk">scan speed</span><span class="dv">{{.Speed}}</span></div>{{end}}
+        {{if .PeakMem}}<div class="dfact"><span class="dk">peak memory (runtime)</span><span class="dv">{{.PeakMem}}</span></div>{{end}}
+        <div class="dfact"><span class="dk">worker threads</span><span class="dv">{{.Workers}}</span></div>
+        <div class="dfact"><span class="dk">engine</span><span class="dv">{{.Engine}}</span></div>
+        <div class="dfact"><span class="dk">toolchain</span><span class="dv">{{.Toolchain}}</span></div>
+      </div>
+    </div>
+  </details>
+  {{end}}
+
+  <footer>Generated by <a href="https://github.com/bytevet/godzilla" target="_blank" rel="noopener">Godzilla</a>{{if .Root}} &middot; paths relative to <code>{{.Root}}</code>{{end}} &middot; press / to search</footer>
+</main>
+
+{{if .Findings}}
+<aside class="col-detail">
+  <div class="pane-empty">Select a finding to inspect its source, taint flow and sink.</div>
+</aside>
+{{end}}
 </div>
-<script>{{.JS}}</script>
+<script nonce="{{.Nonce}}">
+/* Godzilla SAST report — client-side interaction.
+   Static: contains NO finding data. It reads data-* attributes and textContent
+   already rendered (and escaped) by html/template, and only toggles visibility,
+   selection and order. The wide-screen detail pane is a cloneNode(true) of the
+   inline body, i.e. already-escaped nodes copied without re-parsing, so it
+   cannot introduce an XSS vector. With JS disabled every finding body stays
+   reachable through the inline accordion. */
+(function () {
+  "use strict";
+  var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
+
+  /* ---- theme: OS preference, overridden by a persisted choice ---- */
+  var root = document.documentElement;
+  var toggle = $("#theme-toggle");
+  var KEY = "godzilla-theme";
+  var dark = matchMedia("(prefers-color-scheme: dark)");
+  var effective = function () { return root.getAttribute("data-theme") || (dark.matches ? "dark" : "light"); };
+  var paintToggle = function () { if (toggle) toggle.setAttribute("data-eff", effective()); };
+  try {
+    var saved = localStorage.getItem(KEY);
+    if (saved === "dark" || saved === "light") root.setAttribute("data-theme", saved);
+  } catch (e) {}
+  paintToggle();
+  if (toggle) toggle.addEventListener("click", function () {
+    var next = effective() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+    paintToggle();
+  });
+  dark.addEventListener("change", paintToggle);
+
+  /* ---- findings ---- */
+  var list = $(".list");
+  var findings = $$(".finding");
+  if (!findings.length) return;
+
+  var sevBoxes = $$("[data-sev]");
+  var confRadios = $$('input[name="conf"]');
+  var confDD = $("#f-conf");
+  var ruleSel = $("#f-rule");
+  var sortSel = $("#f-sort");
+  var search = $("#f-search");
+  var counter = $("#f-count");
+  var clearBtn = $("#f-clear");
+  var emptyMsg = $(".list .empty");
+  var detail = $(".col-detail");
+  var paneEmpty = detail ? $(".pane-empty", detail) : null;
+  var wide = matchMedia("(min-width: 1000px)");
+  var isWide = function () { return wide.matches; };
+  var active = null;
+
+  var SEV = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  var CONF = { high: 0, medium: 1, low: 2 };
+  var CONF_LABEL = { "": "Any confidence", high: "High only", medium: "Medium and up" };
+  var attr = function (el, name) { return el.getAttribute(name) || ""; };
+
+  /* ---- confidence dropdown ---- */
+  function confValue() {
+    for (var i = 0; i < confRadios.length; i++) if (confRadios[i].checked) return confRadios[i].value;
+    return "";
+  }
+  function paintConf() {
+    if (!confDD) return;
+    var v = confValue();
+    var n = v === "high" ? 3 : v === "medium" ? 2 : v === "low" ? 1 : 0;
+    $$("summary .meter i", confDD).forEach(function (tick, i) { tick.className = i < n ? "on" : ""; });
+    var cur = $(".dd-cur", confDD);
+    if (cur) cur.textContent = CONF_LABEL[v];
+  }
+
+  /* ---- detail pane / selection ---- */
+  function renderPane() {
+    if (!detail) return;
+    var prev = $(".pane", detail);
+    if (prev) prev.remove();
+    if (active && isWide()) {
+      var clone = $(".body", active).cloneNode(true);
+      clone.className = "pane";
+      detail.appendChild(clone);
+    }
+    if (paneEmpty) paneEmpty.hidden = !!(active && isWide());
+  }
+  function setActive(f, stampHash) {
+    active = f;
+    findings.forEach(function (x) {
+      var on = x === f;
+      x.classList.toggle("active", on);
+      var row = $(".row", x);
+      if (row) row.setAttribute("aria-expanded", String(on && !isWide()));
+    });
+    renderPane();
+    if (stampHash && history.replaceState) {
+      history.replaceState(null, "", f ? "#" + f.id : location.pathname + location.search);
+    }
+  }
+  function openInline(f) {
+    var opening = !f.classList.contains("open");
+    findings.forEach(function (x) { if (x !== f) x.classList.remove("open", "active"); });
+    f.classList.toggle("open", opening);
+    f.classList.toggle("active", opening);
+    var row = $(".row", f);
+    if (row) row.setAttribute("aria-expanded", String(opening));
+    active = opening ? f : null;
+    if (history.replaceState) {
+      history.replaceState(null, "", active ? "#" + f.id : location.pathname + location.search);
+    }
+  }
+  var firstVisible = function () {
+    for (var i = 0; i < findings.length; i++) if (!findings[i].hidden) return findings[i];
+    return null;
+  };
+
+  /* ---- sort ---- */
+  function sortList() {
+    if (!list || !sortSel) return;
+    var mode = sortSel.value;
+    var key = mode === "file" ? "data-loc" : mode === "rule" ? "data-rule" : null;
+    findings.slice().sort(function (a, b) {
+      if (key) {
+        var cmp = attr(a, key).localeCompare(attr(b, key));
+        if (cmp) return cmp;
+      }
+      return (SEV[attr(a, "data-severity")] - SEV[attr(b, "data-severity")]) ||
+             attr(a, "data-loc").localeCompare(attr(b, "data-loc"));
+    }).forEach(function (f) { list.insertBefore(f, emptyMsg || null); });
+  }
+
+  /* ---- filters ---- */
+  function anyFilter() {
+    if (ruleSel && ruleSel.value) return true;
+    if (search && search.value.trim()) return true;
+    if (confValue()) return true;
+    return sevBoxes.some(function (b) { return !b.checked; });
+  }
+  function apply() {
+    var sev = {};
+    sevBoxes.forEach(function (b) {
+      sev[attr(b, "data-sev")] = b.checked;
+      var label = b.closest("label");
+      if (label) label.classList.toggle("off", !b.checked);
+    });
+    var minConf = confValue();
+    var rule = ruleSel ? ruleSel.value : "";
+    var q = search ? search.value.trim().toLowerCase() : "";
+    var shown = 0;
+    findings.forEach(function (f) {
+      var ok = sev[attr(f, "data-severity")] !== false;
+      if (ok && minConf) ok = CONF[attr(f, "data-conf")] <= CONF[minConf];
+      if (ok && rule) ok = attr(f, "data-rule") === rule;
+      if (ok && q) ok = f.textContent.toLowerCase().indexOf(q) !== -1;
+      f.hidden = !ok;
+      if (ok) shown++;
+    });
+    var vis = findings.filter(function (f) { return !f.hidden; });
+    findings.forEach(function (f) {
+      f.classList.toggle("r-top", f === vis[0]);
+      f.classList.toggle("r-bot", f === vis[vis.length - 1]);
+    });
+    if (counter) counter.textContent = shown + " of " + findings.length;
+    if (emptyMsg) emptyMsg.hidden = shown !== 0;
+    if (clearBtn) clearBtn.hidden = !anyFilter();
+    $$(".rule-pick").forEach(function (b) {
+      var row = b.closest("tr");
+      if (row) row.classList.toggle("picked", !!rule && attr(b, "data-rule") === rule);
+    });
+    if (isWide()) {
+      if (!active || active.hidden) setActive(firstVisible(), false);
+    } else if (active && active.hidden) {
+      active.classList.remove("open", "active");
+      active = null;
+    }
+  }
+  function clearAll() {
+    sevBoxes.forEach(function (b) { b.checked = true; });
+    if (confRadios.length) confRadios[0].checked = true;
+    if (ruleSel) ruleSel.value = "";
+    if (search) search.value = "";
+    paintConf();
+    apply();
+  }
+
+  /* ---- wiring ---- */
+  findings.forEach(function (f) {
+    var row = $(".row", f);
+    if (row) row.addEventListener("click", function () { isWide() ? setActive(f, true) : openInline(f); });
+  });
+  sevBoxes.forEach(function (b) { b.addEventListener("change", apply); });
+  confRadios.forEach(function (r) {
+    r.addEventListener("change", function () {
+      paintConf();
+      apply();
+      if (confDD) confDD.open = false;
+    });
+  });
+  if (ruleSel) ruleSel.addEventListener("change", apply);
+  if (sortSel) sortSel.addEventListener("change", function () { sortList(); apply(); });
+  if (clearBtn) clearBtn.addEventListener("click", clearAll);
+  if (search) {
+    var timer = null;
+    search.addEventListener("input", function () {
+      clearTimeout(timer);
+      timer = setTimeout(apply, 110);
+    });
+    search.addEventListener("keydown", function (e) { if (e.key === "Escape") clearAll(); });
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "/" && search && document.activeElement !== search) { e.preventDefault(); search.focus(); }
+  });
+  document.addEventListener("click", function (e) {
+    if (confDD && confDD.open && !confDD.contains(e.target)) confDD.open = false;
+  });
+  /* the rule table doubles as a filter: click a rule to scope the list to it */
+  $$(".rule-pick").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!ruleSel) return;
+      var r = attr(b, "data-rule");
+      ruleSel.value = ruleSel.value === r ? "" : r;
+      apply();
+      var controls = $(".controls");
+      if (controls && !isWide()) window.scrollTo({ top: Math.max(0, controls.offsetTop - 8), behavior: "smooth" });
+    });
+  });
+  wide.addEventListener("change", function () {
+    if (isWide()) {
+      findings.forEach(function (x) { x.classList.remove("open"); });
+      setActive(!active || active.hidden ? firstVisible() : active, false);
+    } else {
+      var pane = detail ? $(".pane", detail) : null;
+      if (pane) pane.remove();
+      if (paneEmpty) paneEmpty.hidden = false;
+      if (active) {
+        active.classList.add("open");
+        var row = $(".row", active);
+        if (row) row.setAttribute("aria-expanded", "true");
+      }
+    }
+  });
+  var fromHash = function () {
+    var f = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+    return f && f.classList.contains("finding") ? f : null;
+  };
+  window.addEventListener("hashchange", function () {
+    var f = fromHash();
+    if (!f) return;
+    isWide() ? setActive(f, false) : (f.classList.contains("open") || openInline(f));
+  });
+
+  paintConf();
+  sortList();
+  apply();
+  var deep = fromHash();
+  if (deep && !deep.hidden) isWide() ? setActive(deep, false) : openInline(deep);
+  else if (isWide()) setActive(firstVisible(), false);
+
+  /* ---- syntax highlighting ----
+     A small Go tokenizer, inlined: no CDN, no extra CSP source, works offline in
+     a CI artifact. Applied per line so the gutter, the highlighted sink line and
+     the caret line survive, and a line is only replaced when the rendered text is
+     identical to the source the scanner emitted. */
+  /* Two lexical families cover every language the scanner handles: C-style
+     (slash-slash line comments plus slash-star blocks) and hash-comment (Python,
+     Ruby). A finding's data-lex names one directly — Go decides it, so this side
+     needs no table of language names or aliases. */
+  var FAMILY = {
+    c: {
+      line: "\\/\\/", block: true,
+      kw: /^(func|var|const|if|else|for|range|return|package|import|type|struct|interface|map|chan|go|defer|select|switch|case|default|break|continue|fallthrough|goto|nil|true|false|class|public|private|protected|static|final|void|new|extends|implements|throws|try|catch|finally|this|super|abstract|enum|let|function|async|await|export|as|of|in|instanceof|typeof|null|undefined|fn|impl|mut|pub|use|match|loop|where|trait|self|string|int|bool|float|double|char|long|short|namespace|template|virtual|override|delete|sizeof)$/
+    },
+    hash: {
+      line: "#", block: false,
+      kw: /^(def|class|if|elif|else|for|while|return|import|from|as|try|except|finally|with|lambda|None|True|False|and|or|not|in|is|pass|raise|yield|global|assert|del|end|do|then|elsif|unless|module|require|nil|self|function|local|echo|fi|esac|export)$/
+    }
+  };
+  var lexCache = {};
+  function lex(fam) {
+    var name = FAMILY[fam] ? fam : "c";
+    if (!lexCache[name]) {
+      var fam = FAMILY[name];
+      lexCache[name] = {
+        kw: fam.kw,
+        re: new RegExp(
+          "(" + fam.line + ".*" + (fam.block ? "|\\/\\*[\\s\\S]*?\\*\\/" : "") + ")" +
+          "|(\"(?:\\\\.|[^\"\\\\])*\"|`[^`]*`|'(?:\\\\.|[^'\\\\])*')" +
+          "|(\\d[\\w.]*)|([A-Za-z_]\\w*)|(\\s+)|([^\\s\\w]+)", "g")
+      };
+    }
+    return lexCache[name];
+  }
+  function esc(t) {
+    return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function highlight(src, fam) {
+    var L = lex(fam), out = "", m;
+    L.re.lastIndex = 0;
+    while ((m = L.re.exec(src))) {
+      var t = m[0];
+      if (m[1]) out += '<span class="t-com">' + esc(t) + "</span>";
+      else if (m[2]) out += '<span class="t-str">' + esc(t) + "</span>";
+      else if (m[3]) out += '<span class="t-num">' + esc(t) + "</span>";
+      else if (m[4]) {
+        if (L.kw.test(t)) out += '<span class="t-kw">' + t + "</span>";
+        else if (src.charAt(L.re.lastIndex) === "(") out += '<span class="t-fn">' + t + "</span>";
+        else out += esc(t);
+      } else if (m[6]) out += '<span class="t-op">' + esc(t) + "</span>";
+      else out += esc(t);
+    }
+    return out;
+  }
+  function paintCode(scope) {
+    $$(".snippet", scope).forEach(function (pre) {
+      if (pre.getAttribute("data-hl")) return;
+      pre.setAttribute("data-hl", "1");
+      var host = pre.closest("[data-lex]");
+      var lex = host ? host.getAttribute("data-lex") : "";
+      $$(".line", pre).forEach(function (line) {
+        if (line.classList.contains("caret")) return;
+        var node = line.lastChild;
+        if (!node || node.nodeType !== 3 || !node.nodeValue.trim()) return;
+        var holder = document.createElement("span");
+        try { holder.innerHTML = highlight(node.nodeValue, lex); } catch (e) { return; }
+        if (holder.textContent === node.nodeValue) line.replaceChild(holder, node);
+      });
+    });
+  }
+  paintCode(document);
+  if (detail && window.MutationObserver) {
+    new MutationObserver(function () { paintCode(detail); }).observe(detail, { childList: true });
+  }
+})();
+</script>
 </body>
 </html>
-{{define "snippet"}}<pre class="snippet">{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{if .Caret}}<span class="line caret"><span class="ln"></span>{{.Caret}}</span>{{end}}{{end}}</pre>{{end}}
+{{define "snippet"}}{{range .Lines}}<span class="line{{if .Highlight}} hl{{end}}"><span class="ln">{{.Num}}</span>{{.Text}}</span>{{if .Caret}}<span class="line caret"><span class="ln"></span>{{.Caret}}</span>{{end}}{{end}}{{end}}

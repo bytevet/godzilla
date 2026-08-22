@@ -29,7 +29,7 @@ go test ./converters/go/ -run TestGIRv2Metadata
 # Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.erb/.c/.cpp file). Exit codes:
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
-go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>
+go run ./cmd/godzilla scan --html /tmp/report.html --fail-on high <path>
 go run ./cmd/godzilla scan --llm-review <path>          # needs ANTHROPIC_API_KEY (or `ant auth`)
 
 # Java scanning needs a JDK 24+ `java`; Rust needs `rustc`; both degrade gracefully if absent.
@@ -142,9 +142,15 @@ dataflow (default), `dangerous-call`, and `secret`. `_`-prefixed **fragments** a
 language is the [detection matrix](README.md#supported-languages--detections); authoring reference is
 `docs/writing-rules.md`.
 
-**Report & LLM (`internal/report/`, `internal/llm/`).** `WriteHTML` renders a self-contained, auto-escaped
-report with code snippets; `WriteJSON` and `WriteSARIF` (2.1.0, severity→level) feed tooling and GitHub
-code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
+**Report & LLM (`internal/report/`, `internal/llm/`).** `WriteHTML` renders an auto-escaped report with
+code snippets from ONE embedded template (`templates/report.html.tmpl`, CSS and JS written out inside
+it) under a strict per-render nonce CSP — so nothing finding-derived may be interpolated into either
+inline tag, and the only external reference is the Google Fonts stylesheet, which degrades to the
+system stack offline. `WithScanInfo` supplies the optional scan-diagnostics panel; its type lives in
+the leaf package **`internal/scaninfo`** so `internal/scan` can fill it and `internal/report` render
+it without report importing scan — that would drag every frontend, including the cgo C/C++ one, into
+a rendering package. `WriteJSON` and `WriteSARIF` (2.1.0,
+severity→level) feed tooling and GitHub code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
 semantics, prompt builder, verdict parser); `anthropic.go` and `openai.go` are the backends (default
 `claude-haiku-4-5`; `GODZILLA_LLM_MODEL` overrides the model,
 `GODZILLA_LLM_PROVIDER=openai` + `GODZILLA_LLM_BASE_URL` selects an
@@ -190,6 +196,10 @@ cache shared by report/LLM/triage), and `internal/testsupport` (test-only interp
   `comment`/intrinsic like `unsupported instruction`; converter tests fail if one appears.
 - **Confidence drives triage.** Intra-procedural findings are High; cross-function are Medium. The LLM
   reviewer only adjudicates at/below Medium and fails open (never drops a finding on an API error).
+- **README.md and its Chinese mirror ship in the same commit.** `README.md` is the source of truth and
+  `docs/README.zh-CN.md` mirrors it section for section; changing one WITHOUT the other is the whole
+  failure mode, and no test catches it. The mirror's links are rewritten, not copied — repo files need
+  `../`, `docs/` siblings drop the prefix, and its internal anchors point at the translated headings.
 - **Comments are concise and carry only what the code cannot say.** Write the invariant, the failure mode,
   or why the obvious alternative is wrong — then stop. Specifically, do NOT write: a restatement of the line
   below it; the same rationale in two places (put it where the person who would break it is looking — often

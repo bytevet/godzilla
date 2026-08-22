@@ -1,17 +1,23 @@
-// Package report renders a slice of analysis.Finding values into a
-// self-contained HTML document with no external assets. Everything
-// finding-derived comes from analyzed source code, so it is rendered through
-// html/template's contextual auto-escaping — a report must never itself be XSS.
+// Package report renders a slice of analysis.Finding values into a single
+// HTML document whose only external reference is the Google Fonts stylesheet;
+// it degrades to the system stack offline. Everything finding-derived comes from
+// analyzed source code, so it is rendered through html/template's contextual
+// auto-escaping — a report must never itself be XSS.
 //
-// The markup, styling and filter script live under templates/ and are embedded
-// with go:embed. The CSS/JS carry no finding data, so they are injected as
-// template.CSS/template.JS typed values and emit verbatim.
+// The markup, styling and script are one embedded template file. The stylesheet
+// and script are written out literally in it rather than injected, and neither
+// carries finding data: the script reads only data-* attributes and textContent
+// html/template already escaped. A strict per-render nonce CSP pins both inline
+// tags, which is why nothing may be interpolated into either.
 package report
 
 import (
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"slices"
 	"sort"
@@ -21,6 +27,7 @@ import (
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/scaninfo"
 	"github.com/bytevet/godzilla/internal/srclines"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 
@@ -30,23 +37,44 @@ import (
 //go:embed templates/report.html.tmpl
 var reportTemplateSrc string
 
-//go:embed templates/report.css
-var reportCSS string
-
-//go:embed templates/report.js
-var reportJS string
-
-// The filter bar, tiles and normalization iterate rules.Severities and
-// analysis.Confidences rather than a local restatement, so a newly added level
-// cannot silently vanish from the report's display surfaces.
+// The severity filter chips and the summary strip iterate rules.Severities
+// rather than a local restatement, so a new severity cannot silently vanish from
+// them. Confidence has no such treatment: its three levels are spelled out in
+// the template's threshold picker and in the script, so a new one needs both
+// edited by hand.
 
 // snippetContext is how many lines of source to show before/after the
 // highlighted line when rendering best-effort code context.
 const snippetContext = 3
 
+// HTMLOption configures a WriteHTML render.
+type HTMLOption func(*htmlConfig)
+
+type htmlConfig struct {
+	info scaninfo.Info
+}
+
+// WithScanInfo supplies the pipeline telemetry behind the report's scan
+// diagnostics section. Without it the section is omitted rather than rendered
+// with zeros.
+func WithScanInfo(info scaninfo.Info) HTMLOption {
+	return func(c *htmlConfig) { c.info = info }
+}
+
 // WriteHTML renders findings as a complete standalone HTML document to w,
 // sorted worst-severity-first then by sink location.
-func WriteHTML(w io.Writer, findings []analysis.Finding) error {
+func WriteHTML(w io.Writer, findings []analysis.Finding, opts ...HTMLOption) error {
+	var cfg htmlConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	// The diagnostics panel reports how long the report itself took, which it
+	// cannot do for a phase it is inside of. Time the half that actually costs
+	// something — building the view model reads every finding's source file —
+	// and report it as "report build"; template execution is the cheap half.
+	start := time.Now()
+
 	sorted := sortedFindings(findings)
 
 	// Call-scoped, not package-global, so a later scan or test never observes
@@ -57,22 +85,41 @@ func WriteHTML(w io.Writer, findings []analysis.Finding) error {
 	// shows "models/group.go:322" rather than an absolute scan path.
 	root := commonRoot(sorted)
 
+	total := len(sorted)
+	counts, files := summarize(sorted)
 	data := reportData{
-		Title:          "Godzilla SAST Report",
-		GeneratedAt:    time.Now().Format(time.RFC1123),
-		Total:          len(sorted),
-		Root:           root,
-		Tiles:          summaryTiles(sorted),
-		ByRule:         ruleRows(sorted),
+		Generated:      time.Now().Format(time.RFC1123),
+		Target:         displayTarget(cfg.info.Target, root),
+		Nonce:          newNonce(),
+		Root:           relativeRoot(root),
+		Total:          total,
+		SeverityCells:  severityCells(counts, total),
+		Critical:       counts[string(rules.SeverityCritical)],
+		High:           counts[string(rules.SeverityHigh)],
+		FilesAffected:  files,
 		SeverityFilter: severityFilters(),
-		CSS:            template.CSS(reportCSS),
-		JS:             template.JS(reportJS),
+		Rules:          ruleRows(sorted, total),
 	}
+	data.Findings = make([]findingView, 0, len(sorted))
 	for _, f := range sorted {
 		data.Findings = append(data.Findings, newFindingView(cache, root, f))
 	}
+	data.Diag = newDiagView(cfg.info, time.Since(start))
 
 	return reportTemplate.Execute(w, data)
+}
+
+// newNonce returns a fresh 128-bit CSP nonce. The document's inline <style> and
+// <script> are allowed by nonce alone, so it must be unpredictable and must
+// never be reused across renders.
+func newNonce() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand cannot fail on any supported platform; if it somehow did,
+		// a fixed nonce would silently weaken the CSP, so fail loudly instead.
+		panic("report: crypto/rand: " + err.Error())
+	}
+	return base64.RawStdEncoding.EncodeToString(b[:])
 }
 
 // sortedFindings returns a copy of findings in the pipeline-wide display order
@@ -86,83 +133,145 @@ func sortedFindings(findings []analysis.Finding) []analysis.Finding {
 	return sorted
 }
 
-// reportData is the top-level structure fed to the HTML template.
+// reportData is the top-level structure fed to the HTML template. Every value
+// is pre-formatted here so the template stays logic-free — the package
+// deliberately parses without a FuncMap.
 type reportData struct {
-	Title          string
-	GeneratedAt    string
+	Generated string
+	Target    string
+	Nonce     string
+	Root      string // the anchor locations are relative to, itself shown relative to cwd
+
 	Total          int
-	Root           string // common path prefix stripped from displayed locations
-	Tiles          []tile
-	ByRule         []ruleRow
+	Critical, High int // the masthead verdict
+	FilesAffected  int
+
+	SeverityCells  []sevCell // the severity strip's cells, worst first
 	SeverityFilter []severityFilter
+	Rules          []ruleRow
 	Findings       []findingView
-	CSS            template.CSS
-	JS             template.JS
+	Diag           *diagView // nil when no scan telemetry was supplied
 }
 
-// tile is one summary stat card.
-type tile struct {
-	Label string
+// sevCell is one cell of the summary strip: a severity, its count, and that
+// count as a percent of the total for the cell's bar.
+type sevCell struct {
+	Key   string
 	Count int
-	Class string // optional severity class for coloring the number
-	Lead  bool   // the headline tile (accent-colored)
+	Pct   int
 }
 
-// summaryTiles derives the headline stat cards from the findings.
-func summaryTiles(findings []analysis.Finding) []tile {
-	bySev := map[rules.Severity]int{}
-	files := map[string]struct{}{}
+// displayTarget names the scanned project in the masthead: the scan root when
+// the caller knows it, else the findings' common directory, else the working
+// directory. The fallback goes through relativeRoot for the same reason the
+// footer does — it reaches the title, the heading and the masthead, so a caller
+// that supplies no target would otherwise print the scanning machine's paths
+// three more times.
+func displayTarget(target, root string) string {
+	if target != "" {
+		// An absolute target is the caller's own argument, but `scan
+		// "$GITHUB_WORKSPACE"` is an ordinary CI invocation, so echoing it puts the
+		// runner's filesystem in the title. Relative-to-cwd where that says
+		// something, else the directory's own name — which is what the reader
+		// recognises anyway.
+		if strings.HasPrefix(target, "/") {
+			if rel := relativeRoot(target); rel != "" && rel != "." {
+				return rel
+			}
+			return path.Base(target)
+		}
+		return target
+	}
+	if rel := relativeRoot(root); rel != "" {
+		return rel
+	}
+	return "."
+}
+
+// pctOf is a count as a whole percent of total, for a summary bar's width. Zero
+// total yields zero rather than dividing.
+func pctOf(n, total int) int {
+	if total <= 0 || n <= 0 {
+		return 0
+	}
+	return n * 100 / total
+}
+
+// summarize walks the findings once for both headline figures: the per-severity
+// tally (every known level present) and how many distinct files hold a sink.
+func summarize(findings []analysis.Finding) (counts map[string]int, files int) {
+	counts = make(map[string]int, len(rules.Severities))
+	for _, s := range rules.Severities {
+		counts[string(s)] = 0
+	}
+	seen := map[string]struct{}{}
 	for _, f := range findings {
-		bySev[normalizeSeverity(f.Severity)]++
+		counts[string(normalizeSeverity(f.Severity))]++
 		if f.SinkPos != nil && f.SinkPos.GetFilename() != "" {
-			files[f.SinkPos.GetFilename()] = struct{}{}
+			seen[f.SinkPos.GetFilename()] = struct{}{}
 		}
 	}
-	return []tile{
-		{Label: "Total findings", Count: len(findings), Lead: true},
-		{Label: "Critical", Count: bySev[rules.SeverityCritical], Class: "sev-critical"},
-		{Label: "High", Count: bySev[rules.SeverityHigh], Class: "sev-high"},
-		{Label: "Medium", Count: bySev[rules.SeverityMedium], Class: "sev-medium"},
-		{Label: "Low / Info", Count: bySev[rules.SeverityLow] + bySev[rules.SeverityInfo], Class: "sev-low"},
-		{Label: "Files affected", Count: len(files)},
+	return counts, len(seen)
+}
+
+// severityCells lists the severities that get their own cell in the summary
+// strip. Info is folded out: the strip is six cells wide and its wrap points
+// are factors of six (6 -> 3+3 -> 2+2+2), so a seventh cell would leave a
+// half-empty trailing row. Info findings are still counted, filterable and
+// listed.
+func severityCells(counts map[string]int, total int) []sevCell {
+	out := make([]sevCell, 0, len(rules.Severities))
+	for _, s := range rules.Severities {
+		if s == rules.SeverityInfo {
+			continue
+		}
+		n := counts[string(s)]
+		out = append(out, sevCell{Key: string(s), Count: n, Pct: pctOf(n, total)})
 	}
+	return out
 }
 
 // severityFilter is one toggle in the filter bar.
 type severityFilter struct {
 	Key   string // data-sev value (lower-case severity)
 	Label string
-	Class string
+}
+
+// sevAbbrev shortens the two labels that would not fit the filter chips.
+var sevAbbrev = map[rules.Severity]string{
+	rules.SeverityCritical: "CRIT",
+	rules.SeverityMedium:   "MED",
 }
 
 func severityFilters() []severityFilter {
 	out := make([]severityFilter, 0, len(rules.Severities))
 	for _, s := range rules.Severities {
-		out = append(out, severityFilter{
-			Key:   string(s),
-			Label: strings.ToUpper(string(s)),
-			Class: severityClass(s),
-		})
+		label, ok := sevAbbrev[s]
+		if !ok {
+			label = strings.ToUpper(string(s))
+		}
+		out = append(out, severityFilter{Key: string(s), Label: label})
 	}
 	return out
 }
 
 // ruleRow is one row of the "findings by rule" summary table.
 type ruleRow struct {
-	RuleID   string
-	CWE      string
-	Count    int
-	SevClass string // chip/text class of this rule's worst observed severity
+	Name        string
+	CWE         string
+	Count       int
+	Pct         int    // Count as a percent of all findings, for the row's bar
+	TopSeverity string // this rule's worst observed severity, colouring the row
 
 	// sevRank is that same worst severity's rank, kept for the sort below.
 	// Unexported, so html/template leaves it out of the rendered output.
 	sevRank int
 }
 
-// ruleRows tallies findings per rule, ordered by count desc, then worst
-// severity first, then rule id — a deterministic order that also keeps the
-// rule ids appearing in severity order for the severity-ordering test.
-func ruleRows(findings []analysis.Finding) []ruleRow {
+// ruleRows tallies findings per rule, worst severity first, then count desc,
+// then rule id. Severity leads so the table reads in the same order as the
+// findings list below it.
+func ruleRows(findings []analysis.Finding, total int) []ruleRow {
 	type agg struct {
 		cwe     string
 		count   int
@@ -186,23 +295,22 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 	rows := make([]ruleRow, 0, len(byRule))
 	for id, a := range byRule {
 		rows = append(rows, ruleRow{
-			RuleID:   id,
-			CWE:      a.cwe,
-			Count:    a.count,
-			SevClass: severityClass(a.bestSev),
-			sevRank:  a.bestSev.Rank(),
+			Name:        id,
+			CWE:         a.cwe,
+			Count:       a.count,
+			Pct:         pctOf(a.count, total),
+			TopSeverity: string(normalizeSeverity(a.bestSev)),
+			sevRank:     a.bestSev.Rank(),
 		})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Count != rows[j].Count {
-			return rows[i].Count > rows[j].Count
-		}
-		// Tie-break by worst severity (so rule ids also appear in severity
-		// order), then rule id for determinism.
 		if rows[i].sevRank != rows[j].sevRank {
 			return rows[i].sevRank > rows[j].sevRank
 		}
-		return rows[i].RuleID < rows[j].RuleID
+		if rows[i].Count != rows[j].Count {
+			return rows[i].Count > rows[j].Count
+		}
+		return rows[i].Name < rows[j].Name
 	})
 	return rows
 }
@@ -210,80 +318,128 @@ func ruleRows(findings []analysis.Finding) []ruleRow {
 // findingView is the per-finding data made available to the template; it
 // pre-formats everything so the template stays logic-free.
 type findingView struct {
-	SeverityLabel     string
-	SeverityClass     string
-	SevKey            string
-	ConfidenceLabel   string
-	ConfidenceClass   string
-	ConfKey           string
-	ConfidenceNote    string // plain-language explanation of the confidence level
-	RuleID            string
-	CWE               string
-	Message           string
-	Language          string
-	Function          string
-	SinkCallee        string
-	SinkLocation      string
+	ID             string // element id, minus the "f-" prefix the template adds
+	Severity       string // lower-case, the data-severity the script filters on
+	SeverityLabel  string
+	Confidence     string // lower-case, drives both data-conf and the 3-tick meter
+	ConfidenceNote string // plain-language explanation of the confidence level
+	Rule           string
+	CWE            string
+	Message        string
+	Short          string // first sentence of Message, shown in the collapsed row
+	SinkLoc        string
+	SortKey        string // data-loc: zero-padded so line 9 sorts before line 10
+	Function       string
+	Callee         string
+	Lex            string // data-lex, picks the highlighter's lexical family
+
 	Flow              []flowStep
-	HasFlow           bool
 	FlowEndpointsOnly bool
-	AnchorID          string
+
 	Suppressed        bool
+	SuppressedBy      string
 	SuppressionReason string
 	ReviewConfirmed   bool
 	ReviewNote        string
 }
 
-// flowStep is one position along the taint spread flow, rendered inside a
-// nested <details>. The endpoints (source and sink) are expanded by default
-// (Open); intermediate steps stay collapsed. The snippet is best-effort.
+// flowStep is one position along the taint flow, rendered inside a nested
+// <details>. Kind is always one of source/step/sink — the template expands
+// everything that is not a "step". The snippet is best-effort.
 type flowStep struct {
-	Index    int
-	Kind     string // "source", "sink", or "" for intermediate steps
-	Open     bool   // expand this step's snippet by default (source/sink)
-	Location string
-	Snippet  *codeSnippet
+	Index   int
+	Kind    string
+	Loc     string
+	Snippet *codeSnippet
 }
 
 func newFindingView(cache srclines.Cache, root string, f analysis.Finding) findingView {
 	flow, endpointsOnly := buildFlow(cache, root, f)
 	return findingView{
-		SeverityLabel:     strings.ToUpper(string(f.Severity)),
-		SeverityClass:     severityClass(f.Severity),
-		SevKey:            string(normalizeSeverity(f.Severity)),
-		ConfidenceLabel:   strings.ToUpper(string(f.Confidence)),
-		ConfidenceClass:   confidenceClass(f.Confidence),
-		ConfKey:           string(normalizeConfidence(f.Confidence)),
-		ConfidenceNote:    confidenceNote(f.Confidence),
-		RuleID:            f.RuleID,
-		CWE:               f.CWE,
-		Message:           f.Message,
-		Language:          f.Language,
-		Function:          f.Function,
-		SinkCallee:        f.SinkCallee,
-		SinkLocation:      displayPos(root, f.SinkPos),
+		ID:             analysis.Fingerprint(f),
+		Severity:       string(normalizeSeverity(f.Severity)),
+		SeverityLabel:  strings.ToUpper(string(normalizeSeverity(f.Severity))),
+		Confidence:     string(normalizeConfidence(f.Confidence)),
+		ConfidenceNote: confidenceNote(f.Confidence),
+		Rule:           f.RuleID,
+		CWE:            f.CWE,
+		Message:        f.Message,
+		Short:          firstSentence(f.Message),
+		SinkLoc:        displayPos(root, f.SinkPos),
+		SortKey:        sortKey(root, f.SinkPos),
+		Function:       f.Function,
+		Callee:         f.SinkCallee,
+		Lex:            lexFamily(f.Language),
+
 		Flow:              flow,
-		HasFlow:           len(flow) > 0,
 		FlowEndpointsOnly: endpointsOnly,
-		AnchorID:          "f-" + analysis.Fingerprint(f),
+
 		Suppressed:        f.Suppressed,
+		SuppressedBy:      f.SuppressedBy,
 		SuppressionReason: f.SuppressionReason,
 		ReviewConfirmed:   f.ReviewConfirmed,
 		ReviewNote:        f.ReviewNote,
 	}
 }
 
-// buildFlow builds the taint spread flow. When the engine reconstructed an
+// lexFamily maps a finding's language onto the lexical family the report's
+// highlighter tokenizes with. Deciding it here rather than in the script is what
+// keeps the script from guessing: the frontend names are known on this side, so
+// the browser never needs a table of aliases and languages no frontend emits.
+// An unlisted language falls back to the C-style lexer, which degrades to plain
+// text at worst.
+func lexFamily(language string) string {
+	switch language {
+	case "python", "ruby":
+		return "hash" // # line comments, no block form
+	default:
+		return "c" // go, java, javascript, rust, c, cpp
+	}
+}
+
+// firstSentence is the collapsed row's one-line summary. Rule messages lead
+// with what happened and follow with the remediation, so the first sentence is
+// the part worth showing before the reader opens the finding.
+//
+// A period ending a single-letter word is skipped: rule messages say "e.g." and
+// "i.e.", and cutting there would leave a row reading "Use a placeholder (e.g.".
+func firstSentence(msg string) string {
+	for i := 0; i+1 < len(msg); i++ {
+		if msg[i] != '.' || msg[i+1] != ' ' {
+			continue
+		}
+		if i >= 2 && msg[i-2] == '.' {
+			continue // ...g. of "e.g."
+		}
+		return msg[:i+1]
+	}
+	return msg
+}
+
+// sortKey is the data-loc the script sorts "by file" on. It compares as text
+// (localeCompare), so the line and column are zero-padded — otherwise line 10
+// would sort before line 9. An unknown position sorts last.
+func sortKey(root string, pos *ir.Position) string {
+	if pos == nil {
+		return "~"
+	}
+	return fmt.Sprintf("%s:%06d:%06d", displayPath(root, pos.GetFilename()), pos.GetLine(), pos.GetColumn())
+}
+
+// buildFlow builds the taint flow. When the engine reconstructed an
 // intra-procedural path (Finding.Steps), each step is a position along it;
 // otherwise it falls back to the source and sink endpoints and flags the flow
 // as endpoints-only.
 func buildFlow(cache srclines.Cache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
-	// kinds[i] labels position i as source/sink/intermediate.
+	// kinds[i] labels position i as source/step/sink.
 	var positions []*ir.Position
 	var kinds []string
 	if len(f.Steps) > 0 {
 		positions = f.Steps
 		kinds = make([]string, len(positions))
+		for i := range kinds {
+			kinds[i] = "step"
+		}
 		kinds[0] = "source"
 		if len(positions) > 1 {
 			kinds[len(positions)-1] = "sink"
@@ -304,11 +460,10 @@ func buildFlow(cache srclines.Cache, root string, f analysis.Finding) (steps []f
 	steps = make([]flowStep, 0, len(positions))
 	for i, p := range positions {
 		steps = append(steps, flowStep{
-			Index:    i + 1,
-			Kind:     kinds[i],
-			Open:     kinds[i] != "", // expand the source and sink endpoints
-			Location: displayPos(root, p),
-			Snippet:  buildSnippet(cache, p),
+			Index:   i + 1,
+			Kind:    kinds[i],
+			Loc:     displayPos(root, p),
+			Snippet: buildSnippet(cache, p),
 		})
 	}
 	return steps, endpointsOnly
@@ -369,6 +524,34 @@ func commonRoot(findings []analysis.Finding) string {
 	return strings.Join(common, "/")
 }
 
+// relativeRoot renders the anchor the locations hang off, without naming the
+// machine the scan ran on. commonRoot is absolute because the frontends emit
+// absolute positions, and a report is routinely uploaded as a CI artifact or
+// attached to a ticket — "/home/runner/work/repo/repo" tells that reader nothing
+// and is the only part of the document that does not survive leaving the host.
+//
+// Anchoring is unaffected: displayPath still resolves against the real root, and
+// this only changes how that directory is named. Falls back to the base name for
+// a root outside the working directory, where a "../../.." chain would be worse
+// than useless.
+func relativeRoot(root string) string {
+	if root == "" {
+		return ""
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return path.Base(root)
+	}
+	switch {
+	case root == wd:
+		return "."
+	case strings.HasPrefix(root, wd+"/"):
+		return root[len(wd)+1:]
+	default:
+		return path.Base(root)
+	}
+}
+
 // displayPath renders filename relative to root; a Go module-cache path becomes
 // a short "dep: <module@version>/..." form; anything outside root is returned
 // unchanged.
@@ -420,32 +603,6 @@ func normalizeConfidence(c analysis.Confidence) analysis.Confidence {
 		}
 	}
 	return analysis.ConfidenceLow
-}
-
-func severityClass(s rules.Severity) string {
-	switch normalizeSeverity(s) {
-	case rules.SeverityCritical:
-		return "sev-critical"
-	case rules.SeverityHigh:
-		return "sev-high"
-	case rules.SeverityMedium:
-		return "sev-medium"
-	case rules.SeverityLow:
-		return "sev-low"
-	default:
-		return "sev-info"
-	}
-}
-
-func confidenceClass(c analysis.Confidence) string {
-	switch normalizeConfidence(c) {
-	case analysis.ConfidenceHigh:
-		return "conf-high"
-	case analysis.ConfidenceMedium:
-		return "conf-medium"
-	default:
-		return "conf-low"
-	}
 }
 
 // codeSnippet holds a small window of source lines around a finding position,

@@ -1,5 +1,12 @@
 # Godzilla
 
+[![CI](https://github.com/bytevet/godzilla/actions/workflows/ci.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/ci.yml)
+[![Security](https://github.com/bytevet/godzilla/actions/workflows/security.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/security.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bytevet/godzilla)](https://goreportcard.com/report/github.com/bytevet/godzilla)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**English** · [简体中文](docs/README.zh-CN.md)
+
 A fast, multi-language **Static Application Security Testing (SAST)** analyzer for CI/CD gates.
 
 Godzilla lowers many languages into one language-neutral SSA IR — **gIR** — and
@@ -38,11 +45,13 @@ flowchart LR
 - **Batteries included.** Built-in packs for the classes in the
   [detection matrix](#supported-languages--detections), plus non-dataflow checks
   for **weak crypto** and **hardcoded secrets**.
-- **CI-friendly output.** Human-readable findings, a self-contained **HTML
-  report**, **JSON** and **SARIF 2.1.0** (for GitHub code scanning), and a
-  severity-gated **exit code**.
-- **Optional LLM review.** A pluggable, off-by-default stage sends low-confidence
-  findings to Claude to trim false positives; it fails open.
+- **CI-friendly output.** Human-readable findings, a single-file **HTML report**
+  (filterable and sortable, with taint-flow snippets, syntax highlighting and a
+  scan-diagnostics panel), **JSON** and **SARIF 2.1.0** (for GitHub code
+  scanning), and a severity-gated **exit code**.
+- **Optional LLM review.** A pluggable, off-by-default stage sends findings at or
+  below **medium** confidence to Claude to trim false positives; High-confidence
+  findings are never reviewed, and the stage fails open.
 - **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
@@ -53,10 +62,13 @@ go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone
 go build -o godzilla ./cmd/godzilla
 ```
 
-Requires **Go 1.26+**. Scanning Python, Ruby, Java, or Rust also needs that
+Requires **Go 1.26.5+**. Scanning Python, Ruby, Java, or Rust also needs that
 language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`,
 each degrading gracefully when absent. Or skip install and
 [run with Docker](#run-with-docker).
+
+Both commands above produce a binary that reports its version as `dev`. Use
+`make build` for one stamped with the current tag (`godzilla version`).
 
 ## Quick start
 
@@ -70,10 +82,12 @@ godzilla scan --html report.html --fail-on high ./path/to/project
 # Machine-readable output: JSON for tooling, SARIF for GitHub code scanning
 godzilla scan --sarif results.sarif --json results.json ./path/to/project
 
-# Add your own rules on top of the built-ins, and print the gIR summary
-godzilla scan --rules myrules.yaml --summary ./path/to/project
+# Add your own rules on top of the built-ins
+godzilla scan --rules myrules.yaml ./path/to/project
 
-# Triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY)
+# Triage medium/low-confidence findings with an LLM (needs ANTHROPIC_API_KEY).
+# A scan whose findings are all High reports "0 reviewed" — that is the gate
+# working, not a failure.
 godzilla scan --llm-review ./path/to/project
 
 # Changed-files mode: gate only what a commit touched (one process, one gate)
@@ -93,12 +107,21 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 
 ```
 $ godzilla scan ./test/go/sql_injection
+coverage: go=ok
+
+[high] go-sql-injection (CWE-89, confidence: medium)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
+  source: .../main.go:43:6
+  in:     go:(*.../sql_injection.User).GetByID
+
 [high] go-sql-injection (CWE-89, confidence: high)
   Untrusted input flows into a database/sql query without parameterized arguments...
   sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
-  source: .../main.go:59:26
+  source: .../main.go:58:27
   in:     go:.../sql_injection.main$1
-1 finding(s); 1 at/above "medium".
+
+2 finding(s); 2 at/above "medium"; 0 suppressed.
 ```
 
 ### Environment variables
@@ -111,7 +134,7 @@ carries operator concerns:
 | `GODZILLA_ALLOW_BUILD=1` | Same opt-in as `-allow-build`: lets a scan run the project's build tool (Maven/Gradle/Cargo). |
 | `GODZILLA_RUSTC`, `GODZILLA_CARGO` | Paths to the Rust toolchain binaries (default: `rustc`, `cargo` on `PATH`). |
 | `GODZILLA_CC`, `GODZILLA_CXX` | C/C++ compilers for the opt-in LLVM backend (default: `clang`, `clang++`). |
-| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5`). |
+| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5` for Anthropic, `gpt-4o-mini` for OpenAI). |
 | `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
 | `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
@@ -160,8 +183,12 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Insecure deserialization | — | ✅ | — | ✅ | — | ✅ |
+| Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
 | Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
+| Server-side template injection | — | ✅ | — | — | — | — |
+| LDAP / XPath injection | — | ✅ | — | — | — | — |
+| Zip slip | — | ✅ | — | — | — | — |
+| Insecure framework config | — | ✅ | — | — | — | — |
 | Weak crypto | ✅ | — | — | ✅ | — | — |
 
 > **Hardcoded secrets** (CWE-798) are detected in **all** languages by
@@ -237,6 +264,11 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first are
 new built-in rules (often just YAML — [guide](docs/writing-rules.md)), a new
 language frontend, or better frontend fidelity.
 
+Found a vulnerability **in Godzilla itself**? Please report it privately through
+[GitHub's private vulnerability reporting](https://github.com/bytevet/godzilla/security/advisories/new)
+rather than a public issue. A missed or false detection is not a vulnerability —
+that is an ordinary issue, and a very welcome one.
+
 ## License
 
-[MIT](LICENSE) © 2026 SYM01
+[MIT](LICENSE) © 2026 Byte.Vet

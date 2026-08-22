@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/bytevet/godzilla/internal/rules"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
@@ -23,10 +24,28 @@ import (
 // and a function that can return tainted data taints its callers' call
 // results. A worklist re-analyzes functions until this state stabilizes.
 func (e *Engine) Analyze(prog *ir.Program) []Finding {
+	findings, _ := e.analyze(prog, false)
+	return findings
+}
+
+// AnalyzeWithStats is Analyze plus what the run observed about the program and
+// about its own cost, for the report's scan diagnostics. The numbers come back
+// as a return value rather than engine state, which would make concurrent or
+// repeated use of one Engine unsafe.
+func (e *Engine) AnalyzeWithStats(prog *ir.Program) ([]Finding, Stats) {
+	return e.analyze(prog, true)
+}
+
+// analyze is Analyze's body. countSites gates the only measurement that is not
+// free — globbing every distinct callee against every rule — so a caller that
+// discards the Stats does not pay |callees| x |rules| for it.
+func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	var findings []Finding
+	var stats Stats
 	if e == nil || e.rs == nil || prog == nil {
-		return findings
+		return findings, stats
 	}
+	phaseStart := time.Now()
 
 	// Both indexes depend only on the immutable program, so each is built ONCE and
 	// shared by every rule AND by the call graph: one index, one policy — private
@@ -51,6 +70,9 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
 		fnIdx:          make(map[*ir.Function]fnIndex, len(byKey)),
 	}
+	stats.Functions, stats.Rules = len(byKey), len(e.rs.Rules)
+	stats.Index = time.Since(phaseStart)
+	phaseStart = time.Now()
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
 	// parallel analysis: matching then walks compiled patterns lock-free, and
@@ -149,6 +171,35 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 			live[i] = canProduceFinding(&e.rs.Rules[i])
 		}
 	}
+	for _, ok := range live {
+		if ok {
+			stats.RulesLive++
+		}
+	}
+	// Source/sink workload for the report, over the SAME distinct-callee set the
+	// prefilter above just used — the counts are per call site, which is why
+	// cg.Callees carries them.
+	if countSites {
+		for callee, sites := range cg.Callees {
+			if callee == "" {
+				continue // an unresolved dynamic call names nothing a glob should match
+			}
+			for i := range e.rs.Rules {
+				if e.rs.Rules[i].IsSource(callee) {
+					stats.SourceSites += sites
+					break
+				}
+			}
+			for i := range e.rs.Rules {
+				if e.rs.Rules[i].IsSink(callee) {
+					stats.SinkSites += sites
+					break
+				}
+			}
+		}
+	}
+	stats.RuleSelect = time.Since(phaseStart)
+	phaseStart = time.Now()
 
 	// Phase 2: each live rule's analysis is independent — it reads the shared,
 	// immutable indexes and writes only its own local state — so the rules run
@@ -181,7 +232,8 @@ func (e *Engine) Analyze(prog *ir.Program) []Finding {
 	for _, r := range results {
 		findings = append(findings, r...)
 	}
-	return findings
+	stats.Taint = time.Since(phaseStart)
+	return findings, stats
 }
 
 // callEffect records that a tainted argument at a call site flows into the

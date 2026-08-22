@@ -7,13 +7,12 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -28,7 +27,6 @@ import (
 	"github.com/bytevet/godzilla/internal/rules/loader"
 	"github.com/bytevet/godzilla/internal/scan"
 	"github.com/bytevet/godzilla/internal/triage"
-	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
 // version is the tool version, overridable at build time via
@@ -61,7 +59,6 @@ for pre-commit hooks / CI diffs.
 flags:
   -rules <path>     additional YAML rule file — or directory of rulepacks — to load alongside the built-in rules
   -fail-on <sev>    minimum severity that fails the gate: info|low|medium|high|critical (default medium)
-  -summary          also print a gIR summary (opcode histogram, intrinsics)
   -html <file>      write an HTML report to <file>
   -json <file>      write a JSON report to <file>
   -sarif <file>     write a SARIF 2.1.0 report to <file>
@@ -144,7 +141,6 @@ func runScan(args []string) {
 	fs.Usage = usage
 	rulesPath := fs.String("rules", "", "additional YAML rule file, or a directory of rulepacks")
 	failOn := fs.String("fail-on", "medium", "minimum severity that fails the gate")
-	showSummary := fs.Bool("summary", false, "also print a gIR summary")
 	htmlPath := fs.String("html", "", "write an HTML report to this file")
 	jsonPath := fs.String("json", "", "write a JSON report to this file")
 	sarifPath := fs.String("sarif", "", "write a SARIF 2.1.0 report to this file")
@@ -154,7 +150,7 @@ func runScan(args []string) {
 	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
 	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
 	configPath := fs.String("config", "", "path to a .godzilla.yaml (default: auto-loaded from the scan root)")
-	quiet := fs.Bool("quiet", false, "suppress coverage/summary/per-finding console output; the exit code and any report files still reflect findings")
+	quiet := fs.Bool("quiet", false, "suppress coverage and per-finding console output; the exit code and any report files still reflect findings")
 	filesList := fs.String("files", "", "changed-files mode: read newline-separated paths to scan from this file, or '-' for stdin (for pre-commit hooks / CI diffs)")
 	parseTimeout := fs.Duration("parse-timeout", proc.ParseTimeout(), "deadline for each per-file parse/dump subprocess (python3, JavaDump, rustc, clang)")
 	buildTimeout := fs.Duration("build-timeout", proc.BuildTimeout(), "deadline for a whole-project build subprocess (only runs with -allow-build)")
@@ -242,24 +238,32 @@ func runScan(args []string) {
 	}
 	ruleSet = cfg.ApplyRules(ruleSet) // disable rules / apply severity overrides (no-op if cfg nil)
 
+	// Only the HTML report renders scan diagnostics, so only it pays to collect them.
+	var scanOpts []scan.Option
+	if *htmlPath != "" {
+		scanOpts = append(scanOpts, scan.WithDiagnostics())
+	}
 	var res scan.Result
 	if filesMode {
-		res, err = scan.ScanFiles(paths, ruleSet)
+		res, err = scan.ScanFiles(paths, ruleSet, scanOpts...)
 	} else {
-		res, err = scan.Scan(path, ruleSet)
+		res, err = scan.Scan(path, ruleSet, scanOpts...)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
 	}
+	// Sampled here rather than inside Scan: ReadMemStats stops the world, and a
+	// library caller in a loop must not pay that per iteration. Sys only grows, so
+	// reading it the moment the scan returns is the same high-water mark.
+	if *htmlPath != "" {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		res.Diag.PeakBytes = ms.Sys
+	}
 
 	if !*quiet {
 		printCoverage(os.Stdout, res.Coverage)
-	}
-
-	if *showSummary && !*quiet {
-		printSummary(os.Stdout, summarize(res.Program))
-		fmt.Fprintln(os.Stdout)
 	}
 
 	findings := res.Findings
@@ -326,12 +330,21 @@ func runScan(args []string) {
 
 	gated := printFindings(os.Stdout, findings, threshold, *quiet)
 
+	// res.Diag is already the report's input type, so there is nothing to map.
+	scanInfo := res.Diag
+	scanInfo.Target = path
+	if filesMode {
+		scanInfo.Target = "changed files"
+	}
+
 	reports := []struct {
 		path  string
 		kind  string
 		write func(io.Writer, []analysis.Finding) error
 	}{
-		{*htmlPath, "HTML", report.WriteHTML},
+		{*htmlPath, "HTML", func(w io.Writer, f []analysis.Finding) error {
+			return report.WriteHTML(w, f, report.WithScanInfo(scanInfo))
+		}},
 		{*jsonPath, "JSON", report.WriteJSON},
 		{*sarifPath, "SARIF", report.WriteSARIF},
 	}
@@ -467,98 +480,4 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n", len(active), gated, threshold, len(suppressed))
 	}
 	return gated
-}
-
-// summary holds the aggregate counts and histograms computed from a
-// converted ir.Program, ready to be rendered by printSummary.
-type summary struct {
-	modules      int
-	functions    int
-	synthetic    int
-	blocks       int
-	instructions int
-
-	langModules map[string]int
-	opCounts    map[ir.OpCode]int
-	intrinsics  map[string]int
-}
-
-// summarize walks a converted gIR program and tallies module, function,
-// block, and instruction counts, along with per-language module counts,
-// an opcode histogram, and distinct intrinsic names.
-func summarize(prog *ir.Program) summary {
-	s := summary{
-		langModules: make(map[string]int),
-		opCounts:    make(map[ir.OpCode]int),
-		intrinsics:  make(map[string]int),
-	}
-
-	for _, mod := range prog.Modules {
-		s.modules++
-		s.langModules[mod.Language]++
-
-		for _, fn := range mod.Functions {
-			s.functions++
-			if fn.Synthetic {
-				s.synthetic++
-			}
-
-			for _, blk := range fn.Blocks {
-				s.blocks++
-
-				for _, instr := range blk.Instrs {
-					s.instructions++
-					s.opCounts[instr.Op]++
-
-					if instr.Op == ir.OpCode_OP_CODE_INTRINSIC && instr.Intrinsic != "" {
-						s.intrinsics[instr.Intrinsic]++
-					}
-				}
-			}
-		}
-	}
-
-	return s
-}
-
-func printSummary(w io.Writer, s summary) {
-	fmt.Fprintf(w, "modules: %d\n", s.modules)
-	fmt.Fprintf(w, "functions: %d (%d synthetic)\n", s.functions, s.synthetic)
-	fmt.Fprintf(w, "basic blocks: %d\n", s.blocks)
-	fmt.Fprintf(w, "instructions: %d\n", s.instructions)
-
-	fmt.Fprintln(w, "\nmodules by language:")
-	for _, lang := range sortedKeys(s.langModules) {
-		fmt.Fprintf(w, "  %s: %d module(s)\n", lang, s.langModules[lang])
-	}
-
-	fmt.Fprintln(w, "\nopcode histogram:")
-	for _, op := range sortedOpCodes(s.opCounts) {
-		fmt.Fprintf(w, "  %-28s %d\n", op.String(), s.opCounts[op])
-	}
-
-	fmt.Fprintln(w, "\nintrinsics:")
-	if len(s.intrinsics) == 0 {
-		fmt.Fprintln(w, "  (none)")
-	}
-	for _, name := range sortedKeys(s.intrinsics) {
-		fmt.Fprintf(w, "  %s: %d\n", name, s.intrinsics[name])
-	}
-}
-
-func sortedKeys(m map[string]int) []string {
-	return slices.Sorted(maps.Keys(m))
-}
-
-// sortedOpCodes returns the keys of m sorted by count descending, then by
-// opcode name ascending to break ties deterministically.
-func sortedOpCodes(m map[ir.OpCode]int) []ir.OpCode {
-	ops := slices.Collect(maps.Keys(m))
-	slices.SortFunc(ops, func(a, b ir.OpCode) int {
-		if c := cmp.Compare(m[b], m[a]); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.String(), b.String())
-	})
-	return ops
 }

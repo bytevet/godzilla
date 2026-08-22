@@ -70,6 +70,11 @@ language-specific construct. If a change is truly unavoidable, edit
 
 ## Reporting security-relevant issues
 
-If you find a vulnerability in Godzilla itself (as opposed to a detection gap),
-open an issue describing it; avoid posting working exploits against third-party
-targets.
+If you find a vulnerability in Godzilla itself — as opposed to a detection gap —
+report it privately through
+[GitHub's private vulnerability reporting](https://github.com/bytevet/godzilla/security/advisories/new)
+rather than a public issue, so a fix can ship before the details are public.
+
+A missed detection or a false positive is **not** a vulnerability in Godzilla: open
+an ordinary issue for those, ideally with a minimal sample. Either way, avoid
+posting working exploits against third-party targets.
