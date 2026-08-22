@@ -107,7 +107,9 @@ func (idx *Index) serveFile(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("p")
 	view := idx.View(id)
 	if view == nil {
-		writeJSON(w, http.StatusNotFound, apiError{Error: "no gIR for " + id})
+		// The requested id is not echoed: it is attacker-controlled, and a 404
+		// that quotes it back reflects input into a response for no benefit.
+		writeJSON(w, http.StatusNotFound, apiError{Error: "unknown file"})
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
