@@ -274,7 +274,6 @@ type moduleCtx struct {
 	moduleAliases    map[string]string
 	relativeDefaults map[string]string
 	handlers         map[fnID]bool
-	components       map[fnID]bool
 }
 
 // newFuncState creates a funcState for a function in this module, priming the
@@ -313,7 +312,10 @@ func lowerFunction(m *moduleCtx, pf pendingFunc) *ir.Function {
 
 	fs := m.newFuncState()
 	fs.isHandler = m.handlers[pf.node]
-	fs.isComponent = m.components[pf.node]
+	// Derived, not carried: unlike isHandler -- a fact only the route
+	// registration elsewhere in the AST knows -- this is a pure function of the
+	// function's own name, which pendingFunc already holds.
+	fs.isComponent = isComponentName(pf.objectName)
 	// A method's qualname is "<Class>.<method>" (or nested "<a>.<b>"); record the
 	// prefix so `this.method(x)` resolves to the sibling method.
 	if i := strings.LastIndexByte(pf.qualname, '.'); i >= 0 {
@@ -379,12 +381,9 @@ func (fs *funcState) bindParams(fn *ir.Function, args []jsast.Arg, hasRest bool)
 					fs.bindDestructuredParam("req", pat, a.Binding.Loc)
 				}
 			case fs.isComponent && destructured:
-				// `function Note({html})` — the dominant React idiom, and until this
-				// existed the reason react-xss could not fire in the field: the pattern
-				// binds no identifier, so the parameter took an `_arg0` name and `html`
-				// read as an unbound global, untainted. reqParam stays unset on purpose:
-				// it drives canonRoot's request-name canonicalization, which would
-				// rewrite a component's own parameter reads into request sources.
+				// reqParam stays unset on purpose: it drives canonRoot's request-name
+				// canonicalization, which would rewrite a component's own parameter
+				// reads into request sources.
 				fs.bindDestructuredParam("props", pat, a.Binding.Loc)
 			}
 		}
@@ -901,6 +900,20 @@ func objectPatternRest(f *jsast.File, op *jsast.BObject) string {
 // `js:` prefix because emitCall writes the callee verbatim -- sfc.go's Vue
 // equivalent gets the prefix for free by injecting source text that is then
 // lowered as an ordinary call.
+// isComponentName reports whether a function with this leaf name can be used as a
+// React component, which is what makes its first parameter a props object.
+//
+// The capital initial is React's OWN dispatch rule, not a proxy for it: JSX
+// compiles a lowercase tag to a host-element STRING, so a lowercase-named
+// function cannot be rendered as a component at all. Why the broader "its first
+// parameter is destructured" is wrong is pinned by test/js/react_props_xss_safe.
+//
+// A class METHOD leafs to its method name, so it is never a component -- correct,
+// since a class component reads this.props rather than a parameter.
+func isComponentName(leaf string) bool {
+	return leaf != "" && leaf[0] >= 'A' && leaf[0] <= 'Z'
+}
+
 const reactHTMLSink = "js:__godzilla_react_html"
 
 // emitReactHTMLSink gives React's dangerouslySetInnerHTML a callee to match.

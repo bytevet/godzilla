@@ -1,0 +1,11 @@
+# HTML sanitizers that neutralize a value before it is bound as raw HTML. Shared
+# by every JS/TS pack whose sink renders unescaped markup, SOURCES INCLUDED OR
+# NOT: react-xss-props deliberately inherits no sources (see its own comment) but
+# accepts exactly these, and a sanitizer known to one raw-HTML rule and not
+# another is a false positive on the same file in the same scan.
+sanitizers:
+  - "js:*DOMPurify*"
+  - "js:*.sanitize"
+  - "js:*sanitizeHtml"
+  - "js:*escapeHtml"
+  - "js:*xss"

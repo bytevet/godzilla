@@ -24,3 +24,20 @@ func Global(name string) *ir.Value {
 func Nil() *ir.Value {
 	return &ir.Value{Kind: &ir.Value_Constant{Constant: &ir.Constant{IsNil: true}}}
 }
+
+// SetKwargMarker stamps inst as a `builtin.kwarg(<name>, <value>)` marker: the
+// intrinsic a frontend emits to tag a keyword argument with the name it was
+// passed under, since gIR carries positional arguments only.
+//
+// TWO channels, and dropping either fails silently. Operands is what the engine's
+// markTaintFromOperands reads, and builtin.kwarg is an intrinsic propagator, so
+// without it every `f(x=tainted)` loses its taint. Call.Args is what unwrapKwarg
+// reads to give a rule guard `kwargs.<name>`, so without it a guard can see that
+// SOME argument is set but not which. Shared so the pairing is stated once rather
+// than re-derived per frontend.
+func SetKwargMarker(inst *ir.Instruction, name string, v *ir.Value) {
+	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
+	inst.Intrinsic = "builtin.kwarg"
+	inst.Operands = []*ir.Value{v}
+	inst.Call = &ir.CallCommon{Callee: "builtin.kwarg", Args: []*ir.Value{Str(name), v}}
+}

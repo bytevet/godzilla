@@ -14,17 +14,10 @@ rules:
       request.
     extend: [$_ruby-sources.yaml, $_ruby-propagators.yaml]
     when: 'not hostFixed()'
-    # Every sink pins the URL argument. Unpinned, each of these treats EVERY
-    # argument as an injection point, which since the frontend started carrying
-    # keyword taint includes the options hash -- and
-    # `HTTParty.get("https://api.example.com/items", query: params[:q])` is the
-    # PARAMETERIZED, safe idiom. The `when: 'not hostFixed()'` guard makes that
-    # worse rather than better: a tainted keyword is not a scheme://host prefix,
-    # so the host reads as controllable and the rule fires.
-    #
-    # The index differs by call shape and that is not a typo: a Ruby dot-call
-    # carries its receiver as logical argument 0, so the URL is #1, while a bare
-    # `open(url)` has no receiver and its URL is #0.
+    # Each sink pins the URL. Unpinned, a keyword like `query:` is an injection
+    # point too, and the `not hostFixed()` guard then reads it as a controllable
+    # host (test/ruby/kwarg_taint_safe). The bare `open` is #0 and the dot-calls
+    # are #1 -- see the receiver convention in docs/writing-rules.md.
     sinks:
       # net/http (canonical const-path names are scoped by the frontend).
       - "ruby:Net::HTTP.get#1"

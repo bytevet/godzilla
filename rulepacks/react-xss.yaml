@@ -23,7 +23,7 @@ rules:
       passing it as HTML.
     # Shared browser sources + HTML sanitizers come from the fragment; only the
     # React-specific sources stay inline.
-    extend: $_js-sfc-xss.yaml
+    extend: [$_js-sfc-xss.yaml, $_js-html-sanitizers.yaml]
     sources:
       # react-router route params/query — the framework's request input.
       - "js:*useParams"

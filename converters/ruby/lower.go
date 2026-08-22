@@ -301,29 +301,23 @@ func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix 
 	return fn
 }
 
-// kwargSlotParam is an inert parameter standing in for the caller's keyword hash.
-// A caller lowers a keyword list as an untainted placeholder in the positional
-// slot plus markers appended after it (lowerArgList), and the engine maps
-// arguments to parameters by POSITION, so the callee needs the same placeholder
-// or every marker lands one slot early. It is never written or read, and the name
-// cannot collide -- Ruby has no local starting with '@'.
+// kwargSlotParam mirrors, on the callee, the inert placeholder a caller leaves in
+// the keyword hash's positional slot (appendArgList). The engine binds arguments
+// to parameters by POSITION, so without it every appended marker lands one slot
+// early. Never written or read; '@' cannot start a Ruby local, so it cannot
+// collide.
 const kwargSlotParam = "@kwargs"
 
 // paramNames extracts the parameter names from a `params` node
 // (`["params", [reqs], [opts], rest, [post], [keywords], kwrest, block]`) in the
-// order a CALLER supplies them: required first, then optional (defaulted), then
-// the keyword-slot placeholder, then keyword and `**` parameters. The optionals
-// matter for taint — a classic vulnerable signature is `def m(filter = nil)`, and
-// unbound its tainted argument maps to no parameter and drops.
+// order a CALLER supplies them. The optionals matter for taint — a classic
+// vulnerable signature is `def m(filter = nil)`, and unbound its tainted argument
+// maps to no parameter and drops.
 //
-// The keyword half aligns by ORDER, not by name, and only for a call that passes
-// every declared positional. `def m(a, b = nil, **o)` called `m(x, k: t)` puts the
-// marker where `b` is declared, so the taint lands on the inert slot and stops:
-// the caller's placeholder sits after the positionals actually PASSED, the
-// callee's after the ones declared. Making that exact needs the engine to map a
-// marker by its recorded name, which is a change to the callee-binding contract
-// rather than to this frontend. `*rest` and post-required params stay out for the
-// same reason -- they shift the same alignment.
+// Keyword binding is positional, so it is exact only when the call passes every
+// declared positional: the caller's placeholder sits after the positionals
+// PASSED, this one after those declared. `*rest` and post-required params are
+// omitted because they shift the same alignment.
 func paramNames(n interface{}) []string {
 	// def may wrap params in `paren`: ["paren", ["params", …]].
 	if tag(n) == "paren" {
@@ -340,16 +334,7 @@ func paramNames(n interface{}) []string {
 		}
 	}
 	// Optionals: index 2 is a list of [identNode, defaultExpr] pairs.
-	opts, _ := asList(at(n, 2))
-	for _, o := range opts {
-		pair, ok := asList(o)
-		if !ok || len(pair) == 0 {
-			continue
-		}
-		if name := identName(pair[0]); name != "" {
-			out = append(out, name)
-		}
-	}
+	out = append(out, pairParamNames(at(n, 2))...)
 	kws := keywordParamNames(n)
 	if len(kws) == 0 {
 		return out
@@ -357,25 +342,33 @@ func paramNames(n interface{}) []string {
 	return append(append(out, kwargSlotParam), kws...)
 }
 
-// keywordParamNames returns a def's keyword parameters (index 5, each a
-// [identNode, defaultOrFalse] pair) followed by its `**rest` (index 6), in
-// declaration order.
+// keywordParamNames returns a def's keyword parameters (index 5) followed by its
+// `**rest` (index 6), in declaration order.
 func keywordParamNames(n interface{}) []string {
+	out := pairParamNames(at(n, 5))
+	// `**rest` arrives wrapped: [kwrest_param, [@ident, "rest"]]. An anonymous
+	// `**` has nil inside and yields no name.
+	if name := identName(at(at(n, 6), 1)); name != "" {
+		out = append(out, name)
+	}
+	return out
+}
+
+// pairParamNames reads a `[identNode, defaultOrFalse]` pair list — how Ripper
+// spells both the optional (index 2) and keyword (index 5) parameter lists. A
+// keyword's ident is an `@label` carrying its trailing colon; a positional name
+// can never end in one, so the trim is unconditional.
+func pairParamNames(list interface{}) []string {
+	items, _ := asList(list)
 	var out []string
-	kws, _ := asList(at(n, 5))
-	for _, k := range kws {
-		pair, ok := asList(k)
+	for _, it := range items {
+		pair, ok := asList(it)
 		if !ok || len(pair) == 0 {
 			continue
 		}
 		if name := identName(pair[0]); name != "" {
 			out = append(out, strings.TrimSuffix(name, ":"))
 		}
-	}
-	// `**rest` arrives wrapped: [kwrest_param, [@ident, "rest"]]. An anonymous
-	// `**` has nil inside and yields no name.
-	if name := identName(at(at(n, 6), 1)); name != "" {
-		out = append(out, name)
 	}
 	return out
 }
@@ -475,8 +468,8 @@ func assocPairs(n interface{}) []interface{} {
 }
 
 // assocSplats returns the `assoc_splat` entries of a hash node -- the `**rest` in
-// `t(key, **params, scope: s)`. Ripper puts them in the same list as the ordinary
-// pairs, so both halves of a keyword list come from one walk.
+// `t(key, **params, scope: s)`. Emitted after assocPairs and never interleaved:
+// markers bind to parameters by position, and paramNames puts `**rest` last.
 func assocSplats(n interface{}) []interface{} {
 	return assocNodes(n, "assoc_splat")
 }
@@ -510,9 +503,9 @@ func assocKeyName(pair interface{}) string {
 	k := at(pair, 1)
 	switch tag(k) {
 	case "@label":
-		return strings.TrimSuffix(scalarText(k), ":")
-	case "symbol_literal", "dyna_symbol":
-		return identName(at(k, 1))
+		return labelName(k)
+	case "symbol_literal":
+		return symbolText(k)
 	case "@tstring_content":
 		return scalarText(k)
 	case "string_literal":
@@ -524,6 +517,15 @@ func assocKeyName(pair interface{}) string {
 	}
 	return ""
 }
+
+// symbolText returns a `symbol_literal`'s bare name. Ripper wraps it twice --
+// [symbol_literal, [symbol, [@ident, "html"]]] -- and reading it at one level
+// yields a list, not a name. A `dyna_symbol` (`:"#{x}"`) names nothing.
+func symbolText(n interface{}) string { return identName(at(at(n, 1), 1)) }
+
+// labelName returns a keyword key's name. Ripper's `@label` text carries the
+// trailing colon (`html:`), and every consumer wants it gone.
+func labelName(n interface{}) string { return strings.TrimSuffix(scalarText(n), ":") }
 
 // posFrom converts a Ripper node's position to a gIR one. Ripper counts columns
 // from 0 and every other frontend — and every editor a reported column is read
@@ -655,7 +657,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		// receiver of `Net::HTTP.get` off the ruby.unsupported path.
 		return ssabuild.Str(constPathName(n))
 	case "symbol_literal":
-		return ssabuild.Str(identName(at(at(n, 1), 1)))
+		return ssabuild.Str(symbolText(n))
 	case "dyna_symbol":
 		return ssabuild.Str("")
 	case "var_ref":
@@ -740,6 +742,11 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 		for _, pair := range assocPairs(n) {
 			fs.lowerExpr(at(pair, 1))
 			fs.lowerExpr(at(pair, 2))
+		}
+		// A `**splat` entry too, so a hash in VALUE position sees what one in
+		// argument position does (appendArgList).
+		for _, sp := range assocSplats(n) {
+			fs.lowerExpr(at(sp, 1))
 		}
 		return ssabuild.Str("")
 	case "array":
@@ -1219,7 +1226,7 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 		}
 	}
 	// Receiver as operand 0 (rules pin the tainted arg with #1).
-	argVals := append([]*ir.Value{recvVal}, fs.lowerArgList(args)...)
+	argVals := fs.appendArgList(append(make([]*ir.Value, 0, len(args)+1), recvVal), args)
 	return fs.lowerCallExprVals(callee, argVals, n)
 }
 
@@ -1357,26 +1364,15 @@ func extractArgs(n interface{}) []interface{} {
 	return nil
 }
 
-// emitKwargMarker tags a keyword-argument value with the name it was passed
-// under, mirroring the Python frontend's marker so the engine needs no Ruby case.
-// Two channels, and dropping either breaks something silently: Operands is what
-// markTaintFromOperands reads (builtin.kwarg is an intrinsic propagator), and
-// Call.Args is what unwrapKwarg reads to give a rule guard `kwargs.<name>`.
 func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n interface{}) *ir.Value {
 	inst := fs.newValueInst(n)
-	inst.Op = ir.OpCode_OP_CODE_INTRINSIC
-	inst.Intrinsic = "builtin.kwarg"
-	inst.Operands = []*ir.Value{v}
-	inst.Call = &ir.CallCommon{
-		Callee: "builtin.kwarg",
-		Args:   []*ir.Value{ssabuild.Str(name), v},
-	}
+	ssabuild.SetKwargMarker(inst, name, v)
 	fs.emit(inst)
 	return ssabuild.Reg(inst.Name)
 }
 
-// lowerArgList lowers a call's argument nodes, turning a trailing keyword list
-// into markers APPENDED after every positional argument.
+// appendArgList lowers a call's argument nodes into dst, turning a trailing
+// keyword list into markers APPENDED after every positional argument.
 //
 // The hash keeps its own inert placeholder in the positional slot, and that is
 // load-bearing rather than tidy: a rule pins an injection point by logical index
@@ -1389,16 +1385,21 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n interface{}) *i
 // Values are lowered ONCE. Routing a pair through lowerExpr and then re-lowering
 // it for the marker would emit a second copy of any synthetic source call inside
 // it, and duplicate a finding.
-func (fs *funcState) lowerArgList(args []interface{}) []*ir.Value {
-	var vals, markers []*ir.Value
+func (fs *funcState) appendArgList(dst []*ir.Value, args []interface{}) []*ir.Value {
+	var markers []*ir.Value
 	for _, a := range args {
 		if t := tag(a); t != "bare_assoc_hash" && t != "hash" {
-			vals = append(vals, fs.lowerExpr(a))
+			dst = append(dst, fs.lowerExpr(a))
 			continue
 		}
 		for _, pair := range assocPairs(a) {
-			fs.lowerExpr(at(pair, 1)) // the key, for a source or sink inside it
-			markers = append(markers, fs.emitKwargMarker(assocKeyName(pair), fs.lowerExpr(at(pair, 2)), pair))
+			name := assocKeyName(pair)
+			if name == "" {
+				// Only a COMPUTED key needs lowering, for a source or sink inside it.
+				// A literal one lowers to a constant nothing reads.
+				fs.lowerExpr(at(pair, 1))
+			}
+			markers = append(markers, fs.emitKwargMarker(name, fs.lowerExpr(at(pair, 2)), pair))
 		}
 		// `**rest` names no single keyword, so it stays a plain value -- the same
 		// treatment Python gives an unexpandable splat. Without it the forwarding
@@ -1406,13 +1407,13 @@ func (fs *funcState) lowerArgList(args []interface{}) []*ir.Value {
 		for _, sp := range assocSplats(a) {
 			markers = append(markers, fs.lowerExpr(at(sp, 1)))
 		}
-		vals = append(vals, ssabuild.Str(""))
+		dst = append(dst, ssabuild.Str(""))
 	}
-	return append(vals, markers...)
+	return append(dst, markers...)
 }
 
 func (fs *funcState) lowerCallExpr(callee string, args []interface{}, n interface{}) *ir.Value {
-	return fs.lowerCallExprVals(callee, fs.lowerArgList(args), n)
+	return fs.lowerCallExprVals(callee, fs.appendArgList(nil, args), n)
 }
 
 func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interface{}) *ir.Value {

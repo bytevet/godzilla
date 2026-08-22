@@ -22,16 +22,11 @@ rules:
       - "ruby:*.html_safe"
       - "ruby:concat"               # ERB/helper concat(user_html)
       - "ruby:safe_concat"
-      # render html:/inline:/plain:/text:/body: interpolates the value straight
-      # into the response body. The guard names those keywords because `render`
-      # is Rails' most keyword-heavy call and the others are not HTML output:
-      # `locals:` feeds an auto-escaping template, and `json:` is a JSON body, so
-      # once the frontend started carrying keyword taint both reported as XSS.
-      #
-      # A `when:` is required-confirmation, so this also drops the POSITIONAL
-      # `render(x)` form. That form is a tainted template NAME -- template
-      # injection, which ruby-code-injection covers -- not XSS, so it is not a
-      # loss here.
+      # Only these keywords put the value in the response body as HTML; `locals:`
+      # feeds an auto-escaping template and `json:` is not HTML (test/ruby/
+      # kwarg_taint). A `when:` is required-confirmation, so this also drops the
+      # positional `render(x)` -- a tainted template NAME, which is template
+      # injection and ruby-code-injection's business, not XSS.
       - sink: "ruby:render"
         when: >-
           kwargs.html.Tainted or kwargs.inline.Tainted or kwargs.plain.Tainted

@@ -19,9 +19,9 @@ export class Bio extends React.Component {
   }
 }
 
-// The dominant React idiom: props destructured in the signature. Until the
-// frontend bound these, the parameter took an `_arg0` name and `html` read as an
-// unbound global -- which is why this rule could not fire on real code.
+// The dominant React idiom: props destructured in the signature. The pattern
+// binds no identifier of its own, so without the frontend binding each property
+// the prop is not a value this rule can see at all.
 export function Note({html}) {
   return <div dangerouslySetInnerHTML={{__html: html}} />;
 }

@@ -20,7 +20,7 @@ rules:
       sanitize it (e.g. DOMPurify.sanitize) before binding it as HTML.
     # Shared browser sources + HTML sanitizers come from the fragment; only the
     # Vue-specific sources stay inline.
-    extend: $_js-sfc-xss.yaml
+    extend: [$_js-sfc-xss.yaml, $_js-html-sanitizers.yaml]
     sources:
       # Component props (data passed from a parent — external to this component).
       - "js:*defineProps"

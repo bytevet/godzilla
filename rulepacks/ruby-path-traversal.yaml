@@ -24,10 +24,8 @@ rules:
       - "ruby:IO.read"
       - "ruby:IO.binread"
       - "ruby:IO.readlines"
-      # Pinned to the path/body (logical 0 -- both are bare fcalls, no receiver).
-      # `send_data csv, filename: params[:name]` is the idiomatic Rails download,
-      # and `filename:` is a Content-Disposition header value, not a filesystem
-      # path; unpinned, every argument is an injection point and it reports.
+      # Pinned to the path/body: `filename:` is a Content-Disposition value, not a
+      # path (test/ruby/kwarg_taint_safe).
       - "ruby:send_file#0"          # Rails ActionController#send_file
       - "ruby:send_data#0"
       - "ruby:open"                 # Kernel#open(path)

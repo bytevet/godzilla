@@ -3,8 +3,6 @@ package js_converter
 import (
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	jsast "github.com/bytevet/esbuild-jsast"
 
@@ -35,7 +33,6 @@ type collector struct {
 	nameOf     map[fnID]string // node -> canonical name ("js:<module>.<qualname>")
 	order      []pendingFunc
 	handlers   map[fnID]bool // function nodes registered as HTTP route handlers
-	components map[fnID]bool // function nodes usable as React components (see isComponentName)
 }
 
 func newCollector(src *jsast.File, moduleName string) *collector {
@@ -45,7 +42,6 @@ func newCollector(src *jsast.File, moduleName string) *collector {
 		anonSeq:    map[string]int{},
 		nameOf:     map[fnID]string{},
 		handlers:   map[fnID]bool{},
-		components: map[fnID]bool{},
 	}
 }
 
@@ -104,11 +100,7 @@ func (c *collector) addFunction(node fnID, loc jsast.Loc, qualname string, args 
 		c.collectExpr(a.DefaultOrNil, qualname+".", "")
 	}
 	c.nameOf[node] = "js:" + c.moduleName + "." + qualname
-	leaf := leafName(qualname)
-	if isComponentName(leaf) {
-		c.components[node] = true
-	}
-	c.order = append(c.order, pendingFunc{node: node, loc: loc, qualname: qualname, objectName: leaf})
+	c.order = append(c.order, pendingFunc{node: node, loc: loc, qualname: qualname, objectName: leafName(qualname)})
 	c.collectStmts(body, qualname+".")
 }
 
@@ -138,29 +130,6 @@ func (c *collector) collectClass(cl jsast.Class, qualPrefix, fallbackName string
 			c.addFunction(fn, p.ValueOrNil.Loc, prefix+name, fn.Fn.Args, fn.Fn.Body.Block.Stmts)
 		}
 	}
-}
-
-// isComponentName reports whether a function with this leaf name can be used as a
-// React component, which is what makes its first parameter a props object.
-//
-// The capital initial is React's OWN dispatch rule, not a proxy for it: JSX
-// compiles a lowercase tag to a host-element STRING, so a lowercase-named
-// function cannot be rendered as a component at all. Deciding by "the first
-// parameter is a destructured object" instead would be both broader and wrong --
-// it makes every `function f({retries, timeout})` options-bag helper a props
-// source, and it would DOWNGRADE a destructured request handler: binding `{req}`
-// to a local register makes it an assigned name, so `req.query` stops matching
-// the request-source globs and a real source is lost.
-//
-// A class METHOD leafs to the method name (`SignupPage.render` -> `render`), so
-// it is never a component -- correct, since a class component reads this.props
-// rather than a parameter.
-func isComponentName(leaf string) bool {
-	if leaf == "" {
-		return false
-	}
-	r, _ := utf8.DecodeRuneInString(leaf)
-	return unicode.IsUpper(r)
 }
 
 func leafName(qualname string) string {
@@ -446,7 +415,7 @@ func convertModule(src *jsast.File, li *lineIndex, moduleName string) (*ir.Modul
 	mctx := &moduleCtx{
 		src: src, li: li, moduleName: moduleName, nameOf: c.nameOf,
 		localFuncs: localFuncs, moduleAliases: moduleAliases,
-		relativeDefaults: relativeDefaults, handlers: c.handlers, components: c.components,
+		relativeDefaults: relativeDefaults, handlers: c.handlers,
 	}
 
 	var functions []*ir.Function

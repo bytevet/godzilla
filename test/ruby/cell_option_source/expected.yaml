@@ -1,9 +1,8 @@
 # Expected findings for this sample (see test/README.md).
 # max: 2 is the assertion: the option reaching `raw` directly, and the same value
 # reaching it through a keyword argument and a `**` splat forward -- the decidim
-# CVE-2024-41673 shape, which needs both halves of Ruby keyword taint (the
-# appended marker at the call, the @kwargs slot on the callee). The negatives are
-# what the max protects:
+# CVE-2024-41673 shape (keyword taint itself is pinned by test/ruby/kwarg_taint).
+# The negatives are what the max protects:
 # html_escape neutralizes the value, and `options` in app/helpers is an ordinary
 # parameter that must not be seeded -- the source is emitted only under app/cells,
 # where the name has exactly one meaning. severity is low by design (see the

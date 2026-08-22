@@ -19,7 +19,7 @@ rules:
     # SvelteKit-specific sources stay inline. (A prop declared with `export let`
     # lowers as an ordinary module-scope local with no source glob to match, so
     # the reliable untrusted sources are the browser URL, $page, and query parsing.)
-    extend: $_js-sfc-xss.yaml
+    extend: [$_js-sfc-xss.yaml, $_js-html-sanitizers.yaml]
     sources:
       - "js:*$page*"
       - "js:*useSearchParams*"
