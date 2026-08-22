@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/bytevet/godzilla/actions/workflows/ci.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/ci.yml)
 [![Security](https://github.com/bytevet/godzilla/actions/workflows/security.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/security.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/bytevet/godzilla)](https://goreportcard.com/report/github.com/bytevet/godzilla)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
 
 [English](../README.md) · **简体中文**
