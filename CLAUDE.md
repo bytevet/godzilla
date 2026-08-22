@@ -196,6 +196,10 @@ cache shared by report/LLM/triage), and `internal/testsupport` (test-only interp
   `comment`/intrinsic like `unsupported instruction`; converter tests fail if one appears.
 - **Confidence drives triage.** Intra-procedural findings are High; cross-function are Medium. The LLM
   reviewer only adjudicates at/below Medium and fails open (never drops a finding on an API error).
+- **README.md and its Chinese mirror ship in the same commit.** `README.md` is the source of truth and
+  `docs/README.zh-CN.md` mirrors it section for section; changing one WITHOUT the other is the whole
+  failure mode, and no test catches it. The mirror's links are rewritten, not copied — repo files need
+  `../`, `docs/` siblings drop the prefix, and its internal anchors point at the translated headings.
 - **Comments are concise and carry only what the code cannot say.** Write the invariant, the failure mode,
   or why the obvious alternative is wrong — then stop. Specifically, do NOT write: a restatement of the line
   below it; the same rationale in two places (put it where the person who would break it is looking — often

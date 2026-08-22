@@ -1,5 +1,12 @@
 # Godzilla
 
+[![CI](https://github.com/bytevet/godzilla/actions/workflows/ci.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/ci.yml)
+[![Security](https://github.com/bytevet/godzilla/actions/workflows/security.yml/badge.svg)](https://github.com/bytevet/godzilla/actions/workflows/security.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bytevet/godzilla)](https://goreportcard.com/report/github.com/bytevet/godzilla)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**English** · [简体中文](docs/README.zh-CN.md)
+
 A fast, multi-language **Static Application Security Testing (SAST)** analyzer for CI/CD gates.
 
 Godzilla lowers many languages into one language-neutral SSA IR — **gIR** — and
@@ -55,10 +62,13 @@ go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone
 go build -o godzilla ./cmd/godzilla
 ```
 
-Requires **Go 1.26+**. Scanning Python, Ruby, Java, or Rust also needs that
+Requires **Go 1.26.5+**. Scanning Python, Ruby, Java, or Rust also needs that
 language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`,
 each degrading gracefully when absent. Or skip install and
 [run with Docker](#run-with-docker).
+
+Both commands above produce a binary that reports its version as `dev`. Use
+`make build` for one stamped with the current tag (`godzilla version`).
 
 ## Quick start
 
@@ -124,7 +134,7 @@ carries operator concerns:
 | `GODZILLA_ALLOW_BUILD=1` | Same opt-in as `-allow-build`: lets a scan run the project's build tool (Maven/Gradle/Cargo). |
 | `GODZILLA_RUSTC`, `GODZILLA_CARGO` | Paths to the Rust toolchain binaries (default: `rustc`, `cargo` on `PATH`). |
 | `GODZILLA_CC`, `GODZILLA_CXX` | C/C++ compilers for the opt-in LLVM backend (default: `clang`, `clang++`). |
-| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5`). |
+| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5` for Anthropic, `gpt-4o-mini` for OpenAI). |
 | `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
 | `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
@@ -253,6 +263,11 @@ merge. Run it yourself with `scripts/pr-quality-gate.sh origin/main`. See
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first areas:
 new built-in rules (often just YAML — [guide](docs/writing-rules.md)), a new
 language frontend, or better frontend fidelity.
+
+Found a vulnerability **in Godzilla itself**? Please report it privately through
+[GitHub's private vulnerability reporting](https://github.com/bytevet/godzilla/security/advisories/new)
+rather than a public issue. A missed or false detection is not a vulnerability —
+that is an ordinary issue, and a very welcome one.
 
 ## License
 
