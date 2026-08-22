@@ -2,11 +2,14 @@ package report
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/scaninfo"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -71,7 +74,7 @@ func TestWriteHTML(t *testing.T) {
 		t.Fatalf("output does not look like an HTML document; got prefix: %q", out[:min(80, len(out))])
 	}
 
-	if !strings.Contains(out, "Godzilla SAST Report") {
+	if !strings.Contains(out, "Godzilla SAST") || !strings.Contains(out, "Code Security Report") {
 		t.Error("output missing report title")
 	}
 
@@ -103,11 +106,14 @@ func TestWriteHTML_Empty(t *testing.T) {
 		t.Fatalf("WriteHTML returned error: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "No findings.") {
+	if !strings.Contains(out, "<h3>No findings</h3>") {
 		t.Error("expected empty-state message for zero findings")
 	}
-	if !strings.Contains(out, "Total findings: <strong>0</strong>") {
-		t.Error("expected total count of 0 in summary")
+	if !strings.Contains(out, `<span class="verdict pass">`) {
+		t.Error("expected the clean-scan verdict for zero findings")
+	}
+	if strings.Contains(out, `class="finding`) {
+		t.Error("empty report still rendered a finding row")
 	}
 }
 
@@ -149,8 +155,8 @@ func TestWriteHTML_TaintFlow(t *testing.T) {
 	}
 	out := buf.String()
 
-	if !strings.Contains(out, "Taint spread flow") {
-		t.Error("expected a taint spread flow section")
+	if !strings.Contains(out, "Taint flow") {
+		t.Error("expected a taint flow section")
 	}
 	// The reconstructed intra-procedural path renders each step location.
 	for _, loc := range []string{"h.go:10:5", "h.go:25:3", "h.go:42:9"} {
@@ -159,7 +165,7 @@ func TestWriteHTML_TaintFlow(t *testing.T) {
 		}
 	}
 	// The endpoints-only finding must carry the fallback note.
-	if !strings.Contains(out, "Endpoints only") {
+	if !strings.Contains(out, "endpoints only") {
 		t.Error("expected an endpoints-only note for a finding without reconstructed steps")
 	}
 }
@@ -185,7 +191,7 @@ func TestWriteHTML_NoUnsafeInterpolation(t *testing.T) {
 	}
 	out := buf.String()
 
-	start := strings.LastIndex(out, "<script>")
+	start := strings.LastIndex(out, "<script")
 	end := strings.LastIndex(out, "</script>")
 	if start == -1 || end == -1 || end < start {
 		t.Fatal("could not locate inline <script> block")
@@ -251,5 +257,112 @@ func TestSeverityOrdering(t *testing.T) {
 	}
 	if critIdx >= highIdx || highIdx >= lowIdx {
 		t.Errorf("expected findings ordered critical < high < low in output, got positions %d, %d, %d", critIdx, highIdx, lowIdx)
+	}
+}
+
+// TestWriteHTML_Nonce pins the CSP contract: the inline <style> and <script>
+// are allowed by nonce alone, so both tags and the policy must carry the SAME
+// value, and a reused nonce across renders would make the policy predictable.
+func TestWriteHTML_Nonce(t *testing.T) {
+	render := func() string {
+		var buf bytes.Buffer
+		if err := WriteHTML(&buf, nil); err != nil {
+			t.Fatalf("WriteHTML: %v", err)
+		}
+		return buf.String()
+	}
+	out := render()
+
+	m := regexp.MustCompile(`<style nonce="([^"]+)">`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatal("no nonce on the inline <style>")
+	}
+	nonce := m[1]
+	for _, want := range []string{
+		`<script nonce="` + nonce + `">`,
+		`script-src 'nonce-` + nonce + `'`,
+		`style-src 'nonce-` + nonce + `'`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q; the nonce did not reach every inline tag and the policy", want)
+		}
+	}
+	if strings.Contains(render(), nonce) {
+		t.Error("nonce reused across renders")
+	}
+}
+
+// TestWriteHTML_DiagnosticsOptional: without telemetry the panel is omitted
+// rather than rendered full of zeros.
+func TestWriteHTML_DiagnosticsOptional(t *testing.T) {
+	var off, on bytes.Buffer
+	if err := WriteHTML(&off, nil); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	if strings.Contains(off.String(), "Scan diagnostics") {
+		t.Error("diagnostics section rendered without a ScanInfo")
+	}
+	if err := WriteHTML(&on, nil, WithScanInfo(scaninfo.Info{Files: 3, Lines: 120, Wall: time.Second})); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	if !strings.Contains(on.String(), "Scan diagnostics") {
+		t.Error("diagnostics section missing with a ScanInfo")
+	}
+}
+
+// TestSortKeyOrdersNumerically pins the zero-padding: the report's "sort by
+// file" is a textual localeCompare on data-loc in the browser, so an unpadded
+// line number would put 10 before 9.
+func TestSortKeyOrdersNumerically(t *testing.T) {
+	nine := sortKey("", &ir.Position{Filename: "f.go", Line: 9, Column: 1})
+	ten := sortKey("", &ir.Position{Filename: "f.go", Line: 10, Column: 1})
+	if !(nine < ten) {
+		t.Errorf("sortKey(line 9)=%q should sort before sortKey(line 10)=%q", nine, ten)
+	}
+	if unknown := sortKey("", nil); !(ten < unknown) {
+		t.Errorf("an unknown position (%q) should sort last, after %q", unknown, ten)
+	}
+}
+
+func TestFirstSentence(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Tainted input reaches a query. Use a placeholder.", "Tainted input reaches a query."},
+		{"No trailing sentence break", "No trailing sentence break"},
+		{"Single sentence.", "Single sentence."},
+		{"Use a placeholder (e.g. a bind param) instead. Do not concatenate.", "Use a placeholder (e.g. a bind param) instead."},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := firstSentence(c.in); got != c.want {
+			t.Errorf("firstSentence(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestPctOfZeroTotal: the summary bars divide by the finding total, which is
+// zero on a clean scan.
+func TestPctOfZeroTotal(t *testing.T) {
+	if got := pctOf(0, 0); got != 0 {
+		t.Errorf("pctOf(0, 0) = %d, want 0", got)
+	}
+	if got := pctOf(1, 4); got != 25 {
+		t.Errorf("pctOf(1, 4) = %d, want 25", got)
+	}
+}
+
+// TestDiagRendersZeros: most diagnostics rows always render, so a zero must read
+// as "0" rather than leaving a live label with a blank value beside it.
+func TestDiagRendersZeros(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHTML(&buf, nil, WithScanInfo(scaninfo.Info{Files: 3, Lines: 120, Wall: time.Second})); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `<span class="dk">modules loaded</span><span class="dv">0</span>`) {
+		t.Error("a zero-valued diagnostics row rendered blank instead of 0")
+	}
+	// Skipped and RulesLive are the two rows the template drops entirely.
+	if strings.Contains(out, "skipped)") || strings.Contains(out, "dataflow)") {
+		t.Error("an optional diagnostics row rendered with nothing to report")
 	}
 }

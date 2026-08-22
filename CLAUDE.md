@@ -142,9 +142,15 @@ dataflow (default), `dangerous-call`, and `secret`. `_`-prefixed **fragments** a
 language is the [detection matrix](README.md#supported-languages--detections); authoring reference is
 `docs/writing-rules.md`.
 
-**Report & LLM (`internal/report/`, `internal/llm/`).** `WriteHTML` renders a self-contained, auto-escaped
-report with code snippets; `WriteJSON` and `WriteSARIF` (2.1.0, severity→level) feed tooling and GitHub
-code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
+**Report & LLM (`internal/report/`, `internal/llm/`).** `WriteHTML` renders an auto-escaped report with
+code snippets from ONE embedded template (`templates/report.html.tmpl`, CSS and JS written out inside
+it) under a strict per-render nonce CSP — so nothing finding-derived may be interpolated into either
+inline tag, and the only external reference is the Google Fonts stylesheet, which degrades to the
+system stack offline. `WithScanInfo` supplies the optional scan-diagnostics panel; its type lives in
+the leaf package **`internal/scaninfo`** so `internal/scan` can fill it and `internal/report` render
+it without report importing scan — that would drag every frontend, including the cgo C/C++ one, into
+a rendering package. `WriteJSON` and `WriteSARIF` (2.1.0,
+severity→level) feed tooling and GitHub code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
 semantics, prompt builder, verdict parser); `anthropic.go` and `openai.go` are the backends (default
 `claude-haiku-4-5`; `GODZILLA_LLM_MODEL` overrides the model,
 `GODZILLA_LLM_PROVIDER=openai` + `GODZILLA_LLM_BASE_URL` selects an

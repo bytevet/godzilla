@@ -326,12 +326,21 @@ func runScan(args []string) {
 
 	gated := printFindings(os.Stdout, findings, threshold, *quiet)
 
+	// res.Diag is already the report's input type, so there is nothing to map.
+	scanInfo := res.Diag
+	scanInfo.Target = path
+	if filesMode {
+		scanInfo.Target = "changed files"
+	}
+
 	reports := []struct {
 		path  string
 		kind  string
 		write func(io.Writer, []analysis.Finding) error
 	}{
-		{*htmlPath, "HTML", report.WriteHTML},
+		{*htmlPath, "HTML", func(w io.Writer, f []analysis.Finding) error {
+			return report.WriteHTML(w, f, report.WithScanInfo(scanInfo))
+		}},
 		{*jsonPath, "JSON", report.WriteJSON},
 		{*sarifPath, "SARIF", report.WriteSARIF},
 	}

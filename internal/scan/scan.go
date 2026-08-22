@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"time"
 
 	cpp_converter "github.com/bytevet/godzilla/converters/cpp"
 	go_converter "github.com/bytevet/godzilla/converters/go"
@@ -20,6 +21,7 @@ import (
 	rust_converter "github.com/bytevet/godzilla/converters/rust"
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/scaninfo"
 	"github.com/bytevet/godzilla/internal/walkignore"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -53,6 +55,9 @@ type Result struct {
 	// means findings for that language are missing because analysis failed, not
 	// because the code is clean.
 	Coverage []LangCoverage
+	// Diag is scan telemetry for the HTML report's diagnostics section. It is
+	// observational only: nothing in the pipeline reads it back.
+	Diag scaninfo.Info
 }
 
 // Failed returns the languages that were detected but failed to convert (so
@@ -76,12 +81,16 @@ func (r Result) Failed() []LangCoverage {
 // applies that optional stage. Result.Coverage records which frontends ran and
 // which failed.
 func Scan(path string, rs *rules.RuleSet) (Result, error) {
+	start := time.Now()
 	prog, coverage, targetPkgs, inv, err := convert(path)
+	convertDur := time.Since(start)
 	if err != nil {
 		return Result{}, err
 	}
-	findings := scopeFindings(runAnalyses(prog, rs, path, inv, targetPkgs), targetPkgs)
-	return Result{Findings: findings, Program: prog, Coverage: coverage}, nil
+	raw, diag := runAnalyses(prog, rs, sourceFiles(path, inv), path, inv, targetPkgs)
+	findings := scopeFindings(raw, targetPkgs)
+	finishDiag(&diag, start, convertDur, prog, coverage)
+	return Result{Findings: findings, Program: prog, Coverage: coverage, Diag: diag}, nil
 }
 
 // depLoweringLangs names the frontends that lower dependency bodies, so their
@@ -130,21 +139,28 @@ func seedScope(prog *ir.Program, targetPkgs map[string]bool) map[string]bool {
 // skips the raw-file secrets scan (for callers that already did it); a non-nil
 // inv (directory scans) feeds that scan from the cached walk instead of
 // re-walking filePath.
-func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool) []analysis.Finding {
+func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePath string, inv *walkignore.Inventory, targetPkgs map[string]bool) ([]analysis.Finding, scaninfo.Info) {
 	_ = rs.Compile() // guard-compile errors are already reported by the loader at load
+	start := time.Now()
 	var (
 		taint, danger, secrets, fileSecrets []analysis.Finding
+		stats                               analysis.Stats
+		lines                               int
 		wg                                  sync.WaitGroup
 	)
-	wg.Add(3)
+	wg.Add(4)
 	// ScopeSeed makes dependency functions analyzed demand-driven (only when taint
 	// reaches them) when deps were lowered; a nil/empty set seeds every function.
 	go func() {
 		defer wg.Done()
-		taint = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).Analyze(prog)
+		taint, stats = analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs)).AnalyzeWithStats(prog)
 	}()
 	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
 	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
+	// Line counting joins the same WaitGroup: re-reading the source the frontends
+	// already read is far cheaper than the taint engine, so alongside it it costs
+	// no measurable wall time.
+	go func() { defer wg.Done(); lines = countLines(srcFiles) }()
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
 		// language frontend parses — the dominant hardcoded-secret vector.
@@ -160,7 +176,25 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, filePath string, inv *walk
 	}
 	wg.Wait()
 
-	return slices.Concat(taint, dropCoLocatedDangerous(danger, taint), secrets, fileSecrets)
+	diag := scaninfo.Info{
+		Files:       len(srcFiles),
+		Lines:       lines,
+		Functions:   stats.Functions,
+		Rules:       stats.Rules,
+		RulesLive:   stats.RulesLive,
+		SourceSites: stats.SourceSites,
+		SinkSites:   stats.SinkSites,
+		Analysis:    time.Since(start),
+		Index:       stats.Index,
+		RuleSel:     stats.RuleSelect,
+		Taint:       stats.Taint,
+	}
+	if diag.Rules == 0 {
+		// AnalyzeWithStats returns early on an empty program, so take the rule
+		// count from the set itself rather than reporting none were evaluated.
+		diag.Rules = len(rs.Rules)
+	}
+	return slices.Concat(taint, dropCoLocatedDangerous(danger, taint), secrets, fileSecrets), diag
 }
 
 // dropCoLocatedDangerous removes every dangerous-call finding that sits on a call
@@ -210,9 +244,12 @@ func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding
 // pre-commit hands over mixed file types. A batch with no analyzable source
 // returns cleanly rather than erroring, so a docs-only commit does not fail.
 func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
+	start := time.Now()
 	merged := &ir.Program{}
 	var coverage []LangCoverage
 	var findings []analysis.Finding
+	var convertDur time.Duration
+	var srcFiles []string
 	targetPkgs := map[string]bool{}
 	for _, p := range paths {
 		info, err := os.Stat(p)
@@ -226,7 +263,9 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 				continue // non-source file: secrets already scanned, no dataflow
 			}
 		}
+		convertStart := time.Now()
 		prog, cov, tp, inv, err := convert(p)
+		convertDur += time.Since(convertStart)
 		if info.IsDir() {
 			// Feed off convert's single pruned walk. When convert failed before
 			// yielding an inventory (e.g. a directory with no analyzable source),
@@ -243,14 +282,25 @@ func ScanFiles(paths []string, rs *rules.RuleSet) (Result, error) {
 		}
 		merged.Modules = append(merged.Modules, prog.Modules...)
 		coverage = append(coverage, cov...)
+		// Accumulated here, past the error check, because runAnalyses is handed no
+		// root and no inventory on this path — and because a path whose conversion
+		// failed was not analysed. A non-directory p passed the fileFrontend check
+		// above, so it is already known to be source and needs no re-stat.
+		if info.IsDir() {
+			srcFiles = append(srcFiles, sourceFiles(p, inv)...)
+		} else {
+			srcFiles = append(srcFiles, p)
+		}
 		for pkg := range tp {
 			targetPkgs[pkg] = true
 		}
 	}
 	// The per-path raw-file secrets scan already ran in the loop above, so pass an
 	// empty path to skip it here.
-	findings = append(findings, scopeFindings(runAnalyses(merged, rs, "", nil, targetPkgs), targetPkgs)...)
-	return Result{Findings: findings, Program: merged, Coverage: coverage}, nil
+	raw, diag := runAnalyses(merged, rs, srcFiles, "", nil, targetPkgs)
+	findings = append(findings, scopeFindings(raw, targetPkgs)...)
+	finishDiag(&diag, start, convertDur, merged, coverage)
+	return Result{Findings: findings, Program: merged, Coverage: coverage, Diag: diag}, nil
 }
 
 // convert lowers source at path into a single gIR program and reports per-
