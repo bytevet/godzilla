@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -247,6 +248,12 @@ func runScan(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
 	}
+	// Sampled here rather than inside Scan: ReadMemStats stops the world, and a
+	// library caller in a loop must not pay that per iteration. Sys only grows, so
+	// reading it the moment the scan returns is the same high-water mark.
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	res.Diag.PeakBytes = ms.Sys
 
 	if !*quiet {
 		printCoverage(os.Stdout, res.Coverage)

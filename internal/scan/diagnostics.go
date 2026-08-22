@@ -14,9 +14,13 @@ import (
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
-// finishDiag completes the telemetry both entry points share: the whole-scan
-// figures and the one process fact only the scan can observe. ReadMemStats stops
-// the world, so this must run exactly once per scan.
+// finishDiag completes the whole-scan telemetry both entry points share.
+//
+// It deliberately does NOT sample memory: runtime.ReadMemStats stops the world,
+// and a scan is a library call, so a caller in a loop — the benchmarks, the test
+// corpus, `rules test` over every sample — would pay one pause per iteration for
+// a number it never reads. The CLI samples it once instead, right after the scan
+// it is about to report on.
 func finishDiag(d *scaninfo.Info, start time.Time, convert time.Duration, prog *ir.Program, coverage []LangCoverage) {
 	d.Convert = convert
 	d.Packages = len(prog.GetModules())
@@ -24,10 +28,6 @@ func finishDiag(d *scaninfo.Info, start time.Time, convert time.Duration, prog *
 		d.Skipped += c.Skipped
 	}
 	d.Wall = time.Since(start)
-
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	d.PeakBytes = ms.Sys
 }
 
 // sourceFiles is the file list the frontends were given: for a directory scan

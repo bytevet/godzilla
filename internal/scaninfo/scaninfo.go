@@ -52,8 +52,10 @@ type Info struct {
 	RuleSel  time.Duration
 	Taint    time.Duration
 
-	// PeakBytes is runtime.MemStats.Sys sampled once at scan end — a Go-runtime
-	// high-water mark, not RSS. Sys only grows, so a single late sample is a true
-	// peak; HeapAlloc is the post-GC live heap and TotalAlloc is cumulative.
+	// PeakBytes is runtime.MemStats.Sys — a Go-runtime high-water mark, not RSS.
+	// Sys only grows, so a single late sample is a true peak; HeapAlloc is the
+	// post-GC live heap and TotalAlloc is cumulative. Filled by the CLI, not by
+	// the scan: reading it stops the world, which a library call made in a loop
+	// must not do. Zero when nobody sampled.
 	PeakBytes uint64
 }

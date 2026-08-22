@@ -239,8 +239,10 @@ func TestScanDiagnostics(t *testing.T) {
 			if d.Convert+d.Analysis > d.Wall {
 				t.Errorf("Convert+Analysis %v exceeds Wall %v", d.Convert+d.Analysis, d.Wall)
 			}
-			if d.PeakBytes == 0 {
-				t.Errorf("PeakBytes unsampled: %+v", d)
+			// Memory is deliberately NOT sampled by a scan: ReadMemStats stops
+			// the world, and this is a library call. The CLI samples it.
+			if d.PeakBytes != 0 {
+				t.Errorf("PeakBytes = %d; a scan must not call ReadMemStats", d.PeakBytes)
 			}
 		})
 	}
