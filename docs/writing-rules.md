@@ -21,8 +21,11 @@ py:flask.request.args.get
 js:express.Request.query
 ```
 
-`godzilla scan --summary <path>` prints the exact names a frontend emits for your
-code.
+To find the exact name a frontend emits for a call, scan code that reaches it: the
+console prints `sink: … -> <canonical name>`, and `--json` carries the same string
+as `sinkCallee` (`--sarif` puts it in the result message). Starting from a rule
+whose glob is deliberately wide — `go:*` — and narrowing from what it reports is
+the quickest way in.
 
 ## Rule kinds
 

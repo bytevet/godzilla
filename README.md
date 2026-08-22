@@ -82,8 +82,8 @@ godzilla scan --html report.html --fail-on high ./path/to/project
 # Machine-readable output: JSON for tooling, SARIF for GitHub code scanning
 godzilla scan --sarif results.sarif --json results.json ./path/to/project
 
-# Add your own rules on top of the built-ins, and print the gIR summary
-godzilla scan --rules myrules.yaml --summary ./path/to/project
+# Add your own rules on top of the built-ins
+godzilla scan --rules myrules.yaml ./path/to/project
 
 # Triage medium/low-confidence findings with an LLM (needs ANTHROPIC_API_KEY).
 # A scan whose findings are all High reports "0 reviewed" — that is the gate

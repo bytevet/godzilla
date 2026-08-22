@@ -77,8 +77,8 @@ godzilla scan --html report.html --fail-on high ./path/to/project
 # 机器可读输出：JSON 供工具消费，SARIF 供 GitHub code scanning
 godzilla scan --sarif results.sarif --json results.json ./path/to/project
 
-# 在内置规则之上叠加自己的规则，并打印 gIR 摘要
-godzilla scan --rules myrules.yaml --summary ./path/to/project
+# 在内置规则之上叠加自己的规则
+godzilla scan --rules myrules.yaml ./path/to/project
 
 # 用 LLM 复核 medium/low 置信度的检出（需要 ANTHROPIC_API_KEY）。
 # 如果一次扫描的检出全是 High，会显示 "0 reviewed" —— 这是门槛在正常工作，

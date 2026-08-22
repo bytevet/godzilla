@@ -29,7 +29,7 @@ go test ./converters/go/ -run TestGIRv2Metadata
 # Scan a project (directory or single .go/.py/.js/.java/.rs/.rb/.erb/.c/.cpp file). Exit codes:
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
-go run ./cmd/godzilla scan --summary --html /tmp/report.html --fail-on high <path>
+go run ./cmd/godzilla scan --html /tmp/report.html --fail-on high <path>
 go run ./cmd/godzilla scan --llm-review <path>          # needs ANTHROPIC_API_KEY (or `ant auth`)
 
 # Java scanning needs a JDK 24+ `java`; Rust needs `rustc`; both degrade gracefully if absent.
