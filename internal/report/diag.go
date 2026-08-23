@@ -21,6 +21,7 @@ type diagView struct {
 	SourceSites, SinkSites        string
 	Wall, Speed, PeakMem, Workers string
 	Engine, Toolchain             string
+	Degraded                      string // empty unless a frontend ran at reduced depth
 	Hint                          string // the collapsed summary line
 	Phases                        []phaseRow
 }
@@ -58,6 +59,7 @@ func newDiagView(info scaninfo.Info, build time.Duration) *diagView {
 		Workers:     count(runtime.GOMAXPROCS(0)),
 		Engine:      Version,
 		Toolchain:   runtime.Version(),
+		Degraded:    info.DegradedNote,
 		Phases:      phases(info, build),
 	}
 	d.Hint = hint(d)

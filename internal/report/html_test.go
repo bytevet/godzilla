@@ -351,6 +351,31 @@ func TestWriteHTML_DiagnosticsOptional(t *testing.T) {
 	}
 }
 
+// TestWriteHTML_DegradedNote: the diagnostics panel names a scan that ran at
+// reduced dependency depth, and escapes the note like any other text — the
+// panel is rendered under a per-render nonce CSP, so nothing scan-derived may
+// reach the page unescaped.
+func TestWriteHTML_DegradedNote(t *testing.T) {
+	var quiet, noted bytes.Buffer
+	if err := WriteHTML(&quiet, nil, WithScanInfo(scaninfo.Info{Files: 3, Wall: time.Second})); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	if strings.Contains(quiet.String(), "reduced dependency depth") {
+		t.Error("a full-depth scan must not claim to be degraded")
+	}
+	info := scaninfo.Info{Files: 3, Wall: time.Second, DegradedNote: "go: 12 of 40 <deps> as signatures"}
+	if err := WriteHTML(&noted, nil, WithScanInfo(info)); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := noted.String()
+	if !strings.Contains(out, "reduced dependency depth") || !strings.Contains(out, "12 of 40") {
+		t.Error("the degraded note is missing from the diagnostics panel")
+	}
+	if strings.Contains(out, "<deps>") {
+		t.Error("the note reached the page unescaped")
+	}
+}
+
 // TestSortKeyOrdersNumerically pins the zero-padding: the report's "sort by
 // file" is a textual localeCompare on data-loc in the browser, so an unpadded
 // line number would put 10 before 9.

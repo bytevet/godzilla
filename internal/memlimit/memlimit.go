@@ -39,6 +39,12 @@ func Configure() int64 {
 	return limit
 }
 
+// Available returns the memory this process may use in bytes: the tightest of
+// the host's physical memory and any cgroup limit applying to it. A 0 return
+// means nothing could be detected (a non-Linux host, or an unreadable /proc),
+// which a caller must read as "unknown", not "none".
+func Available() int64 { return detectAvailable() }
+
 // detectAvailable returns the tightest positive memory bound that applies to
 // this process: the smaller of the host's physical memory and any cgroup limit.
 // Returns 0 when nothing can be read.
