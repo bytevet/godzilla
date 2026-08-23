@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,32 @@ type LangCoverage struct {
 	// not a guarantee.
 	Files   int
 	Skipped int
+}
+
+// CoverageSummary renders a one-line per-language coverage summary, so a
+// degraded scan — a frontend that failed on detected source, or one that
+// silently dropped part of it — is visible even when the run is not strict.
+// Empty when no language was detected. It lives here rather than in a command
+// because both binaries print it and the wording is the thing that must agree.
+func CoverageSummary(coverage []LangCoverage) string {
+	if len(coverage) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(coverage))
+	for _, c := range coverage {
+		status := "ok"
+		switch {
+		case !c.Converted:
+			status = "FAILED"
+		case c.Skipped > 0:
+			// The frontend ran, so the language is not "failed", yet some of its
+			// source never reached the engine. The ratio is what distinguishes a
+			// scan that dropped most of a project from a genuinely clean one.
+			status = fmt.Sprintf("PARTIAL(%d/%d files)", c.Files-c.Skipped, c.Files)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
+	}
+	return "coverage: " + strings.Join(parts, ", ")
 }
 
 // Result is the outcome of scanning a path.

@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/bytevet/godzilla/internal/buildpolicy"
 	"github.com/bytevet/godzilla/internal/memlimit"
@@ -97,15 +96,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
 	}
-	fmt.Fprintf(os.Stderr, "lowered %d module(s); %d finding(s).\n", len(res.Program.GetModules()), len(res.Findings))
-	if failed := res.Failed(); len(failed) > 0 {
-		langs := make([]string, 0, len(failed))
-		for _, c := range failed {
-			langs = append(langs, c.Language)
-		}
-		fmt.Fprintf(os.Stderr, "warning: %d language(s) failed to analyze (%s): their gIR and findings are missing, not absent.\n",
-			len(failed), strings.Join(langs, ", "))
+	// The same summary `godzilla scan` prints. A frontend that failed already
+	// warned on stderr from the pipeline, so restating it here in different words
+	// only made one fact look like two; what this adds is the per-language
+	// verdict for the frontends that DID run.
+	if line := scan.CoverageSummary(res.Coverage); line != "" {
+		fmt.Fprintln(os.Stderr, line)
 	}
+	fmt.Fprintf(os.Stderr, "lowered %d module(s); %d finding(s).\n", len(res.Program.GetModules()), len(res.Findings))
 
 	idx := playground.NewIndex(res, path, version, ruleSet)
 	if err := playground.Serve(idx, *addr, *open, os.Stderr); err != nil {
