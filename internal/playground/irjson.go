@@ -171,7 +171,7 @@ func literalBody(s string) string {
 			b.WriteString(`\r`)
 		default:
 			if r < 0x20 || r == 0x7f {
-				b.WriteString(fmt.Sprintf(`\x%02x`, r))
+				fmt.Fprintf(&b, `\x%02x`, r)
 				continue
 			}
 			b.WriteRune(r)
