@@ -196,7 +196,13 @@ func TestInterruptFlushesTheDisplay(t *testing.T) {
 	var mu sync.Mutex
 	var seen strings.Builder
 	captured := make(chan struct{})
+	// Closed when the reader has drained the pipe to EOF. cmd.Wait closes the
+	// pipe as soon as the child exits, so calling it while a read is still
+	// outstanding discards the tail — which is precisely the final frame this
+	// test is about.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		buf := make([]byte, 4096)
 		var once sync.Once
 		for {
@@ -229,6 +235,7 @@ func TestInterruptFlushesTheDisplay(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	<-drained
 	code := 0
 	if err := cmd.Wait(); err != nil {
 		var ee *exec.ExitError
