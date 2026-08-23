@@ -28,6 +28,7 @@ go/header_source|go-command-injection|go:godzilla-samples/header_source.main$1|g
 go/higher_order_callback|go-command-injection|go:godzilla-samples/higher_order_callback.runCmd|go:os/exec.Command|src=test/go/higher_order_callback/main.go:21:6|sink=test/go/higher_order_callback/main.go:14:14
 go/interface_dispatch|go-command-injection|go:(*godzilla-samples/interface_dispatch.shellRunner).Run|go:os/exec.Command|src=test/go/interface_dispatch/main.go:23:24|sink=test/go/interface_dispatch/main.go:15:14
 go/interproc|go-command-injection|go:godzilla-samples/interproc.runCommand|go:os/exec.Command|src=test/go/interproc/main.go:22:26|sink=test/go/interproc/main.go:18:14
+go/map_key_select|go-path-traversal|go:godzilla/test/go/map_key_select.contentsTainted|go:os.ReadFile|src=test/go/map_key_select/main.go:30:6|sink=test/go/map_key_select/main.go:33:20
 go/open_redirect|go-open-redirect|go:godzilla-samples/open_redirect.main$1|go:net/http.Redirect|src=test/go/open_redirect/main.go:6:31|sink=test/go/open_redirect/main.go:8:16
 go/outparam_fill|go-command-injection|go:godzilla-samples/outparam_fill.handler|go:os/exec.Command|src=test/go/outparam_fill/main.go:13:6|sink=test/go/outparam_fill/main.go:20:18
 go/path_traversal_servefile|go-path-traversal|go:servefilept.handler|go:net/http.ServeFile|src=test/go/path_traversal_servefile/main.go:9:6|sink=test/go/path_traversal_servefile/main.go:11:16

@@ -1,0 +1,7 @@
+# Both handlers read a map with a request-derived string involved; only one is a
+# flow. max: 1 pins the distinction: taint rides the CONTAINER (contentsTainted),
+# never the KEY (keySelects). A second finding means key-supplied taint is back.
+findings:
+    - rule: go-path-traversal
+      min: 1
+      max: 1
