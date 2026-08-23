@@ -105,7 +105,7 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
   ✓ go list (metadata)                            +0.34s    @0.36s
   ✓ go parse & typecheck                          +0.59s    @0.95s
   ✓ go lowering                    8636 funcs     +0.14s    @1.32s
-[███████████████████████████████████░░░░░░░░░░░░░░]  71%    1.40s  taint…
+███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
 ```
 
 进度条只画在 **stderr** 上，检出项仍走 stdout，因此单独重定向其中任意一个都不受影响。

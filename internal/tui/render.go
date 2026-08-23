@@ -252,14 +252,15 @@ func frame(stages []progress.Snapshot, width int, p palette, elapsed time.Durati
 	// the arithmetic backwards, and a bar that retreats reads as a fault.
 	pct := max(overall(segs), floor)
 
-	suffix := fmt.Sprintf("] %3.0f%% %8s", pct*100, fmtDur(elapsed))
+	// No brackets: the fill and the track already say where the bar ends.
+	suffix := fmt.Sprintf(" %3.0f%% %8s", pct*100, fmtDur(elapsed))
 	active, activeID := activeLabel(segs)
 	inner := width - 1 - len(suffix) - len(active)
 	if inner < 8 {
 		// Too narrow for a segmented bar; a percentage still fits.
 		return []string{clip(fmt.Sprintf("scanning %3.0f%% %s", pct*100, fmtDur(elapsed)), width-1)}, pct
 	}
-	return []string{"[" + p.bar(segs, inner) + suffix + p.paint(activeID, active)}, pct
+	return []string{p.bar(segs, inner) + suffix + p.paint(activeID, active)}, pct
 }
 
 // activeWidth caps the running-stage text so the bar itself keeps most of the

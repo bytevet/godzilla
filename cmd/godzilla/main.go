@@ -260,9 +260,9 @@ func runScan(args []string) {
 	}
 	// ONE display for everything that makes the user wait — the scan and the LLM
 	// review, which is network-bound and the longest single wait in the run. It
-	// owns both standard streams while it is up, so whatever they emit in between
-	// (the coverage line, a frontend warning) scrolls above the bar instead of
-	// tearing through it, and each still lands on its own stream.
+	// owns stderr while it is up, and the few stdout writes that happen inside
+	// the window go through ui.Stdout(), so both scroll above the bar instead of
+	// tearing through it while each still lands on its own stream.
 	//
 	// os.Exit skips defers AND strands captured output in the pipe, so every exit
 	// inside the window goes through exitWith. Past ui.Stop below, os.Exit is
@@ -305,7 +305,7 @@ func runScan(args []string) {
 	}
 
 	if !*quiet {
-		printCoverage(os.Stdout, res.Coverage, st)
+		printCoverage(ui.Stdout(), res.Coverage, st)
 	}
 
 	findings := res.Findings
@@ -318,7 +318,7 @@ func runScan(args []string) {
 		var excluded int
 		findings, excluded = cfg.FilterFindings(findings, path)
 		if excluded > 0 {
-			fmt.Fprintf(os.Stdout, "config: excluded %d finding(s) by path filter.\n", excluded)
+			fmt.Fprintf(ui.Stdout(), "config: excluded %d finding(s) by path filter.\n", excluded)
 		}
 	}
 	if *baselinePath != "" {
@@ -345,7 +345,7 @@ func runScan(args []string) {
 				active++
 			}
 		}
-		fmt.Fprintf(os.Stdout, "Baseline written to %s (%d fingerprint(s)).\n", *writeBaseline, active)
+		fmt.Fprintf(ui.Stdout(), "Baseline written to %s (%d fingerprint(s)).\n", *writeBaseline, active)
 		exitWith(exitClean)
 	}
 

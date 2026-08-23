@@ -33,7 +33,7 @@ type Options struct {
 	Size    func() (w, h int) // nil means the real terminal size
 	Now     func() time.Time  // nil means time.Now
 	Tick    time.Duration     // 0 means 100ms
-	Capture bool              // route os.Stdout and os.Stderr through the display
+	Capture bool              // route os.Stderr through the display
 	// Expect names stages that will run but that no scan stage implies, so the
 	// bar can carry them in its denominator before they register.
 	Expect []string
@@ -58,11 +58,12 @@ type UI struct {
 	promoted map[string]bool // stages already written into the scrollback
 	onStop   []func()
 
-	// stdout is the real stdout, when the display has tapped it. Captured stdout
-	// is re-emitted THERE and not onto the bar's stream, so `godzilla scan >
-	// out.txt` on a terminal still puts the findings in the file.
-	stdout io.Writer
-	taps   []*tap
+	// stdout is the real stdout. Lines destined for it are re-emitted THERE and
+	// not onto the bar's stream, so `godzilla scan > out.txt` on a terminal
+	// still puts the coverage line and the findings in the file.
+	stdout  io.Writer
+	partial string // an incomplete stdout line, waiting for its newline
+	taps    []*tap
 
 	// drawn is how many lines the last frame occupied — the erase sequence is
 	// relative to the cursor, so this is the display's entire screen state.
@@ -113,6 +114,7 @@ func Start(opts Options) *UI {
 	if u.size == nil {
 		u.size = terminalSize
 	}
+	u.stdout = os.Stdout
 	applyPalette(&u.pal)
 	u.start = u.now()
 
@@ -139,6 +141,36 @@ func Start(opts Options) *UI {
 		}
 	}()
 	return u
+}
+
+// Stdout is where the command writes its own stdout output while the display is
+// up: the line is held until the next frame, which erases the bar, writes it to
+// the REAL stdout and redraws. On a nil UI — the display is off — it is plain
+// os.Stdout, so the caller does not branch.
+func (u *UI) Stdout() io.Writer {
+	if u == nil {
+		return os.Stdout
+	}
+	return stdoutWriter{u}
+}
+
+type stdoutWriter struct{ u *UI }
+
+func (s stdoutWriter) Write(p []byte) (int, error) {
+	u := s.u
+	at := u.now()
+	u.mu.Lock()
+	u.partial += string(p)
+	for {
+		i := strings.IndexByte(u.partial, '\n')
+		if i < 0 {
+			break
+		}
+		u.pending = append(u.pending, logLine{u.partial[:i], true, at})
+		u.partial = u.partial[i+1:]
+	}
+	u.mu.Unlock()
+	return len(p), nil
 }
 
 // OnStop registers a function to run when the display stops — the hook the
@@ -186,15 +218,21 @@ func (u *UI) Stop() {
 	})
 }
 
-// startCapture routes both standard streams through pipes so the display owns
-// the terminal. Swapping the variables is what catches packages.PrintErrors,
-// which writes to os.Stderr from inside golang.org/x/tools with no writer
-// parameter and is the burstiest output a scan has — and the coverage line on
-// stdout, which is printed in the middle of the display's window. Runtime panics
-// write to fd 2 directly and bypass this, which is what we want.
+// startCapture routes os.Stderr through a pipe so the display owns the
+// terminal. Swapping the variable is what catches packages.PrintErrors, which
+// writes to os.Stderr from inside golang.org/x/tools with no writer parameter
+// and is the burstiest output a scan has. Runtime panics write to fd 2 directly
+// and bypass this, which is what we want.
+//
+// STDOUT is deliberately NOT tapped. A second pipe means a second reader
+// goroutine, and then a line's position in the scrollback depends on which
+// goroutine the runtime happened to schedule first — measurably so under a
+// burst, where whole runs of one stream can land ahead of the other. Nothing
+// below package main writes to stdout during a scan, so the command routes its
+// own few writes through Stdout() instead, where they are timestamped at the
+// call rather than whenever a reader wakes up.
 func (u *UI) startCapture() {
 	u.tapStream(&os.Stderr, false)
-	u.tapStream(&os.Stdout, true)
 }
 
 func (u *UI) tapStream(target **os.File, isStdout bool) {
@@ -205,9 +243,6 @@ func (u *UI) tapStream(target **os.File, isStdout bool) {
 	t := &tap{target: target, orig: *target, w: w, done: make(chan struct{})}
 	*target = w
 	u.taps = append(u.taps, t)
-	if isStdout {
-		u.stdout = t.orig
-	}
 
 	go func() {
 		defer close(t.done)
@@ -262,6 +297,10 @@ func (u *UI) render(final bool) {
 	u.mu.Lock()
 	logs := u.pending
 	u.pending = nil
+	if final && u.partial != "" {
+		logs = append(logs, logLine{u.partial, true, u.now()})
+		u.partial = ""
+	}
 	u.mu.Unlock()
 
 	var bar []string

@@ -114,7 +114,7 @@ bar covers `--llm-review` too, which is the longest wait in a run.
   ✓ go list (metadata)                            +0.34s    @0.36s
   ✓ go parse & typecheck                          +0.59s    @0.95s
   ✓ go lowering                    8636 funcs     +0.14s    @1.32s
-[███████████████████████████████████░░░░░░░░░░░░░░]  71%    1.40s  taint…
+███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
 ```
 
 The bar draws on **stderr only**, and findings stay on stdout, so redirecting
