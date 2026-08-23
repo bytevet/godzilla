@@ -107,13 +107,21 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 When stderr is a terminal, a scan shows its progress: a one-line segmented bar
 broken down by pipeline stage, naming whatever is running right now. Each stage
 leaves the scrollback a line as it finishes — what it cost (`+`) and where the
-run stood when it ended (`@`) — and frontend warnings scroll above the bar. The
-bar covers `--llm-review` too, which is the longest wait in a run.
+run stood when it ended (`@`). The bar covers `--llm-review` too, which is the
+longest wait in a run.
+
+Frontend warnings sit in a small pane above the bar while the scan runs, so a
+forty-line `rustc` diagnostic cannot bury the stage list. It is a preview: every
+captured line is written out in full, in order, when the scan finishes.
 
 ```
   ✓ go list (metadata)                            +0.34s    @0.36s
   ✓ go parse & typecheck                          +0.59s    @0.95s
   ✓ go lowering                    8636 funcs     +0.14s    @1.32s
+  43 warning(s), last 3
+    rust_converter: skipping test/rust/db_rusqlite/src/lib.rs: rustc: exit st…
+    error[E0432]: unresolved import `rusqlite`
+    error: aborting due to 1 previous error
 ███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
 ```
 

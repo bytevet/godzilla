@@ -204,24 +204,39 @@ func TestCapturedStdoutIsReemittedOnStdout(t *testing.T) {
 }
 
 // The scrollback has to read as a narrative. Promotion is only NOTICED on a
-// tick, so a stage that ended before a log line was written must still print
-// above it — ordering by arrival would put the coverage line above the analysis
-// stages that finished first.
+// tick, so a stage that ended before the coverage line was written must still
+// print above it — ordering by arrival put that line above the analysis stages
+// that had finished before it. Stdout() is the path the coverage line takes.
 func TestScrollbackIsInHappenedOrder(t *testing.T) {
 	defer progress.Enable()()
 
-	var out bytes.Buffer
-	ui := Start(Options{Out: &out, Capture: true, Tick: time.Hour,
+	// Both streams point at ONE file: a Stdout() line goes to the real stdout by
+	// design, so their relative position is only observable when they share a
+	// sink.
+	f, err := os.CreateTemp(t.TempDir(), "merged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedOut := os.Stdout
+	os.Stdout = f
+	defer func() { os.Stdout = savedOut }()
+
+	ui := Start(Options{Out: f, Capture: true, Tick: time.Hour,
 		Size: func() (int, int) { return 120, 24 }})
 
 	early := progress.Start("taint", "taint propagation", 2, "rules")
 	early.Advance(2)
 	early.Done(nil)
 	time.Sleep(5 * time.Millisecond)
-	fmt.Fprintln(os.Stderr, "a-line-written-after-the-stage-ended")
+	fmt.Fprintln(ui.Stdout(), "a-line-written-after-the-stage-ended")
 	ui.Stop()
+	os.Stdout = savedOut
 
-	got := out.String()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
 	stage, line := strings.Index(got, "taint propagation"), strings.Index(got, "a-line-written-after")
 	if stage < 0 || line < 0 {
 		t.Fatalf("missing output: %q", got)

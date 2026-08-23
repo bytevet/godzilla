@@ -54,8 +54,11 @@ type UI struct {
 	ticked sync.WaitGroup
 
 	mu       sync.Mutex
-	pending  []logLine       // log lines waiting to be flushed above the bar
-	promoted map[string]bool // stages already written into the scrollback
+	pending  []logLine       // Stdout() lines waiting to be flushed above the bar
+	warnings []string        // every captured stderr line, in arrival order
+	shown    int             // how many of them have reached the real stderr
+	promoted map[string]bool // stages already noticed as finished
+	holding  []progress.Snapshot
 	onStop   []func()
 
 	// stdout is the real stdout. Lines destined for it are re-emitted THERE and
@@ -254,7 +257,7 @@ func (u *UI) tapStream(target **os.File, isStdout bool) {
 		for {
 			line, err := br.ReadString('\n')
 			if line != "" {
-				u.addLog(logLine{strings.TrimRight(line, "\n"), isStdout, u.now()})
+				u.addWarning(strings.TrimRight(line, "\n"))
 			}
 			if err != nil {
 				return
@@ -263,10 +266,52 @@ func (u *UI) tapStream(target **os.File, isStdout bool) {
 	}()
 }
 
-func (u *UI) addLog(line logLine) {
+// unflushed reports whether captured lines are still waiting for Stop to write
+// them out. Without it a scan that drew no frame at all — everything finished
+// inside one tick — would drop every warning it captured.
+func (u *UI) unflushed() bool {
 	u.mu.Lock()
-	u.pending = append(u.pending, line)
+	defer u.mu.Unlock()
+	return u.shown < len(u.warnings)
+}
+
+func (u *UI) addWarning(line string) {
+	u.mu.Lock()
+	u.warnings = append(u.warnings, line)
 	u.mu.Unlock()
+}
+
+// paneRows is how many captured lines the live pane shows. A rustc diagnostic
+// runs to fifteen lines per file, so the pane is a signal that something is
+// being skipped, not the record — Stop writes every captured line out in full.
+const paneRows = 3
+
+// pane is the warnings block that sits above the bar. Each line is clipped:
+// nothing in the sticky block may wrap, or the erase sequence's row count is
+// wrong and it eats the scrollback above it.
+func (u *UI) pane(width int) []string {
+	u.mu.Lock()
+	n := len(u.warnings)
+	show := u.warnings
+	if n > paneRows {
+		show = show[n-paneRows:]
+	}
+	show = slices.Clone(show)
+	u.mu.Unlock()
+	if n == 0 {
+		return nil
+	}
+
+	head := fmt.Sprintf("  %d warning(s)", n)
+	if n > paneRows {
+		head = fmt.Sprintf("  %d warning(s), last %d", n, paneRows)
+	}
+	out := make([]string, 0, len(show)+1)
+	out = append(out, u.pal.dim(clip(head, width-1)))
+	for _, l := range show {
+		out = append(out, u.pal.dim(clip("    "+l, width-1)))
+	}
+	return out
 }
 
 // render draws one frame. Only the ticker goroutine calls this.
@@ -285,13 +330,26 @@ func (u *UI) render(final bool) {
 	// rather than accumulating in the sticky block: seven frontends plus the Go
 	// phases and the analysis passes would be a twenty-line block on a
 	// twenty-four-row terminal.
-	var promote []progress.Snapshot
+	//
+	// It is held for one frame first. A stage's end time is exact, but a warning
+	// written microseconds earlier is timestamped when the pipe reader WAKES, so
+	// sorting alone would put the stage's line above output that preceded it —
+	// and a frontend emits its skip warnings immediately before calling Done, so
+	// this is the common path, not a corner. One tick is ample for the reader to
+	// deliver what was already written; the final frame does not need it,
+	// because Stop drains the pipe before drawing.
+	promote := u.holding
+	u.holding = nil
 	for _, s := range stages {
 		if s.Running || u.promoted[s.ID] {
 			continue
 		}
 		u.promoted[s.ID] = true
-		promote = append(promote, s)
+		u.holding = append(u.holding, s)
+	}
+	if final {
+		promote = append(promote, u.holding...)
+		u.holding = nil
 	}
 
 	u.mu.Lock()
@@ -303,15 +361,18 @@ func (u *UI) render(final bool) {
 	}
 	u.mu.Unlock()
 
-	var bar []string
+	var block []string
 	if !final {
+		var bar []string
 		bar, u.lastPct = frame(stages, w, u.pal, u.now().Sub(u.start), u.lastPct, u.expect)
-		if maxRows := h - 1; len(bar) > maxRows {
-			bar = bar[:maxRows]
+		block = append(u.pane(w), bar...)
+		// Trimmed from the TOP: the bar is the one row that must never be cut.
+		if maxRows := h - 1; len(block) > maxRows {
+			block = block[len(block)-maxRows:]
 		}
 	}
 
-	if len(logs) == 0 && len(promote) == 0 && len(bar) == 0 && u.drawn == 0 {
+	if len(logs) == 0 && len(promote) == 0 && len(block) == 0 && u.drawn == 0 && !u.unflushed() {
 		return
 	}
 
@@ -319,10 +380,13 @@ func (u *UI) render(final bool) {
 	// line goes back to the real stdout — so it is built as a sequence of runs
 	// and emitted in order. Adjacent writes to one stream coalesce, which is what
 	// keeps the erase and the redraw a single write and stops the bar tearing.
-	// The scrollback is a narrative, so it is emitted in the order things
-	// HAPPENED, not in the order this frame noticed them: a stage that ended at
-	// 1.86s must not print under a line written at 1.90s merely because
-	// promotion is only observed on the next tick.
+	// The scrollback carries only the two things with an EXACT clock: a stage
+	// completion, timestamped in the ledger, and a line written through Stdout(),
+	// timestamped at the call. Captured stderr has neither — it is timestamped
+	// when the reader goroutine wakes, strictly after the write, by an amount
+	// nothing here can bound — so it lives in the pane instead and is written out
+	// in one piece by Stop. Merging all three by time is what put a frontend's ✓
+	// above the skip warnings it printed a microsecond earlier.
 	type event struct {
 		at   time.Time
 		w    io.Writer
@@ -333,7 +397,7 @@ func (u *UI) render(final bool) {
 		events = append(events, event{u.start.Add(s.Offset + s.Elapsed), u.out, u.pal.ledgerLine(s, w-1)})
 	}
 	for _, l := range logs {
-		events = append(events, event{l.at, u.streamOf(l), l.text})
+		events = append(events, event{l.at, u.stdout, l.text})
 	}
 	slices.SortStableFunc(events, func(a, b event) int { return a.at.Compare(b.at) })
 
@@ -358,13 +422,23 @@ func (u *UI) render(final bool) {
 		add(e.w, e.text+"\n")
 	}
 	if final {
+		// The pane was a live preview; this is the record. Every captured line
+		// goes to the real stderr in arrival order, so a warning is never lost
+		// and `godzilla scan 2>&1 | grep` still finds it.
+		u.mu.Lock()
+		rest := slices.Clone(u.warnings[u.shown:])
+		u.shown = len(u.warnings)
+		u.mu.Unlock()
+		for _, l := range rest {
+			add(u.out, l+"\n")
+		}
 		add(u.out, fmt.Sprintf("  scanned in %s\n", fmtDur(u.now().Sub(u.start))))
 		u.drawn = 0
 	} else {
-		// No trailing newline: the cursor stays on the last bar line, so the
+		// No trailing newline: the cursor stays on the last block line, so the
 		// next erase is relative to it and the terminal handles scrolling.
-		add(u.out, strings.Join(bar, "\n"))
-		u.drawn = len(bar)
+		add(u.out, strings.Join(block, "\n"))
+		u.drawn = len(block)
 	}
 	for _, r := range seq {
 		_, _ = io.WriteString(r.w, r.b.String())
@@ -375,13 +449,6 @@ func (u *UI) render(final bool) {
 type run struct {
 	w io.Writer
 	b strings.Builder
-}
-
-func (u *UI) streamOf(l logLine) io.Writer {
-	if l.stdout && u.stdout != nil {
-		return u.stdout
-	}
-	return u.out
 }
 
 // erase removes the previous frame. It is written relative to the cursor, which

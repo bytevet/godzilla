@@ -99,12 +99,19 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 
 当 stderr 是终端时，扫描会显示进度：一条按流水线阶段分段的单行进度条，并标出当前正在跑的
 阶段。每个阶段结束时会在上方回滚区留下一行——本阶段耗时（`+`）以及结束时的累计耗时
-（`@`）；前端的告警同样在进度条上方滚动。`--llm-review` 这段全流程最久的等待也计入进度条。
+（`@`）。`--llm-review` 这段全流程最久的等待也计入进度条。
+
+扫描过程中，前端告警集中显示在进度条上方的一小块面板里，这样一份四十行的 `rustc`
+诊断也不会淹没阶段列表。面板只是预览：扫描结束时，所有捕获到的告警都会按原顺序完整输出。
 
 ```
   ✓ go list (metadata)                            +0.34s    @0.36s
   ✓ go parse & typecheck                          +0.59s    @0.95s
   ✓ go lowering                    8636 funcs     +0.14s    @1.32s
+  43 warning(s), last 3
+    rust_converter: skipping test/rust/db_rusqlite/src/lib.rs: rustc: exit st…
+    error[E0432]: unresolved import `rusqlite`
+    error: aborting due to 1 previous error
 ███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
 ```
 

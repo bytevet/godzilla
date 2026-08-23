@@ -1,73 +1,84 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bytevet/godzilla/internal/progress"
 )
 
-// Interleaved stdout and stderr must reach the scrollback in the order they were
-// written. Both are pointed at ONE file here so the merged order is observable.
-//
-// This is why stdout is routed through Stdout() rather than a second pipe. With
-// two reader goroutines the order depends on which one the runtime schedules,
-// and under a burst whole runs of one stream landed ahead of the other — an
-// inversion spanning thirty lines, not a jittered pair.
-//
-// The residual limit, measured: writes separated by less than ~100µs can still
-// swap, because a stderr line is timestamped when the reader goroutine wakes
-// while a stdout line is timestamped at the call. Nothing in a scan writes to
-// both streams that close together — the frontend warnings and the coverage line
-// are hundreds of milliseconds apart — so the gap here is already a thousandfold
-// tighter than the case it stands in for.
-func TestInterleavedStreamsKeepTheirOrder(t *testing.T) {
-	const gap = 100 * time.Microsecond
+// Captured stderr never interleaves with the stage lines: it is a live preview
+// in the pane while the scan runs, and one complete block in arrival order when
+// it stops. That is what makes the ordering question go away — a frontend prints
+// its skip warnings and calls Done on the very next statement, a gap far smaller
+// than the pipe reader's lag, so no timestamp could have separated them.
+func TestCapturedStderrIsOneOrderedBlock(t *testing.T) {
+	defer progress.Enable()()
 
-	f, err := os.CreateTemp(t.TempDir(), "merged")
-	if err != nil {
-		t.Fatal(err)
-	}
-	savedOut, savedErr := os.Stdout, os.Stderr
-	os.Stdout = f
-	defer func() { os.Stdout, os.Stderr = savedOut, savedErr }()
-
-	ui := Start(Options{Out: f, Capture: true, Tick: 5 * time.Millisecond,
+	var out bytes.Buffer
+	ui := Start(Options{Out: &out, Capture: true, Tick: 10 * time.Millisecond,
 		Size: func() (int, int) { return 200, 24 }})
-	const lines = 60
-	for i := range lines {
-		if i%2 == 0 {
-			fmt.Fprintf(ui.Stdout(), "seq-%02d-stdout\n", i)
-		} else {
-			fmt.Fprintf(os.Stderr, "seq-%02d-stderr\n", i)
-		}
-		time.Sleep(gap)
-	}
-	ui.Stop()
-	os.Stdout, os.Stderr = savedOut, savedErr
 
-	data, err := os.ReadFile(f.Name())
-	if err != nil {
-		t.Fatal(err)
+	stage := progress.Start("rust.convert", "rust parse & lower", 3, "files")
+	stage.Advance(3)
+	for i := range 6 {
+		fmt.Fprintf(os.Stderr, "rust_converter: skipping file-%d\n", i)
 	}
-	var seq []int
-	for _, l := range strings.Split(string(data), "\n") {
-		if i := strings.Index(l, "seq-"); i >= 0 {
-			n, err := strconv.Atoi(l[i+4 : i+6])
-			if err != nil {
-				t.Fatalf("unparseable line %q", l)
-			}
-			seq = append(seq, n)
+	stage.Done(nil) // no gap at all, exactly as the frontend does it
+	ui.Stop()
+
+	got := out.String()
+	at := make([]int, 6)
+	for i := range at {
+		w := fmt.Sprintf("rust_converter: skipping file-%d", i)
+		if at[i] = strings.Index(got, w); at[i] < 0 {
+			t.Fatalf("warning %d was lost: %q", i, got)
+		}
+		if i > 0 && at[i] < at[i-1] {
+			t.Errorf("warnings are out of arrival order at %d:\n%s", i, got)
 		}
 	}
-	if len(seq) != lines {
-		t.Errorf("lost lines: got %d of %d", len(seq), lines)
+}
+
+// The pane is what makes a skipped file visible while the scan is still
+// running, since the full text does not land until Stop.
+func TestThePaneShowsRecentWarningsWhileScanning(t *testing.T) {
+	defer progress.Enable()()
+
+	var out bytes.Buffer
+	ui := Start(Options{Out: &out, Capture: true, Tick: time.Hour,
+		Size: func() (int, int) { return 200, 24 }})
+	progress.Start("rust.convert", "rust parse & lower", 3, "files")
+	for i := range 9 {
+		fmt.Fprintf(os.Stderr, "warn-%d\n", i)
 	}
-	for i := 1; i < len(seq); i++ {
-		if seq[i] < seq[i-1] {
-			t.Fatalf("stdout and stderr were reordered at %d: %v", i, seq)
+	// Wait for the reader, then draw one non-final frame.
+	for range 200 {
+		ui.mu.Lock()
+		n := len(ui.warnings)
+		ui.mu.Unlock()
+		if n == 9 {
+			break
 		}
+		time.Sleep(time.Millisecond)
+	}
+	ui.render(false)
+	got := out.String()
+	ui.Stop()
+
+	if !strings.Contains(got, "9 warning(s), last 3") {
+		t.Errorf("the pane does not say how much it is holding back:\n%q", got)
+	}
+	for _, want := range []string{"warn-6", "warn-7", "warn-8"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the pane is missing the most recent line %q:\n%q", want, got)
+		}
+	}
+	if strings.Contains(got, "warn-0") {
+		t.Errorf("the pane should hold only the last %d lines:\n%q", paneRows, got)
 	}
 }
