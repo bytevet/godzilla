@@ -112,19 +112,18 @@ func newConfig(opts []Option) config {
 // rssPerSourceByte is how much peak resident memory one byte of third-party Go
 // source costs once it is promoted to a syntax root and lowered to SSA.
 //
-// CALIBRATED, not derived — measured on a whole-repo grafana scan (2,196
-// third-party packages, 4.18M lines, ~12 GB peak) at ~2.9 MB of peak RSS per
-// 1,000 LINES of promoted source. The budget is denominated in bytes because
-// that is what the frontend can measure without reading a file, so the
-// conversion happens once, here:
+// A CONSERVATIVE ENVELOPE, not a fit. Measured across eight whole-repo and
+// subpackage scans, the cost is superlinear in promoted bytes (log-log slope
+// ~1.5), and two closures of the same 30 MB differ 2.8x in peak — declaration
+// density is the real driver and source bytes cannot see it. A least-squares
+// slope would therefore under-predict exactly where the budget has to hold. 512
+// is 1.33x the worst uncensored measurement (384, a gogs subpackage at 10.9 GiB);
+// anything below 384 is known-optimistic for a dependency set of that shape.
 //
-//	2.9 MB / 1,000 lines            = 2,900 bytes of RSS per line of source
-//	2,900 / 32 bytes per line       ≈ 91 bytes of RSS per byte of source
-//
-// where 32 bytes is the mean physical line length of Go source, blanks and
-// comments included. Re-measure both halves together: changing the MB/kloc
-// figure without the bytes-per-line assumption silently rescales the budget.
-const rssPerSourceByte = 91
+// Re-measure with .claude/skills/cve-recall/scripts/measure_peak_rss.py, which
+// sizes the closure exactly as the frontend does. Raising this number loosens
+// the budget: it is the divisor.
+const rssPerSourceByte = 512
 
 // depClosureShare is the fraction of available memory the dependency closure may
 // claim. The rest covers the user code's own SSA, the engine's taint state, and

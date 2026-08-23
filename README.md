@@ -134,12 +134,13 @@ lines, and loading all of it can exhaust the machine before any analysis starts.
 |---|---|
 | `auto` (default) | Size the cap from the memory available to the process — a container's cgroup limit counts, so a smaller CI runner gets a smaller cap. |
 | `off` | No cap: load the whole dependency closure, whatever it costs. |
-| A byte count — `512M`, `2G` | Use exactly this cap (suffixes `K`/`M`/`G`, powers of 1024). |
+| A byte count — `32M`, `256M` | Use exactly this cap (suffixes `K`/`M`/`G`, powers of 1024). |
 
-Dependencies beyond the cap are analyzed as **signatures only** — the same treatment
-the standard library always gets. The scan still runs to completion and still reports
-findings; what it loses is taint that would have been carried *through* one of those
-dependencies' bodies. Such a scan is reported as degraded, not failed:
+The cap is spent on the dependencies nearest your own code first, so what it drops
+is the fringe of the closure. Those are analyzed as **signatures only** — the same
+treatment the standard library always gets. The scan still runs to completion and
+still reports findings; what it loses is taint that would have been carried
+*through* one of those dependencies' bodies. Such a scan is degraded, not failed:
 
 ```
 coverage: go=DEGRADED
