@@ -90,16 +90,16 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
-      # Building only proves the Dockerfile parses. Both binaries come from one
+      # Building only proves the Dockerfile parses. The commands come from one
       # `go build ./cmd/...`, so one silently ceasing to ship is a real failure
       # mode — and an invisible one, because the image still builds and the
-      # scanner still works. Run each.
+      # scanner still works. The script enumerates ./cmd/ the same way the
+      # Dockerfile does, so a new command is covered without editing either.
+      #
+      # Only on pull_request: that is where the image can be loaded rather than
+      # pushed, and where failing still prevents the merge. A push builds
+      # multi-arch straight to the registry, so there is no local image to run
+      # and nothing left to gate by the time it exists.
       - name: Smoke test the image
         if: github.event_name == 'pull_request'
-        env:
-          IMG: ghcr.io/${{ github.repository }}:smoke${{ matrix.suffix }}
-        run: |
-          set -euo pipefail
-          docker run --rm "$IMG" version | tee /dev/stderr | grep -q '^godzilla '
-          docker run --rm --entrypoint godzilla-playground "$IMG" -h 2>&1 \
-            | tee /dev/stderr | grep -q '^usage: godzilla-playground'
+        run: scripts/smoke-image.sh ghcr.io/${{ github.repository }}:smoke${{ matrix.suffix }}

@@ -226,6 +226,25 @@ func TestViewFlagsSinksAndSourcesFromTheLoadedRules(t *testing.T) {
 	}
 }
 
+// A sink can carry a `when:` guard — and inherits the rule-level one when it
+// declares none. The badge must say so: the engine reaches a guarded sink and
+// then DECIDES, so drawing it like an unconditional sink promises a finding the
+// rule may suppress. Rebuilding the probe from the pattern text alone loses the
+// guard silently, which is why this is pinned.
+func TestGuardedSinkIsReportedAsGuarded(t *testing.T) {
+	guarded := testRules(t)
+	guarded.Rules[0].When = "not hostFixed()" // rule-level: every sink inherits it
+
+	call := methodCall("t1", sinkCallee, "Query", pos("x.go", 1), reg("db"), reg("t0"))
+	if f := newClassifier(guarded).flag("go", call); f == nil || !f.Guarded {
+		t.Errorf("a sink inheriting a rule-level when: must be flagged guarded, got %+v", f)
+	}
+	// The unguarded rule from the same fixture must NOT be marked guarded.
+	if f := newClassifier(testRules(t)).flag("go", call); f == nil || f.Guarded {
+		t.Errorf("an unconditional sink must not be flagged guarded, got %+v", f)
+	}
+}
+
 // The receiver shift is the whole reason this tool exists: a static method call
 // passes its receiver as args[0], so the argument a rule pins with #0 is args[1].
 // If this ever reports the receiver, the UI is teaching the off-by-one it exists

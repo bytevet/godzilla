@@ -16,32 +16,40 @@ const (
 
 // probe answers "did THIS pattern match", which a rule cannot: MatchSink reports
 // that some sink matched, not which one. One single-pattern rule/GlobSet per
-// authored pattern recovers that WITHOUT a second matcher — the badge is still
-// internal/rules' verdict, so it cannot drift from the engine's.
+// authored pattern recovers that WITHOUT a second matcher, so the badge stays
+// internal/rules' verdict rather than a second reading of it.
 type probe struct {
 	pattern string
 	sink    *rules.Rule    // single-sink probe; also yields the pinned indices
 	glob    *rules.GlobSet // plain glob: sources, dangerous-call callees, propagators
 }
 
-func newSinkProbe(pattern string) probe {
-	// A guard-less sink cannot fail to compile (CompileGuard("") is a no-op) and
-	// a probe that somehow did would simply match nothing.
-	r := &rules.Rule{Sinks: rules.SinksOf(pattern)}
+// newSinkProbe carries the sink ENTRY across, not just its pattern text, and
+// the owning rule's When with it: a sink inherits the rule-level guard, and
+// SinksOf would rebuild a bare Sink that has none. A probe stripped of its
+// guard reports a plain sink where the engine evaluates a condition and may
+// suppress — the badge would then over-claim in exactly the direction this tool
+// must never be wrong about.
+func newSinkProbe(s rules.Sink, when string) probe {
+	r := &rules.Rule{When: when, Sinks: []rules.Sink{s}}
 	_ = r.Compile()
-	return probe{pattern: pattern, sink: r}
+	return probe{pattern: s.Pattern, sink: r}
 }
 
 func newGlobProbe(pattern string) probe {
 	return probe{pattern: pattern, glob: rules.NewGlobSet([]string{pattern})}
 }
 
-func (p *probe) match(callee string) (args []int32, ok bool) {
+// match reports the pinned argument indices and whether the entry carries a
+// `when:` guard — a guarded sink fires only if that condition holds, so the two
+// are different verdicts and the UI says which it is.
+func (p *probe) match(callee string) (args []int32, guarded, ok bool) {
 	if p.sink != nil {
-		args, _, ok = p.sink.MatchSink(callee)
-		return args, ok
+		var g *rules.Guard
+		args, g, ok = p.sink.MatchSink(callee)
+		return args, g != nil, ok
 	}
-	return nil, p.glob.Match(callee)
+	return nil, false, p.glob.Match(callee)
 }
 
 // ruleProbes keeps a rule's probes under the rule itself, so AppliesTo is asked
@@ -80,7 +88,7 @@ func newClassifier(rs *rules.RuleSet) *classifier {
 		rp := ruleProbes{rule: r}
 		for _, s := range r.Sinks {
 			if s.Pattern != "" {
-				rp.sinks = append(rp.sinks, newSinkProbe(s.Pattern))
+				rp.sinks = append(rp.sinks, newSinkProbe(s, r.When))
 			}
 		}
 		// A dangerous-call rule declares no Sinks; its Callees are the call sites
@@ -120,11 +128,12 @@ func (c *classifier) flag(lang string, in *ir.Instruction) *flagView {
 			continue
 		}
 		for j := range rp.sinks {
-			args, ok := rp.sinks[j].match(callee)
+			args, guarded, ok := rp.sinks[j].match(callee)
 			if !ok {
 				continue
 			}
-			fv := &flagView{Kind: "sink", Rule: rp.rule.ID, CWE: rp.rule.CWE, Pattern: rp.sinks[j].pattern}
+			fv := &flagView{Kind: "sink", Rule: rp.rule.ID, CWE: rp.rule.CWE,
+				Pattern: rp.sinks[j].pattern, Guarded: guarded}
 			if len(args) > 0 {
 				idx := args[0]
 				fv.Idx = &idx
@@ -138,7 +147,7 @@ func (c *classifier) flag(lang string, in *ir.Instruction) *flagView {
 			continue
 		}
 		for j := range rp.srcs {
-			if _, ok := rp.srcs[j].match(callee); ok {
+			if _, _, ok := rp.srcs[j].match(callee); ok {
 				return &flagView{Kind: "source", Rule: rp.rule.ID, CWE: rp.rule.CWE, Pattern: rp.srcs[j].pattern}
 			}
 		}
@@ -185,7 +194,7 @@ func topMatching(ps []probe, callees map[string]bool, n int) []string {
 	for i := range ps {
 		hits := 0
 		for callee := range callees {
-			if _, ok := ps[i].match(callee); ok {
+			if _, _, ok := ps[i].match(callee); ok {
 				hits++
 			}
 		}

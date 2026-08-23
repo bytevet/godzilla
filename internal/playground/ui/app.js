@@ -297,8 +297,10 @@
         b.instrs.forEach(function (ins) {
           var cls = classify(ins), flags = "";
           if (cls && cls.kind === "sink")
-            flags += ' <span class="sinkflag" title="' + esc(cls.rule + (cls.cwe ? " \u00b7 " + cls.cwe : "")) +
-              '">sink' + (cls.idx != null ? " #" + cls.idx : " (all args)") + "</span>";
+            flags += ' <span class="sinkflag" title="' + esc(cls.rule + (cls.cwe ? " \u00b7 " + cls.cwe : "") +
+              (cls.guarded ? " \u00b7 guarded by a when: condition" : "")) +
+              '">sink' + (cls.idx != null ? " #" + cls.idx : " (all args)") +
+              (cls.guarded ? "?" : "") + "</span>";
           if (cls && cls.kind === "source")
             flags += ' <span class="sinkflag srcflag" title="' + esc(cls.rule) + '">source</span>';
           if (!ins.pos) flags += ' <span class="nopos-tag">no source position</span>';
@@ -493,6 +495,15 @@
         });
         if (shift) rows.push(["", '<span class="nmeta">receiver excluded, ' +
           'so a rule pins #0 for args[1]</span>']);
+      }
+      var f = classify(d);
+      if (f && f.kind === "sink") {
+        row("sink rule", esc(f.rule + (f.cwe ? " \u00b7 " + f.cwe : "")) +
+          '<span class="nmeta"> \u00b7 ' + esc(f.pattern) + "</span>");
+        // A guarded sink is reached and then judged; saying only "sink" would
+        // promise a finding the rule may suppress.
+        if (f.guarded) row("sink guard", '<span class="nmeta">fires only if the rule\u2019s ' +
+          "<code>when:</code> condition holds</span>");
       }
       row("function", '<span class="nmeta">' + esc(rec.fn.canonical_name) + "</span>");
       row("block", "b" + rec.block.index + " \u00b7 " + esc(rec.block.comment));

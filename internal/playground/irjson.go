@@ -54,6 +54,10 @@ type flagView struct {
 	Pattern string `json:"pattern"`
 	// Idx is the pinned logical injection point; nil means every argument.
 	Idx *int32 `json:"idx,omitempty"`
+	// Guarded marks a sink whose entry carries a `when:` condition: the engine
+	// reaches it, then decides. Drawing it identically to an unconditional sink
+	// would promise a finding the rule may well suppress.
+	Guarded bool `json:"guarded,omitempty"`
 }
 
 type instrView struct {
