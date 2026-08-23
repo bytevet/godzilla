@@ -181,7 +181,7 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 	// Lowercased so the ledger names a language exactly as the coverage line
 	// does; b.Lang is capitalised for prose ("Python parse failed").
 	lang := strings.ToLower(b.Lang)
-	stage := progress.Start(lang+".convert", lang+" parse & lower", len(files))
+	stage := progress.Start(lang+".convert", lang+" parse & lower", len(files), "files")
 
 	// Results land at fixed indices, so module order stays the sorted file
 	// order regardless of chunk completion order.

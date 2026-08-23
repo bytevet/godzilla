@@ -38,6 +38,7 @@ type Stage struct {
 	id    string
 	label string
 	total int
+	unit  string
 	start time.Time
 
 	// done is atomic rather than under mu: the Go lowerer advances once per
@@ -51,21 +52,26 @@ type Stage struct {
 }
 
 // Snapshot is one stage as a display sees it. Elapsed runs live while the stage
-// is Running and is final once it is not.
+// is Running and is final once it is not; Offset is when the stage began,
+// measured from the moment the ledger was armed, so a display can show where a
+// stage sat in the run without quantising it to its own frame clock.
 type Snapshot struct {
 	ID      string
 	Label   string
-	Total   int // 0 when the stage has no measurable unit of work
+	Total   int    // 0 when the stage has no measurable unit of work
+	Unit    string // what Total counts: "files", "funcs", "rules"
 	Done    int
+	Offset  time.Duration
 	Elapsed time.Duration
 	Running bool
 	Failed  bool
 }
 
 var (
-	mu     sync.Mutex
-	armed  bool
-	ledger []*Stage
+	mu      sync.Mutex
+	armed   bool
+	armedAt time.Time
+	ledger  []*Stage
 )
 
 // Enable arms the registry for one scan and returns the function that disarms
@@ -82,8 +88,7 @@ func Enable() (disable func()) {
 	if armed {
 		return func() {}
 	}
-	armed = true
-	ledger = nil
+	armed, armedAt, ledger = true, now(), nil
 	return func() {
 		mu.Lock()
 		armed = false
@@ -92,16 +97,18 @@ func Enable() (disable func()) {
 }
 
 // Start registers a stage and starts its clock, returning nil unless the
-// registry is armed. total is the denominator in whatever unit the stage counts
-// — files, functions, rules — and 0 means the stage has no countable work and
-// is reported by elapsed time alone.
-func Start(id, label string, total int) *Stage {
+// registry is armed. total is the denominator and unit names what it counts —
+// "files", "funcs", "rules". A bare number tells a reader nothing, so the unit
+// is a parameter rather than something the display keeps its own table of:
+// a new stage cannot then be added without saying what it counts. total of 0
+// means no countable work, and the stage is reported by elapsed time alone.
+func Start(id, label string, total int, unit string) *Stage {
 	mu.Lock()
 	defer mu.Unlock()
 	if !armed {
 		return nil
 	}
-	s := &Stage{id: id, label: label, total: total, start: now()}
+	s := &Stage{id: id, label: label, total: total, unit: unit, start: now()}
 	ledger = append(ledger, s)
 	return s
 }
@@ -156,7 +163,9 @@ func (s *Stage) snapshot() Snapshot {
 		ID:      s.id,
 		Label:   s.label,
 		Total:   s.total,
+		Unit:    s.unit,
 		Done:    int(s.done.Load()),
+		Offset:  s.start.Sub(armedAt),
 		Elapsed: elapsed,
 		Running: !s.finished,
 		Failed:  s.failed,

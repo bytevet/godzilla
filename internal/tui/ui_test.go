@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bytevet/godzilla/internal/progress"
 )
 
 // -quiet is contracted to emit literally nothing, so it has to beat every other
@@ -162,5 +164,69 @@ func TestEraseMatchesTheRowsLastDrawn(t *testing.T) {
 		if rows == 1 && strings.Contains(got, "A") {
 			t.Errorf("drawn=1: erase should not move the cursor up at all: %q", got)
 		}
+	}
+}
+
+// Captured stdout is re-emitted on the REAL stdout, never onto the stream the
+// bar draws on. `godzilla scan > out.txt` from a terminal still puts the
+// coverage line and the findings in the file.
+func TestCapturedStdoutIsReemittedOnStdout(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = tmp
+	defer func() { os.Stdout = saved }()
+
+	var bar bytes.Buffer
+	ui := Start(Options{Out: &bar, Capture: true, Tick: time.Hour,
+		Size: func() (int, int) { return 100, 24 }})
+	const line = "coverage: go=ok python=ok"
+	fmt.Fprintln(os.Stdout, line)
+	fmt.Fprintln(os.Stderr, "warning: a frontend complained")
+	ui.Stop()
+	os.Stdout = saved
+
+	got, err := os.ReadFile(tmp.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), line) {
+		t.Errorf("stdout line did not reach the real stdout, got %q", got)
+	}
+	if strings.Contains(bar.String(), line) {
+		t.Errorf("stdout line was diverted onto the bar's stream: %q", bar.String())
+	}
+	if !strings.Contains(bar.String(), "a frontend complained") {
+		t.Errorf("stderr line did not scroll above the bar: %q", bar.String())
+	}
+}
+
+// The scrollback has to read as a narrative. Promotion is only NOTICED on a
+// tick, so a stage that ended before a log line was written must still print
+// above it — ordering by arrival would put the coverage line above the analysis
+// stages that finished first.
+func TestScrollbackIsInHappenedOrder(t *testing.T) {
+	defer progress.Enable()()
+
+	var out bytes.Buffer
+	ui := Start(Options{Out: &out, Capture: true, Tick: time.Hour,
+		Size: func() (int, int) { return 120, 24 }})
+
+	early := progress.Start("taint", "taint propagation", 2, "rules")
+	early.Advance(2)
+	early.Done(nil)
+	time.Sleep(5 * time.Millisecond)
+	fmt.Fprintln(os.Stderr, "a-line-written-after-the-stage-ended")
+	ui.Stop()
+
+	got := out.String()
+	stage, line := strings.Index(got, "taint propagation"), strings.Index(got, "a-line-written-after")
+	if stage < 0 || line < 0 {
+		t.Fatalf("missing output: %q", got)
+	}
+	if stage > line {
+		t.Errorf("the stage that finished first printed second:\n%q", got)
 	}
 }

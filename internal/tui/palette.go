@@ -24,14 +24,17 @@ var (
 		"index":      "#499e2a",
 		"ruleselect": "#6e7912",
 		"taint":      "#ac7c0b",
+		// The review draws in its own bar, alone, so it has no neighbour to be
+		// confused with — only FAILED, which it stays well clear of.
+		"llm": "#3691d6",
 	}
 	sweepIdx256 = map[string]int{
 		"walk": 133, "go.list": 27, "go.load": 32, "go.ssa": 30, "go.lower": 28,
-		"convert": 66, "index": 64, "ruleselect": 137, "taint": 136,
+		"convert": 66, "index": 64, "ruleselect": 137, "taint": 136, "llm": 32,
 	}
 	sweepAnsi16 = map[string]int{
 		"walk": 35, "go.list": 34, "go.load": 94, "go.ssa": 96, "go.lower": 36,
-		"convert": 92, "index": 32, "ruleselect": 93, "taint": 33,
+		"convert": 92, "index": 32, "ruleselect": 93, "taint": 33, "llm": 94,
 	}
 )
 

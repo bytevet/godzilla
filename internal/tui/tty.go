@@ -71,3 +71,25 @@ func detectColor() colorMode {
 	}
 	return color16
 }
+
+// Color reports whether ANSI colour should be written to f. It is the same
+// decision the display makes, asked about a different stream: the findings go
+// to STDOUT, which may well be a file or a pipe while the bar's stderr is a
+// terminal, and a colour code in a redirected report is corruption.
+func Color(f *os.File) bool {
+	return detectColor() != colorNone && isTTY(f)
+}
+
+// Width is the usable width of f, or 0 when it is not a terminal. Callers that
+// lay text out — the findings report on stdout — need this for a stream the bar
+// is not drawing on.
+func Width(f *os.File) int {
+	if !isTTY(f) {
+		return 0
+	}
+	w, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || w <= 0 {
+		return 0
+	}
+	return w
+}

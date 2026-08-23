@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bytevet/godzilla/internal/analysis"
@@ -22,6 +23,7 @@ import (
 	"github.com/bytevet/godzilla/internal/llm"
 	"github.com/bytevet/godzilla/internal/memlimit"
 	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/report"
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/rules/loader"
@@ -85,6 +87,18 @@ sink line or the line above it (optionally "godzilla:ignore[rule-id]").
 
 exit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on
 `
+
+// progressUI arms the stage ledger and starts a display over it, or returns nil
+// when the display is off. The ledger's lifetime is the display's.
+func progressUI(quiet bool, expect []string) *tui.UI {
+	if !tui.Enabled(quiet) {
+		return nil
+	}
+	disable := progress.Enable()
+	ui := tui.Start(tui.Options{Capture: true, Expect: expect})
+	ui.OnStop(disable)
+	return ui
+}
 
 func usage() {
 	fmt.Fprint(os.Stderr, usageText)
@@ -244,15 +258,32 @@ func runScan(args []string) {
 	if *htmlPath != "" {
 		scanOpts = append(scanOpts, scan.WithDiagnostics())
 	}
-	// The live display draws on stderr and owns it for the scan's duration, so
-	// stdout — the coverage line and the findings, which tooling parses — is
-	// byte for byte what it is with no terminal attached. The window is exactly
-	// this call: every os.Exit below is past Stop.
+	// ONE display for everything that makes the user wait — the scan and the LLM
+	// review, which is network-bound and the longest single wait in the run. It
+	// owns both standard streams while it is up, so whatever they emit in between
+	// (the coverage line, a frontend warning) scrolls above the bar instead of
+	// tearing through it, and each still lands on its own stream.
+	//
+	// os.Exit skips defers AND strands captured output in the pipe, so every exit
+	// inside the window goes through exitWith. Past ui.Stop below, os.Exit is
+	// fine again.
+	var expect []string
+	if *llmReview {
+		// Reserved before it starts: a stage discovered only at the end would
+		// leave the bar pinned near 100% for the longest wait in the run.
+		expect = append(expect, "llm")
+	}
+	// Asked about stdout, not about the display: the two streams can be a
+	// terminal and a file independently.
+	st := styler{on: tui.Color(os.Stdout), width: tui.Width(os.Stdout)}
 	var ui *tui.UI
-	if tui.Enabled(*quiet) {
-		ui = tui.Start(tui.Options{Capture: true})
+	if ui = progressUI(*quiet, expect); ui != nil {
 		defer ui.Stop()
 		scanOpts = append(scanOpts, scan.WithProgress())
+	}
+	exitWith := func(code int) {
+		ui.Stop()
+		os.Exit(code)
 	}
 	var res scan.Result
 	if filesMode {
@@ -260,10 +291,9 @@ func runScan(args []string) {
 	} else {
 		res, err = scan.Scan(path, ruleSet, scanOpts...)
 	}
-	ui.Stop()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(exitError)
+		exitWith(exitError)
 	}
 	// Sampled here rather than inside Scan: ReadMemStats stops the world, and a
 	// library caller in a loop must not pay that per iteration. Sys only grows, so
@@ -275,7 +305,7 @@ func runScan(args []string) {
 	}
 
 	if !*quiet {
-		printCoverage(os.Stdout, res.Coverage)
+		printCoverage(os.Stdout, res.Coverage, st)
 	}
 
 	findings := res.Findings
@@ -295,7 +325,7 @@ func runScan(args []string) {
 		baseFps, err := triage.LoadBaseline(*baselinePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: loading baseline: %v\n", err)
-			os.Exit(exitError)
+			exitWith(exitError)
 		}
 		findings = triage.ApplyBaseline(findings, baseFps)
 	}
@@ -307,7 +337,7 @@ func runScan(args []string) {
 			return triage.WriteBaseline(w, findings)
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "error: writing baseline: %v\n", err)
-			os.Exit(exitError)
+			exitWith(exitError)
 		}
 		active := 0
 		for _, f := range findings {
@@ -316,7 +346,7 @@ func runScan(args []string) {
 			}
 		}
 		fmt.Fprintf(os.Stdout, "Baseline written to %s (%d fingerprint(s)).\n", *writeBaseline, active)
-		os.Exit(exitClean)
+		exitWith(exitClean)
 	}
 
 	if *llmReview {
@@ -326,6 +356,7 @@ func runScan(args []string) {
 		// agency over the scanned project — LLM-4).
 		reviewer := llm.NewReviewer(llm.NewFileToolBox(res.Program, path))
 		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
+		ui.Stop()
 		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
 			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
 		if stats.Skipped > 0 {
@@ -340,7 +371,8 @@ func runScan(args []string) {
 		fmt.Fprintln(os.Stdout)
 	}
 
-	gated := printFindings(os.Stdout, findings, threshold, *quiet)
+	ui.Stop()
+	gated := printFindings(os.Stdout, findings, threshold, *quiet, st)
 
 	// res.Diag is already the report's input type, so there is nothing to map.
 	scanInfo := res.Diag
@@ -391,11 +423,44 @@ func runScan(args []string) {
 	os.Exit(exitClean)
 }
 
+// printFinding renders one finding. The two layouts are deliberate: piped
+// output is what tooling and the CLI tests were written against and stays byte
+// for byte what it has always been, while a terminal gets the message wrapped
+// to the window with a hanging indent and the fields aligned into columns —
+// which is the difference between skimming two hundred findings and not.
+func printFinding(w io.Writer, n, of int, f analysis.Finding, st styler) {
+	tag := "[" + string(f.Severity) + "]"
+	if !st.on {
+		fmt.Fprintf(w, "%s %s (%s, confidence: %s)\n", tag, f.RuleID, f.CWE, f.Confidence)
+		fmt.Fprintf(w, "  %s\n", f.Message)
+		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", analysis.PosString(f.SinkPos), f.SinkCallee)
+		fmt.Fprintf(w, "  source: %s\n", analysis.PosString(f.SourcePos))
+		fmt.Fprintf(w, "  in:     %s\n\n", f.Function)
+		return
+	}
+
+	// The counter is left-padded to the width of the largest index so the tags
+	// line up, but the BODY hangs at a fixed two columns rather than under the
+	// counter: on a two-hundred-finding scan that indent would otherwise eat
+	// eight columns of every wrapped line.
+	idx := fmt.Sprintf("%*d/%d ", len(strconv.Itoa(of)), n, of)
+
+	fmt.Fprintf(w, "%s%s %s  %s\n", st.dim(idx), st.severity(f.Severity, fmt.Sprintf("%-10s", tag)),
+		st.bold(f.RuleID), st.dim(f.CWE+" · confidence "+string(f.Confidence)))
+	for _, line := range st.wrap(f.Message, 2) {
+		fmt.Fprintf(w, "  %s\n", line)
+	}
+	fmt.Fprintf(w, "  %s %s %s %s\n", st.dim("sink  "),
+		st.loc(analysis.PosString(f.SinkPos)), st.dim("→"), st.callee(f.SinkCallee))
+	fmt.Fprintf(w, "  %s %s\n", st.dim("source"), st.loc(analysis.PosString(f.SourcePos)))
+	fmt.Fprintf(w, "  %s %s\n\n", st.dim("in    "), st.dim(f.Function))
+}
+
 // printCoverage prints the scan's per-language coverage summary. The trailing
 // blank line separates it from the findings that follow.
-func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
+func printCoverage(w io.Writer, coverage []scan.LangCoverage, st styler) {
 	if line := scan.CoverageSummary(coverage); line != "" {
-		fmt.Fprintf(w, "%s\n\n", line)
+		fmt.Fprintf(w, "%s\n\n", st.coverage(line))
 	}
 }
 
@@ -419,7 +484,7 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // and returns how many meet or exceed the gate threshold. When quiet, it still
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
-func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool) int {
+func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool, st styler) int {
 	slices.SortStableFunc(findings, analysis.CompareFindings)
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
@@ -447,33 +512,35 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 	}
 
 	if len(active) == 0 {
-		fmt.Fprintln(w, "No findings.")
+		fmt.Fprintln(w, st.good("No findings."))
 	}
-	for _, f := range active {
-		fmt.Fprintf(w, "[%s] %s (%s, confidence: %s)\n", f.Severity, f.RuleID, f.CWE, f.Confidence)
-		fmt.Fprintf(w, "  %s\n", f.Message)
-		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", analysis.PosString(f.SinkPos), f.SinkCallee)
-		fmt.Fprintf(w, "  source: %s\n", analysis.PosString(f.SourcePos))
-		fmt.Fprintf(w, "  in:     %s\n\n", f.Function)
+	for i, f := range active {
+		printFinding(w, i+1, len(active), f, st)
 	}
 
 	if len(suppressed) > 0 {
-		fmt.Fprintf(w, "Suppressed (%d) — not gated:\n", len(suppressed))
+		fmt.Fprintf(w, "%s\n", st.dim(fmt.Sprintf("Suppressed (%d) — not gated:", len(suppressed))))
 		for _, f := range suppressed {
 			by := f.SuppressedBy
 			if by == "" {
 				by = "suppressed"
 			}
-			fmt.Fprintf(w, "  [%s] %s  %s  ->  %s  (%s)\n", f.Severity, f.RuleID, analysis.PosString(f.SinkPos), f.SinkCallee, by)
+			fmt.Fprintf(w, "  %s\n", st.dim(fmt.Sprintf("[%s] %s  %s  ->  %s  (%s)",
+				f.Severity, f.RuleID, analysis.PosString(f.SinkPos), f.SinkCallee, by)))
 			if f.SuppressionReason != "" {
-				fmt.Fprintf(w, "    reason: %s\n", f.SuppressionReason)
+				fmt.Fprintf(w, "    %s\n", st.dim("reason: "+f.SuppressionReason))
 			}
 		}
 		fmt.Fprintln(w)
 	}
 
 	if len(active) > 0 || len(suppressed) > 0 {
-		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n", len(active), gated, threshold, len(suppressed))
+		count := st.good
+		if gated > 0 {
+			count = st.bad
+		}
+		fmt.Fprintf(w, "%d finding(s); %s; %d suppressed.\n",
+			len(active), count(fmt.Sprintf("%d at/above %q", gated, threshold)), len(suppressed))
 	}
 	return gated
 }

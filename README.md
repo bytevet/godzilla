@@ -104,19 +104,24 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
 `--fail-on` (default: `medium`). Use the exit code as your CI gate.
 
-When stderr is a terminal, a scan shows its progress: a segmented bar broken down
-by pipeline stage, each stage promoted into the scrollback with its elapsed time
-as it finishes, and any frontend warnings scrolling above it.
+When stderr is a terminal, a scan shows its progress: a one-line segmented bar
+broken down by pipeline stage, naming whatever is running right now. Each stage
+leaves the scrollback a line as it finishes — what it cost (`+`) and where the
+run stood when it ended (`@`) — and frontend warnings scroll above the bar. The
+bar covers `--llm-review` too, which is the longest wait in a run.
 
 ```
-  ok    go list (metadata)                          0.07s
-  ok    go parse & typecheck                        0.65s
-[████████████████████████████████████████░░░░░░░░░░░░░░░░]  68%    0.90s
-  ■ walk 0.00s  ■ list (metadata) 0.07s  ■ SSA build 0.22s…  □ lowering
+  ✓ go list (metadata)                            +0.34s    @0.36s
+  ✓ go parse & typecheck                          +0.59s    @0.95s
+  ✓ go lowering                    8636 funcs     +0.14s    @1.32s
+[███████████████████████████████████░░░░░░░░░░░░░░]  71%    1.40s  taint…
 ```
 
-It draws on **stderr only**, so piping stdout is unaffected. It turns itself off
-when stderr is not a terminal, under `-quiet`, and when `CI` is set.
+The bar draws on **stderr only**, and findings stay on stdout, so redirecting
+either one on its own still works. Findings are coloured by severity when stdout
+is a terminal — asked separately, so `godzilla scan > report.txt` writes a plain
+file. All of it turns itself off when stderr is not a terminal, under `-quiet`,
+and when `CI` is set.
 
 ```
 $ godzilla scan ./test/go/sql_injection

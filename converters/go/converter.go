@@ -255,7 +255,7 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 		Tests: false,
 		Dir:   dir,
 	}
-	listStage := progress.Start("go.list", "go list (metadata)", 0)
+	listStage := progress.Start("go.list", "go list (metadata)", 0, "")
 	meta, err := packages.Load(metaCfg, pattern)
 	listStage.Done(err)
 	if err != nil {
@@ -327,7 +327,7 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	// — it offers no callback, and on a Go repo it is the single largest span in
 	// the scan. Nothing here can report a fraction of it; the bar estimates and
 	// then snaps when the span closes.
-	loadStage := progress.Start("go.load", "go parse & typecheck", 0)
+	loadStage := progress.Start("go.load", "go parse & typecheck", 0, "")
 	initial, err := packages.Load(cfg, append([]string{pattern}, extraRoots...)...)
 	if err != nil {
 		loadStage.Done(err)
@@ -388,7 +388,7 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		}
 		prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 	})
-	ssaStage := progress.Start("go.ssa", "go SSA build", 0)
+	ssaStage := progress.Start("go.ssa", "go SSA build", 0, "")
 	prog.Build()
 	ssaStage.Done(nil)
 	return prog, initial[0].Fset, nil
@@ -444,7 +444,7 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, st
 		idx int
 		fn  *ssa.Function
 	}
-	lowerStage := progress.Start("go.lower", "go lowering", totalFuncs)
+	lowerStage := progress.Start("go.lower", "go lowering", totalFuncs, "funcs")
 	defer lowerStage.Done(nil)
 	jobs := make([]fnJob, 0, totalFuncs)
 	for _, w := range works {

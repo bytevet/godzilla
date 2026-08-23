@@ -10,7 +10,7 @@ import (
 // Unarmed, every hook must cost a nil check and nothing else. This is what lets
 // the Go lowerer call Advance once per function on a scan nobody is watching.
 func TestDisabledIsANoOp(t *testing.T) {
-	if s := Start("x", "x", 10); s != nil {
+	if s := Start("x", "x", 10, "files"); s != nil {
 		t.Fatalf("Start returned %v with the registry unarmed, want nil", s)
 	}
 	var nilStage *Stage
@@ -25,7 +25,7 @@ func TestDisabledIsANoOp(t *testing.T) {
 // Advance is the one hot write; it must total exactly under -race.
 func TestAdvanceIsExactUnderConcurrency(t *testing.T) {
 	defer Enable()()
-	s := Start("lower", "go lowering", 4000)
+	s := Start("lower", "go lowering", 4000, "funcs")
 
 	const workers, each = 8, 500
 	var wg sync.WaitGroup
@@ -51,8 +51,8 @@ func TestAdvanceIsExactUnderConcurrency(t *testing.T) {
 
 func TestLedgerRecordsOutcomeAndOrder(t *testing.T) {
 	defer Enable()()
-	first := Start("walk", "walk", 0)
-	second := Start("py", "python parse & lower", 12)
+	first := Start("walk", "walk", 0, "")
+	second := Start("py", "python parse & lower", 12, "files")
 	second.Advance(5)
 	first.Done(nil)
 	second.Done(errors.New("python3 not found"))
@@ -88,7 +88,7 @@ func TestElapsedRunsLiveAndThenFreezes(t *testing.T) {
 	defer func() { now = time.Now }()
 
 	defer Enable()()
-	s := Start("load", "go parse & typecheck", 0)
+	s := Start("load", "go parse & typecheck", 0, "")
 
 	clock = clock.Add(300 * time.Millisecond)
 	if got := Stages()[0]; got.Elapsed != 300*time.Millisecond || !got.Running {
@@ -106,14 +106,14 @@ func TestElapsedRunsLiveAndThenFreezes(t *testing.T) {
 func TestSecondEnableDoesNotResetTheLedger(t *testing.T) {
 	disable := Enable()
 	defer disable()
-	Start("walk", "walk", 0)
+	Start("walk", "walk", 0, "")
 
 	inner := Enable()
 	if got := Stages(); len(got) != 1 {
 		t.Errorf("a nested Enable discarded the ledger: %d stages, want 1", len(got))
 	}
 	inner() // the no-op disable must not disarm the outer scan
-	if Start("second", "second", 0) == nil {
+	if Start("second", "second", 0, "") == nil {
 		t.Error("the nested disable disarmed the outer scan's registry")
 	}
 }
@@ -122,13 +122,39 @@ func TestSecondEnableDoesNotResetTheLedger(t *testing.T) {
 // can draw its final summary after Scan has returned.
 func TestDisableKeepsTheLedgerReadable(t *testing.T) {
 	disable := Enable()
-	Start("walk", "walk", 0).Done(nil)
+	Start("walk", "walk", 0, "").Done(nil)
 	disable()
 
 	if got := Stages(); len(got) != 1 {
 		t.Errorf("stages after disable = %d, want the ledger kept", len(got))
 	}
-	if Start("late", "late", 0) != nil {
+	if Start("late", "late", 0, "") != nil {
 		t.Error("Start registered a stage after disable")
+	}
+}
+
+// Offset is measured from the moment the ledger was armed, so a display can say
+// where a stage sat in the run without quantising it to its own frame clock.
+func TestOffsetIsMeasuredFromArming(t *testing.T) {
+	clock := time.Unix(0, 0)
+	saved := now
+	now = func() time.Time { return clock }
+	defer func() { now = saved }()
+
+	defer Enable()()
+	clock = clock.Add(2 * time.Second)
+	s := Start("taint", "taint propagation", 3, "rules")
+	clock = clock.Add(400 * time.Millisecond)
+	s.Done(nil)
+
+	got := Stages()[0]
+	if got.Offset != 2*time.Second {
+		t.Errorf("Offset = %v, want 2s", got.Offset)
+	}
+	if got.Elapsed != 400*time.Millisecond {
+		t.Errorf("Elapsed = %v, want 400ms", got.Elapsed)
+	}
+	if got.Unit != "rules" {
+		t.Errorf("Unit = %q, want %q", got.Unit, "rules")
 	}
 }

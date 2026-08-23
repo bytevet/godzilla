@@ -97,18 +97,21 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
 （默认 `medium`）的检出项。直接把退出码用作 CI 门禁即可。
 
-当 stderr 是终端时，扫描会显示进度：一条按流水线阶段分段的进度条；每个阶段结束后会带着
-自己的耗时留在上方的回滚区里；前端的告警也会在进度条上方滚动。
+当 stderr 是终端时，扫描会显示进度：一条按流水线阶段分段的单行进度条，并标出当前正在跑的
+阶段。每个阶段结束时会在上方回滚区留下一行——本阶段耗时（`+`）以及结束时的累计耗时
+（`@`）；前端的告警同样在进度条上方滚动。`--llm-review` 这段全流程最久的等待也计入进度条。
 
 ```
-  ok    go list (metadata)                          0.07s
-  ok    go parse & typecheck                        0.65s
-[████████████████████████████████████████░░░░░░░░░░░░░░░░]  68%    0.90s
-  ■ walk 0.00s  ■ list (metadata) 0.07s  ■ SSA build 0.22s…  □ lowering
+  ✓ go list (metadata)                            +0.34s    @0.36s
+  ✓ go parse & typecheck                          +0.59s    @0.95s
+  ✓ go lowering                    8636 funcs     +0.14s    @1.32s
+[███████████████████████████████████░░░░░░░░░░░░░░]  71%    1.40s  taint…
 ```
 
-它只画在 **stderr** 上，因此不影响 stdout 的管道输出。stderr 不是终端时、加了 `-quiet`
-时、以及设置了 `CI` 时，它都会自动关闭。
+进度条只画在 **stderr** 上，检出项仍走 stdout，因此单独重定向其中任意一个都不受影响。
+stdout 是终端时，检出项会按严重级别着色——这是独立判断的，所以
+`godzilla scan > report.txt` 写出的仍是纯文本。stderr 不是终端时、加了 `-quiet` 时、
+以及设置了 `CI` 时，以上全部自动关闭。
 
 ```
 $ godzilla scan ./test/go/sql_injection

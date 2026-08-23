@@ -47,7 +47,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 		return findings, stats
 	}
 	phaseStart := time.Now()
-	indexStage := progress.Start("index", "index & call graph", 0)
+	indexStage := progress.Start("index", "index & call graph", 0, "")
 
 	// Both indexes depend only on the immutable program, so each is built ONCE and
 	// shared by every rule AND by the call graph: one index, one policy — private
@@ -75,7 +75,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	stats.Functions, stats.Rules = len(byKey), len(e.rs.Rules)
 	stats.Index = time.Since(phaseStart)
 	indexStage.Done(nil)
-	selectStage := progress.Start("ruleselect", "rule selection", 0)
+	selectStage := progress.Start("ruleselect", "rule selection", 0, "")
 	phaseStart = time.Now()
 
 	// Precompile every rule's glob patterns ONCE, single-threaded, before the
@@ -207,7 +207,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	// Rules, not functions: analyzeInterproc is a fixpoint worklist that
 	// re-enqueues on every summary change, so a function counter is not
 	// monotone — and it runs once per rule, concurrently.
-	taintStage := progress.Start("taint", "taint propagation", stats.RulesLive)
+	taintStage := progress.Start("taint", "taint propagation", stats.RulesLive, "rules")
 	phaseStart = time.Now()
 
 	// Phase 2: each live rule's analysis is independent — it reads the shared,

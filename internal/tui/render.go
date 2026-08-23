@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/bytevet/godzilla/internal/progress"
 )
@@ -27,14 +26,18 @@ const (
 // segments of the same glyph are never adjacent for the stage counts we draw.
 var segGlyphs = []rune{'#', '=', '~', '+', 'o', 'x', '*', '%', '@', '&'}
 
-// Neighbouring segments alternate their fill so every boundary carries a
-// LUMINANCE step, not only a hue step. The palette's hues climb monotonically
-// with pipeline position, which is what makes the bar readable at a glance but
-// also puts adjacent hues close together — for tritanopia, close enough to merge
-// (ΔE 1.3). This texture is what keeps the segmentation visible regardless.
-var segTexture = []rune{'█', '▓'}
-
-const emptyBlock = '░'
+// One glyph for every filled segment, so the bar is an unbroken rule and a
+// boundary is a change of HUE only — nothing in the fill itself moves.
+//
+// That leaves colour carrying the segmentation on its own, and the palette's
+// hues climb monotonically with pipeline position, so adjacent ones sit close
+// together: under tritanopia, close enough to merge (ΔE 1.3). segGlyphs is what
+// covers the no-colour case; a viewer with reduced colour discrimination and a
+// colour terminal reads the bar as one length, plus the running stage's name.
+const (
+	fullBlock  = '█'
+	emptyBlock = '░'
+)
 
 type palette struct {
 	mode colorMode
@@ -174,7 +177,7 @@ func (p palette) bar(segs []segment, width int) string {
 		}
 		glyph := segGlyphs[i%len(segGlyphs)]
 		if p.mode != colorNone {
-			glyph = segTexture[i%len(segTexture)]
+			glyph = fullBlock
 		}
 		if s.failed {
 			// Colour alone must never be what tells you a frontend died.
@@ -198,36 +201,7 @@ func (p palette) bar(segs []segment, width int) string {
 // legend names each stage in its own colour, with its elapsed time once it has
 // started. This is the "finished stage and the time it took" half of the
 // display, live rather than only at the end.
-func (p palette) legend(segs []segment, width int) string {
-	var parts []string
-	for i, s := range segs {
-		mark := "□"
-		if p.mode == colorNone {
-			mark = string(segGlyphs[i%len(segGlyphs)])
-		}
-		text := shortLabel(s.label)
-		if !s.started {
-			parts = append(parts, p.dim(mark+" "+text))
-			continue
-		}
-		if p.mode != colorNone {
-			mark = "■"
-		}
-		entry := mark + " " + text + " " + fmtDur(s.elapsed)
-		if s.running {
-			entry += "…"
-		}
-		switch {
-		case s.failed:
-			parts = append(parts, p.failed(entry))
-		default:
-			parts = append(parts, p.paint(s.id, entry))
-		}
-	}
-	return clipStyled("  "+strings.Join(parts, "  "), width)
-}
-
-// shortLabel drops the language prefix a legend entry does not need — the
+// shortLabel drops the language prefix the running-stage text does not need — the
 // colour and position already say which stage it is, and the legend has to fit
 // several entries on one line.
 func shortLabel(label string) string {
@@ -244,18 +218,24 @@ func shortLabel(label string) string {
 // deliberately plain text with an ASCII outcome token, so it reads the same in a
 // terminal, in a screenshot and in a pasted bug report.
 func (p palette) ledgerLine(s progress.Snapshot, width int) string {
-	outcome, paint := "ok  ", p.paint
+	mark, paint := "✓", p.paint
 	if s.Failed {
-		outcome, paint = "FAIL", func(_, str string) string { return p.failed(str) }
+		mark, paint = "✗", func(_, str string) string { return p.failed(str) }
 	}
+	// A bare denominator says nothing on its own — 8626 of what? — so a stage
+	// that counts anything names its unit, and one that counts nothing shows no
+	// number at all rather than a zero.
 	count := ""
 	if s.Total > 0 {
-		count = fmt.Sprintf("%d", s.Total)
+		count = fmt.Sprintf("%d %s", s.Total, s.Unit)
 		if s.Done != s.Total {
-			count = fmt.Sprintf("%d/%d", s.Done, s.Total)
+			count = fmt.Sprintf("%d/%d %s", s.Done, s.Total, s.Unit)
 		}
 	}
-	body := fmt.Sprintf("  %s  %-28s %10s  %8s", outcome, s.Label, count, fmtDur(s.Elapsed))
+	// Two clocks, because they answer different questions: +d is what this stage
+	// COST, @d is where the run stood when it ended.
+	body := fmt.Sprintf("  %s %-24s %16s   %8s %9s", mark, s.Label, strings.TrimSpace(count),
+		"+"+fmtDur(s.Elapsed), "@"+fmtDur(s.Offset+s.Elapsed))
 	return paint(s.ID, clip(strings.TrimRight(body, " "), width))
 }
 
@@ -263,8 +243,8 @@ func (p palette) ledgerLine(s progress.Snapshot, width int) string {
 // exercised entirely through this with no terminal at all. elapsed is the
 // scan's own wall clock, which cannot be derived from the stages: they overlap,
 // so neither their sum nor their maximum is the answer.
-func frame(stages []progress.Snapshot, width int, p palette, elapsed time.Duration, floor float64) ([]string, float64) {
-	segs := plan(stages)
+func frame(stages []progress.Snapshot, width int, p palette, elapsed time.Duration, floor float64, expect []string) ([]string, float64) {
+	segs := plan(stages, expect)
 	if len(segs) == 0 {
 		return nil, floor
 	}
@@ -273,51 +253,36 @@ func frame(stages []progress.Snapshot, width int, p palette, elapsed time.Durati
 	pct := max(overall(segs), floor)
 
 	suffix := fmt.Sprintf("] %3.0f%% %8s", pct*100, fmtDur(elapsed))
-	inner := width - 1 - len(suffix)
+	active, activeID := activeLabel(segs)
+	inner := width - 1 - len(suffix) - len(active)
 	if inner < 8 {
 		// Too narrow for a segmented bar; a percentage still fits.
 		return []string{clip(fmt.Sprintf("scanning %3.0f%% %s", pct*100, fmtDur(elapsed)), width-1)}, pct
 	}
-	return []string{
-		"[" + p.bar(segs, inner) + suffix,
-		p.legend(segs, width-1),
-	}, pct
+	return []string{"[" + p.bar(segs, inner) + suffix + p.paint(activeID, active)}, pct
 }
 
-// clipStyled truncates to n VISIBLE columns, stepping over SGR sequences so a
-// colour code is never counted as width and never cut in half. A clipped line
-// always ends reset, or the truncation would bleed its colour into whatever the
-// terminal draws next.
-func clipStyled(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	var b strings.Builder
-	seen, styled := 0, false
-	for i := 0; i < len(s); {
-		if s[i] == 0x1b {
-			j := i
-			for j < len(s) && s[j] != 'm' {
-				j++
-			}
-			if j < len(s) {
-				j++
-			}
-			b.WriteString(s[i:j])
-			styled = true
-			i = j
+// activeWidth caps the running-stage text so the bar itself keeps most of the
+// line even when several frontends run at once.
+const activeWidth = 30
+
+// activeLabel names what is running at this instant. It is what the bar carries
+// instead of a second legend row: a stage that has FINISHED is already written
+// into the scrollback with its elapsed time, so the one thing the sticky line
+// cannot get from anywhere else is where the scan is right now.
+func activeLabel(segs []segment) (text, id string) {
+	var names []string
+	for _, s := range segs {
+		if !s.running {
 			continue
 		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if seen+1 > n {
-			if styled {
-				b.WriteString("\x1b[0m")
-			}
-			return b.String()
+		if id == "" {
+			id = s.id
 		}
-		b.WriteRune(r)
-		seen++
-		i += size
+		names = append(names, shortLabel(s.label))
 	}
-	return s
+	if len(names) == 0 {
+		return "", ""
+	}
+	return clip("  "+strings.Join(names, " + ")+"…", activeWidth), id
 }

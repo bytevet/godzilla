@@ -31,6 +31,7 @@ var priors = map[string]float64{
 	"index":      0.12,
 	"ruleselect": 0.05,
 	"taint":      0.02,
+	"llm":        6.0,
 }
 
 // convertPrior is the weight for a `<lang>.convert` stage, whose id is not known
@@ -58,6 +59,7 @@ var pendingLabels = map[string]string{
 	"index":      "index & call graph",
 	"ruleselect": "rule selection",
 	"taint":      "taint propagation",
+	"llm":        "LLM review",
 }
 
 // labelFor names a stage that has not registered yet.
@@ -95,7 +97,9 @@ type segment struct {
 // plan turns the live ledger into the bar's segments, in pipeline order. Stages
 // that have not registered yet are included at their prior when the pipeline
 // guarantees they are coming, so the denominator does not grow under the bar.
-func plan(stages []progress.Snapshot) []segment {
+// expect names stages only the caller knows are coming — the LLM review, which
+// no scan stage implies.
+func plan(stages []progress.Snapshot, expect []string) []segment {
 	seen := make(map[string]progress.Snapshot, len(stages))
 	var order []string
 	sawGo := false
@@ -113,6 +117,7 @@ func plan(stages []progress.Snapshot) []segment {
 	if sawGo {
 		expected = append(expected, goStages...)
 	}
+	expected = append(expected, expect...)
 	expected = append(expected, order...)
 
 	var segs []segment
@@ -178,6 +183,8 @@ func pipelineOrder(ids []string) []string {
 			return 31
 		case id == "taint":
 			return 32
+		case id == "llm":
+			return 40
 		}
 		return 25
 	}

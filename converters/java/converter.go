@@ -132,7 +132,7 @@ func (c *Converter) ConvertFile(path string) (_ *ir.Program, convErr error) {
 	// not a file, so there is nothing finer to count. It is also the stage most
 	// likely to look hung — a Maven build runs under a ten-minute deadline — which
 	// is precisely why it needs a row with a ticking clock.
-	stage := progress.Start("java.convert", "java parse & lower", 0)
+	stage := progress.Start("java.convert", "java parse & lower", 0, "")
 	defer func() { stage.Done(convErr) }()
 
 	javaExe, err := exec.LookPath("java")

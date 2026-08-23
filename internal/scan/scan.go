@@ -451,7 +451,7 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 
 	// ONE pruned walk: language detection, every present frontend and the
 	// config-file secrets pass all consume this inventory.
-	walkStage := progress.Start("walk", "walk", 0)
+	walkStage := progress.Start("walk", "walk", 0, "")
 	inv := walkignore.NewInventory(path)
 	present := detectLanguages(inv)
 	walkStage.Done(nil)
