@@ -69,6 +69,12 @@ type fileView struct {
 	Src      []string   `json:"src"`
 	Module   moduleView `json:"module"`
 
+	// State is set when the file produced no gIR. The view is still served, and
+	// still carries Src: a file the frontend choked on is the one whose source
+	// you most want to read, and blanking it would hide the evidence.
+	State       string `json:"state,omitempty"`
+	StateDetail string `json:"stateDetail,omitempty"`
+
 	// ords maps an instruction's emission ordinal to the instruction, so
 	// /api/match can answer in the same coordinates the client rendered.
 	ords []*ir.Instruction
@@ -320,10 +326,12 @@ func absOf(p string) string {
 // Files returns the tree rows.
 func (idx *Index) Files() []*fileEntry { return idx.files }
 
-// View renders (once) the gIR for one file.
+// View renders (once) the gIR for one file. A file with no gIR still gets a
+// view — empty module, State set, source intact — so the UI can show the source
+// beside the reason it never lowered. Only an unknown id has no view at all.
 func (idx *Index) View(id string) *fileView {
 	e, ok := idx.byID[id]
-	if !ok || e.State != "" {
+	if !ok {
 		return nil
 	}
 	e.once.Do(func() { e.view = idx.build(e) })
@@ -333,6 +341,7 @@ func (idx *Index) View(id string) *fileView {
 func (idx *Index) build(e *fileEntry) *fileView {
 	fv := &fileView{
 		ID: e.ID, Path: e.Path, Lang: e.Lang, Findings: e.Findings,
+		State: e.State, StateDetail: e.StateDetail,
 		Src: idx.source(e.abs),
 		Module: moduleView{
 			Name:      e.mod.GetName(),

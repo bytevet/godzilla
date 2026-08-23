@@ -40,7 +40,7 @@ func (idx *Index) Match(fileID, pattern string) matchResult {
 	res.PatternLang = patternLang(pat)
 
 	fv := idx.View(fileID)
-	if fv == nil {
+	if fv == nil || fv.State != "" {
 		res.Error = "this file has no gIR, so no pattern can match in it"
 		return res
 	}

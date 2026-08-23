@@ -843,22 +843,18 @@
       : '<svg class="sicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
   }
   var noModule = false;
-  function showEmpty(state, f) {
-    var e = EMPTY[state] || EMPTY["empty-failed"];
-    selNode = null; fanout = []; nodes = []; byLine = {}; byOrd = {};
-    noModule = true;
-    file = f || null;
-    $("#file-path").textContent = f ? f.path : "\u2014";
-    $("#code").innerHTML = '<div class="statebox">' + stateIcon(e.icon) + "<h3>" + esc(e.t) + "</h3><p>" +
-      esc((f && f.stateDetail) || e.d) + "</p></div>";
-    $("#ir").innerHTML = '<div class="statebox sm">' + stateIcon(e.icon) + "<p>No gIR for this file.</p></div>";
+  /* A file with no gIR still shows its SOURCE — it is the file whose contents
+     you most want to read, since something in it is why the frontend produced
+     nothing. Only the gIR column reports the absence, and it carries the
+     frontend's own reason. */
+  function showNoGIR(f) {
+    var e = EMPTY[f.state] || EMPTY["empty-failed"];
     $("#ir").style.height = "";
+    $("#ir").innerHTML = '<div class="statebox">' + stateIcon(e.icon) + "<h3>" + esc(e.t) +
+      "</h3><p>" + esc(f.stateDetail || e.d) + "</p></div>";
     $("#ir-count").textContent = "0 nodes";
     $("#stepper").hidden = true;
     $("#virt-note").hidden = true;
-    renderInspector(null);
-    matched = null;
-    renderMatches(pattern.trim(), null);
   }
   function skeleton(n) {
     var out = '<div class="skel">';
@@ -869,7 +865,6 @@
     var entry = files.filter(function (x) { return x.id === id; })[0];
     if (!entry) return;
     markCurrent(id);
-    if (entry.state) { showEmpty(entry.state, entry); return; }
     $("#code").innerHTML = skeleton(14);
     $("#ir").innerHTML = skeleton(18);
     $("#ir").style.height = "";
@@ -880,10 +875,16 @@
     api("/api/file?p=" + encodeURIComponent(id)).then(function (f) {
       if (seq !== fileSeq) return; // a later click already won
       file = f;
-      noModule = false;
+      // No functions means no nodes, which is exactly what noModule gates on.
+      noModule = !!f.state;
       selNode = null; fanout = []; fanIdx = 0;
       $("#file-path").textContent = f.path;
-      build(); renderCode(); paint(); bootSelect();
+      // Build no node tree for a module that is not there: an empty one still
+      // yields a root row, and renderIR would repaint it over the state box on
+      // the next paint or match.
+      if (f.state) { nodes = []; byLine = {}; byOrd = {}; open = {}; } else { build(); }
+      renderCode(); paint();
+      if (f.state) showNoGIR(f); else bootSelect();
       requestMatch();
     }).catch(function (e) { if (seq === fileSeq) fail(e.message); });
   }

@@ -160,6 +160,39 @@ func TestIndexAttributesGIRToItsSourceFile(t *testing.T) {
 	}
 }
 
+// A file that produced no gIR still serves its source. That file is the one
+// whose contents most need reading — something in it is why the frontend came
+// back empty — so blanking it would hide the evidence.
+func TestViewOfAFileWithNoGIRStillCarriesItsSource(t *testing.T) {
+	idx, _ := newTestIndex(t)
+
+	fv := idx.View("broken.go")
+	if fv == nil {
+		t.Fatal("a file with no gIR must still have a view")
+	}
+	if fv.State != stateFailed {
+		t.Errorf("state = %q, want %q", fv.State, stateFailed)
+	}
+	if fv.StateDetail == "" {
+		t.Error("the view must carry the reason, or the UI has nothing to show")
+	}
+	if len(fv.Src) == 0 {
+		t.Fatal("source is missing; the whole point is that it is still readable")
+	}
+	if len(fv.Module.Functions) != 0 {
+		t.Errorf("functions = %d, want 0", len(fv.Module.Functions))
+	}
+
+	// It must not, however, look like something a pattern can be tested against.
+	if got := idx.Match("broken.go", "go:*"); got.Error == "" {
+		t.Error("matching a file with no gIR must say so, not report zero matches")
+	}
+	// An unknown id is still a 404, which is a different thing entirely.
+	if idx.View("nope.go") != nil {
+		t.Error("an unknown id must have no view")
+	}
+}
+
 func TestViewFlagsSinksAndSourcesFromTheLoadedRules(t *testing.T) {
 	idx, _ := newTestIndex(t)
 	fv := idx.View("main.go")
