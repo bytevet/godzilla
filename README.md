@@ -104,6 +104,20 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
 `--fail-on` (default: `medium`). Use the exit code as your CI gate.
 
+When stderr is a terminal, a scan shows its progress: a segmented bar broken down
+by pipeline stage, each stage promoted into the scrollback with its elapsed time
+as it finishes, and any frontend warnings scrolling above it.
+
+```
+  ok    go list (metadata)                          0.07s
+  ok    go parse & typecheck                        0.65s
+[████████████████████████████████████████░░░░░░░░░░░░░░░░]  68%    0.90s
+  ■ walk 0.00s  ■ list (metadata) 0.07s  ■ SSA build 0.22s…  □ lowering
+```
+
+It draws on **stderr only**, so piping stdout is unaffected. It turns itself off
+when stderr is not a terminal, under `-quiet`, and when `CI` is set.
+
 ```
 $ godzilla scan ./test/go/sql_injection
 coverage: go=ok
@@ -173,6 +187,7 @@ carries operator concerns:
 | `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
 | `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
+| `GODZILLA_PROGRESS` | Force the scan's progress display on (`1`) or off (`0`). By default it runs only when stderr is a terminal and `CI` is unset. |
 
 Subprocess deadlines are flags, not environment: `-parse-timeout` (default
 `2m0s`, each per-file parse/dump) and `-build-timeout` (default `10m0s`, a

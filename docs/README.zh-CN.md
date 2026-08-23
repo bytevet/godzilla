@@ -97,6 +97,19 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
 （默认 `medium`）的检出项。直接把退出码用作 CI 门禁即可。
 
+当 stderr 是终端时，扫描会显示进度：一条按流水线阶段分段的进度条；每个阶段结束后会带着
+自己的耗时留在上方的回滚区里；前端的告警也会在进度条上方滚动。
+
+```
+  ok    go list (metadata)                          0.07s
+  ok    go parse & typecheck                        0.65s
+[████████████████████████████████████████░░░░░░░░░░░░░░░░]  68%    0.90s
+  ■ walk 0.00s  ■ list (metadata) 0.07s  ■ SSA build 0.22s…  □ lowering
+```
+
+它只画在 **stderr** 上，因此不影响 stdout 的管道输出。stderr 不是终端时、加了 `-quiet`
+时、以及设置了 `CI` 时，它都会自动关闭。
+
 ```
 $ godzilla scan ./test/go/sql_injection
 coverage: go=ok
@@ -160,6 +173,7 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 | `GODZILLA_LLM_PROVIDER=openai`、`GODZILLA_LLM_BASE_URL` | 为 `-llm-review` 指定兼容 OpenAI 的接口（例如本地模型）。 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `-llm-review` 的凭据（Anthropic 也支持 `ant auth` 配置）。 |
 | `GOMEMLIMIT` | 原样尊重：一旦设置，Godzilla 就不再自动设定软内存上限。 |
+| `GODZILLA_PROGRESS` | 强制开启（`1`）或关闭（`0`）扫描进度显示。默认只在 stderr 是终端、且未设置 `CI` 时才启用。 |
 
 子进程超时由命令行参数控制，而非环境变量：`-parse-timeout`（默认 `2m0s`，作用于单个文件
 的解析/导出子进程）与 `-build-timeout`（默认 `10m0s`，作用于 `-allow-build` 下的整项目

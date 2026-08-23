@@ -71,7 +71,7 @@ flags:
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
   -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
   -config <file>    path to a .godzilla.yaml (default: auto-loaded from the scan root)
-  -quiet            suppress console output; the exit code and report files still reflect findings
+  -quiet            suppress console output (and the progress display); the exit code and report files still reflect findings
   -files <file>     changed-files mode: read newline-separated paths from <file> ('-' for stdin),
                     e.g. a pre-commit hook: git diff --name-only --cached | godzilla scan -files -
   -parse-timeout <dur>  deadline per per-file parse/dump subprocess (default 2m0s)
