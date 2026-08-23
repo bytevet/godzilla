@@ -2107,6 +2107,8 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 		fa.recordParamMemoryTaint(inst)
 	case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
 		visitFieldRead(inst, fa.tainted)
+	case ir.OpCode_OP_CODE_INDEX, ir.OpCode_OP_CODE_INDEX_ADDR:
+		visitIndexRead(inst, fa.tainted)
 	case ir.OpCode_OP_CODE_INTRINSIC:
 		// go.defer / go.goroutine carry a CallCommon; route them through the
 		// call transfer so sinks/sources/propagation aren't lost.
