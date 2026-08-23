@@ -237,3 +237,53 @@ func TestJavaSourceFilePositions(t *testing.T) {
 		t.Errorf("expected positions in both Alpha.java and Beta.java, saw %v", seen)
 	}
 }
+
+// This frontend compiles a directory as ONE unit, so independent projects that
+// share a class name collide and only one survives — while every file still
+// reported a clean conversion, because Converted is all-or-nothing. That is the
+// "analyzed and clean" vs "never analyzed" confusion LangCoverage exists to
+// prevent, and it needs a per-file count to be visible at all.
+func TestSkippedCountsSourcesThatProducedNoGIR(t *testing.T) {
+	requireJava(t)
+
+	root := t.TempDir()
+	// Two self-contained samples, each declaring the same class in the same
+	// (default) package — the shape of test/java, where sixteen directories
+	// each hold a Handler.java.
+	for _, dir := range []string{"a", "b"} {
+		sub := filepath.Join(root, dir)
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := "public class Handler {\n  public static String go(String s) { return s; }\n}\n"
+		if err := os.WriteFile(filepath.Join(sub, "Handler.java"), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := NewConverter()
+	prog, err := c.ConvertFile(root)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	// javac rejects the duplicate outright, so this compiles to NOTHING — and
+	// still returns no error, which is the whole problem: without a count the
+	// scan reports java=ok having lowered nothing at all. Skipped equal to the
+	// input count is what turns that into PARTIAL(0/2 files).
+	if n := len(prog.GetModules()); n != 0 {
+		t.Fatalf("expected the duplicate class to compile to nothing, got %d module(s)", n)
+	}
+	if c.Skipped() != 2 {
+		t.Errorf("Skipped = %d, want 2 (both inputs produced no gIR)", c.Skipped())
+	}
+
+	// A directory with nothing to collide over must stay at zero, or every clean
+	// scan starts reporting PARTIAL.
+	solo := NewConverter()
+	if _, err := solo.ConvertFile(filepath.Join(root, "a")); err != nil {
+		t.Fatalf("convert single: %v", err)
+	}
+	if solo.Skipped() != 0 {
+		t.Errorf("a self-consistent directory reported Skipped = %d, want 0", solo.Skipped())
+	}
+}

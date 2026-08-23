@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,40 @@ type LangCoverage struct {
 	Skipped int
 }
 
+// LanguageOf reports which frontend claims path, off the same languageFrontends
+// table the scan dispatches on. ok is false when no frontend handles it — which
+// is the difference between a file that was skipped and one that is not code.
+func LanguageOf(path string) (lang string, ok bool) {
+	name, conv := fileFrontend(path)
+	return name, conv != nil
+}
+
+// CoverageSummary renders a one-line per-language coverage summary, so a
+// degraded scan — a frontend that failed on detected source, or one that
+// silently dropped part of it — is visible even when the run is not strict.
+// Empty when no language was detected. It lives here rather than in a command
+// because both binaries print it and the wording is the thing that must agree.
+func CoverageSummary(coverage []LangCoverage) string {
+	if len(coverage) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(coverage))
+	for _, c := range coverage {
+		status := "ok"
+		switch {
+		case !c.Converted:
+			status = "FAILED"
+		case c.Skipped > 0:
+			// The frontend ran, so the language is not "failed", yet some of its
+			// source never reached the engine. The ratio is what distinguishes a
+			// scan that dropped most of a project from a genuinely clean one.
+			status = fmt.Sprintf("PARTIAL(%d/%d files)", c.Files-c.Skipped, c.Files)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
+	}
+	return "coverage: " + strings.Join(parts, ", ")
+}
+
 // Result is the outcome of scanning a path.
 type Result struct {
 	Findings []analysis.Finding
@@ -58,12 +93,25 @@ type Result struct {
 	// Diag is scan telemetry for the HTML report's diagnostics section. It is
 	// observational only: nothing in the pipeline reads it back.
 	Diag scaninfo.Info
+	// Sources lists the files the walk handed the frontends, under the same
+	// selection policy they lower. Populated only under WithSources.
+	Sources []string
+}
+
+// sourcesOf returns the walked source list only when it was asked for:
+// WithDiagnostics computes the same slice for its line count, and handing that
+// back too would make Sources present-or-absent depend on an unrelated option.
+func sourcesOf(cfg config, srcFiles []string) []string {
+	if !cfg.sources {
+		return nil
+	}
+	return srcFiles
 }
 
 // Option configures a scan.
 type Option func(*config)
 
-type config struct{ diagnostics bool }
+type config struct{ diagnostics, sources bool }
 
 // WithDiagnostics collects the telemetry behind the HTML report's scan
 // diagnostics panel. Off by default: it is a second read pass over the source
@@ -72,6 +120,16 @@ type config struct{ diagnostics bool }
 // sample, and the corpus loop would all pay for a number they discard.
 func WithDiagnostics() Option {
 	return func(c *config) { c.diagnostics = true }
+}
+
+// WithSources retains the list of source files the walk handed the frontends,
+// in Result.Sources. Off by default for the same reason as WithDiagnostics: it
+// is a selection pass nothing on the gate path reads. A caller that wants to
+// know which files produced no gIR needs it, and asking here is far cheaper
+// than walking the tree a second time — on a large repo that second walk is
+// seconds, and it stats every entry.
+func WithSources() Option {
+	return func(c *config) { c.sources = true }
 }
 
 func newConfig(opts []Option) config {
@@ -111,7 +169,7 @@ func Scan(path string, rs *rules.RuleSet, opts ...Option) (Result, error) {
 		return Result{}, err
 	}
 	var srcFiles []string
-	if cfg.diagnostics {
+	if cfg.diagnostics || cfg.sources {
 		srcFiles = sourceFiles(path, inv)
 	}
 	raw, diag := runAnalyses(prog, rs, srcFiles, path, inv, targetPkgs, cfg)
@@ -119,7 +177,8 @@ func Scan(path string, rs *rules.RuleSet, opts ...Option) (Result, error) {
 	if cfg.diagnostics {
 		finishDiag(&diag, start, convertDur, prog, coverage)
 	}
-	return Result{Findings: findings, Program: prog, Coverage: coverage, Diag: diag}, nil
+	return Result{Findings: findings, Program: prog, Coverage: coverage, Diag: diag,
+		Sources: sourcesOf(cfg, srcFiles)}, nil
 }
 
 // depLoweringLangs names the frontends that lower dependency bodies, so their
@@ -342,7 +401,8 @@ func ScanFiles(paths []string, rs *rules.RuleSet, opts ...Option) (Result, error
 	if cfg.diagnostics {
 		finishDiag(&diag, start, convertDur, merged, coverage)
 	}
-	return Result{Findings: findings, Program: merged, Coverage: coverage, Diag: diag}, nil
+	return Result{Findings: findings, Program: merged, Coverage: coverage, Diag: diag,
+		Sources: sourcesOf(cfg, srcFiles)}, nil
 }
 
 // convert lowers source at path into a single gIR program and reports per-

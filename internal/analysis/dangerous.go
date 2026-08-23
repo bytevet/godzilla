@@ -79,7 +79,7 @@ func ScanDangerousCalls(prog *ir.Program, rs *rules.RuleSet) []Finding {
 		var defs map[string]*ir.Instruction
 		getDefs := func() map[string]*ir.Instruction {
 			if defs == nil {
-				defs = buildDefs(fn)
+				defs = BuildDefs(fn)
 			}
 			return defs
 		}
@@ -136,13 +136,13 @@ func constArgMatches(rule *rules.Rule, re *regexp.Regexp, cc *ir.CallCommon, get
 	if re == nil {
 		return false // a const_arg was declared but its regexp was invalid
 	}
-	la := logicalArgs(cc)
+	la := LogicalArgs(cc)
 	idx := rule.ConstArg.Index
 	if idx < 0 || idx >= len(la) {
 		return false
 	}
 	// Unwrap a keyword marker so a const_arg still reads the VALUE a named
 	// argument carries (Cipher.getInstance(algorithm="DES")).
-	_, v := unwrapKwarg(la[idx], getDefs())
+	_, v := UnwrapKwarg(la[idx], getDefs())
 	return re.MatchString(v.GetConstant().GetStringVal())
 }

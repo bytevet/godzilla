@@ -379,28 +379,12 @@ func runScan(args []string) {
 	os.Exit(exitClean)
 }
 
-// printCoverage prints a one-line per-language coverage summary so a degraded
-// scan (a frontend that failed to analyze detected source) is visible even when
-// the run is not strict. Nothing is printed when no languages were detected.
+// printCoverage prints the scan's per-language coverage summary. The trailing
+// blank line separates it from the findings that follow.
 func printCoverage(w io.Writer, coverage []scan.LangCoverage) {
-	if len(coverage) == 0 {
-		return
+	if line := scan.CoverageSummary(coverage); line != "" {
+		fmt.Fprintf(w, "%s\n\n", line)
 	}
-	parts := make([]string, 0, len(coverage))
-	for _, c := range coverage {
-		status := "ok"
-		switch {
-		case !c.Converted:
-			status = "FAILED"
-		case c.Skipped > 0:
-			// The frontend ran, so the language is not "failed", yet some of its
-			// source never reached the engine. The ratio is what distinguishes a
-			// scan that dropped most of a project from a genuinely clean one.
-			status = fmt.Sprintf("PARTIAL(%d/%d files)", c.Files-c.Skipped, c.Files)
-		}
-		parts = append(parts, fmt.Sprintf("%s=%s", c.Language, status))
-	}
-	fmt.Fprintf(w, "coverage: %s\n\n", strings.Join(parts, ", "))
 }
 
 // writeReportRaw creates path, streams the report to it via write, and returns

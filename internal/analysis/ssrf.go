@@ -59,14 +59,14 @@ const memberReadIntrinsic = "builtin.member_read"
 // a keyword that was never passed (absent from kwargs) from one passed a value we
 // cannot read (present, dynamic). The marker therefore CAN carry taint, which is
 // why it is in intrinsicPropagators with its value in Operands; everything that
-// reads an argument's constant unwraps it first (see unwrapKwarg).
+// reads an argument's constant unwraps it first (see UnwrapKwarg).
 const kwargIntrinsic = "builtin.kwarg"
 
-// unwrapKwarg resolves v through a kwargIntrinsic marker, returning the keyword
+// UnwrapKwarg resolves v through a kwargIntrinsic marker, returning the keyword
 // name and the value it wraps. For anything else it returns ("", v), so callers
 // can apply it unconditionally. defs may be nil, in which case a marker cannot be
 // resolved and v is returned unchanged.
-func unwrapKwarg(v *ir.Value, defs map[string]*ir.Instruction) (string, *ir.Value) {
+func UnwrapKwarg(v *ir.Value, defs map[string]*ir.Instruction) (string, *ir.Value) {
 	if v == nil || defs == nil {
 		return "", v
 	}
