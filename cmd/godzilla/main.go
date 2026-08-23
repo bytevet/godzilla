@@ -27,6 +27,7 @@ import (
 	"github.com/bytevet/godzilla/internal/rules/loader"
 	"github.com/bytevet/godzilla/internal/scan"
 	"github.com/bytevet/godzilla/internal/triage"
+	"github.com/bytevet/godzilla/internal/tui"
 )
 
 // version is the tool version, overridable at build time via
@@ -243,12 +244,23 @@ func runScan(args []string) {
 	if *htmlPath != "" {
 		scanOpts = append(scanOpts, scan.WithDiagnostics())
 	}
+	// The live display draws on stderr and owns it for the scan's duration, so
+	// stdout — the coverage line and the findings, which tooling parses — is
+	// byte for byte what it is with no terminal attached. The window is exactly
+	// this call: every os.Exit below is past Stop.
+	var ui *tui.UI
+	if tui.Enabled(*quiet) {
+		ui = tui.Start(tui.Options{Capture: true})
+		defer ui.Stop()
+		scanOpts = append(scanOpts, scan.WithProgress())
+	}
 	var res scan.Result
 	if filesMode {
 		res, err = scan.ScanFiles(paths, ruleSet, scanOpts...)
 	} else {
 		res, err = scan.Scan(path, ruleSet, scanOpts...)
 	}
+	ui.Stop()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)

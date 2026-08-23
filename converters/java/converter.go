@@ -31,6 +31,7 @@ import (
 
 	"github.com/bytevet/godzilla/internal/buildpolicy"
 	"github.com/bytevet/godzilla/internal/proc"
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/walkignore"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -126,7 +127,14 @@ type dumpInstr struct {
 // java.lang.classfile API, standardized in JDK 24.
 const minJDK = 24
 
-func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
+func (c *Converter) ConvertFile(path string) (_ *ir.Program, convErr error) {
+	// One span for the whole call: this frontend's unit of work is a compilation,
+	// not a file, so there is nothing finer to count. It is also the stage most
+	// likely to look hung — a Maven build runs under a ten-minute deadline — which
+	// is precisely why it needs a row with a ticking clock.
+	stage := progress.Start("java.convert", "java parse & lower", 0)
+	defer func() { stage.Done(convErr) }()
+
 	javaExe, err := exec.LookPath("java")
 	if err != nil {
 		return nil, fmt.Errorf("java not found on PATH (JDK %d+ required for the Java frontend): %w", minJDK, err)

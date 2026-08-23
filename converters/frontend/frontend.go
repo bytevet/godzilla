@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/walkignore"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -173,10 +174,20 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 		return prog, 0, nil
 	}
 
+	// One stage per language, counted in files. runChunks hands each goroutine a
+	// contiguous range, so the count advances a chunk at a time rather than a
+	// file at a time — the stage's own timer is what shows it is alive between
+	// those jumps.
+	// Lowercased so the ledger names a language exactly as the coverage line
+	// does; b.Lang is capitalised for prose ("Python parse failed").
+	lang := strings.ToLower(b.Lang)
+	stage := progress.Start(lang+".convert", lang+" parse & lower", len(files))
+
 	// Results land at fixed indices, so module order stays the sorted file
 	// order regardless of chunk completion order.
 	runChunks(len(files), func(start, end int) {
 		b.Parse(root, files[start:end], results[start:end])
+		stage.Advance(end - start)
 	})
 	if b.Finish != nil {
 		b.Finish(results)
@@ -196,12 +207,15 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 		prog.Modules = append(prog.Modules, mod)
 	}
 	if len(prog.Modules) == 0 {
-		return nil, skipped, fmt.Errorf("%s: no %s files under %s converted successfully (%d file(s) failed): %s",
+		err := fmt.Errorf("%s: no %s files under %s converted successfully (%d file(s) failed): %s",
 			b.Label, b.Lang, root, len(convertErrs), strings.Join(convertErrs, "; "))
+		stage.Done(err)
+		return nil, skipped, err
 	}
 	if b.PostProgram != nil {
 		b.PostProgram(prog, true)
 	}
+	stage.Done(nil)
 	return prog, skipped, nil
 }
 

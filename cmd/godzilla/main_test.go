@@ -148,3 +148,16 @@ func dropGoRunNoise(out string) string {
 	}
 	return strings.Join(kept, "\n")
 }
+
+// The interactive display draws on stderr, and CombinedOutput gives the child a
+// pipe on both descriptors, so it must stay off here. Asserting on the raw ESC
+// byte rather than on the TTY check itself is what makes this catch a future
+// refactor that turns the display on for the wrong reason — every other CLI
+// test's substring assertions would fail in confusing ways, this one says why.
+func TestNoTerminalEscapesWhenOutputIsPiped(t *testing.T) {
+	_, out := runCLI(t, "scan", "../../test/go/sql_injection")
+	if i := strings.IndexRune(out, 0x1b); i >= 0 {
+		t.Errorf("piped output contains a terminal escape at byte %d; the progress display "+
+			"engaged without a terminal:\n%q", i, out[max(0, i-40):min(len(out), i+40)])
+	}
+}
