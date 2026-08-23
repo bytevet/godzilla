@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/buildpolicy"
@@ -87,6 +89,31 @@ sink line or the line above it (optionally "godzilla:ignore[rule-id]").
 
 exit codes: 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on
 `
+
+// trapInterrupt tears the display down on Ctrl-C. A signal skips every defer, so
+// without this the terminal keeps a half-drawn bar and — worse — loses the
+// warnings the display is holding, which are only written out by Stop.
+//
+// The exit code is the shell's own convention for a signal death, 128+signo;
+// re-raising with the default disposition would be the more faithful ending but
+// costs a syscall.Kill this package does not otherwise need and Windows does not
+// have. Nothing is trapped when the display is off, so a piped scan keeps the
+// default behaviour exactly.
+func trapInterrupt(ui *tui.UI) {
+	if ui == nil {
+		return
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-ch
+		ui.Stop()
+		if sig == syscall.SIGTERM {
+			os.Exit(143)
+		}
+		os.Exit(130)
+	}()
+}
 
 // progressUI arms the stage ledger and starts a display over it, or returns nil
 // when the display is off. The ledger's lifetime is the display's.
@@ -279,6 +306,7 @@ func runScan(args []string) {
 	var ui *tui.UI
 	if ui = progressUI(*quiet, expect); ui != nil {
 		defer ui.Stop()
+		trapInterrupt(ui)
 		scanOpts = append(scanOpts, scan.WithProgress())
 	}
 	exitWith := func(code int) {

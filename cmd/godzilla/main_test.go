@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"errors"
 	"github.com/bytevet/godzilla/internal/testsupport"
+	"sync"
+	"time"
 )
 
 // runCLI builds and runs the godzilla CLI (via `go run .`) with args, returning
@@ -159,5 +162,94 @@ func TestNoTerminalEscapesWhenOutputIsPiped(t *testing.T) {
 	if i := strings.IndexRune(out, 0x1b); i >= 0 {
 		t.Errorf("piped output contains a terminal escape at byte %d; the progress display "+
 			"engaged without a terminal:\n%q", i, out[max(0, i-40):min(len(out), i+40)])
+	}
+}
+
+// Ctrl-C must not cost the user what the display is holding. Captured warnings
+// reach the terminal only when Stop writes them out, and a signal skips every
+// defer that would have called it.
+//
+// The binary is built and exec'd directly rather than going through runCLI: that
+// helper runs `go run .`, and a signal sent to the go tool does not reliably
+// reach the program underneath it.
+func TestInterruptFlushesTheDisplay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: skipping CLI exec test")
+	}
+	bin := filepath.Join(t.TempDir(), "godzilla")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building the CLI: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "scan", filepath.Join("..", ".."))
+	// The display keys off stderr being a terminal, which a pipe is not, so it
+	// is forced on. CI is cleared for the same reason.
+	cmd.Env = append(os.Environ(), "GODZILLA_PROGRESS=1", "CI=")
+	pipe, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var seen strings.Builder
+	captured := make(chan struct{})
+	go func() {
+		buf := make([]byte, 4096)
+		var once sync.Once
+		for {
+			n, err := pipe.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				seen.Write(buf[:n])
+				got := seen.String()
+				mu.Unlock()
+				if strings.Contains(got, "skipping") {
+					once.Do(func() { close(captured) })
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Interrupt only once a warning has actually been captured — that is the
+	// thing this test is about, and waiting for it also guarantees the scan is
+	// still running.
+	select {
+	case <-captured:
+	case <-time.After(90 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("no warning was captured within 90s")
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+
+	code := 0
+	if err := cmd.Wait(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("waiting: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	mu.Lock()
+	got := seen.String()
+	mu.Unlock()
+
+	if code != 130 {
+		t.Errorf("exit code = %d, want 130 (128+SIGINT):\n%s", code, got)
+	}
+	if !strings.Contains(got, "scanned in") {
+		t.Errorf("the display was not stopped on the signal:\n%s", got)
+	}
+	// The pane clips to the terminal width; only Stop writes a warning in full,
+	// so the tail of one proves the flush happened.
+	if !strings.Contains(got, "failed to parse") {
+		t.Errorf("captured warnings were lost on the signal:\n%s", got)
 	}
 }
