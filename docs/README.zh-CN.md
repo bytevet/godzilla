@@ -144,7 +144,8 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 ```
 
 它只监听本地回环地址，且每次启动只转换一次：不监听文件变化，也不会重新转换。`make build`
-与 `go build ./...` 会同时构建这两个可执行文件。
+与 `go build ./...` 会同时构建这两个可执行文件，两个 Docker 镜像也都带上了它们
+（见[用 Docker 运行](#用-docker-运行)）。
 
 ### 环境变量
 
@@ -186,6 +187,12 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
 
 # Java/Rust 需要 full 镜像
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
+
+# Playground 是镜像里的另一个可执行文件。要显式绑定 0.0.0.0：默认的 127.0.0.1 指的是
+# 容器自身的回环地址，端口映射到不了；访问时也要用 localhost，因为它只接受回环 Host。
+docker run --rm -p 7391:7391 -v "$PWD:/src" \
+  --entrypoint godzilla-playground ghcr.io/bytevet/godzilla \
+  -addr 0.0.0.0:7391 -open=false /src
 ```
 
 slim 镜像遇到 Java 和 Rust 时会跳过并给出覆盖率警告，而不是直接失败。标签规则：

@@ -156,7 +156,8 @@ go run ./cmd/godzilla-playground <path>          # or: godzilla-playground <path
 ```
 
 It binds loopback only and lowers once per invocation — no watching, no
-re-lowering. `make build` and `go build ./...` build both binaries.
+re-lowering. `make build` and `go build ./...` build both binaries, and both
+Docker images ship them ([Run with Docker](#run-with-docker)).
 
 ### Environment variables
 
@@ -200,6 +201,13 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
 
 # Java/Rust need the full image
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
+
+# The playground is the image's other binary. Bind 0.0.0.0 — the 127.0.0.1
+# default is the container's own loopback, which no port publish reaches — and
+# open it as localhost, since it serves loopback Host headers only.
+docker run --rm -p 7391:7391 -v "$PWD:/src" \
+  --entrypoint godzilla-playground ghcr.io/bytevet/godzilla \
+  -addr 0.0.0.0:7391 -open=false /src
 ```
 
 The slim image **skips** Java and Rust with a coverage warning rather than
