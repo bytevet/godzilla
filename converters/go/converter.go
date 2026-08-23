@@ -421,12 +421,20 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// Create SSA for every loaded package. Non-stdlib roots have syntax, so
-	// prog.Build() builds their bodies and AllFunctions yields them — the engine
-	// can then flow taint through a library call instead of dropping at it.
-	// Stdlib packages (export data, no syntax) are created bodyless: their
-	// declarations still resolve callee names and method sets, but nothing is
-	// built or lowered for them.
+	// Create SSA for every loaded package. Roots have syntax, so prog.Build()
+	// builds their bodies and AllFunctions yields them — the engine can then flow
+	// taint through a library call instead of dropping at it. Everything else is
+	// created bodyless: its declarations still resolve callee names and method
+	// sets, but nothing is built or lowered for it.
+	//
+	// ONLY a root's syntax may be handed to the builder. go/packages type-checks
+	// a non-root with IgnoreFuncBodies (it does so whenever NeedDeps is unset),
+	// so its TypesInfo has no entry for anything inside a function body — and it
+	// still returns that syntax whenever the package could not be served from
+	// export data, which happens to any non-root that transitively imports a
+	// root. Building a body from that pair panics in ssa.objectOf, or dereferences
+	// the nil types.Object in packageLevelMember. The split below is therefore
+	// structural: syntax comes from the initial (root) set, never from the walk.
 	//
 	// ssautil.AllPackages is not enough here: it only visits the go/packages
 	// graph, which without NeedDeps is truncated at the roots' direct imports.
@@ -455,15 +463,22 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		}
 		prog.CreatePackage(tp, nil, nil, true)
 	}
-	packages.Visit(initial, nil, func(p *packages.Package) {
+	// Roots first, and before any part of the types closure is walked: a package
+	// created bodyless can never be given its bodies afterwards, and an
+	// export-data package's types closure can reach a root, so a root the walk
+	// got to first would silently lose every body it was loaded for.
+	for _, p := range initial {
 		if p.Types == nil || p.IllTyped || created[p.Types] {
-			return
+			continue
 		}
 		created[p.Types] = true
-		for _, imp := range p.Types.Imports() {
-			createTypesOnly(imp)
-		}
 		prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
+	}
+	packages.Visit(initial, nil, func(p *packages.Package) {
+		if p.Types == nil || p.IllTyped {
+			return // an ill-typed package is created only if something references it
+		}
+		createTypesOnly(p.Types)
 	})
 	prog.Build()
 	return prog, initial[0].Fset, nil
