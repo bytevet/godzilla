@@ -95,6 +95,10 @@ func fixture(t *testing.T) (root string, res scan.Result) {
 		Program:  &ir.Program{Modules: []*ir.Module{mod}},
 		Findings: []analysis.Finding{{RuleID: "go-sqli", SinkPos: pos(mainGo, 5)}},
 		Coverage: []scan.LangCoverage{{Language: "go", Detected: true, Converted: true, Files: 3, Skipped: 1}},
+		// What scan.WithSources would hand back: the files the walk gave the
+		// frontends. notes.txt is absent because it is not source — which is the
+		// whole reason the tree consults this list rather than walking itself.
+		Sources: []string{mainGo, filepath.Join(root, "models.go"), filepath.Join(root, "broken.go")},
 	}
 	return root, res
 }

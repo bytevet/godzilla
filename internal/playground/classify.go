@@ -160,6 +160,7 @@ func (c *classifier) flag(lang string, in *ir.Instruction) *flagView {
 // from the files in the tree, not the whole program: a pattern that only matches
 // inside a lowered dependency would offer itself and then report nothing.
 func (c *classifier) presets(callees map[string]bool) presetView {
+	ci := newCalleeIndex(callees)
 	var sinks, srcs []probe
 	seenSink, seenSrc := map[string]bool{}, map[string]bool{}
 	for i := range c.rules {
@@ -177,15 +178,45 @@ func (c *classifier) presets(callees map[string]bool) presetView {
 		}
 	}
 	return presetView{
-		Sinks:       topMatching(sinks, callees, presetSinkCount),
-		Sources:     topMatching(srcs, callees, presetSourceCount),
-		Propagators: topMatching(c.props, callees, presetPropCount),
+		Sinks:       topMatching(sinks, ci, presetSinkCount),
+		Sources:     topMatching(srcs, ci, presetSourceCount),
+		Propagators: topMatching(c.props, ci, presetPropCount),
 	}
+}
+
+// calleeIndex groups callees by their "<lang>:" prefix, and keeps the flat list
+// for patterns that have none. An anchored `py:` pattern cannot match a `go:`
+// callee, so bucketing turns the ranking pass from probes x callees into probes
+// x one language's callees — the difference between milliseconds and a second
+// on a large program, on the path that blocks the listener.
+type calleeIndex struct {
+	all    []string
+	byLang map[string][]string
+}
+
+func newCalleeIndex(callees map[string]bool) calleeIndex {
+	ci := calleeIndex{all: make([]string, 0, len(callees)), byLang: map[string][]string{}}
+	for c := range callees {
+		ci.all = append(ci.all, c)
+		if lang := patternLang(c); lang != "" {
+			ci.byLang[lang] = append(ci.byLang[lang], c)
+		}
+	}
+	return ci
+}
+
+// subjects returns the callees a pattern could possibly match. A pattern with
+// no parseable language prefix — one that leads with '*' — has to see them all.
+func (ci calleeIndex) subjects(pattern string) []string {
+	if lang := patternLang(pattern); lang != "" {
+		return ci.byLang[lang]
+	}
+	return ci.all
 }
 
 // topMatching returns the n patterns matching the most distinct callees. Ties
 // break on the pattern text so the preset row does not reshuffle between runs.
-func topMatching(ps []probe, callees map[string]bool, n int) []string {
+func topMatching(ps []probe, ci calleeIndex, n int) []string {
 	type scored struct {
 		pattern string
 		hits    int
@@ -193,7 +224,7 @@ func topMatching(ps []probe, callees map[string]bool, n int) []string {
 	var ranked []scored
 	for i := range ps {
 		hits := 0
-		for callee := range callees {
+		for _, callee := range ci.subjects(ps[i].pattern) {
 			if _, _, ok := ps[i].match(callee); ok {
 				hits++
 			}

@@ -94,6 +94,7 @@ type Index struct {
 
 	files   []*fileEntry
 	byID    map[string]*fileEntry
+	byAbs   map[string]*fileEntry // source filename -> entry (nil = outside the root)
 	presets presetView
 
 	mu    sync.Mutex
@@ -116,11 +117,12 @@ func NewIndex(res scan.Result, target, version string, rs *rules.RuleSet) *Index
 		rs:      rs,
 		cls:     newClassifier(rs),
 		byID:    map[string]*fileEntry{},
+		byAbs:   map[string]*fileEntry{},
 		lines:   srclines.Cache{},
 	}
 	idx.collectGIR(res.Program)
 	idx.countFindings(res.Findings)
-	idx.addMissingFiles(target, res.Coverage)
+	idx.addMissingFiles(res)
 	idx.sortFiles()
 	idx.presets = idx.cls.presets(idx.userCallees())
 	return idx
@@ -132,6 +134,19 @@ func NewIndex(res scan.Result, target, version string, rs *rules.RuleSet) *Index
 // those here is what keeps the tree to user code, the same scoping decision
 // internal/scan's scopeFindings makes for findings.
 func (idx *Index) entryFor(abs string) *fileEntry {
+	// Keyed on the raw filename: a program names the same file once per
+	// function, so without this the Rel/ToSlash below runs ~18x more often than
+	// it has distinct answers. A miss is cached too — most of a lowered Go
+	// program is dependency files that resolve outside the root.
+	if e, seen := idx.byAbs[abs]; seen {
+		return e
+	}
+	e := idx.uncachedEntryFor(abs)
+	idx.byAbs[abs] = e
+	return e
+}
+
+func (idx *Index) uncachedEntryFor(abs string) *fileEntry {
 	id, ok := idx.relID(abs)
 	if !ok {
 		return nil
@@ -231,12 +246,12 @@ func (idx *Index) countFindings(findings []analysis.Finding) {
 // addMissingFiles lists the source files the walk found that produced NO gIR,
 // and says why. This is the point of showing them at all: a file with no gIR is
 // invisible to every rule, which reads as "clean" unless it is surfaced.
-func (idx *Index) addMissingFiles(target string, coverage []scan.LangCoverage) {
+func (idx *Index) addMissingFiles(res scan.Result) {
 	covByLang := map[string]scan.LangCoverage{}
-	for _, c := range coverage {
+	for _, c := range res.Coverage {
 		covByLang[c.Language] = c
 	}
-	for _, p := range scan.SourceFiles(target) {
+	for _, p := range res.Sources {
 		abs := absOf(p)
 		id, inRoot := idx.relID(abs)
 		if !inRoot {

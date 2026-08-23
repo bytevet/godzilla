@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/bytevet/godzilla/internal/buildpolicy"
 	"github.com/bytevet/godzilla/internal/memlimit"
@@ -91,7 +92,7 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "scanning %s …\n", path)
-	res, err := scan.Scan(path, ruleSet)
+	res, err := scan.Scan(path, ruleSet, scan.WithSources())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
@@ -106,6 +107,11 @@ func main() {
 	fmt.Fprintf(os.Stderr, "lowered %d module(s); %d finding(s).\n", len(res.Program.GetModules()), len(res.Findings))
 
 	idx := playground.NewIndex(res, path, version, ruleSet)
+	// The scan's peak arena is ~1 GB on a large target and the live set after
+	// indexing is a few MB, but this process then idles for a whole browsing
+	// session rather than exiting. Hand the pages back.
+	res = scan.Result{}
+	debug.FreeOSMemory()
 	if err := playground.Serve(idx, *addr, *open, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(exitError)
