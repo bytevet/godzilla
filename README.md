@@ -123,6 +123,32 @@ coverage: go=ok
 2 finding(s); 2 at/above "medium"; 0 suppressed.
 ```
 
+### Large Go repositories
+
+The Go frontend lowers dependency **bodies**, so taint flows through library code
+instead of stopping at it — but a big repo's transitive closure runs to millions of
+lines, and loading all of it can exhaust the machine before any analysis starts.
+`-dep-budget` caps how much third-party Go source is promoted to full analysis:
+
+| Value | Effect |
+|---|---|
+| `auto` (default) | Size the cap from the memory available to the process — a container's cgroup limit counts, so a smaller CI runner gets a smaller cap. |
+| `off` | No cap: load the whole dependency closure, whatever it costs. |
+| A byte count — `512M`, `2G` | Use exactly this cap (suffixes `K`/`M`/`G`, powers of 1024). |
+
+Dependencies beyond the cap are analyzed as **signatures only** — the same treatment
+the standard library always gets. The scan still runs to completion and still reports
+findings; what it loses is taint that would have been carried *through* one of those
+dependencies' bodies. Such a scan is reported as degraded, not failed:
+
+```
+coverage: go=DEGRADED
+```
+
+`-strict` still passes on it, because the frontend ran — `-strict` fails only when a
+detected language went un-analyzed. The HTML report's scan-diagnostics panel names
+how much of the closure was dropped.
+
 ### Environment variables
 
 Everything routine is a CLI flag (`godzilla scan -h`); the environment only

@@ -211,6 +211,28 @@ Python/Java/Rust/Ruby shelling out to a toolchain on `PATH`.
 Python, JS, and Ruby name modules by their path relative to the scan root, so
 same-named functions in different files get distinct canonical names.
 
+### Bounding the Go dependency closure
+
+The Go frontend lowers third-party **bodies**, so taint flows *through* a library
+call instead of dropping at it. Two guards keep that affordable: findings are
+scoped back to user code, and dependency functions are analyzed demand-driven. But
+both act on a program that is already in memory — neither bounds the **load**, and
+the load is where the memory goes. Promoting every package in a large repo's
+transitive closure to a syntax root means parsing, typechecking and building SSA
+for millions of lines of third-party source, which is what pushed a whole-repo scan
+of a 4M-dependency-line project past the host's RAM.
+
+Nothing downstream can recover that. `reachableFuncs` prunes what is *lowered*, not
+what is loaded, and it runs after `prog.Build()` — the peak has already been paid by
+the time it can act. `GOMEMLIMIT` cannot help either: it is a GC target, and an SSA
+program under construction is live, not garbage. The failure is a hard OOM kill with
+no partial result, so the only cap that works is a **pre-flight estimate**: Phase A
+already knows every candidate package's source size, so a source-byte budget decides
+before Phase B which packages are promoted to syntax roots and which arrive as export
+data — bodyless SSA, exactly the treatment the stdlib already gets. A scan that hits
+the budget completes at reduced dependency depth and reports that in its coverage
+line, rather than dying.
+
 ## Confidence, LLM review, and reporting
 
 - **Confidence** — every finding is scored (intra = High, cross-function = Medium),
