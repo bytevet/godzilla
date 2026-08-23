@@ -57,8 +57,7 @@ type UI struct {
 	pending  []logLine       // Stdout() lines waiting to be flushed above the bar
 	warnings []string        // every captured stderr line, in arrival order
 	shown    int             // how many of them have reached the real stderr
-	promoted map[string]bool // stages already noticed as finished
-	holding  []progress.Snapshot
+	promoted map[string]bool // stages already written into the scrollback
 	onStop   []func()
 
 	// stdout is the real stdout. Lines destined for it are re-emitted THERE and
@@ -66,7 +65,11 @@ type UI struct {
 	// still puts the coverage line and the findings in the file.
 	stdout  io.Writer
 	partial string // an incomplete stdout line, waiting for its newline
-	taps    []*tap
+
+	// origStderr is restored on Stop; pipeW is closed to give the reader EOF.
+	origStderr *os.File
+	pipeW      *os.File
+	readerDone chan struct{}
 
 	// drawn is how many lines the last frame occupied — the erase sequence is
 	// relative to the cursor, so this is the display's entire screen state.
@@ -76,22 +79,12 @@ type UI struct {
 	stopOnce sync.Once
 }
 
-// tap routes one of the process's standard streams through the display for its
-// lifetime, so the ticker goroutine stays the only thing writing to the
-// terminal. target is the package-level variable to restore on Stop.
-type tap struct {
-	target **os.File
-	orig   *os.File
-	w      *os.File
-	done   chan struct{}
-}
-
-// logLine is a captured line, which stream it came from, and when it arrived —
-// the timestamp is what lets it be ordered against a stage's completion.
+// logLine is a line the command wrote through Stdout(), and when it wrote it.
+// The timestamp is exact — taken at the call — which is what lets it be ordered
+// against a stage's completion.
 type logLine struct {
-	text   string
-	stdout bool
-	at     time.Time
+	text string
+	at   time.Time
 }
 
 // Start begins drawing. It owns two goroutines: the frame ticker, which is the
@@ -169,7 +162,7 @@ func (s stdoutWriter) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		u.pending = append(u.pending, logLine{u.partial[:i], true, at})
+		u.pending = append(u.pending, logLine{u.partial[:i], at})
 		u.partial = u.partial[i+1:]
 	}
 	u.mu.Unlock()
@@ -195,18 +188,14 @@ func (u *UI) Stop() {
 		return
 	}
 	u.stopOnce.Do(func() {
-		// Restore every stream first, so a straggler write lands on the real
-		// terminal rather than a pipe nobody is reading; then close the write
-		// ends so the readers see EOF; then join them, so nothing is still
-		// arriving when the final frame is drawn.
-		for _, t := range u.taps {
-			*t.target = t.orig
-		}
-		for _, t := range u.taps {
-			_ = t.w.Close()
-		}
-		for _, t := range u.taps {
-			<-t.done
+		// Restore stderr first, so a straggler write lands on the real terminal
+		// rather than a pipe nobody is reading; then close the write end so the
+		// reader sees EOF; then join it, so nothing is still arriving when the
+		// final frame is drawn.
+		if u.pipeW != nil {
+			os.Stderr = u.origStderr
+			_ = u.pipeW.Close()
+			<-u.readerDone
 		}
 		u.ticker.Stop()
 		close(u.stop)
@@ -235,20 +224,16 @@ func (u *UI) Stop() {
 // own few writes through Stdout() instead, where they are timestamped at the
 // call rather than whenever a reader wakes up.
 func (u *UI) startCapture() {
-	u.tapStream(&os.Stderr, false)
-}
-
-func (u *UI) tapStream(target **os.File, isStdout bool) {
 	r, w, err := os.Pipe()
 	if err != nil {
-		return // no capture on this stream; its writes just interleave
+		return // no capture; warnings just interleave, as they do with no display
 	}
-	t := &tap{target: target, orig: *target, w: w, done: make(chan struct{})}
-	*target = w
-	u.taps = append(u.taps, t)
+	u.origStderr, u.pipeW = os.Stderr, w
+	os.Stderr = w
+	u.readerDone = make(chan struct{})
 
 	go func() {
-		defer close(t.done)
+		defer close(u.readerDone)
 		defer func() { _ = r.Close() }()
 		// ReadString, not bufio.Scanner: Scanner's 64 KiB token cap would
 		// silently truncate one long line — a packages.PrintErrors burst is
@@ -330,33 +315,20 @@ func (u *UI) render(final bool) {
 	// rather than accumulating in the sticky block: seven frontends plus the Go
 	// phases and the analysis passes would be a twenty-line block on a
 	// twenty-four-row terminal.
-	//
-	// It is held for one frame first. A stage's end time is exact, but a warning
-	// written microseconds earlier is timestamped when the pipe reader WAKES, so
-	// sorting alone would put the stage's line above output that preceded it —
-	// and a frontend emits its skip warnings immediately before calling Done, so
-	// this is the common path, not a corner. One tick is ample for the reader to
-	// deliver what was already written; the final frame does not need it,
-	// because Stop drains the pipe before drawing.
-	promote := u.holding
-	u.holding = nil
+	var promote []progress.Snapshot
 	for _, s := range stages {
 		if s.Running || u.promoted[s.ID] {
 			continue
 		}
 		u.promoted[s.ID] = true
-		u.holding = append(u.holding, s)
-	}
-	if final {
-		promote = append(promote, u.holding...)
-		u.holding = nil
+		promote = append(promote, s)
 	}
 
 	u.mu.Lock()
 	logs := u.pending
 	u.pending = nil
 	if final && u.partial != "" {
-		logs = append(logs, logLine{u.partial, true, u.now()})
+		logs = append(logs, logLine{u.partial, u.now()})
 		u.partial = ""
 	}
 	u.mu.Unlock()

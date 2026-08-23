@@ -168,8 +168,8 @@ func TestFinishingReweightsToActualCost(t *testing.T) {
 			w = s.weight
 		}
 	}
-	if w <= priors["go.load"] {
-		t.Errorf("weight = %v after a 30s run, want it re-scaled above the %v prior", w, priors["go.load"])
+	if w <= priorOf("go.load") {
+		t.Errorf("weight = %v after a 30s run, want it re-scaled above the %v prior", w, priorOf("go.load"))
 	}
 }
 

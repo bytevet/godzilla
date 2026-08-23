@@ -22,50 +22,90 @@ import (
 // for the whole run. The numbers come from measuring test/go/gin_gorm and
 // internal/: parse & lower is 71-85% of wall time, and inside it the Go
 // frontend's load phase is the single largest piece.
-var priors = map[string]float64{
-	"walk":       0.02,
-	"go.list":    0.10,
-	"go.load":    0.55,
-	"go.ssa":     0.25,
-	"go.lower":   0.15,
-	"index":      0.12,
-	"ruleselect": 0.05,
-	"taint":      0.02,
-	"llm":        6.0,
+type stage struct {
+	id    string
+	label string  // used until the producer registers its own
+	prior float64 // seconds — see the note above
+	// always marks a stage that runs on every scan whatever the languages, so
+	// the bar can count it before it has registered.
+	always bool
+	// group marks stages that run together, so seeing any one of them means the
+	// rest are coming. Without it the bar would read 100% the moment `go list`
+	// finished, then fall back as each later Go phase appeared.
+	group string
 }
 
-// convertPrior is the weight for a `<lang>.convert` stage, whose id is not known
-// until that frontend starts.
-const convertPrior = 0.30
+// convertSlot holds the place of the `<lang>.convert` stages, whose ids are not
+// known until a frontend starts. Every language's convert stage ranks here.
+const convertSlot = "*.convert"
 
-// goStages always run together, so seeing any one of them means the other three
-// are coming. Without this the bar would read 100% of "convert" the moment
-// `go list` finished, then fall back as each later phase appeared.
-var goStages = []string{"go.list", "go.load", "go.ssa", "go.lower"}
-
-// alwaysStages run on every scan regardless of language, so they can be counted
-// before they have registered.
-var alwaysStages = []string{"walk", "index", "ruleselect", "taint"}
-
-// pendingLabels name a stage the bar is counting but that has not registered
-// yet. Without them the legend shows a raw id like "go.ssa" until the stage
-// starts, which is the one moment the reader most needs it to read as English.
-var pendingLabels = map[string]string{
-	"walk":       "walk",
-	"go.list":    "go list (metadata)",
-	"go.load":    "go parse & typecheck",
-	"go.ssa":     "go SSA build",
-	"go.lower":   "go lowering",
-	"index":      "index & call graph",
-	"ruleselect": "rule selection",
-	"taint":      "taint propagation",
-	"llm":        "LLM review",
+// stages is the ONE table the bar keeps about the pipeline, in pipeline ORDER —
+// a stage's rank is its index, so the bar reads left to right as time. Adding a
+// stage is a line here rather than an edit to a weight map, a label map and a
+// sort. Its colour lives in palette.go, keyed by the same ids: a separate
+// concern, because that has to be expressed three times over for three colour
+// depths.
+var stages = []stage{
+	{id: "walk", label: "walk", prior: 0.02, always: true},
+	{id: "go.list", label: "go list (metadata)", prior: 0.10, group: "go"},
+	{id: "go.load", label: "go parse & typecheck", prior: 0.55, group: "go"},
+	{id: "go.ssa", label: "go SSA build", prior: 0.25, group: "go"},
+	{id: "go.lower", label: "go lowering", prior: 0.15, group: "go"},
+	{id: convertSlot, prior: 0.30},
+	{id: "index", label: "index & call graph", prior: 0.12, always: true},
+	{id: "ruleselect", label: "rule selection", prior: 0.05, always: true},
+	{id: "taint", label: "taint propagation", prior: 0.02, always: true},
+	{id: "llm", label: "LLM review", prior: 6.0},
 }
 
-// labelFor names a stage that has not registered yet.
+// slot maps a stage id onto its table entry. An unregistered language's convert
+// stage and an id the table has never heard of both land on the convert slot,
+// which is where an unknown frontend stage belongs in the run.
+func slot(id string) (stage, int) {
+	for i, st := range stages {
+		if st.id == id {
+			return st, i
+		}
+	}
+	for i, st := range stages {
+		if st.id == convertSlot {
+			return st, i
+		}
+	}
+	return stage{}, len(stages)
+}
+
+// groupOf returns every id that runs alongside id, itself included.
+func groupOf(id string) []string {
+	st, _ := slot(id)
+	if st.group == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range stages {
+		if s.group == st.group {
+			out = append(out, s.id)
+		}
+	}
+	return out
+}
+
+func alwaysStages() []string {
+	var out []string
+	for _, s := range stages {
+		if s.always {
+			out = append(out, s.id)
+		}
+	}
+	return out
+}
+
+// labelFor names a stage that has not registered yet. Without it the bar shows a
+// raw id like "go.ssa" until the stage starts, which is the one moment the
+// reader most needs it to read as English.
 func labelFor(id string) string {
-	if l, ok := pendingLabels[id]; ok {
-		return l
+	if st, _ := slot(id); st.id == id && st.label != "" {
+		return st.label
 	}
 	if lang, ok := strings.CutSuffix(id, ".convert"); ok {
 		return lang + " parse & lower"
@@ -74,10 +114,8 @@ func labelFor(id string) string {
 }
 
 func priorOf(id string) float64 {
-	if w, ok := priors[id]; ok {
-		return w
-	}
-	return convertPrior
+	st, _ := slot(id)
+	return st.prior
 }
 
 // segment is one stage's share of the bar.
@@ -113,9 +151,9 @@ func plan(stages []progress.Snapshot, expect []string) []segment {
 		}
 	}
 
-	expected := append([]string{}, alwaysStages...)
+	expected := alwaysStages()
 	if sawGo {
-		expected = append(expected, goStages...)
+		expected = append(expected, groupOf("go.list")...)
 	}
 	expected = append(expected, expect...)
 	expected = append(expected, order...)
@@ -161,32 +199,13 @@ func completion(s progress.Snapshot) float64 {
 }
 
 // pipelineOrder sorts stage ids the way the scan runs them, so the bar reads
-// left to right as time. Languages sort among themselves alphabetically for a
-// stable display: their goroutines race to register.
+// left to right as time — a stage's rank is its index in the stages table.
+// Languages sort among themselves alphabetically for a stable display: their
+// goroutines race to register.
 func pipelineOrder(ids []string) []string {
 	rank := func(id string) int {
-		switch {
-		case id == "walk":
-			return 0
-		case strings.HasPrefix(id, "go."):
-			for i, g := range goStages {
-				if g == id {
-					return 10 + i
-				}
-			}
-			return 19
-		case strings.HasSuffix(id, ".convert"):
-			return 20
-		case id == "index":
-			return 30
-		case id == "ruleselect":
-			return 31
-		case id == "taint":
-			return 32
-		case id == "llm":
-			return 40
-		}
-		return 25
+		_, i := slot(id)
+		return i
 	}
 	out := append([]string{}, ids...)
 	// Insertion sort: the list is a dozen entries and must be stable.
