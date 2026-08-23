@@ -351,14 +351,14 @@ type funcResult struct {
 	taintsParamSink paramPositions
 }
 
-// logicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping a method
+// LogicalArgs returns a call's arguments in SOURCE-LEVEL order, dropping a method
 // receiver carried as args[0]. Whether args[0] is a receiver is read from the IR
 // the converter supplies, not from the callee-name shape: a statically-resolved
 // method call is a non-invoke call that names its method (MethodName set), and
 // puts the receiver first; an INVOKE keeps the receiver in Call.Value (args are
 // already logical); a free function has no receiver. So logical argument indices
 // line up across every language: index 0 is the first real argument.
-func logicalArgs(cc *ir.CallCommon) []*ir.Value {
+func LogicalArgs(cc *ir.CallCommon) []*ir.Value {
 	args := cc.GetArgs()
 	if !cc.GetIsInvoke() && cc.GetMethodName() != "" && len(args) > 0 {
 		return args[1:]
@@ -375,7 +375,7 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 	if len(sinkArgs) == 0 {
 		return cc.GetArgs()
 	}
-	la := logicalArgs(cc)
+	la := LogicalArgs(cc)
 	sel := make([]*ir.Value, 0, len(sinkArgs))
 	for _, idx := range sinkArgs {
 		if idx >= 0 && int(idx) < len(la) {
@@ -391,7 +391,7 @@ func injectableArgs(sinkArgs []int32, cc *ir.CallCommon) []*ir.Value {
 // it simply never suppresses there. The structure budget is shared across the
 // whole call, not per argument.
 func argVals(cc *ir.CallCommon, defs map[string]*ir.Instruction, tainted taintState, expand bool) []rules.Arg {
-	la := logicalArgs(cc)
+	la := LogicalArgs(cc)
 	out := make([]rules.Arg, len(la))
 	// A guard that never names .Elems/.Entries cannot observe the structure, so
 	// a zero budget skips reconstructing it entirely.
@@ -419,7 +419,7 @@ func argOf(v *ir.Value, defs map[string]*ir.Instruction, tainted taintState, bud
 	// A keyword argument arrives wrapped in a name marker; unwrap it once here so
 	// the skeleton, type and structure all describe the VALUE while .Name carries
 	// the keyword it was passed under.
-	name, uv := unwrapKwarg(v, defs)
+	name, uv := UnwrapKwarg(v, defs)
 	def := defs[uv.GetRegName()]
 	a := scalarArg(name, uv, def, defs, tainted)
 	expandStructure(&a, def, defs, tainted, budget)
@@ -701,7 +701,7 @@ func (s *sharedIndex) fnIndexFor(fn *ir.Function) fnIndex {
 	if ok {
 		return fx
 	}
-	defs := buildDefs(fn)
+	defs := BuildDefs(fn)
 	fx = fnIndex{defs: defs, nonEscaping: nonEscapingAllocs(fn, defs), cfg: buildFnCFG(fn)}
 	s.fnIdxMu.Lock()
 	if prev, ok := s.fnIdx[fn]; ok {

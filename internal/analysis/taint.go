@@ -78,10 +78,10 @@ var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_LOAD:           true,
 }
 
-// buildDefs maps each SSA result register to the instruction that defines it,
+// BuildDefs maps each SSA result register to the instruction that defines it,
 // so taint transfer can walk value-derivation chains (e.g. from an element
 // address back to its container).
-func buildDefs(fn *ir.Function) map[string]*ir.Instruction {
+func BuildDefs(fn *ir.Function) map[string]*ir.Instruction {
 	defs := map[string]*ir.Instruction{}
 	for _, blk := range fn.Blocks {
 		if blk == nil {

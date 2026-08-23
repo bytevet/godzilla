@@ -18,6 +18,7 @@
 package playground
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,7 +29,6 @@ import (
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/scan"
 	"github.com/bytevet/godzilla/internal/srclines"
-	"github.com/bytevet/godzilla/internal/walkignore"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -62,12 +62,11 @@ type fileEntry struct {
 }
 
 type fileView struct {
-	ID       string     `json:"id"`
-	Path     string     `json:"path"`
-	Lang     string     `json:"lang"`
-	Findings int        `json:"findings"`
-	Src      []string   `json:"src"`
-	Module   moduleView `json:"module"`
+	ID     string     `json:"id"`
+	Path   string     `json:"path"`
+	Lang   string     `json:"lang"`
+	Src    []string   `json:"src"`
+	Module moduleView `json:"module"`
 
 	// State is set when the file produced no gIR. The view is still served, and
 	// still carries Src: a file the frontend choked on is the one whose source
@@ -107,7 +106,7 @@ func NewIndex(res scan.Result, target, version string, rs *rules.RuleSet) *Index
 	root := absOf(target)
 	// A single-file target roots the tree at its directory, so the one row is not
 	// drawn as a folderless orphan.
-	if !isDir(target) {
+	if info, err := os.Stat(target); err == nil && !info.IsDir() {
 		root = filepath.Dir(root)
 	}
 
@@ -237,7 +236,7 @@ func (idx *Index) addMissingFiles(target string, coverage []scan.LangCoverage) {
 	for _, c := range coverage {
 		covByLang[c.Language] = c
 	}
-	for _, p := range sourceCandidates(target) {
+	for _, p := range scan.SourceFiles(target) {
 		abs := absOf(p)
 		id, inRoot := idx.relID(abs)
 		if !inRoot {
@@ -246,7 +245,7 @@ func (idx *Index) addMissingFiles(target string, coverage []scan.LangCoverage) {
 		if _, ok := idx.byID[id]; ok {
 			continue // it lowered; nothing to explain
 		}
-		lang, _ := languageOf(p)
+		lang, _ := scan.LanguageOf(p)
 		e := &fileEntry{ID: id, Path: id, abs: abs, Lang: lang, State: stateFailed}
 		// The frontend's own error is the useful half — a C/C++ file in a build
 		// without the llvm tag says exactly that, and a build failure names itself.
@@ -268,26 +267,6 @@ func (idx *Index) addMissingFiles(target string, coverage []scan.LangCoverage) {
 			e.StateDetail = "The file parsed cleanly but declares no functions, so there is nothing to lower."
 		}
 	}
-}
-
-// sourceCandidates lists the SOURCE files a scan of target would consider, off
-// the same pruned walk the scan itself used so the tree cannot disagree with it.
-// Restricted to files some frontend claims: a file no frontend claims is not a
-// gap in coverage, it is just not code.
-func sourceCandidates(target string) []string {
-	var all []string
-	if isDir(target) {
-		all = walkignore.NewInventory(target).Files()
-	} else {
-		all = []string{target}
-	}
-	out := make([]string, 0, len(all))
-	for _, p := range all {
-		if _, ok := languageOf(p); ok {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // userCallees is every distinct callee in the files the tree shows.
@@ -340,7 +319,7 @@ func (idx *Index) View(id string) *fileView {
 
 func (idx *Index) build(e *fileEntry) *fileView {
 	fv := &fileView{
-		ID: e.ID, Path: e.Path, Lang: e.Lang, Findings: e.Findings,
+		ID: e.ID, Path: e.Path, Lang: e.Lang,
 		State: e.State, StateDetail: e.StateDetail,
 		Src: idx.source(e.abs),
 		Module: moduleView{
@@ -359,33 +338,14 @@ func (idx *Index) build(e *fileEntry) *fileView {
 		fv.Module.Types = append(fv.Module.Types, typeViewOf(t))
 	}
 	lang := e.mod.GetLanguage()
-	ord := 0
 	for _, fn := range e.fns {
-		fv.Module.Functions = append(fv.Module.Functions, funcViewOf(fn, &ord, func(in *ir.Instruction) *flagView {
+		view, ords := funcViewOf(fn, len(fv.ords), func(in *ir.Instruction) *flagView {
 			return idx.cls.flag(lang, in)
-		}))
-		// Recorded in the same order funcViewOf numbered them, which is what makes
-		// an ordinal round-trip to the instruction it names.
-		fv.ords = append(fv.ords, instrsInOrder(fn)...)
+		})
+		fv.Module.Functions = append(fv.Module.Functions, view)
+		fv.ords = append(fv.ords, ords...)
 	}
 	return fv
-}
-
-// instrsInOrder mirrors funcViewOf's traversal (blocks in order, nils skipped),
-// which is what makes an ordinal a stable name for an instruction.
-func instrsInOrder(fn *ir.Function) []*ir.Instruction {
-	var out []*ir.Instruction
-	for _, b := range fn.GetBlocks() {
-		if b == nil {
-			continue
-		}
-		for _, in := range b.GetInstrs() {
-			if in != nil {
-				out = append(out, in)
-			}
-		}
-	}
-	return out
 }
 
 func (idx *Index) source(abs string) []string {

@@ -47,6 +47,25 @@ type LangCoverage struct {
 	Skipped int
 }
 
+// LanguageOf reports which frontend claims path, off the same languageFrontends
+// table the scan dispatches on. ok is false when no frontend handles it — which
+// is the difference between a file that was skipped and one that is not code.
+func LanguageOf(path string) (lang string, ok bool) {
+	name, conv := fileFrontend(path)
+	return name, conv != nil
+}
+
+// SourceFiles returns the files a scan of path would hand the frontends, under
+// the same prune AND per-file selection policy — Inventory.Files deliberately
+// omits the latter, so a caller that walks the tree itself sees generated and
+// oversized files the pipeline never had any intention of lowering.
+func SourceFiles(path string) []string {
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return sourceFiles("", walkignore.NewInventory(path))
+	}
+	return sourceFiles(path, nil)
+}
+
 // CoverageSummary renders a one-line per-language coverage summary, so a
 // degraded scan — a frontend that failed on detected source, or one that
 // silently dropped part of it — is visible even when the run is not strict.

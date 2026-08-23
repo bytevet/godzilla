@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bytevet/godzilla/internal/analysis"
+
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -192,28 +194,6 @@ func valViews(vs []*ir.Value) []valueView {
 	return out
 }
 
-// kwargOf resolves an argument through a builtin.kwarg marker, returning the
-// keyword name and the value it wraps. Mirrors internal/analysis's unwrapKwarg;
-// without it every Python keyword argument renders as an opaque register.
-func kwargOf(v *ir.Value, defs map[string]*ir.Instruction) (string, *ir.Value) {
-	if v == nil || defs == nil {
-		return "", v
-	}
-	def, ok := defs[v.GetRegName()]
-	if !ok || def.GetIntrinsic() != "builtin.kwarg" || def.Call == nil {
-		return "", v
-	}
-	args := def.Call.GetArgs()
-	if len(args) != 2 {
-		return "", v
-	}
-	name, ok := args[0].GetConstant().GetValue().(*ir.Constant_StringVal)
-	if !ok {
-		return "", v
-	}
-	return name.StringVal, args[1]
-}
-
 func callViewOf(cc *ir.CallCommon, defs map[string]*ir.Instruction) *callView {
 	if cc == nil {
 		return nil
@@ -230,29 +210,12 @@ func callViewOf(cc *ir.CallCommon, defs map[string]*ir.Instruction) *callView {
 		cv.Value = &v
 	}
 	for _, a := range cc.GetArgs() {
-		name, inner := kwargOf(a, defs)
+		name, inner := analysis.UnwrapKwarg(a, defs)
 		av := valView(inner)
 		av.Name = name
 		cv.Args = append(cv.Args, av)
 	}
 	return cv
-}
-
-// defsOf indexes a function's SSA registers to their defining instruction, so
-// kwargOf can see through a marker.
-func defsOf(fn *ir.Function) map[string]*ir.Instruction {
-	defs := map[string]*ir.Instruction{}
-	for _, b := range fn.GetBlocks() {
-		if b == nil {
-			continue
-		}
-		for _, in := range b.GetInstrs() {
-			if in != nil && in.GetName() != "" {
-				defs[in.GetName()] = in
-			}
-		}
-	}
-	return defs
 }
 
 func instrViewOf(in *ir.Instruction, ord int, defs map[string]*ir.Instruction) instrView {
@@ -315,9 +278,13 @@ func typeStrings(ts []*ir.Type) []string {
 	return out
 }
 
-func funcViewOf(fn *ir.Function, ord *int, flagFor func(*ir.Instruction) *flagView) funcView {
+// funcViewOf renders one function and returns, alongside it, the instructions
+// it numbered in emission order. Handing both back from the SAME walk is what
+// keeps an ordinal a reliable name for an instruction; two walks kept in step
+// by hand would not.
+func funcViewOf(fn *ir.Function, ordBase int, flagFor func(*ir.Instruction) *flagView) (funcView, []*ir.Instruction) {
 	sig := fn.GetSignature()
-	defs := defsOf(fn)
+	defs := analysis.BuildDefs(fn)
 	fv := funcView{
 		Name:          fn.GetName(),
 		ObjectName:    fn.GetObjectName(),
@@ -337,6 +304,7 @@ func funcViewOf(fn *ir.Function, ord *int, flagFor func(*ir.Instruction) *flagVi
 		Locals:   namedViews(fn.GetLocals(), nil, nil),
 		Blocks:   make([]blockView, 0, len(fn.GetBlocks())),
 	}
+	var ords []*ir.Instruction
 	for _, b := range fn.GetBlocks() {
 		if b == nil {
 			continue
@@ -352,8 +320,8 @@ func funcViewOf(fn *ir.Function, ord *int, flagFor func(*ir.Instruction) *flagVi
 			if in == nil {
 				continue
 			}
-			iv := instrViewOf(in, *ord, defs)
-			*ord++
+			iv := instrViewOf(in, ordBase+len(ords), defs)
+			ords = append(ords, in)
 			if flagFor != nil {
 				iv.Flag = flagFor(in)
 			}
@@ -361,7 +329,7 @@ func funcViewOf(fn *ir.Function, ord *int, flagFor func(*ir.Instruction) *flagVi
 		}
 		fv.Blocks = append(fv.Blocks, bv)
 	}
-	return fv
+	return fv, ords
 }
 
 func globalViewOf(g *ir.Global) globalView {

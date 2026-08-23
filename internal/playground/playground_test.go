@@ -335,8 +335,7 @@ func TestKeywordArgumentKeepsItsName(t *testing.T) {
 	fn := &ir.Function{Signature: &ir.Signature{}, Blocks: []*ir.BasicBlock{{
 		Instrs: []*ir.Instruction{marker, call},
 	}}}
-	ord := 0
-	fv := funcViewOf(fn, &ord, nil)
+	fv, _ := funcViewOf(fn, 0, nil)
 	args := fv.Blocks[0].Instrs[1].Call.Args
 	if len(args) != 2 {
 		t.Fatalf("args = %d, want 2", len(args))

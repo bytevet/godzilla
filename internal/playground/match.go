@@ -3,6 +3,7 @@ package playground
 import (
 	"strings"
 
+	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -87,22 +88,16 @@ func (idx *Index) Match(fileID, pattern string) matchResult {
 	return res
 }
 
-// pinnedArg resolves a LOGICAL injection-point index to the physical argument.
-// A statically-resolved method call carries its receiver as args[0], so physical
-// = logical + 1; an INVOKE keeps its receiver in Call.Value and the two indices
-// coincide. Read off the IR rather than the callee's name shape, exactly as
-// internal/analysis.logicalArgs does — showing the wrong argument here is the
-// silent mis-pin this tool exists to expose.
+// pinnedArg resolves a LOGICAL injection-point index to the argument a rule's
+// #<n> pins. The receiver shift lives in the ENGINE — a second copy here is the
+// one bug this whole tool exists to prevent, so it is deliberately not written
+// out again.
 func pinnedArg(cc *ir.CallCommon, logical int32) *ir.Value {
-	args := cc.GetArgs()
-	phys := int(logical)
-	if !cc.GetIsInvoke() && cc.GetMethodName() != "" {
-		phys++
-	}
-	if phys < 0 || phys >= len(args) {
+	la := analysis.LogicalArgs(cc)
+	if logical < 0 || int(logical) >= len(la) {
 		return nil
 	}
-	return args[phys]
+	return la[logical]
 }
 
 func argText(v *ir.Value) string {
