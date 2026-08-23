@@ -377,6 +377,27 @@
     var t = el.getBoundingClientRect().top - box.getBoundingClientRect().top;
     if (t < 24 || t > box.clientHeight - 32) box.scrollTop += t - box.clientHeight / 3;
   }
+  /* Clicking a row that has children also expands or collapses it, so the list
+     changes height under the pointer; the browser then clamps scrollTop and the
+     tree lurches, often all the way back to the top. Pin the row that was
+     clicked: measure where it sat, run the mutation, put it back. */
+  function anchorRow(i, mutate) {
+    var box = $("#ir-wrap");
+    var at = function () {
+      var el = $('#ir .nrow[data-node="' + i + '"]');
+      return el ? el.getBoundingClientRect().top - box.getBoundingClientRect().top : null;
+    };
+    var before = at();
+    mutate();
+    if (before == null) return;
+    var after = at();
+    if (after == null || after === before) return;
+    box.scrollTop += after - before;
+    // A windowed list renders from scrollTop, so it has to re-window here
+    // rather than waiting for the scroll event.
+    if (virt) renderIR();
+  }
+
   function revealNode(i) {
     var p = nodes[i].parent;
     while (p != null) { open[p] = true; p = nodes[p].parent; }
@@ -971,8 +992,10 @@
       }
       return;
     }
-    if (nodes[i].kids.length) open[i] = !open[i];
-    pickNode(i);
+    anchorRow(i, function () {
+      if (nodes[i].kids.length) open[i] = !open[i];
+      pickNode(i);
+    });
   });
   $("#code").addEventListener("click", function (e) {
     var el = e.target.closest(".cline.has");
