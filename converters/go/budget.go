@@ -1,9 +1,6 @@
 package go_converter
 
-// SEAM STUB — the dependency-budget contract, landed ahead of its implementation
-// so the pipeline and CLI can be built against it in parallel. selectRoots is
-// deliberately a pass-through here: with no implementation, every candidate is
-// kept and the frontend behaves exactly as it did before.
+import "sort"
 
 // rootCost is one candidate Phase-B syntax root and what it would cost to load:
 // its package path, the byte size of its compiled Go files, and its import
@@ -15,12 +12,64 @@ type rootCost struct {
 }
 
 // selectRoots decides which third-party packages are promoted to Phase-B syntax
-// roots under a source-byte budget. limit < 0 means unlimited.
+// roots under a source-byte budget. limit < 0 means unlimited; limit == 0 keeps
+// nothing.
+//
+// Priority order is breadth-first by import depth from user code, ascending
+// package size within a depth, package path to break ties (the whole scan is
+// required to be byte-identical across runs). Depth alone cannot be the cut —
+// on a large repo hop 1 is already several times the user's own source — but as
+// a priority order under a byte budget it degrades toward "the libraries your
+// code actually touches", and taking the small packages of a depth first buys
+// the most packages per byte.
+//
+// The cut is hard: everything from the first candidate that does not fit is
+// dropped, rather than skipping it to fit a later one. The order IS the
+// priority, so letting a deeper package jump ahead of a nearer one it merely
+// outbids on size would spend the budget on the closure's fringe.
 func selectRoots(candidates []rootCost, limit int64) (keep, dropped []string) {
-	for _, c := range candidates {
-		keep = append(keep, c.path)
+	order := make([]rootCost, len(candidates))
+	copy(order, candidates)
+	sort.Slice(order, func(i, j int) bool {
+		a, b := order[i], order[j]
+		switch {
+		case a.depth != b.depth:
+			return a.depth < b.depth
+		case a.bytes != b.bytes:
+			return a.bytes < b.bytes
+		default:
+			return a.path < b.path
+		}
+	})
+
+	cut := len(order)
+	switch {
+	case limit < 0:
+	case limit == 0:
+		// Not derivable from the running total: a package whose files could not
+		// be stat'd measures zero and would otherwise survive a zero budget.
+		cut = 0
+	default:
+		var total int64
+		for i, c := range order {
+			if total+c.bytes > limit {
+				cut = i
+				break
+			}
+			total += c.bytes
+		}
 	}
-	return keep, nil
+
+	for i, c := range order {
+		if i < cut {
+			keep = append(keep, c.path)
+		} else {
+			dropped = append(dropped, c.path)
+		}
+	}
+	sort.Strings(keep) // deterministic Phase-B roots
+	sort.Strings(dropped)
+	return keep, dropped
 }
 
 // SetDepBudget caps the total source bytes of third-party dependency packages
