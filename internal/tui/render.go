@@ -27,10 +27,14 @@ const (
 // segments of the same glyph are never adjacent for the stage counts we draw.
 var segGlyphs = []rune{'#', '=', '~', '+', 'o', 'x', '*', '%', '@', '&'}
 
-const (
-	fillBlock  = '█'
-	emptyBlock = '░'
-)
+// Neighbouring segments alternate their fill so every boundary carries a
+// LUMINANCE step, not only a hue step. The palette's hues climb monotonically
+// with pipeline position, which is what makes the bar readable at a glance but
+// also puts adjacent hues close together — for tritanopia, close enough to merge
+// (ΔE 1.3). This texture is what keeps the segmentation visible regardless.
+var segTexture = []rune{'█', '▓'}
+
+const emptyBlock = '░'
 
 type palette struct {
 	mode colorMode
@@ -44,18 +48,18 @@ type palette struct {
 func (p palette) sgr(id string) string {
 	switch p.mode {
 	case colorTrue:
-		if hex, ok := p.trueHex[id]; ok {
+		if hex, ok := p.trueHex[key(id)]; ok {
 			var r, g, b int
 			if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b); err == nil {
 				return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 			}
 		}
 	case color256:
-		if i, ok := p.idx256[id]; ok {
+		if i, ok := p.idx256[key(id)]; ok {
 			return fmt.Sprintf("\x1b[38;5;%dm", i)
 		}
 	case color16:
-		if c, ok := p.ansi16[id]; ok {
+		if c, ok := p.ansi16[key(id)]; ok {
 			return fmt.Sprintf("\x1b[%dm", c)
 		}
 	}
@@ -73,17 +77,30 @@ func (p palette) paint(id, s string) string {
 }
 
 func (p palette) dim(s string) string {
-	if p.mode == colorNone {
-		return s
-	}
-	return "\x1b[2m" + s + "\x1b[0m"
+	return p.wrap(s, trackHex, track256, trackAnsi16)
 }
 
 func (p palette) failed(s string) string {
-	if p.mode == colorNone {
+	return p.wrap(s, failedHex, failed256, failedAnsi16)
+}
+
+func (p palette) wrap(s, hex string, idx, ansi int) string {
+	var code string
+	switch p.mode {
+	case colorTrue:
+		var r, g, b int
+		if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b); err == nil {
+			code = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+		}
+	case color256:
+		code = fmt.Sprintf("\x1b[38;5;%dm", idx)
+	case color16:
+		code = fmt.Sprintf("\x1b[%dm", ansi)
+	}
+	if code == "" {
 		return s
 	}
-	return "\x1b[31m" + s + "\x1b[0m"
+	return code + s + "\x1b[0m"
 }
 
 // cells apportions width columns across the segments by weight, giving every
@@ -156,12 +173,12 @@ func (p palette) bar(segs []segment, width int) string {
 			filled = 1 // a stage in flight always shows at least one cell
 		}
 		glyph := segGlyphs[i%len(segGlyphs)]
+		if p.mode != colorNone {
+			glyph = segTexture[i%len(segTexture)]
+		}
 		if s.failed {
 			// Colour alone must never be what tells you a frontend died.
 			glyph = '!'
-		}
-		if p.mode != colorNone {
-			glyph = fillBlock
 		}
 		if filled > 0 {
 			run := strings.Repeat(string(glyph), filled)
