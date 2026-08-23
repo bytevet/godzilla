@@ -50,10 +50,11 @@ var intrinsicPropagators = map[string]bool{
 	aggregateMapIntrinsic: true,
 	// A keyword marker STANDS IN for the value it wraps, so it must pass taint
 	// through or every `f(x=tainted)` silently loses it. See kwargIntrinsic.
-	kwargIntrinsic:  true,
-	"go.map.lookup": true,
-	"go.next":       true,
-	"go.range":      true,
+	kwargIntrinsic: true,
+	// go.map.lookup is absent on purpose: visitIntrinsic routes it to
+	// visitIndexRead, which reads the container and not the key.
+	"go.next":  true,
+	"go.range": true,
 }
 
 // propagatingOps are non-call opcodes that propagate taint from any tainted
@@ -68,10 +69,9 @@ var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_TYPE_ASSERT: true, // v := x.(T): the result is x's value with a narrower static type
 	// FIELD / FIELD_ADDR are NOT here: struct-field reads are handled
 	// field-sensitively by visitFieldRead so tainting one field does not taint a
-	// read of a different field (see ENG-3). INDEX(_ADDR) stay whole-container
-	// (array elements can't be statically distinguished — variadic packing).
-	ir.OpCode_OP_CODE_INDEX:          true,
-	ir.OpCode_OP_CODE_INDEX_ADDR:     true,
+	// read of a different field (see ENG-3). INDEX(_ADDR) are not here either --
+	// visitIndexRead reads them from the container only, because the KEY must not
+	// carry taint into the result.
 	ir.OpCode_OP_CODE_EXTRACT:        true,
 	ir.OpCode_OP_CODE_PHI:            true,
 	ir.OpCode_OP_CODE_MAKE_INTERFACE: true,
@@ -319,10 +319,41 @@ func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 		visitMapUpdate(inst, defs, tainted)
 		return
 	}
+	if inst.Intrinsic == "go.map.lookup" {
+		visitIndexRead(inst, tainted)
+		return
+	}
 	if inst.Name == "" || !intrinsicPropagators[inst.Intrinsic] {
 		return
 	}
 	markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
+}
+
+// visitIndexRead propagates an element read -- `m[k]`, `a[i]`, go.map.lookup --
+// from the CONTAINER only. Operand 0 is the container, operand 1 the key.
+//
+// Excluding the key is the point. A key SELECTS among values the program already
+// put in the container; it cannot supply one. Propagating from it meant
+// `byID[r.URL.Query().Get("p")]` returned a tainted struct out of a map built at
+// startup, and everything reachable from that struct came back tainted too
+// (ENG-14a).
+//
+// Reading the container is what keeps the request-parameter idiom working: in
+// Python and Ruby `params` IS the source, so its taint sits on operand 0 and
+// `params[:id]` still flows. Only key-supplied taint stops.
+//
+// Elements stay whole-container rather than per-index (unlike ENG-3's struct
+// fields): an index is rarely a constant the analysis can name, and variadic
+// packing puts unrelated values in one array.
+func visitIndexRead(inst *ir.Instruction, tainted taintState) {
+	if inst.Name == "" {
+		return
+	}
+	ops := inst.GetOperands()
+	if len(ops) == 0 {
+		return
+	}
+	markTaintFromOperands(tainted, inst.Name, ops[:1])
 }
 
 // visitMapUpdate handles the go.map.update intrinsic (m[k] = v). A tainted
