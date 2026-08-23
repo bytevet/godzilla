@@ -72,6 +72,12 @@ type Converter struct {
 	// scoped back to these packages so a sink reached inside a library is not
 	// reported. Populated by ConvertFile.
 	targetPkgs map[string]bool
+
+	// depBudget caps the total source bytes of third-party packages promoted to
+	// Phase-B syntax roots; negative is unlimited. degradedNote is non-empty
+	// exactly when the budget excluded some of them (see Degraded).
+	depBudget    int64
+	degradedNote string
 }
 
 // TargetPackages returns the set of user-authored package import paths from the
@@ -84,6 +90,7 @@ func NewConverter() *Converter {
 		typeCache:  make(map[types.Type]*ir.Type),
 		fnNames:    make(map[*ssa.Function]string),
 		valueCache: make(map[ssa.Value]*ir.Value),
+		depBudget:  -1, // unlimited until a caller sets one
 	}
 }
 
