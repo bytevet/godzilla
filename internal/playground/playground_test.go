@@ -309,6 +309,31 @@ func TestMatchReportsALanguageMismatch(t *testing.T) {
 	}
 }
 
+// A gIR row is one fixed-height line of `white-space: pre`. A string constant
+// holding a real newline — fmt.Fprintf(w, "%s\n", …) is entirely ordinary —
+// would split the row, overlap the one below it, and desynchronise the windowed
+// list's row arithmetic from there down.
+func TestStringConstantsRenderAsSourceLiterals(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"plain", "plain"},
+		{"%s\n", `%s\n`},
+		{"a\tb\r\n%s", `a\tb\r\n%s`},
+		{"say \"hi\"", `say \"hi\"`},
+		{`back\slash`, `back\\slash`},
+		{"bell\x07", `bell\x07`},
+	} {
+		got := constView(&ir.Constant{Value: &ir.Constant_StringVal{StringVal: tc.in}})
+		if got.StringVal != tc.want {
+			t.Errorf("constView(%q) = %q, want %q", tc.in, got.StringVal, tc.want)
+		}
+		for _, r := range got.StringVal {
+			if r < 0x20 || r == 0x7f {
+				t.Errorf("constView(%q) still carries a control character %q", tc.in, r)
+			}
+		}
+	}
+}
+
 func TestTypeString(t *testing.T) {
 	basic := func(k ir.BasicTypeKind) *ir.Type {
 		return &ir.Type{Kind: ir.TypeKind_TYPE_KIND_BASIC, BasicKind: k}

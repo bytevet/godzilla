@@ -1,6 +1,7 @@
 package playground
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -142,6 +143,43 @@ type moduleView struct {
 	Functions []funcView   `json:"functions"`
 }
 
+// literalBody renders a string from scanned source the way a source-level
+// literal would show it, escaping the characters that are not printable.
+//
+// This is layout-critical, not cosmetic: a gIR row is one fixed 20px line of
+// `white-space: pre`, so a constant holding a real newline — `fmt.Fprintf(w,
+// "%s\n", …)` is entirely ordinary — splits the row in two, overlaps the row
+// under it, and puts the windowed list's row arithmetic out by one for every
+// row that follows.
+func literalBody(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '\\' || r == '"' }) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				b.WriteString(fmt.Sprintf(`\x%02x`, r))
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // posView renders a Position, or nil when the frontend genuinely recorded none —
 // varargs packing and synthetic wrappers do. The UI dims and tags those rather
 // than hiding them, so a rule author can see the lowering has steps the source
@@ -159,7 +197,7 @@ func constView(c *ir.Constant) *constantView {
 	}
 	switch v := c.GetValue().(type) {
 	case *ir.Constant_StringVal:
-		return &constantView{Type: "string", StringVal: v.StringVal}
+		return &constantView{Type: "string", StringVal: literalBody(v.StringVal)}
 	case *ir.Constant_IntVal:
 		return &constantView{Type: "int", StringVal: strconv.FormatInt(v.IntVal, 10)}
 	case *ir.Constant_BoolVal:
@@ -349,7 +387,9 @@ func typeViewOf(t *ir.Type) typeView {
 		Fields:     []namedView{},
 	}
 	for _, f := range t.GetUnderlyingType().GetFields() {
-		tv.Fields = append(tv.Fields, namedView{Name: f.GetName(), Type: typeString(f.GetType()), Tag: f.GetTag()})
+		tv.Fields = append(tv.Fields, namedView{
+			Name: f.GetName(), Type: typeString(f.GetType()), Tag: literalBody(f.GetTag()),
+		})
 	}
 	return tv
 }
