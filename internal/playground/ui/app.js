@@ -891,13 +891,21 @@
   var fileSeq = 0;
 
   /* ── resizable columns ─────────────────────────────────────────────── */
-  var COLS_KEY = "gir-cols";
-  var widths = { a: 216, b: 420 };
+  var COLS_KEY = "gir-cols", TREE_W = 216;
+  var MIN_A = 130, MIN_B = 220, MIN_IR = 320;
+  /* Source and gIR split whatever the tree leaves, evenly. They are read side
+     by side — a line and what it lowered to — so a default that favours one
+     just makes the other the column you drag every time you open the tool. */
+  function defaultWidths() {
+    var host = $("#cols");
+    var total = (host && host.clientWidth) || window.innerWidth;
+    return { a: TREE_W, b: Math.max(MIN_B, Math.round((total - TREE_W - 2) / 2)) };
+  }
+  var widths = defaultWidths();
   try {
     var saved = JSON.parse(localStorage.getItem(COLS_KEY) || "null");
     if (saved && saved.a > 80 && saved.b > 160) widths = saved;
   } catch (e) {}
-  var MIN_A = 130, MIN_B = 220, MIN_IR = 320;
   /* Saved widths come from whatever viewport they were dragged in, so they are
      clamped on every apply — not just during a drag — and the gIR column keeps a
      floor. Without this a narrower window silently squeezes column 3 to nothing. */
@@ -938,7 +946,7 @@
       h.addEventListener("pointerup", up);
     });
     h.addEventListener("dblclick", function () {
-      widths = { a: 216, b: 420 };
+      widths = defaultWidths();
       applyCols();
       try { localStorage.setItem(COLS_KEY, JSON.stringify(widths)); } catch (e) {}
       renderIR();
