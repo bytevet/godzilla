@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bytevet/godzilla/internal/progress"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -302,7 +303,9 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 		Tests: false,
 		Dir:   dir,
 	}
+	listStage := progress.Start("go.list", "go list (metadata)", 0, "")
 	meta, err := packages.Load(metaCfg, pattern)
+	listStage.Done(err)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -407,8 +410,14 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		Tests: false,
 		Dir:   dir,
 	}
+	// packages.Load parses and type-checks the whole closure in one opaque call
+	// — it offers no callback, and on a Go repo it is the single largest span in
+	// the scan. Nothing here can report a fraction of it; the bar estimates and
+	// then snaps when the span closes.
+	loadStage := progress.Start("go.load", "go parse & typecheck", 0, "")
 	initial, err := packages.Load(cfg, append([]string{pattern}, extraRoots...)...)
 	if err != nil {
+		loadStage.Done(err)
 		return nil, nil, err
 	}
 	if len(initial) == 0 {
@@ -417,6 +426,7 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	// Conversion continues on whatever built, so partial/vulnerable code still
 	// converts. The summary goes to stderr — a stdout write would corrupt
 	// machine-readable output when the user pipes findings.
+	loadStage.Done(nil)
 	if packages.PrintErrors(initial) > 0 {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
@@ -480,7 +490,9 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		}
 		createTypesOnly(p.Types)
 	})
+	ssaStage := progress.Start("go.ssa", "go SSA build", 0, "")
 	prog.Build()
+	ssaStage.Done(nil)
 	return prog, initial[0].Fset, nil
 }
 
@@ -535,6 +547,8 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, sk
 		idx int
 		fn  *ssa.Function
 	}
+	lowerStage := progress.Start("go.lower", "go lowering", totalFuncs, "funcs")
+	defer lowerStage.Done(nil)
 	jobs := make([]fnJob, 0, totalFuncs)
 	for _, w := range works {
 		for i, fn := range w.funcs {
@@ -551,6 +565,7 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, sk
 			w := c.worker()
 			for j := range jobCh {
 				j.mod.Functions[j.idx] = w.convertFunction(j.fn)
+				lowerStage.Advance(1)
 			}
 		}()
 	}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/srclines"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -122,6 +123,12 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 
 	// Only reads of out[idx] happen here; the suppression writes are applied
 	// afterward in original order, so there is no data race on out.
+	// The reviewer is network-bound and by far the longest thing that happens
+	// after the scan itself — six seconds of silence on this repo. It is the one
+	// post-scan phase worth a stage.
+	stage := progress.Start("llm", "LLM review", len(jobs), "findings")
+	defer stage.Done(nil)
+
 	conc := max(cfg.Concurrency, 1)
 	verdicts := make([]Verdict, len(jobs))
 	errs := make([]error, len(jobs))
@@ -140,6 +147,7 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 				defer cancel()
 			}
 			verdicts[k], errs[k] = r.Review(rctx, out[jobs[k].idx], jobs[k].cc)
+			stage.Advance(1)
 		}(k)
 	}
 	wg.Wait()

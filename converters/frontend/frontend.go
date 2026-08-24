@@ -19,10 +19,13 @@ package frontend
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/walkignore"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -173,10 +176,20 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 		return prog, 0, nil
 	}
 
+	// One stage per language, counted in files. runChunks hands each goroutine a
+	// contiguous range, so the count advances a chunk at a time rather than a
+	// file at a time — the stage's own timer is what shows it is alive between
+	// those jumps.
+	// Lowercased so the ledger names a language exactly as the coverage line
+	// does; b.Lang is capitalised for prose ("Python parse failed").
+	lang := strings.ToLower(b.Lang)
+	stage := progress.Start(lang+".convert", lang+" parse & lower", len(files), "files")
+
 	// Results land at fixed indices, so module order stays the sorted file
 	// order regardless of chunk completion order.
 	runChunks(len(files), func(start, end int) {
 		b.Parse(root, files[start:end], results[start:end])
+		stage.Advance(end - start)
 	})
 	if b.Finish != nil {
 		b.Finish(results)
@@ -189,19 +202,27 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 		mod, err := b.Result(&results[i])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: skipping %s: %v\n", b.Label, files[i], err)
+			// Reported to the display as well as to stderr: the row needs the
+			// language and the file, which are not recoverable from the text.
+			progress.Warn(lang, skipReason(err), rel(root, files[i])+errLine(err))
 			skipped++
 			convertErrs = append(convertErrs, err.Error())
 			continue
 		}
 		prog.Modules = append(prog.Modules, mod)
 	}
+	// Coverage belongs on the phase row, so it is recorded before Done.
+	stage.Cover(len(files)-skipped, len(files))
 	if len(prog.Modules) == 0 {
-		return nil, skipped, fmt.Errorf("%s: no %s files under %s converted successfully (%d file(s) failed): %s",
+		err := fmt.Errorf("%s: no %s files under %s converted successfully (%d file(s) failed): %s",
 			b.Label, b.Lang, root, len(convertErrs), strings.Join(convertErrs, "; "))
+		stage.Done(err)
+		return nil, skipped, err
 	}
 	if b.PostProgram != nil {
 		b.PostProgram(prog, true)
 	}
+	stage.Done(nil)
 	return prog, skipped, nil
 }
 
@@ -229,4 +250,47 @@ func runChunks(n int, fn func(start, end int)) {
 		go func(start, end int) { defer wg.Done(); fn(start, end) }(start, end)
 	}
 	wg.Wait()
+}
+
+// rel shortens an absolute path back to the scan root, which is how a reader
+// recognises the file. The display has one line for it and the prefix is the
+// least useful part.
+func rel(root, path string) string {
+	if r, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(r, "..") {
+		return filepath.ToSlash(r)
+	}
+	return filepath.ToSlash(path)
+}
+
+// skipReason pulls the part of a converter error a reader acts on. The wrapping
+// repeats the file path twice and the converter name three times before getting
+// to what the compiler actually said.
+//
+// FIRST LINE ONLY, and no embedded newline survives: the display lays warnings
+// out itself and counts the rows it drew, so a message carrying its own line
+// breaks would make that count wrong and corrupt the scrollback above the bar.
+func skipReason(err error) string {
+	msg, _, _ := strings.Cut(err.Error(), "\n")
+	msg = strings.Join(strings.Fields(msg), " ")
+	if i := strings.LastIndex(msg, ": "); i >= 0 && len(msg)-i-2 > 12 {
+		return msg[i+2:]
+	}
+	return msg
+}
+
+// errLine finds the source line a diagnostic is pointing at. rustc writes
+// `--> path:line:col`, python and esbuild write `line N`; between them that is
+// every frontend that reports one at all.
+var (
+	arrowLine = regexp.MustCompile(`-->[^\n]*?:(\d+):\d+`)
+	wordLine  = regexp.MustCompile(`\bline (\d+)\b`)
+)
+
+func errLine(err error) string {
+	for _, re := range []*regexp.Regexp{arrowLine, wordLine} {
+		if m := re.FindStringSubmatch(err.Error()); m != nil {
+			return ":" + m[1]
+		}
+	}
+	return ""
 }

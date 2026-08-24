@@ -104,6 +104,54 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
 `--fail-on` (default: `medium`). Use the exit code as your CI gate.
 
+When stderr is a terminal, a scan shows its progress. Each phase is a row that
+carries its own completeness, so a language's coverage is read where the phase
+is; a running phase keeps a spinner and a clock, and gains its `took` and
+coverage only when it lands. The footer is a fixed 80 columns — a 40-cell bar
+segmented by phase group, then percent, elapsed and the running phase.
+
+Frontend warnings stream into a pane above the bar, each naming the language and
+the file it came from. It is a preview: every captured line is written out in
+full when the scan finishes.
+
+```
+✓  walk                                             +0.02s   @0.02s
+!  javascript parse & lower     87 files    86/87   +0.09s   @0.11s
+✓  ruby parse & lower           47 files    47/47   +0.18s   @0.20s
+⠹  java parse & lower                                        @1.20s
+
+  6 warnings · last 2
+  rust      cannot find module or crate `reqwest` in this scope
+            → test/rust/ssrf_reqwest/src/lib.rs:12
+  rust      unresolved import `rouille`
+            → test/rust/web_rouille/src/lib.rs:7
+
+██████████████████████████████░░░░░░░░░░   76%   1.20s  go parse & typecheck
+```
+
+Three outcomes stay distinct without colour — `✓` complete, `!` partial, `✗`
+failed — and under `NO_COLOR` the status widens to `[+] [!] [x] [*]` and the bar
+collapses to a single `[====----]` run. Below 80 columns the `took` column goes
+first, then `volume`; status, name, coverage and the elapsed clock survive.
+
+At rest the bar completes, a legend names what each group cost, and a closing
+block states the outcome with its exit code and its reason:
+
+```
+███████████████████████████████████████████████████   100%   1.47s
+▪ frontends 2.10s  ▪ go 1.26s  ▪ analysis 0.10s
+
+  201 findings 76 critical  80 high  26 medium  19 low
+  incomplete  python, javascript, java, rust — cpp failed
+  exit 3      findings at or above -fail-on=medium
+```
+
+The bar draws on **stderr only**, and findings stay on stdout, so redirecting
+either one on its own still works. Findings are coloured by severity when stdout
+is a terminal — asked separately, so `godzilla scan > report.txt` writes a plain
+file. All of it turns itself off when stderr is not a terminal, under `-quiet`,
+and when `CI` is set.
+
 ```
 $ godzilla scan ./test/go/sql_injection
 coverage: go=ok
@@ -200,6 +248,7 @@ carries operator concerns:
 | `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
 | `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
+| `GODZILLA_PROGRESS` | Force the scan's progress display on (`1`) or off (`0`). By default it runs only when stderr is a terminal and `CI` is unset. |
 
 Subprocess deadlines are flags, not environment: `-parse-timeout` (default
 `2m0s`, each per-file parse/dump) and `-build-timeout` (default `10m0s`, a

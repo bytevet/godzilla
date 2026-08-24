@@ -22,6 +22,7 @@ import (
 	rust_converter "github.com/bytevet/godzilla/converters/rust"
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/memlimit"
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/scaninfo"
 	"github.com/bytevet/godzilla/internal/walkignore"
@@ -130,7 +131,7 @@ func sourcesOf(cfg config, srcFiles []string) []string {
 type Option func(*config)
 
 type config struct {
-	diagnostics, sources bool
+	diagnostics, sources, progress bool
 	// depBudget caps the total source bytes of third-party dependency packages a
 	// dep-lowering frontend may load as syntax roots; negative is unlimited.
 	depBudget int64
@@ -162,6 +163,16 @@ func WithDepBudget(sourceBytes int64) Option {
 // seconds, and it stats every entry.
 func WithSources() Option {
 	return func(c *config) { c.sources = true }
+}
+
+// WithProgress records what the scan is doing in internal/progress, for a
+// display to read back. Off by default, and armed only for the duration of the
+// scan: the producers sit several call layers below this package behind
+// interfaces it does not own, so the ledger they write to is process-global,
+// and scoping it here is what stops two scans in one process from merging into
+// one meaningless ledger. Same contract as proc.SetTimeouts — one at a time.
+func WithProgress() Option {
+	return func(c *config) { c.progress = true }
 }
 
 func newConfig(opts []Option) config {
@@ -227,6 +238,9 @@ func (r Result) Failed() []LangCoverage {
 // which failed.
 func Scan(path string, rs *rules.RuleSet, opts ...Option) (Result, error) {
 	cfg := newConfig(opts)
+	if cfg.progress {
+		defer progress.Enable()()
+	}
 	start := time.Now()
 	prog, coverage, targetPkgs, inv, err := convert(path, cfg)
 	convertDur := time.Since(start)
@@ -406,6 +420,9 @@ func dropCoLocatedDangerous(danger, taint []analysis.Finding) []analysis.Finding
 // returns cleanly rather than erroring, so a docs-only commit does not fail.
 func ScanFiles(paths []string, rs *rules.RuleSet, opts ...Option) (Result, error) {
 	cfg := newConfig(opts)
+	if cfg.progress {
+		defer progress.Enable()()
+	}
 	start := time.Now()
 	merged := &ir.Program{}
 	var coverage []LangCoverage
@@ -502,8 +519,10 @@ func convert(path string, cfg config) (*ir.Program, []LangCoverage, map[string]b
 
 	// ONE pruned walk: language detection, every present frontend and the
 	// config-file secrets pass all consume this inventory.
+	walkStage := progress.Start("walk", "walk", 0, "")
 	inv := walkignore.NewInventory(path)
 	present := detectLanguages(inv)
+	walkStage.Done(nil)
 	merged := &ir.Program{}
 	var coverage []LangCoverage
 	frontends := languageFrontends
