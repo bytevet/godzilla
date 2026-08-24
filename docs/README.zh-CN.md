@@ -97,6 +97,49 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
 （默认 `medium`）的检出项。直接把退出码用作 CI 门禁即可。
 
+当 stderr 是终端时，扫描会显示进度。每个阶段占一行，并在行内直接给出自己的完成度，
+因此某种语言的覆盖率就在对应阶段旁边；正在运行的阶段带一个转轮和计时，只有在结束时
+才补上 `took` 和覆盖率。底部固定 80 列——40 格进度条按阶段分组着色，其后依次是百分比、
+累计耗时和当前阶段。
+
+前端告警实时滚动显示在进度条上方的面板里，每条都标明来自哪种语言、发生在哪个文件。
+面板只是预览：扫描结束时，所有捕获到的输出都会完整写出。
+
+```
+✓  walk                                             +0.02s   @0.02s
+!  javascript parse & lower     87 files    86/87   +0.09s   @0.11s
+✓  ruby parse & lower           47 files    47/47   +0.18s   @0.20s
+⠹  java parse & lower                                        @1.20s
+
+  6 warnings · last 2
+  rust      cannot find module or crate `reqwest` in this scope
+            → test/rust/ssrf_reqwest/src/lib.rs:12
+  rust      unresolved import `rouille`
+            → test/rust/web_rouille/src/lib.rs:7
+
+██████████████████████████████░░░░░░░░░░   76%   1.20s  go parse & typecheck
+```
+
+三种结果在没有颜色时同样可区分——`✓` 完整、`!` 部分、`✗` 失败；在 `NO_COLOR` 下状态位
+会加宽为 `[+] [!] [x] [*]`，进度条退化成单段 `[====----]`。终端窄于 80 列时，先去掉
+`took` 列，再去掉 `volume` 列；状态、名称、覆盖率和累计耗时这四列始终保留。
+
+结束时进度条走满，图例说明每个分组各花了多少时间，最后一段给出结论、退出码及其原因：
+
+```
+████████████████████████████████████████████████████   100%   1.47s
+▪ frontends 2.10s  ▪ go 1.26s  ▪ analysis 0.10s
+
+  201 findings 76 critical  80 high  26 medium  19 low
+  incomplete  python, javascript, java, rust — cpp failed
+  exit 3      findings at or above -fail-on=medium
+```
+
+进度条只画在 **stderr** 上，检出项仍走 stdout，因此单独重定向其中任意一个都不受影响。
+stdout 是终端时，检出项会按严重级别着色——这是独立判断的，所以
+`godzilla scan > report.txt` 写出的仍是纯文本。stderr 不是终端时、加了 `-quiet` 时、
+以及设置了 `CI` 时，以上全部自动关闭。
+
 ```
 $ godzilla scan ./test/go/sql_injection
 coverage: go=ok
@@ -160,6 +203,7 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 | `GODZILLA_LLM_PROVIDER=openai`、`GODZILLA_LLM_BASE_URL` | 为 `-llm-review` 指定兼容 OpenAI 的接口（例如本地模型）。 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `-llm-review` 的凭据（Anthropic 也支持 `ant auth` 配置）。 |
 | `GOMEMLIMIT` | 原样尊重：一旦设置，Godzilla 就不再自动设定软内存上限。 |
+| `GODZILLA_PROGRESS` | 强制开启（`1`）或关闭（`0`）扫描进度显示。默认只在 stderr 是终端、且未设置 `CI` 时才启用。 |
 
 子进程超时由命令行参数控制，而非环境变量：`-parse-timeout`（默认 `2m0s`，作用于单个文件
 的解析/导出子进程）与 `-build-timeout`（默认 `10m0s`，作用于 `-allow-build` 下的整项目

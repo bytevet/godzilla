@@ -8,6 +8,7 @@ require (
 	github.com/expr-lang/expr v1.17.8
 	github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f
 	golang.org/x/net v0.50.0
+	golang.org/x/term v0.45.0
 	golang.org/x/tools v0.42.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
