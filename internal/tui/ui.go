@@ -266,35 +266,88 @@ func (u *UI) addWarning(line string) {
 	u.mu.Unlock()
 }
 
-// paneRows is how many captured lines the live pane shows. A rustc diagnostic
-// runs to fifteen lines per file, so the pane is a signal that something is
-// being skipped, not the record — Stop writes every captured line out in full.
-const paneRows = 3
+// paneBudget is how many rows the live pane may take, including its header: a
+// third of the terminal, floored so it is always worth having. The rest of the
+// screen stays the user's.
+func paneBudget(height int) int {
+	return max(height/3, 4)
+}
 
-// pane is the warnings block that sits above the bar. Each line is clipped:
-// nothing in the sticky block may wrap, or the erase sequence's row count is
-// wrong and it eats the scrollback above it.
-func (u *UI) pane(width int) []string {
+// pane is the warnings block above the bar — a tail of the captured stderr
+// stream, newest last, as much of it as the budget allows.
+//
+// Lines are WRAPPED here rather than left to the terminal. The display's erase
+// sequence is a row count, so a line the terminal wrapped on its own would make
+// that count wrong and eat the scrollback above the bar. Wrapping rather than
+// clipping is what makes a message readable while it streams past; the clipped
+// form hid the half of a rustc diagnostic that says what went wrong.
+func (u *UI) pane(width, height int) []string {
 	u.mu.Lock()
-	n := len(u.warnings)
-	show := u.warnings
-	if n > paneRows {
-		show = show[n-paneRows:]
-	}
-	show = slices.Clone(show)
+	all := slices.Clone(u.warnings)
 	u.mu.Unlock()
-	if n == 0 {
+
+	// Blank lines are separators inside a compiler diagnostic. The full record
+	// keeps them; the pane does not, because its budget is a handful of rows and
+	// a blank one spends a row on nothing. Counting them would also make the
+	// header lie — a blank line occupies no row, so "last 8" would name lines
+	// that are not on screen.
+	lines := make([]string, 0, len(all))
+	for _, l := range all {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+
+	n := len(lines)
+	budget := paneBudget(height) - 1 // the header takes one
+	if n == 0 || budget < 1 {
 		return nil
 	}
 
-	head := fmt.Sprintf("  %d warning(s)", n)
-	if n > paneRows {
-		head = fmt.Sprintf("  %d warning(s), last %d", n, paneRows)
+	// Filled from the NEWEST line backwards, so a burst pushes older output out
+	// of the pane instead of the newest never reaching it.
+	var rows []string
+	shown := 0
+	for i := n - 1; i >= 0 && len(rows) < budget; i-- {
+		w := wrapRows(lines[i], width-1)
+		if room := budget - len(rows); len(w) > room {
+			w = w[len(w)-room:] // a single over-long line keeps its tail
+		}
+		rows = append(w, rows...)
+		shown++
 	}
-	out := make([]string, 0, len(show)+1)
+
+	head := fmt.Sprintf("  %d warning(s)", n)
+	if shown < n {
+		head = fmt.Sprintf("  %d warning(s), last %d", n, shown)
+	}
+	out := make([]string, 0, len(rows)+1)
 	out = append(out, u.pal.dim(clip(head, width-1)))
-	for _, l := range show {
-		out = append(out, u.pal.dim(clip("    "+l, width-1)))
+	for _, r := range rows {
+		out = append(out, u.pal.dim(r))
+	}
+	return out
+}
+
+// wrapRows breaks one captured line into the rows it will occupy, indenting the
+// continuations so a wrap reads as a wrap. It breaks on columns, not words: this
+// is mostly paths and compiler diagnostics, where a word boundary is rare and
+// the useful part is often at the end.
+func wrapRows(line string, width int) []string {
+	const head, cont = "    ", "      "
+	r := []rune(line)
+	var out []string
+	for first := true; len(r) > 0; first = false {
+		prefix := cont
+		if first {
+			prefix = head
+		}
+		room := width - len([]rune(prefix))
+		if room < 8 {
+			return append(out, clip(prefix+string(r), width))
+		}
+		out = append(out, prefix+string(r[:min(room, len(r))]))
+		r = r[min(room, len(r)):]
 	}
 	return out
 }
@@ -337,7 +390,7 @@ func (u *UI) render(final bool) {
 	if !final {
 		var bar []string
 		bar, u.lastPct = frame(stages, w, u.pal, u.now().Sub(u.start), u.lastPct, u.expect)
-		block = append(u.pane(w), bar...)
+		block = append(u.pane(w, h), bar...)
 		// Trimmed from the TOP: the bar is the one row that must never be cut.
 		if maxRows := h - 1; len(block) > maxRows {
 			block = block[len(block)-maxRows:]

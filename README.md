@@ -110,18 +110,22 @@ leaves the scrollback a line as it finishes — what it cost (`+`) and where the
 run stood when it ended (`@`). The bar covers `--llm-review` too, which is the
 longest wait in a run.
 
-Frontend warnings sit in a small pane above the bar while the scan runs, so a
-forty-line `rustc` diagnostic cannot bury the stage list. It is a preview: every
-captured line is written out in full, in order, when the scan finishes.
+Frontend warnings stream into a pane above the bar while the scan runs, so a
+forty-line `rustc` diagnostic cannot bury the stage list. The pane takes up to a
+third of the terminal and wraps rather than truncates, so a message is readable
+as it goes past. It is a preview: every captured line is written out in full, in
+order, when the scan finishes.
 
 ```
   ✓ go list (metadata)                            +0.34s    @0.36s
   ✓ go parse & typecheck                          +0.59s    @0.95s
   ✓ go lowering                    8636 funcs     +0.14s    @1.32s
-  43 warning(s), last 3
-    rust_converter: skipping test/rust/db_rusqlite/src/lib.rs: rustc: exit st…
-    error[E0432]: unresolved import `rusqlite`
+  37 warning(s), last 6
+    help: you might be missing a crate named `rouille`, add it to your project
+      and import it in your code
+    7 + extern crate rouille;
     error: aborting due to 1 previous error
+    For more information about this error, try `rustc --explain E0432`.
 ███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
 ```
 
