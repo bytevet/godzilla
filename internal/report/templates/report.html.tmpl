@@ -447,6 +447,8 @@ input[type="search"] { flex: 1 1 170px; min-width: 110px; }
 }
 .dfact .dk { color: var(--subtle); }
 .dfact .dv { white-space: nowrap; }
+/* Not a .dfact: the note is a sentence, so it spans the grid and wraps. */
+.dnote { padding: 8px 0; border-bottom: 1px solid var(--line); font: 400 12px/1.5 var(--mono); color: var(--muted); }
 .phase {
   display: grid; grid-template-columns: minmax(120px, 160px) 1fr 62px;
   align-items: center; gap: 12px;
@@ -652,6 +654,7 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
         <div class="dfact"><span class="dk">rules evaluated</span><span class="dv">{{.Rules}}{{if .RulesLive}} <span class="muted">({{.RulesLive}} dataflow)</span>{{end}}</span></div>
         <div class="dfact"><span class="dk">source / sink call sites</span><span class="dv">{{.SourceSites}} / {{.SinkSites}}</span></div>
       </div>
+      {{if .Degraded}}<div class="dnote"><span class="warn">reduced dependency depth</span> &mdash; {{.Degraded}}</div>{{end}}
       {{if .Phases}}
       <div class="subhead">Time</div>
       {{range .Phases}}

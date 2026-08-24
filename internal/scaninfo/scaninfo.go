@@ -52,6 +52,12 @@ type Info struct {
 	RuleSel  time.Duration
 	Taint    time.Duration
 
+	// DegradedNote is non-empty when a frontend ran at reduced depth — a Go
+	// dependency closure trimmed to fit the source-byte budget. It is a note for
+	// a reader, not a status: the scan still ran and its findings still hold, so
+	// nothing derives a pass/fail from it.
+	DegradedNote string
+
 	// PeakBytes is runtime.MemStats.Sys — a Go-runtime high-water mark, not RSS.
 	// Sys only grows, so a single late sample is a true peak; HeapAlloc is the
 	// post-GC live heap and TotalAlloc is cumulative. Filled by the CLI, not by

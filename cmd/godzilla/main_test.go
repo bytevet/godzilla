@@ -152,6 +152,73 @@ func dropGoRunNoise(out string) string {
 	return strings.Join(kept, "\n")
 }
 
+// TestParseDepBudget covers the -dep-budget surface: unit-suffixed byte counts,
+// the "off" escape hatch, and garbage, which must be rejected rather than
+// silently read as an unlimited (or zero) budget.
+func TestParseDepBudget(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+	}{
+		{"0", 0},
+		{"1024", 1024},
+		{"512K", 512 << 10},
+		{"512KB", 512 << 10},
+		{"512KiB", 512 << 10},
+		{"2m", 2 << 20},
+		{"3G", 3 << 30},
+		{" 4096 ", 4096},
+		{"off", -1},
+		{"OFF", -1},
+	} {
+		got, err := parseDepBudget(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("parseDepBudget(%q) = %d, %v; want %d, nil", tc.in, got, err, tc.want)
+		}
+	}
+	// An empty string is the same request as "auto": the flag is a string, so a
+	// caller clearing it must not land on a zero-byte cap.
+	for _, auto := range []string{"auto", ""} {
+		if got, err := parseDepBudget(auto); err != nil || got == 0 {
+			t.Errorf("parseDepBudget(%q) = %d, %v; want a cap or -1", auto, got, err)
+		}
+	}
+	for _, bad := range []string{"lots", "12x", "-1", "1.5G", "K"} {
+		if got, err := parseDepBudget(bad); err == nil {
+			t.Errorf("parseDepBudget(%q) = %d; want an error", bad, got)
+		}
+	}
+}
+
+// TestStrict_DegradedIsNotAFailure is the budget's gate guarantee: a scan whose
+// dependency closure was trimmed to fit -dep-budget still ran, so -strict must
+// not fail it. A budget of zero bytes admits no dependency package, which is
+// what makes the degraded state reachable from the CLI.
+func TestStrict_DegradedIsNotAFailure(t *testing.T) {
+	const dir = "../../test/go/dep_transit_safe"
+	code, out := runCLI(t, "scan", "-strict", "-dep-budget", "0", dir)
+	if code == exitError {
+		t.Errorf("-strict must not fail a budget-degraded scan, got exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "go=DEGRADED") {
+		t.Errorf("expected a coverage summary flagging go=DEGRADED, got:\n%s", out)
+	}
+}
+
+// TestDepBudget_RejectsGarbage: an unparseable budget aborts the run, rather
+// than being a silently ignored flag — a typo'd cap must not read as "no cap".
+// Only non-zero is asserted, not exitUsage: `go run` collapses every non-zero
+// program exit to 1.
+func TestDepBudget_RejectsGarbage(t *testing.T) {
+	code, out := runCLI(t, "scan", "-dep-budget", "plenty", "../../test/go/command_injection")
+	if code == exitClean {
+		t.Errorf("a bad -dep-budget must not run the scan, got exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, `invalid -dep-budget "plenty"`) {
+		t.Errorf("expected a usage error naming the flag, got:\n%s", out)
+	}
+}
+
 // The interactive display draws on stderr, and CombinedOutput gives the child a
 // pipe on both descriptors, so it must stay off here. Asserting on the raw ESC
 // byte rather than on the TTY check itself is what makes this catch a future

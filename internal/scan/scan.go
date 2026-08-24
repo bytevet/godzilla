@@ -21,6 +21,7 @@ import (
 	ruby_converter "github.com/bytevet/godzilla/converters/ruby"
 	rust_converter "github.com/bytevet/godzilla/converters/rust"
 	"github.com/bytevet/godzilla/internal/analysis"
+	"github.com/bytevet/godzilla/internal/memlimit"
 	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/scaninfo"
@@ -46,6 +47,18 @@ type LangCoverage struct {
 	// not a guarantee.
 	Files   int
 	Skipped int
+	// Degraded marks a frontend that ran to completion but at reduced depth: a Go
+	// dependency closure trimmed to fit the source-byte budget, whose excluded
+	// packages get bodyless SSA instead of lowered bodies. DegradedNote names the
+	// counts.
+	//
+	// Deliberately NOT Converted=false. Converted=false means "never analyzed",
+	// which puts the entry in Failed() and fails -strict; a degraded scan RAN and
+	// produced findings, so it stays Converted=true and the gate passes. Reporting
+	// it as a failure would fail every scan the budget rescued from being
+	// OOM-killed — the opposite of what the budget is for.
+	Degraded     bool
+	DegradedNote string
 }
 
 // LanguageOf reports which frontend claims path, off the same languageFrontends
@@ -71,6 +84,11 @@ func CoverageSummary(coverage []LangCoverage) string {
 		switch {
 		case !c.Converted:
 			status = "FAILED"
+		case c.Degraded:
+			// The frontend ran and its findings hold; the dependency closure behind
+			// them was trimmed to fit the memory budget. Distinct from FAILED, which
+			// alone fails -strict.
+			status = "DEGRADED"
 		case c.Skipped > 0:
 			// The frontend ran, so the language is not "failed", yet some of its
 			// source never reached the engine. The ratio is what distinguishes a
@@ -112,7 +130,12 @@ func sourcesOf(cfg config, srcFiles []string) []string {
 // Option configures a scan.
 type Option func(*config)
 
-type config struct{ diagnostics, sources, progress bool }
+type config struct {
+	diagnostics, sources, progress bool
+	// depBudget caps the total source bytes of third-party dependency packages a
+	// dep-lowering frontend may load as syntax roots; negative is unlimited.
+	depBudget int64
+}
 
 // WithDiagnostics collects the telemetry behind the HTML report's scan
 // diagnostics panel. Off by default: it is a second read pass over the source
@@ -121,6 +144,15 @@ type config struct{ diagnostics, sources, progress bool }
 // sample, and the corpus loop would all pay for a number they discard.
 func WithDiagnostics() Option {
 	return func(c *config) { c.diagnostics = true }
+}
+
+// WithDepBudget caps the total source bytes of third-party dependency packages
+// the Go frontend promotes to syntax roots; the remainder is loaded as export
+// data (bodyless SSA), so taint stops at those signatures instead of flowing
+// through them. sourceBytes < 0 is unlimited. See DefaultDepBudget for the
+// memory-derived figure the CLI passes.
+func WithDepBudget(sourceBytes int64) Option {
+	return func(c *config) { c.depBudget = sourceBytes }
 }
 
 // WithSources retains the list of source files the walk handed the frontends,
@@ -144,11 +176,44 @@ func WithProgress() Option {
 }
 
 func newConfig(opts []Option) config {
-	var c config
+	c := config{depBudget: -1} // unlimited unless a caller sets one
 	for _, o := range opts {
 		o(&c)
 	}
 	return c
+}
+
+// rssPerSourceByte is how much peak resident memory one byte of third-party Go
+// source costs once it is promoted to a syntax root and lowered to SSA.
+//
+// A CONSERVATIVE ENVELOPE, not a fit. Measured across eight whole-repo and
+// subpackage scans, the cost is superlinear in promoted bytes (log-log slope
+// ~1.5), and two closures of the same 30 MB differ 2.8x in peak — declaration
+// density is the real driver and source bytes cannot see it. A least-squares
+// slope would therefore under-predict exactly where the budget has to hold. 512
+// is 1.33x the worst uncensored measurement (384, a gogs subpackage at 10.9 GiB);
+// anything below 384 is known-optimistic for a dependency set of that shape.
+//
+// Re-measure with .claude/skills/cve-recall/scripts/measure_peak_rss.py, which
+// sizes the closure exactly as the frontend does. Raising this number loosens
+// the budget: it is the divisor.
+const rssPerSourceByte = 512
+
+// depClosureShare is the fraction of available memory the dependency closure may
+// claim. The rest covers the user code's own SSA, the engine's taint state, and
+// the runtime's non-heap overhead — none of which this budget bounds.
+const depClosureShare = 0.5
+
+// DefaultDepBudget returns the dependency source-byte budget that fits the
+// memory this process may use, or -1 (unlimited) when available memory cannot
+// be detected — a host memlimit cannot read keeps today's behaviour rather than
+// inheriting a guess.
+func DefaultDepBudget() int64 {
+	avail := memlimit.Available()
+	if avail <= 0 {
+		return -1
+	}
+	return int64(float64(avail) * depClosureShare / rssPerSourceByte)
 }
 
 // Failed returns the languages that were detected but failed to convert (so
@@ -177,7 +242,7 @@ func Scan(path string, rs *rules.RuleSet, opts ...Option) (Result, error) {
 		defer progress.Enable()()
 	}
 	start := time.Now()
-	prog, coverage, targetPkgs, inv, err := convert(path)
+	prog, coverage, targetPkgs, inv, err := convert(path, cfg)
 	convertDur := time.Since(start)
 	if err != nil {
 		return Result{}, err
@@ -378,7 +443,7 @@ func ScanFiles(paths []string, rs *rules.RuleSet, opts ...Option) (Result, error
 			}
 		}
 		convertStart := time.Now()
-		prog, cov, tp, inv, err := convert(p)
+		prog, cov, tp, inv, err := convert(p, cfg)
 		convertDur += time.Since(convertStart)
 		if info.IsDir() {
 			// Feed off convert's single pruned walk. When convert failed before
@@ -429,7 +494,7 @@ func ScanFiles(paths []string, rs *rules.RuleSet, opts ...Option) (Result, error
 // that cached file list, merging their modules. A frontend that fails on present
 // source is warned on stderr AND recorded as a failed-coverage entry, so the
 // caller can fail the gate rather than report a false "clean".
-func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkignore.Inventory, error) {
+func convert(path string, cfg config) (*ir.Program, []LangCoverage, map[string]bool, *walkignore.Inventory, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -440,13 +505,16 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 		if conv == nil {
 			return nil, nil, nil, nil, fmt.Errorf("unsupported file type: %s (expected .go, .py, .js/.vue/.svelte, .java, C/C++, .rs, or .rb/.erb)", path)
 		}
-		prog, targetPkgs, skipped, err := conv(path, nil)
+		r, err := conv(path, nil, cfg)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		return prog, []LangCoverage{{
-			Language: lang, Detected: true, Converted: true, Files: 1, Skipped: skipped,
-		}}, targetPkgs, nil, nil
+		cov := LangCoverage{
+			Language: lang, Detected: true, Converted: true, Files: 1, Skipped: r.skipped,
+			Degraded: r.degraded, DegradedNote: r.degradedNote,
+		}
+		warnDegraded(cov, path)
+		return r.prog, []LangCoverage{cov}, r.targetPkgs, nil, nil
 	}
 
 	// ONE pruned walk: language detection, every present frontend and the
@@ -476,8 +544,8 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 		go func() {
 			defer wg.Done()
 			cov := LangCoverage{Language: fe.name, Detected: true, Files: present[fe.name]}
-			prog, targetPkgs, skipped, err := fe.convert(path, inv)
-			cov.Skipped = skipped
+			r, err := fe.convert(path, inv, cfg)
+			cov.Skipped = r.skipped
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: %s frontend failed under %s: %v\n", fe.name, path, err)
 				cov.Err = err.Error()
@@ -485,7 +553,8 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 				return
 			}
 			cov.Converted = true
-			results[i] = &feResult{prog: prog, cov: cov, targetPkgs: targetPkgs}
+			cov.Degraded, cov.DegradedNote = r.degraded, r.degradedNote
+			results[i] = &feResult{prog: r.prog, cov: cov, targetPkgs: r.targetPkgs}
 		}()
 	}
 	wg.Wait()
@@ -495,6 +564,9 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 			continue
 		}
 		coverage = append(coverage, r.cov)
+		// Warned here, in the ordered merge rather than in the goroutine, so the
+		// warnings appear in frontend order however the frontends interleave.
+		warnDegraded(r.cov, path)
 		if r.prog != nil {
 			merged.Modules = append(merged.Modules, r.prog.Modules...)
 		}
@@ -510,15 +582,41 @@ func convert(path string) (*ir.Program, []LangCoverage, map[string]bool, *walkig
 	return merged, coverage, targetPkgs, inv, nil
 }
 
+// convertResult is one frontend's output, as a struct rather than a return
+// tuple: the values are heterogeneous and most are meaningful for only some
+// frontends, so a positional list stops being readable.
+type convertResult struct {
+	prog *ir.Program
+	// targetPkgs is the set of user-authored package paths, so findings inside
+	// lowered dependencies can be scoped out. Only a dep-lowering frontend (Go)
+	// fills it; nil otherwise.
+	targetPkgs map[string]bool
+	// skipped is how many files the frontend could not lower, 0 for a frontend
+	// whose unit of work is not a file.
+	skipped int
+	// degraded and degradedNote report a frontend that ran at reduced depth; they
+	// feed LangCoverage's fields of the same names.
+	degraded     bool
+	degradedNote string
+}
+
+// warnDegraded reports on stderr that a frontend ran at reduced depth. Stderr,
+// never stdout: stdout carries the machine-readable output.
+func warnDegraded(cov LangCoverage, path string) {
+	if !cov.Degraded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s frontend degraded under %s: %s\n", cov.Language, path, cov.DegradedNote)
+}
+
 // frontend pairs a language tag with the function that lowers a path to gIR and
 // the predicate that recognizes that language's single-file extensions. convert
-// takes the scan path plus, for directory scans, the shared file inventory (nil
-// for single files). It returns the lowered program and — only for frontends
-// that lower dependency bodies (Go) — the set of user-authored package paths, so
-// findings inside lowered dependencies can be scoped out; nil otherwise.
+// takes the scan path, the shared file inventory for directory scans (nil for
+// single files), and the scan's own options — of which only the dependency
+// budget reaches a frontend.
 type frontend struct {
 	name    string
-	convert func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error)
+	convert func(string, *walkignore.Inventory, config) (convertResult, error)
 	matches func(path string) bool
 	// lowersDeps marks a frontend that lowers third-party dependency bodies: its
 	// convert returns a non-nil targetPkgs set, its modules are seeded
@@ -552,12 +650,16 @@ var languageFrontends = []frontend{
 // so scopeFindings can drop findings whose sink sits inside a lowered dependency.
 // The inventory is unused: the Go frontend's unit of work is the package, and
 // go/packages does its own module-aware source discovery.
-func goConvert(p string, _ *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
-	c := go_converter.NewConverter()
+func goConvert(p string, _ *walkignore.Inventory, cfg config) (convertResult, error) {
+	c := go_converter.NewConverter().SetDepBudget(cfg.depBudget)
 	prog, err := c.ConvertFile(p)
-	// 0 skipped: the Go frontend lowers packages, not files, so it has no
+	degraded, note := c.Degraded()
+	// skipped stays 0: the Go frontend lowers packages, not files, so it has no
 	// per-file skip count to report (see LangCoverage.Skipped).
-	return prog, c.TargetPackages(), 0, err
+	return convertResult{
+		prog: prog, targetPkgs: c.TargetPackages(),
+		degraded: degraded, degradedNote: note,
+	}, err
 }
 
 // fileConverter is the shape every non-dep-lowering frontend's converter shares:
@@ -580,8 +682,8 @@ type inventoryConverter interface {
 // findings to scope, so it returns a nil target-package set. newC is called per
 // conversion so each scan gets a fresh converter. Directory scans (inv non-nil)
 // hand the converter the shared inventory; single-file scans use ConvertFile.
-func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
-	return func(p string, inv *walkignore.Inventory) (*ir.Program, map[string]bool, int, error) {
+func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inventory, config) (convertResult, error) {
+	return func(p string, inv *walkignore.Inventory, _ config) (convertResult, error) {
 		c := newC()
 		var prog *ir.Program
 		var err error
@@ -596,7 +698,7 @@ func noDepConvert[T fileConverter](newC func() T) func(string, *walkignore.Inven
 		if s, ok := any(c).(interface{ Skipped() int }); ok {
 			skipped = s.Skipped()
 		}
-		return prog, nil, skipped, err
+		return convertResult{prog: prog, skipped: skipped}, err
 	}
 }
 
@@ -633,7 +735,7 @@ func isSourcePath(path string) bool {
 // fileFrontend returns the language tag and conversion function for a single
 // source file, or a nil function for an unsupported extension. It dispatches off
 // the shared languageFrontends table (first match wins, in table order).
-func fileFrontend(path string) (string, func(string, *walkignore.Inventory) (*ir.Program, map[string]bool, int, error)) {
+func fileFrontend(path string) (string, func(string, *walkignore.Inventory, config) (convertResult, error)) {
 	for _, fe := range languageFrontends {
 		if fe.matches(path) {
 			return fe.name, fe.convert

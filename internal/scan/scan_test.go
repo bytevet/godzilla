@@ -289,6 +289,19 @@ func TestCoverageSummary(t *testing.T) {
 			"coverage: js=PARTIAL(7/10 files)",
 		},
 		{
+			"degraded", []LangCoverage{{Language: "go", Detected: true, Converted: true, Degraded: true}},
+			"coverage: go=DEGRADED",
+		},
+		{
+			// Degraded outranks PARTIAL: a trimmed dependency closure is why the
+			// findings are thinner, and naming the dropped FILES instead would
+			// point at the wrong cause.
+			"degraded outranks partial", []LangCoverage{
+				{Language: "go", Detected: true, Converted: true, Degraded: true, Files: 10, Skipped: 3},
+			},
+			"coverage: go=DEGRADED",
+		},
+		{
 			"several", []LangCoverage{
 				{Language: "go", Detected: true, Converted: true},
 				{Language: "python", Detected: true},

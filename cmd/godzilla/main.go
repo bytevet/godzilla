@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/buildpolicy"
@@ -71,6 +73,10 @@ flags:
                     set GODZILLA_LLM_PROVIDER=openai + GODZILLA_LLM_BASE_URL for a local/
                     OpenAI-compatible server, e.g. Ollama/vLLM)
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
+  -dep-budget <n>   cap on the third-party Go source promoted to full analysis: a byte count
+                    (suffixes K/M/G), "off" for no cap, or "auto" (default) to size it from
+                    available memory. Past the cap dependencies are analyzed as signatures
+                    only, so a huge repo completes at reduced depth instead of being OOM-killed
   -baseline <file>  suppress findings whose fingerprint is in this baseline file (gate only NEW findings)
   -write-baseline <file>  write the current findings' fingerprints to <file> as a baseline and exit 0
   -allow-build      allow running the scanned project's build tool (Maven/Gradle/Cargo) — executes repo code; off by default
@@ -179,6 +185,39 @@ func readFileList(src string) ([]string, error) {
 	return paths, nil
 }
 
+// parseDepBudget resolves -dep-budget to a source-byte cap for
+// scan.WithDepBudget, where a negative value means unlimited: "auto" sizes it
+// from available memory, "off" removes it, and anything else is a byte count
+// with an optional K/M/G/T suffix (powers of 1024; a trailing "B" or "iB" is
+// accepted and ignored).
+func parseDepBudget(s string) (int64, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "auto", "":
+		return scan.DefaultDepBudget(), nil
+	case "off", "none", "unlimited":
+		return -1, nil
+	}
+	// 512, 512M, 512MB and 512MiB all mean the same thing.
+	num := strings.TrimSpace(s)
+	num = strings.TrimSuffix(strings.TrimSuffix(num, "B"), "b")
+	num = strings.TrimSuffix(strings.TrimSuffix(num, "I"), "i")
+	mult := int64(1)
+	if n := len(num); n > 0 {
+		if i := strings.IndexRune("KMGT", unicode.ToUpper(rune(num[n-1]))); i >= 0 {
+			mult = int64(1) << (10 * (i + 1))
+			num = num[:n-1]
+		}
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil {
+		return 0, errors.New(`want a byte count (e.g. 512M), "off", or "auto"`)
+	}
+	if v < 0 {
+		return 0, errors.New(`want a non-negative byte count; use "off" for no cap`)
+	}
+	return v * mult, nil
+}
+
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	fs.Usage = usage
@@ -189,6 +228,7 @@ func runScan(args []string) {
 	sarifPath := fs.String("sarif", "", "write a SARIF 2.1.0 report to this file")
 	llmReview := fs.Bool("llm-review", false, "review lower-confidence findings with an LLM and drop false positives")
 	strict := fs.Bool("strict", false, "fail if a detected language could not be analyzed")
+	depBudget := fs.String("dep-budget", "auto", `cap on third-party Go source promoted to full analysis: a byte count, "off", or "auto"`)
 	baselinePath := fs.String("baseline", "", "suppress findings whose fingerprint is in this baseline file")
 	writeBaseline := fs.String("write-baseline", "", "write current findings' fingerprints to this baseline file and exit")
 	allowBuild := fs.Bool("allow-build", false, "allow executing the scanned project's build tool (Maven/Gradle/Cargo)")
@@ -274,6 +314,12 @@ func runScan(args []string) {
 		os.Exit(exitUsage)
 	}
 
+	budget, err := parseDepBudget(*depBudget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid -dep-budget %q: %v\n", *depBudget, err)
+		os.Exit(exitUsage)
+	}
+
 	ruleSet, err := loader.LoadDefault(*rulesPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: loading rules: %v\n", err)
@@ -282,7 +328,7 @@ func runScan(args []string) {
 	ruleSet = cfg.ApplyRules(ruleSet) // disable rules / apply severity overrides (no-op if cfg nil)
 
 	// Only the HTML report renders scan diagnostics, so only it pays to collect them.
-	var scanOpts []scan.Option
+	scanOpts := []scan.Option{scan.WithDepBudget(budget)}
 	if *htmlPath != "" {
 		scanOpts = append(scanOpts, scan.WithDiagnostics())
 	}

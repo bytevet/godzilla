@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,9 +25,16 @@ import (
 func finishDiag(d *scaninfo.Info, start time.Time, convert time.Duration, prog *ir.Program, coverage []LangCoverage) {
 	d.Convert = convert
 	d.Packages = len(prog.GetModules())
+	var degraded []string
 	for _, c := range coverage {
 		d.Skipped += c.Skipped
+		if c.Degraded {
+			degraded = append(degraded, c.Language+": "+c.DegradedNote)
+		}
 	}
+	// Coverage is already in frontend order, so joining in place keeps the note
+	// deterministic across runs.
+	d.DegradedNote = strings.Join(degraded, "; ")
 	d.Wall = time.Since(start)
 }
 

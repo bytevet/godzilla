@@ -1,3 +1,12 @@
+// Package go_converter lowers Go to gIR, in-process, from x/tools SSA.
+//
+// Third-party dependency bodies are lowered too, so taint flows through library
+// code instead of dropping at the call. That closure is LOADED before any
+// downstream guard can shrink it, and a large repo's is big enough to OOM the
+// host, so SetDepBudget caps the third-party source bytes promoted to syntax
+// roots — a pre-flight decision, because the failure it prevents is a kill with
+// nothing left to recover. What the cap excludes arrives as export data
+// (bodyless SSA, the stdlib's treatment) and the converter reports Degraded.
 package go_converter
 
 import (
@@ -5,6 +14,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -73,6 +83,12 @@ type Converter struct {
 	// scoped back to these packages so a sink reached inside a library is not
 	// reported. Populated by ConvertFile.
 	targetPkgs map[string]bool
+
+	// depBudget caps the total source bytes of third-party packages promoted to
+	// Phase-B syntax roots; negative is unlimited. degradedNote is non-empty
+	// exactly when the budget excluded some of them (see Degraded).
+	depBudget    int64
+	degradedNote string
 }
 
 // TargetPackages returns the set of user-authored package import paths from the
@@ -85,6 +101,7 @@ func NewConverter() *Converter {
 		typeCache:  make(map[types.Type]*ir.Type),
 		fnNames:    make(map[*ssa.Function]string),
 		valueCache: make(map[ssa.Value]*ir.Value),
+		depBudget:  -1, // unlimited until a caller sets one
 	}
 }
 
@@ -128,11 +145,36 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// classifies the closure by module; Phase B (loadAndBuildSSA) loads syntax
 	// for every non-stdlib package as an explicit root and builds SSA, with the
 	// stdlib arriving as export data (bodyless SSA packages).
-	reportable, stdlibPkgs, extraRoots, err := classifyPackages(dir, pattern)
+	reportable, stdlibPkgs, userRoots, deps, err := classifyPackages(dir, pattern, c.depBudget)
 	if err != nil {
 		return nil, err
 	}
 	c.targetPkgs = reportable
+
+	// The budget is spent HERE, before Phase B loads anything: the failure it
+	// exists for is an OOM kill, which no check made after the closure is in
+	// memory can prevent.
+	keep, dropped := selectRoots(deps, c.depBudget)
+	c.degradedNote = ""
+	if len(dropped) > 0 {
+		c.degradedNote = fmt.Sprintf("%d of %d dependency packages loaded as signatures only (dependency budget)",
+			len(dropped), len(deps))
+	}
+	extraRoots := make([]string, 0, len(userRoots)+len(keep))
+	extraRoots = append(extraRoots, userRoots...)
+	extraRoots = append(extraRoots, keep...)
+	sort.Strings(extraRoots)
+
+	// A dropped package is not a Phase-B root, so it arrives as export data and
+	// its SSA is bodyless. Its declarations are still SSA functions, so without
+	// this they would lower to signature-only shells: gIR no analysis can use.
+	skipPkgs := stdlibPkgs
+	if len(dropped) > 0 {
+		skipPkgs = maps.Clone(stdlibPkgs)
+		for _, p := range dropped {
+			skipPkgs[p] = true
+		}
+	}
 
 	prog, fset, err := loadAndBuildSSA(dir, pattern, extraRoots)
 	if err != nil {
@@ -162,7 +204,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		}
 	}
 
-	return c.lowerModules(funcsByPkg, stdlibPkgs), nil
+	return c.lowerModules(funcsByPkg, skipPkgs), nil
 }
 
 // reachableFuncs returns the functions reachable from user (reportable) code by
@@ -247,11 +289,25 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 // module path like `abccc` or one of the user's own sibling packages is not
 // mistaken for the stdlib. Reportable = the scanned packages plus everything
 // sharing their module, so scanning a subdir still reports the whole module.
-// extraRoots is every non-stdlib package the pattern didn't match — Phase B
-// loads them as explicit syntax roots.
-func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bool, extraRoots []string, err error) {
+//
+// The two returned root sets are not interchangeable. userRoots (same-module
+// packages the pattern didn't match) are reportable code and are ALWAYS Phase-B
+// syntax roots: dropping one loses findings. deps (third-party packages) are
+// candidates, sized and depth-ranked here so selectRoots can spend a byte budget
+// on them.
+//
+// Sizing is skipped entirely when budget < 0, and NeedFiles goes with it: without
+// a budget nothing reads the sizes, and NeedFiles makes the driver materialise a
+// file list for EVERY package in the closure — 2,265 paths across 187 packages on
+// a sample with no third-party dependencies at all. Paying that to size an empty
+// set was an 11% allocs/op regression on Scan_GoSimple.
+func classifyPackages(dir, pattern string, budget int64) (reportable, stdlibPkgs map[string]bool, userRoots []string, deps []rootCost, err error) {
+	mode := packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule
+	if budget >= 0 {
+		mode |= packages.NeedFiles
+	}
 	metaCfg := &packages.Config{
-		Mode:  packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule,
+		Mode:  mode,
 		Tests: false,
 		Dir:   dir,
 	}
@@ -259,10 +315,10 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 	meta, err := packages.Load(metaCfg, pattern)
 	listStage.Done(err)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if len(meta) == 0 {
-		return nil, nil, nil, fmt.Errorf("no Go packages found under %s", dir)
+		return nil, nil, nil, nil, fmt.Errorf("no Go packages found under %s", dir)
 	}
 	initialPaths := make(map[string]bool, len(meta))
 	targetModules := map[string]bool{}
@@ -275,35 +331,81 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 	stdlibPkgs = map[string]bool{}
 	reportable = map[string]bool{}
 	seenPkg := map[string]bool{}
-	var classify func(p *packages.Package)
-	classify = func(p *packages.Package) {
-		if p == nil || seenPkg[p.PkgPath] {
+	depBytes := map[string]int64{} // third-party candidate -> its Go source size
+	depth := map[string]int{}      // package -> cheapest import depth from user code
+	var classify func(p *packages.Package, d int)
+	classify = func(p *packages.Package, d int) {
+		if p == nil {
 			return
 		}
-		seenPkg[p.PkgPath] = true
-		switch {
-		case initialPaths[p.PkgPath]:
-			reportable[p.PkgPath] = true
-		case p.Module == nil:
-			stdlibPkgs[p.PkgPath] = true
-		case targetModules[p.Module.Path]:
-			// Same module as the scan target but outside the pattern (e.g.
-			// scanning a subdir): still reportable, and it must be a Phase-B
-			// root so its body keeps being lowered from source.
-			reportable[p.PkgPath] = true
-			extraRoots = append(extraRoots, p.PkgPath)
-		default:
-			extraRoots = append(extraRoots, p.PkgPath) // third-party
+		// A package is reachable at many depths; re-descend only when this path
+		// is cheaper, so what is recorded is the minimum.
+		if prev, seen := depth[p.PkgPath]; seen && prev <= d {
+			return
+		}
+		depth[p.PkgPath] = d
+		if !seenPkg[p.PkgPath] {
+			seenPkg[p.PkgPath] = true
+			switch {
+			case initialPaths[p.PkgPath]:
+				reportable[p.PkgPath] = true
+			case p.Module == nil:
+				stdlibPkgs[p.PkgPath] = true
+			case targetModules[p.Module.Path]:
+				// Same module as the scan target but outside the pattern (e.g.
+				// scanning a subdir): still reportable, and it must be a Phase-B
+				// root so its body keeps being lowered from source.
+				reportable[p.PkgPath] = true
+				userRoots = append(userRoots, p.PkgPath)
+			default:
+				// Third-party. The entry must exist either way -- the walk reads
+				// its membership to decide whether a hop costs a depth level --
+				// but its SIZE is only meaningful under a budget.
+				size := int64(0)
+				if budget >= 0 {
+					size = sourceSize(p)
+				}
+				depBytes[p.PkgPath] = size
+			}
+		}
+		// User code is the origin, so anything it imports sits at depth 0; only a
+		// hop through a dependency costs one.
+		next := 0
+		if _, isDep := depBytes[p.PkgPath]; isDep {
+			next = d + 1
 		}
 		for _, imp := range p.Imports {
-			classify(imp)
+			classify(imp, next)
 		}
 	}
 	for _, p := range meta {
-		classify(p)
+		classify(p, 0)
 	}
-	sort.Strings(extraRoots) // deterministic Phase-B roots
-	return reportable, stdlibPkgs, extraRoots, nil
+	for path, size := range depBytes {
+		deps = append(deps, rootCost{path: path, bytes: size, depth: depth[path]})
+	}
+	sort.Strings(userRoots) // deterministic Phase-B roots
+	sort.Slice(deps, func(i, j int) bool { return deps[i].path < deps[j].path })
+	return reportable, stdlibPkgs, userRoots, deps, nil
+}
+
+// sourceSize is the on-disk byte size of a package's Go source, the proxy the
+// dependency budget spends: parsing and typechecking dominate Phase B's peak and
+// both scale with it. Files that cannot be stat'd count as zero — an unreadable
+// package cannot be parsed either.
+//
+// GoFiles, not CompiledGoFiles: asking `go list` for the compiled set runs cgo
+// over the closure, which measured ~1.5x on Phase A and can fail outright with no
+// C toolchain — a steep price in a metadata-only phase for a size estimate that
+// differs only on cgo packages.
+func sourceSize(p *packages.Package) int64 {
+	var total int64
+	for _, f := range p.GoFiles {
+		if fi, err := os.Stat(f); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total
 }
 
 // loadAndBuildSSA is Phase B of the two-phase load: it loads SYNTAX only where
@@ -344,12 +446,20 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
-	// Create SSA for every loaded package. Non-stdlib roots have syntax, so
-	// prog.Build() builds their bodies and AllFunctions yields them — the engine
-	// can then flow taint through a library call instead of dropping at it.
-	// Stdlib packages (export data, no syntax) are created bodyless: their
-	// declarations still resolve callee names and method sets, but nothing is
-	// built or lowered for them.
+	// Create SSA for every loaded package. Roots have syntax, so prog.Build()
+	// builds their bodies and AllFunctions yields them — the engine can then flow
+	// taint through a library call instead of dropping at it. Everything else is
+	// created bodyless: its declarations still resolve callee names and method
+	// sets, but nothing is built or lowered for it.
+	//
+	// ONLY a root's syntax may be handed to the builder. go/packages type-checks
+	// a non-root with IgnoreFuncBodies (it does so whenever NeedDeps is unset),
+	// so its TypesInfo has no entry for anything inside a function body — and it
+	// still returns that syntax whenever the package could not be served from
+	// export data, which happens to any non-root that transitively imports a
+	// root. Building a body from that pair panics in ssa.objectOf, or dereferences
+	// the nil types.Object in packageLevelMember. The split below is therefore
+	// structural: syntax comes from the initial (root) set, never from the walk.
 	//
 	// ssautil.AllPackages is not enough here: it only visits the go/packages
 	// graph, which without NeedDeps is truncated at the roots' direct imports.
@@ -378,15 +488,22 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 		}
 		prog.CreatePackage(tp, nil, nil, true)
 	}
-	packages.Visit(initial, nil, func(p *packages.Package) {
+	// Roots first, and before any part of the types closure is walked: a package
+	// created bodyless can never be given its bodies afterwards, and an
+	// export-data package's types closure can reach a root, so a root the walk
+	// got to first would silently lose every body it was loaded for.
+	for _, p := range initial {
 		if p.Types == nil || p.IllTyped || created[p.Types] {
-			return
+			continue
 		}
 		created[p.Types] = true
-		for _, imp := range p.Types.Imports() {
-			createTypesOnly(imp)
-		}
 		prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
+	}
+	packages.Visit(initial, nil, func(p *packages.Package) {
+		if p.Types == nil || p.IllTyped {
+			return // an ill-typed package is created only if something references it
+		}
+		createTypesOnly(p.Types)
 	})
 	ssaStage := progress.Start("go.ssa", "go SSA build", 0, "")
 	prog.Build()
@@ -394,20 +511,21 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	return prog, initial[0].Fset, nil
 }
 
-// lowerModules lowers the target packages and every non-stdlib dependency
-// (third-party bodies, so taint flows through them; the stdlib is modeled by
-// rules instead). No RTA pre-pass: analysis is demand-driven (the engine reaches
-// a dependency function only when taint does — see Engine.ScopeSeed), so its cost
-// does not scale with the lowered set and a reachability pass is pure overhead.
-// The remaining cost is the lowering itself, parallelized here.
-func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, stdlibPkgs map[string]bool) *ir.Program {
+// lowerModules lowers the target packages and every dependency loaded with
+// bodies (so taint flows through them). skipPkgs is what has no body to lower:
+// the stdlib, which rules model instead, plus anything the dependency budget
+// left as export data. No RTA pre-pass: analysis is demand-driven (the engine
+// reaches a dependency function only when taint does — see Engine.ScopeSeed), so
+// its cost does not scale with the lowered set and a reachability pass is pure
+// overhead. The remaining cost is the lowering itself, parallelized here.
+func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, skipPkgs map[string]bool) *ir.Program {
 	var pkgList []*ssa.Package
 	for pkg := range funcsByPkg {
 		if pkg == nil || pkg.Pkg == nil {
 			continue
 		}
-		if stdlibPkgs[pkg.Pkg.Path()] {
-			continue // stdlib: modeled by rules, not lowered
+		if skipPkgs[pkg.Pkg.Path()] {
+			continue // no body loaded: stdlib, or excluded by the dependency budget
 		}
 		pkgList = append(pkgList, pkg)
 	}

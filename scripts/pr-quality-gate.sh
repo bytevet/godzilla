@@ -63,7 +63,7 @@ BENCH_PKGS=(./internal/scan/ ./internal/analysis/ ./internal/rules/)
 # here as a regression instead of quietly inflating every scan.
 KEY_BENCHMARKS=(
 	Engine_RuleScaling Engine_InertRules MatchGlob
-	Scan_GoWithDeps Scan_GoSimple
+	Scan_GoWithDeps Scan_GoSimple Scan_GoBudgeted
 	Scan_Python Scan_JS Scan_Rust Scan_Java Scan_Ruby
 )
 

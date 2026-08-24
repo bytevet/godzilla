@@ -200,6 +200,9 @@ cache shared by report/LLM/triage), and `internal/testsupport` (test-only interp
   `docs/README.zh-CN.md` mirrors it section for section; changing one WITHOUT the other is the whole
   failure mode, and no test catches it. The mirror's links are rewritten, not copied — repo files need
   `../`, `docs/` siblings drop the prefix, and its internal anchors point at the translated headings.
+  Take the mirror's wording from [docs/glossary.zh-CN.md](docs/glossary.zh-CN.md) rather than
+  re-deciding it: the drift it exists to stop is one English term arriving as three Chinese ones,
+  which is what happens when each new section is translated on its own.
 - **Comments are concise and carry only what the code cannot say.** Write the invariant, the failure mode,
   or why the obvious alternative is wrong — then stop. Specifically, do NOT write: a restatement of the line
   below it; the same rationale in two places (put it where the person who would break it is looking — often

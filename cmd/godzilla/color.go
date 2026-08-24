@@ -78,7 +78,10 @@ func (s styler) coverage(line string) string {
 		switch {
 		case status == "FAILED":
 			paint = s.bad
-		case strings.HasPrefix(status, "PARTIAL"):
+		// PARTIAL and DEGRADED are the same class: the frontend ran, so the scan is
+		// not red, but it saw less than the whole target and the findings are
+		// thinner for it. Green here would say the opposite of what they mean.
+		case strings.HasPrefix(status, "PARTIAL"), status == "DEGRADED":
 			paint = func(t string) string { return s.sgr("33", t) }
 		}
 		parts[i] = s.dim(name+"=") + paint(status)
