@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -301,12 +302,12 @@ func bars(segs []segment, cells int) ([]barSeg, float64) {
 	}
 	pct := min(finished/total, 1)
 
-	// Largest remainder over the filled cells only, so the runs always sum to
+	// Largest remainder over the FILLED cells only, so the runs always sum to
 	// exactly the filled length and the bar never gains or loses a column.
 	filled := int(float64(cells)*pct + 0.5)
 	type share struct {
 		group string
-		exact float64
+		frac  float64
 		cells int
 	}
 	var shares []share
@@ -320,20 +321,28 @@ func bars(segs []segment, cells int) ([]barSeg, float64) {
 		shares = append(shares, share{g, exact - float64(n), n})
 		assigned += n
 	}
-	for i := 0; assigned < filled && len(shares) > 0; i++ {
-		best, bestFrac := -1, -1.0
-		for j := range shares {
-			if shares[j].exact > bestFrac {
-				best, bestFrac = j, shares[j].exact
-			}
+	// One pass: the remainders are handed out largest first, and there are never
+	// more than len(shares) of them to hand out.
+	slices.SortStableFunc(shares, func(a, b share) int {
+		switch {
+		case a.frac > b.frac:
+			return -1
+		case a.frac < b.frac:
+			return 1
 		}
-		shares[best].cells++
-		shares[best].exact = -1
-		assigned++
-		if i > cells {
+		return 0
+	})
+	for i := range shares {
+		if assigned >= filled {
 			break
 		}
+		shares[i].cells++
+		assigned++
 	}
+	// Back into pipeline order: the bar reads left to right as time.
+	slices.SortStableFunc(shares, func(a, b share) int {
+		return slices.Index(groupOrder, a.group) - slices.Index(groupOrder, b.group)
+	})
 
 	var out []barSeg
 	for _, sh := range shares {

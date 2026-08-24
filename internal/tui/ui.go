@@ -316,12 +316,13 @@ func (u *UI) pane(width, height int) []string {
 	// the field exactly would run straight into the message.
 	const langCol, gutter = 10, 2
 	const textCol = 2 + langCol + gutter
+	failed := failedLangs()
 	for _, w := range shown {
 		lang := pad(clip(w.Lang, langCol), langCol)
 		body := wrapRows(w.Message, width-1-textCol)
 		for i, line := range body {
 			if i == 0 {
-				out = append(out, "  "+u.pal.paint(u.warnHex(w.Lang), lang)+
+				out = append(out, "  "+u.pal.paint(warnHex(failed, w.Lang), lang)+
 					strings.Repeat(" ", gutter)+u.pal.fg(line))
 				continue
 			}
@@ -338,14 +339,25 @@ func (u *UI) pane(width, height int) []string {
 	return out
 }
 
-// warnHex colours the language tag by what became of that frontend: a warning
-// from a frontend that gave up entirely reads differently from one that skipped
-// a file and carried on.
-func (u *UI) warnHex(lang string) string {
+// failedLangs is the set of frontends that gave up entirely. Taken once per
+// frame: Stages clones the ledger and locks every stage in it, which is not
+// something to do once per line of a warning.
+func failedLangs() map[string]bool {
+	out := map[string]bool{}
 	for _, s := range progress.Stages() {
-		if s.ID == strings.ToLower(lang)+".convert" && s.Failed {
-			return badHex
+		if lang, ok := strings.CutSuffix(s.ID, ".convert"); ok && s.Failed {
+			out[lang] = true
 		}
+	}
+	return out
+}
+
+// warnHex colours the language tag by what became of that frontend: a warning
+// from one that gave up entirely reads differently from one that skipped a file
+// and carried on.
+func warnHex(failed map[string]bool, lang string) string {
+	if failed[strings.ToLower(lang)] {
+		return badHex
 	}
 	return partHex
 }

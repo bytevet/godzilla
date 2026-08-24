@@ -138,10 +138,10 @@ type summary struct {
 }
 
 func (s summary) write(w io.Writer) {
-	label := func(k string) string { return s.st.dim(pad(k, 12)) }
+	label := func(k string) string { return s.st.dim(fmt.Sprintf("%-12s", k)) }
 
 	if s.total == 0 {
-		fmt.Fprintf(w, "  %s%s\n", s.st.good(pad("no findings", 13)),
+		fmt.Fprintf(w, "  %s%s\n", s.st.good(fmt.Sprintf("%-13s", "no findings")),
 			s.st.dim(fmt.Sprintf("%d rules over %d languages, all sinks clean", s.rules, s.langs)))
 	} else {
 		var parts []string
@@ -158,7 +158,7 @@ func (s summary) write(w io.Writer) {
 			parts = append(parts, s.st.severity(sev, text))
 		}
 		fmt.Fprintf(w, "  %s%s\n",
-			s.st.bad(pad(fmt.Sprintf("%d findings", s.total), 13)), strings.Join(parts, "  "))
+			s.st.bad(fmt.Sprintf("%-13s", fmt.Sprintf("%d findings", s.total))), strings.Join(parts, "  "))
 	}
 	for _, r := range s.reports {
 		fmt.Fprintf(w, "  %s%s\n", label("report"), s.st.loc(r))
@@ -201,11 +201,4 @@ func coverageLine(st styler, cov []scan.LangCoverage) (string, bool) {
 		out += st.bad(strings.Join(failed, ", ") + " failed")
 	}
 	return out, false
-}
-
-func pad(s string, w int) string {
-	if n := len([]rune(s)); n < w {
-		return s + strings.Repeat(" ", w-n)
-	}
-	return s
 }

@@ -48,26 +48,28 @@ func (p palette) paint(hex, text string) string {
 	if p.mode == colorNone || text == "" {
 		return text
 	}
-	switch p.mode {
-	case colorTrue:
-		r, g, b := rgb(hex)
-		return sgr(fmt.Sprintf("38;2;%d;%d;%d", r, g, b), text)
-	case color256:
-		return sgr(fmt.Sprintf("38;5;%d", idx256[hex]), text)
-	default:
-		return sgr(strconv.Itoa(ansi16[hex]), text)
-	}
+	return prefix[p.mode][hex] + text + "\x1b[0m"
 }
 
-func sgr(code, text string) string { return "\x1b[" + code + "m" + text + "\x1b[0m" }
-
-func rgb(hex string) (r, g, b int) {
-	v, err := strconv.ParseUint(hex[1:], 16, 32)
-	if err != nil {
-		return 0xee, 0xee, 0xee
+// prefix resolves every palette colour to its escape ONCE. The colours are
+// compile-time constants and a frame paints dozens of cells ten times a second;
+// re-parsing a hex string for each of them is work with a known answer.
+var prefix = func() map[colorMode]map[string]string {
+	out := map[colorMode]map[string]string{
+		colorTrue: {}, color256: {}, color16: {},
 	}
-	return int(v >> 16 & 0xff), int(v >> 8 & 0xff), int(v & 0xff)
-}
+	for hex := range idx256 {
+		v, err := strconv.ParseUint(hex[1:], 16, 32)
+		if err != nil {
+			continue
+		}
+		r, g, b := v>>16&0xff, v>>8&0xff, v&0xff
+		out[colorTrue][hex] = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+		out[color256][hex] = fmt.Sprintf("\x1b[38;5;%dm", idx256[hex])
+		out[color16][hex] = fmt.Sprintf("\x1b[%dm", ansi16[hex])
+	}
+	return out
+}()
 
 func (p palette) acc(s string) string   { return p.paint(accHex, s) }
 func (p palette) bad(s string) string   { return p.paint(badHex, s) }
