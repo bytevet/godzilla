@@ -55,13 +55,12 @@ func selectRoots(candidates []rootCost, limit int64) (keep, dropped []string) {
 		}
 	})
 
-	cut := len(order)
-	switch {
-	case limit == 0:
-		// Not derivable from the running total: a package whose files could not
-		// be stat'd measures zero and would otherwise survive a zero budget.
-		cut = 0
-	default:
+	// A zero budget drops everything, and that is NOT derivable from the running
+	// total below: a package whose files could not be stat'd measures zero bytes
+	// and would otherwise fit inside a budget of zero.
+	cut := 0
+	if limit > 0 {
+		cut = len(order)
 		var total int64
 		for i, c := range order {
 			if total+c.bytes > limit {
