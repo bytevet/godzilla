@@ -9,6 +9,10 @@ js/crossfile_sfc_import|js-sqli|js:Renderer.render|js:some-db.query|src=test/js/
 js/decorators_for_await|js-code-injection|js:service.SessionService.runFromRequest|js:eval|src=test/js/decorators_for_await/service.js:12:10|sink=test/js/decorators_for_await/service.js:12:5
 js/decorators_for_await|js-code-injection|js:service.drainAndRun|js:eval|src=test/js/decorators_for_await/service.js:20:8|sink=test/js/decorators_for_await/service.js:20:3
 js/deserialization|js-insecure-deserialization|js:app.<module>$anon0|js:node-serialize.unserialize|src=test/js/deserialization/app.js:4:16|sink=test/js/deserialization/app.js:5:3
+js/dom_nav_xss|js-dom-xss|js:app.go|js:__godzilla_js_url|src=test/js/dom_nav_xss/app.js:6:16|sink=test/js/dom_nav_xss/app.js:9:3
+js/dom_nav_xss|js-dom-xss|js:app.go|js:location.assign|src=test/js/dom_nav_xss/app.js:6:16|sink=test/js/dom_nav_xss/app.js:12:3
+js/dom_nav_xss|js-dom-xss|js:app.go|js:window.location.replace|src=test/js/dom_nav_xss/app.js:6:16|sink=test/js/dom_nav_xss/app.js:13:3
+js/dom_nav_xss|js-dom-xss|js:app.go|js:window.open|src=test/js/dom_nav_xss/app.js:6:16|sink=test/js/dom_nav_xss/app.js:14:3
 js/esm_module|js-command-injection|js:app.<module>$anon0|js:child_process.exec|src=test/js/esm_module/app.js:11:16|sink=test/js/esm_module/app.js:12:3
 js/esmodule|js-command-injection|js:app.run|js:child_process.execSync|src=test/js/esmodule/app.mjs:7:17|sink=test/js/esmodule/app.mjs:8:5
 js/express_params|js-path-traversal|js:app.<module>$anon0|js:res.sendFile|src=test/js/express_params/app.js:11:14|sink=test/js/express_params/app.js:12:3

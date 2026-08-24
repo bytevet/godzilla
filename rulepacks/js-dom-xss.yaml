@@ -1,0 +1,37 @@
+# XSS through the browser's own navigation (CWE-79), the half of a client-side
+# open redirect that a server-side one does not have.
+#
+# A server's `Location:` header is safe from this: per the Fetch spec a redirect
+# to a non-HTTP(S) scheme is a network error, so browsers refuse to follow
+# `Location: javascript:...`. Assigning that same string to `location` in the page
+# EXECUTES it. So the identical taint flow is CWE-601 on the server and both
+# CWE-601 and CWE-79 in the browser, which is why this rule shares its sinks with
+# js-open-redirect instead of replacing it: the two have different fixes, and
+# reporting only the redirect would understate the impact.
+rules:
+  - id: js-dom-xss
+    languages: [javascript]
+    # Aligned with js-xss / vue-xss (same CWE-79) so the CI gate treats XSS
+    # identically regardless of framework.
+    severity: medium
+    cwe: CWE-79
+    message: >-
+      Untrusted input becomes the browser's next location. A `javascript:` URL
+      assigned to `location` executes as script, so this is Cross-Site Scripting
+      as well as an open redirect. Reject any scheme outside http/https before
+      navigating — encoding the value does not help, because the scheme is read
+      before the rest of the URL.
+    extend: [$_js-sfc-xss.yaml, $_js-html-sanitizers.yaml]
+    # A constant scheme+host prefix fixes the scheme too, so the same fact that
+    # suppresses a non-exploitable SSRF/redirect applies here unchanged.
+    when: 'not hostFixed()'
+    sinks:
+      - "js:__godzilla_js_url"
+      - "js:*location.assign"
+      - "js:*location.replace"
+      - "js:*window.open"
+    # encodeURIComponent is NOT a sanitizer here: it escapes the PATH, leaving a
+    # bare `javascript:alert(1)` (no reserved characters) intact.
+    sanitizers: []
+    validators:
+      - "js:*isSafeUrl"
