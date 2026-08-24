@@ -28,6 +28,19 @@ type rootCost struct {
 // priority, so letting a deeper package jump ahead of a nearer one it merely
 // outbids on size would spend the budget on the closure's fringe.
 func selectRoots(candidates []rootCost, limit int64) (keep, dropped []string) {
+	// Unlimited: nothing is dropped and the priority order is never consulted, so
+	// return before the copy and the sort. On a large closure that order is a few
+	// thousand elements ranked for nothing. Phase-B roots must still be
+	// deterministic, hence the sort by path.
+	if limit < 0 {
+		keep = make([]string, len(candidates))
+		for i, c := range candidates {
+			keep[i] = c.path
+		}
+		sort.Strings(keep)
+		return keep, nil
+	}
+
 	order := make([]rootCost, len(candidates))
 	copy(order, candidates)
 	sort.Slice(order, func(i, j int) bool {
@@ -44,7 +57,6 @@ func selectRoots(candidates []rootCost, limit int64) (keep, dropped []string) {
 
 	cut := len(order)
 	switch {
-	case limit < 0:
 	case limit == 0:
 		// Not derivable from the running total: a package whose files could not
 		// be stat'd measures zero and would otherwise survive a zero budget.

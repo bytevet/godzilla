@@ -72,6 +72,27 @@ func BenchmarkScan_GoWithDeps(b *testing.B) {
 	}
 }
 
+// BenchmarkScan_GoBudgeted is Scan_GoWithDeps with a budget in force, which is
+// what the CLI does -- `-dep-budget` defaults to auto, while scan.Scan defaults to
+// unlimited so no library caller changed behaviour.
+//
+// It exists so that cost is MEASURED rather than merely absent from the other
+// benchmarks: sizing the closure is skipped entirely without a budget, so without
+// this the only gated Go benchmarks would be the ones that never pay for it, and
+// a regression on the path every CLI user takes would be invisible.
+func BenchmarkScan_GoBudgeted(b *testing.B) {
+	rs, err := loader.Builtin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Scan("../../test/go/gin_gorm", rs, WithDepBudget(DefaultDepBudget())); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkScan_GoSimple scans a minimal Go sample as a baseline.
 func BenchmarkScan_GoSimple(b *testing.B) {
 	rs, err := loader.Builtin()

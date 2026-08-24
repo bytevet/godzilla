@@ -145,7 +145,7 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// classifies the closure by module; Phase B (loadAndBuildSSA) loads syntax
 	// for every non-stdlib package as an explicit root and builds SSA, with the
 	// stdlib arriving as export data (bodyless SSA packages).
-	reportable, stdlibPkgs, userRoots, deps, err := classifyPackages(dir, pattern)
+	reportable, stdlibPkgs, userRoots, deps, err := classifyPackages(dir, pattern, c.depBudget)
 	if err != nil {
 		return nil, err
 	}
@@ -294,12 +294,20 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 // packages the pattern didn't match) are reportable code and are ALWAYS Phase-B
 // syntax roots: dropping one loses findings. deps (third-party packages) are
 // candidates, sized and depth-ranked here so selectRoots can spend a byte budget
-// on them — measuring them is the only always-on cost this adds to Phase A, one
-// stat per compiled file.
-func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bool, userRoots []string, deps []rootCost, err error) {
+// on them.
+//
+// Sizing is skipped entirely when budget < 0, and NeedFiles goes with it: without
+// a budget nothing reads the sizes, and NeedFiles makes the driver materialise a
+// file list for EVERY package in the closure — 2,265 paths across 187 packages on
+// a sample with no third-party dependencies at all. Paying that to size an empty
+// set was an 11% allocs/op regression on Scan_GoSimple.
+func classifyPackages(dir, pattern string, budget int64) (reportable, stdlibPkgs map[string]bool, userRoots []string, deps []rootCost, err error) {
+	mode := packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule
+	if budget >= 0 {
+		mode |= packages.NeedFiles
+	}
 	metaCfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedImports | packages.NeedDeps | packages.NeedModule |
-			packages.NeedFiles,
+		Mode:  mode,
 		Tests: false,
 		Dir:   dir,
 	}
@@ -350,7 +358,14 @@ func classifyPackages(dir, pattern string) (reportable, stdlibPkgs map[string]bo
 				reportable[p.PkgPath] = true
 				userRoots = append(userRoots, p.PkgPath)
 			default:
-				depBytes[p.PkgPath] = sourceSize(p) // third-party
+				// Third-party. The entry must exist either way -- the walk reads
+				// its membership to decide whether a hop costs a depth level --
+				// but its SIZE is only meaningful under a budget.
+				size := int64(0)
+				if budget >= 0 {
+					size = sourceSize(p)
+				}
+				depBytes[p.PkgPath] = size
 			}
 		}
 		// User code is the origin, so anything it imports sits at depth 0; only a

@@ -76,6 +76,19 @@ func TestSelectRootsUnlimitedAndZero(t *testing.T) {
 	if keep != nil || !reflect.DeepEqual(dropped, []string{"a", "b"}) {
 		t.Errorf("limit 0: keep = %v, dropped = %v, want nothing kept", keep, dropped)
 	}
+
+	// The unlimited case returns before the priority sort, so it needs its own
+	// unsorted input: Phase-B roots must still come back deterministic, by path,
+	// even though depth and size were never consulted.
+	shuffled := []rootCost{
+		{path: "z", bytes: 1, depth: 0},
+		{path: "a", bytes: 99, depth: 3},
+		{path: "m", bytes: 50, depth: 1},
+	}
+	keep, dropped = selectRoots(shuffled, -1)
+	if !reflect.DeepEqual(keep, []string{"a", "m", "z"}) || dropped != nil {
+		t.Errorf("limit -1 unsorted: keep = %v, dropped = %v, want [a m z] and nothing dropped", keep, dropped)
+	}
 }
 
 // The scan must be byte-identical across runs, so the selection may not depend on
