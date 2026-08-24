@@ -37,6 +37,35 @@ propagators:
   - "go:*strings.Clone"
   - "go:*strings.Builder*.String"
   - "go:*strings.Builder*.Write*"
+  # regexp EXTRACTION: the result is a substring of the subject, so taint carries
+  # exactly. Only the Find*/Split family -- the *Index variants return offsets,
+  # not content. Without these a single `re.FindString(userInput)` drops taint
+  # while the equivalent strings.* call above carries it, which is a hole rather
+  # than a policy: the engine never saw a guard, it just did not know the callee.
+  - "go:*regexp.Regexp*.Find"
+  - "go:*regexp.Regexp*.FindAll"
+  - "go:*regexp.Regexp*.FindAllString"
+  - "go:*regexp.Regexp*.FindAllStringSubmatch"
+  - "go:*regexp.Regexp*.FindAllSubmatch"
+  - "go:*regexp.Regexp*.FindString"
+  - "go:*regexp.Regexp*.FindStringSubmatch"
+  - "go:*regexp.Regexp*.FindSubmatch"
+  - "go:*regexp.Regexp*.Split"
+  # regexp REPLACEMENT, the same trade strings.Replace/ReplaceAll above already
+  # take: a replace is a transform, not a guarantee. `re.ReplaceAllString(s, "")`
+  # is a common scrubbing idiom, so this will report flows whose author believed
+  # they had sanitized -- which is the point. A pattern that misses a case is
+  # exactly how CVE-2025-4123 (grafana) got its open redirect past a `^(?:/\\|/+)`
+  # guard. Treating the call as taint-clearing would silently suppress that whole
+  # bug class; a rule that genuinely sanitizes this way should name it a
+  # `sanitizer`, which wins over a propagator.
+  - "go:*regexp.Regexp*.ReplaceAll"
+  - "go:*regexp.Regexp*.ReplaceAllLiteral"
+  - "go:*regexp.Regexp*.ReplaceAllLiteralString"
+  - "go:*regexp.Regexp*.ReplaceAllString"
+  - "go:*regexp.Regexp*.ReplaceAllStringFunc"
+  - "go:*regexp.Regexp*.Expand"
+  - "go:*regexp.Regexp*.ExpandString"
   - "go:*fmt.Sprintf"
   - "go:*fmt.Sprint"
   - "go:*fmt.Sprintln"

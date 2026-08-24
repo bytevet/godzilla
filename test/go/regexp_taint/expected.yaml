@@ -1,0 +1,11 @@
+# A regexp transform carries taint, exactly as the strings.Replace family already
+# does. Both handlers reach http.Redirect from r.URL: one through
+# (*regexp.Regexp).ReplaceAllString, one through FindString.
+#
+# Do NOT "fix" this by making regexp replacement a sanitizer. A replace is a
+# transform, not a guarantee -- a pattern that misses a case is how grafana
+# CVE-2025-4123 kept its open redirect -- so a call that genuinely sanitizes has
+# to be named a `sanitizer` on the rule, which wins over a propagator.
+findings:
+  - rule: go-open-redirect
+    min: 2
