@@ -35,6 +35,20 @@ type stage struct {
 	group string
 }
 
+// The four phase groups. The footer bar is one run per group rather than one
+// per stage: thirteen segments in a forty-cell bar are two or three cells each,
+// which reads as noise, and the group is the level at which "where did the time
+// go" is actually answered.
+const (
+	groupFrontends = "frontends"
+	groupGo        = "go"
+	groupAnalysis  = "analysis"
+	groupLLM       = "LLM"
+)
+
+// groupOrder is the order groups appear in the bar and the legend.
+var groupOrder = []string{groupFrontends, groupGo, groupAnalysis, groupLLM}
+
 // convertSlot holds the place of the `<lang>.convert` stages, whose ids are not
 // known until a frontend starts. Every language's convert stage ranks here.
 const convertSlot = "*.convert"
@@ -46,16 +60,16 @@ const convertSlot = "*.convert"
 // concern, because that has to be expressed three times over for three colour
 // depths.
 var stages = []stage{
-	{id: "walk", label: "walk", prior: 0.02, always: true},
-	{id: "go.list", label: "go list (metadata)", prior: 0.10, group: "go"},
-	{id: "go.load", label: "go parse & typecheck", prior: 0.55, group: "go"},
-	{id: "go.ssa", label: "go SSA build", prior: 0.25, group: "go"},
-	{id: "go.lower", label: "go lowering", prior: 0.15, group: "go"},
-	{id: convertSlot, prior: 0.30},
-	{id: "index", label: "index & call graph", prior: 0.12, always: true},
-	{id: "ruleselect", label: "rule selection", prior: 0.05, always: true},
-	{id: "taint", label: "taint propagation", prior: 0.02, always: true},
-	{id: "llm", label: "LLM review", prior: 6.0},
+	{id: "walk", label: "walk", prior: 0.02, always: true, group: groupFrontends},
+	{id: "go.list", label: "go list (metadata)", prior: 0.10, group: groupGo},
+	{id: "go.load", label: "go parse & typecheck", prior: 0.55, group: groupGo},
+	{id: "go.ssa", label: "go SSA build", prior: 0.25, group: groupGo},
+	{id: "go.lower", label: "go lowering", prior: 0.15, group: groupGo},
+	{id: convertSlot, prior: 0.30, group: groupFrontends},
+	{id: "index", label: "index & call graph", prior: 0.12, always: true, group: groupAnalysis},
+	{id: "ruleselect", label: "rule selection", prior: 0.05, always: true, group: groupAnalysis},
+	{id: "taint", label: "taint propagation", prior: 0.02, always: true, group: groupAnalysis},
+	{id: "llm", label: "LLM review", prior: 6.0, group: groupLLM},
 }
 
 // slot maps a stage id onto its table entry. An unregistered language's convert
@@ -73,6 +87,15 @@ func slot(id string) (stage, int) {
 		}
 	}
 	return stage{}, len(stages)
+}
+
+// groupName is the phase group a stage belongs to.
+func groupName(id string) string {
+	st, _ := slot(id)
+	if st.group == "" {
+		return groupFrontends
+	}
+	return st.group
 }
 
 // groupOf returns every id that runs alongside id, itself included.
@@ -221,19 +244,6 @@ func pipelineOrder(ids []string) []string {
 	return out
 }
 
-// overall is the weighted completion across every segment.
-func overall(segs []segment) float64 {
-	var done, total float64
-	for _, s := range segs {
-		total += s.weight
-		done += s.weight * s.fraction
-	}
-	if total == 0 {
-		return 0
-	}
-	return min(done/total, 1)
-}
-
 // fmtDur renders a duration at the display's own resolution, so no digit is
 // ever stale between ticks.
 func fmtDur(d time.Duration) string {
@@ -259,4 +269,119 @@ func clip(s string, n int) string {
 		return "…"
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// barSeg is one group's run of cells in the footer bar.
+type barSeg struct {
+	group string
+	cells int
+}
+
+// groupTime is a group's total cost, for the closing legend.
+type groupTime struct {
+	name    string
+	elapsed time.Duration
+}
+
+// bars apportions the footer's filled cells among the phase groups and returns
+// the overall percentage. Cells go by each group's COMPLETED weight, so the
+// filled length IS the progress and the track is what remains — the bar cannot
+// be full while work is outstanding.
+func bars(segs []segment, cells int) ([]barSeg, float64) {
+	done := map[string]float64{}
+	var total, finished float64
+	for _, s := range segs {
+		total += s.weight
+		d := s.weight * s.fraction
+		finished += d
+		done[groupName(s.id)] += d
+	}
+	if total <= 0 {
+		return nil, 0
+	}
+	pct := min(finished/total, 1)
+
+	// Largest remainder over the filled cells only, so the runs always sum to
+	// exactly the filled length and the bar never gains or loses a column.
+	filled := int(float64(cells)*pct + 0.5)
+	type share struct {
+		group string
+		exact float64
+		cells int
+	}
+	var shares []share
+	assigned := 0
+	for _, g := range groupOrder {
+		if done[g] <= 0 {
+			continue
+		}
+		exact := float64(filled) * done[g] / finished
+		n := int(exact)
+		shares = append(shares, share{g, exact - float64(n), n})
+		assigned += n
+	}
+	for i := 0; assigned < filled && len(shares) > 0; i++ {
+		best, bestFrac := -1, -1.0
+		for j := range shares {
+			if shares[j].exact > bestFrac {
+				best, bestFrac = j, shares[j].exact
+			}
+		}
+		shares[best].cells++
+		shares[best].exact = -1
+		assigned++
+		if i > cells {
+			break
+		}
+	}
+
+	var out []barSeg
+	for _, sh := range shares {
+		if sh.cells > 0 {
+			out = append(out, barSeg{group: sh.group, cells: sh.cells})
+		}
+	}
+	return out, pct
+}
+
+// groupTimes totals what each group cost, in pipeline order.
+func groupTimes(segs []segment) []groupTime {
+	sum := map[string]time.Duration{}
+	for _, s := range segs {
+		if s.started {
+			sum[groupName(s.id)] += s.elapsed
+		}
+	}
+	out := make([]groupTime, 0, len(groupOrder))
+	for _, g := range groupOrder {
+		if sum[g] > 0 {
+			out = append(out, groupTime{name: g, elapsed: sum[g]})
+		}
+	}
+	return out
+}
+
+// runningLabel names what is in flight, for the footer's trailing field.
+func runningLabel(segs []segment) string {
+	for _, s := range segs {
+		if s.running {
+			return s.label
+		}
+	}
+	return ""
+}
+
+// completed treats every segment as finished, for the closing frame: the bar has
+// to read 100% when the run actually finished, not carry the estimate a stage
+// that never registered was still holding a place for.
+func completed(segs []segment) []segment {
+	out := make([]segment, 0, len(segs))
+	for _, s := range segs {
+		if !s.started {
+			continue
+		}
+		s.fraction = 1
+		out = append(out, s)
+	}
+	return out
 }

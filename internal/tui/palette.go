@@ -1,65 +1,91 @@
 package tui
 
-// Palette "pipeline sweep": hue climbs monotonically with position in the run,
-// magenta through blue and teal to green and yellow, so where the scan has got
-// to reads off the bar without consulting the legend.
-//
-// Every colour was re-luminanced to clear 3:1 contrast against BOTH a dark and a
-// light terminal — 3.12:1 and 3.13:1 at worst. That is the constraint that rules
-// out most terminal palettes, which assume black behind them.
-//
-// The sweep's cost is that adjacent hues are close by construction, and for
-// tritanopia they are very close (adjacent ΔE 1.3, against 7.2 deuteranopic and
-// 6.0 protanopic). segTexture is the answer: neighbouring segments alternate
-// their fill block, so every boundary carries a luminance step as well as a hue
-// step and the breakdown survives with no colour discrimination at all.
-var (
-	sweepTrueHex = map[string]string{
-		"walk":       "#b763c4",
-		"go.list":    "#7360d5",
-		"go.load":    "#3691d6",
-		"go.ssa":     "#147e89",
-		"go.lower":   "#128167",
-		"convert":    "#289e4f",
-		"index":      "#499e2a",
-		"ruleselect": "#6e7912",
-		"taint":      "#ac7c0b",
-		// The review draws in its own bar, alone, so it has no neighbour to be
-		// confused with — only FAILED, which it stays well clear of.
-		"llm": "#3691d6",
-	}
-	sweepIdx256 = map[string]int{
-		"walk": 133, "go.list": 27, "go.load": 32, "go.ssa": 30, "go.lower": 28,
-		"convert": 66, "index": 64, "ruleselect": 137, "taint": 136, "llm": 32,
-	}
-	sweepAnsi16 = map[string]int{
-		"walk": 35, "go.list": 34, "go.load": 94, "go.ssa": 96, "go.lower": 36,
-		"convert": 92, "index": 32, "ruleselect": 93, "taint": 33, "llm": 94,
-	}
+import (
+	"fmt"
+	"strconv"
 )
 
-// failedHex is the one hue outside the sweep, and deliberately so: a dead
-// frontend has to read as an exception rather than as the next stage along.
+// The palette is SEMANTIC, not per-stage. A colour means an outcome — complete,
+// partial, failed, running — and the only place a hue stands for a position in
+// the run is the footer bar, where four phase groups are told apart.
+//
+// That is the whole reason it replaced a per-stage hue sweep: thirteen hues
+// climbing through the spectrum encoded where you were, which the trailing label
+// on the bar already says, and spent the one channel that could have carried
+// whether a phase actually succeeded.
 const (
-	failedHex    = "#ea5b51"
-	failed256    = 131
-	failedAnsi16 = 91
-	trackHex     = "#71727c"
-	track256     = 243
-	trackAnsi16  = 90
+	okHex    = "#2fbfa8" // complete
+	accHex   = "#78e3d2" // running, and the LLM group
+	partHex  = "#d3982f" // partial — it ran, but not everything got through
+	badHex   = "#e0554a" // failed
+	infoHex  = "#4c8dd0" // the Go group, and paths
+	fgHex    = "#e9ebee"
+	mutHex   = "#8b929e"
+	dimHex   = "#5f6672"
+	trackHex = "#252a32"
 )
 
-func applyPalette(p *palette) {
-	p.trueHex, p.idx256, p.ansi16 = sweepTrueHex, sweepIdx256, sweepAnsi16
+// 256-colour and 16-colour stand-ins, nearest by eye on a dark terminal. The
+// 16-colour rung cannot separate ok from acc, which is why the glyphs carry the
+// distinction too.
+var (
+	idx256 = map[string]int{
+		okHex: 43, accHex: 122, partHex: 178, badHex: 167, infoHex: 68,
+		fgHex: 255, mutHex: 246, dimHex: 241, trackHex: 236,
+	}
+	ansi16 = map[string]int{
+		okHex: 36, accHex: 96, partHex: 33, badHex: 31, infoHex: 34,
+		fgHex: 37, mutHex: 37, dimHex: 90, trackHex: 90,
+	}
+)
+
+type palette struct{ mode colorMode }
+
+// paint wraps text in the escape for one palette colour, or returns it bare when
+// the terminal has no colour. Every rendering path goes through here, so a
+// no-colour terminal never sees a stray escape.
+func (p palette) paint(hex, text string) string {
+	if p.mode == colorNone || text == "" {
+		return text
+	}
+	switch p.mode {
+	case colorTrue:
+		r, g, b := rgb(hex)
+		return sgr(fmt.Sprintf("38;2;%d;%d;%d", r, g, b), text)
+	case color256:
+		return sgr(fmt.Sprintf("38;5;%d", idx256[hex]), text)
+	default:
+		return sgr(strconv.Itoa(ansi16[hex]), text)
+	}
 }
 
-// key resolves a stage id to a palette entry. Every frontend's convert stage
-// shares one colour: they run CONCURRENTLY, so they are not steps along the
-// sweep, and giving each language its own hue would break the "hue means
-// position" reading the palette is built on.
-func key(id string) string {
-	if len(id) > 8 && id[len(id)-8:] == ".convert" {
-		return "convert"
+func sgr(code, text string) string { return "\x1b[" + code + "m" + text + "\x1b[0m" }
+
+func rgb(hex string) (r, g, b int) {
+	v, err := strconv.ParseUint(hex[1:], 16, 32)
+	if err != nil {
+		return 0xee, 0xee, 0xee
 	}
-	return id
+	return int(v >> 16 & 0xff), int(v >> 8 & 0xff), int(v & 0xff)
+}
+
+func (p palette) acc(s string) string   { return p.paint(accHex, s) }
+func (p palette) bad(s string) string   { return p.paint(badHex, s) }
+func (p palette) fg(s string) string    { return p.paint(fgHex, s) }
+func (p palette) mut(s string) string   { return p.paint(mutHex, s) }
+func (p palette) dim(s string) string   { return p.paint(dimHex, s) }
+func (p palette) track(s string) string { return p.paint(trackHex, s) }
+
+// groupHex is the footer bar's only use of colour as position. Four groups, in
+// pipeline order.
+func groupHex(g string) string {
+	switch g {
+	case groupGo:
+		return infoHex
+	case groupAnalysis:
+		return partHex
+	case groupLLM:
+		return accHex
+	}
+	return okHex
 }

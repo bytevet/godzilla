@@ -4,15 +4,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bytevet/godzilla/internal/progress"
 )
 
-// colorMode is how much colour the terminal was found to support. Everything
-// below plain still renders: the bar distinguishes stages by FILL GLYPH as well
-// as by colour, so the breakdown survives NO_COLOR, a dumb terminal, and
-// colour-vision deficiency alike. Colour is an enhancement, never the only
-// channel carrying the information.
 type colorMode int
 
 const (
@@ -22,268 +18,287 @@ const (
 	colorTrue
 )
 
-// segGlyphs distinguish adjacent segments without colour. They cycle, so two
-// segments of the same glyph are never adjacent for the stage counts we draw.
-var segGlyphs = []rune{'#', '=', '~', '+', 'o', 'x', '*', '%', '@', '&'}
-
-// One glyph for every filled segment, so the bar is an unbroken rule and a
-// boundary is a change of HUE only — nothing in the fill itself moves.
-//
-// That leaves colour carrying the segmentation on its own, and the palette's
-// hues climb monotonically with pipeline position, so adjacent ones sit close
-// together: under tritanopia, close enough to merge (ΔE 1.3). segGlyphs is what
-// covers the no-colour case; a viewer with reduced colour discrimination and a
-// colour terminal reads the bar as one length, plus the running stage's name.
+// The status glyphs. Three OUTCOMES are distinguishable without colour, which
+// matters for the no-colour build and for a red/green deficiency — the colour is
+// a second channel carrying the same fact, never the only one.
 const (
-	fullBlock  = '█'
-	emptyBlock = '░'
+	glyphOK      = "✓"
+	glyphPartial = "!"
+	glyphFailed  = "✗"
 )
 
-type palette struct {
-	mode colorMode
-	// codes maps a stage id to its SGR parameters, per mode. Filled in from the
-	// chosen palette; a stage with no entry falls back to the default.
-	trueHex map[string]string
-	idx256  map[string]int
-	ansi16  map[string]int
+// asciiStatus is the no-colour form. It widens to a three-character bracket so
+// four states stay distinct with no colour at all; column positions shift by
+// one, nothing else changes.
+var asciiStatus = map[string]string{
+	glyphOK: "[+]", glyphPartial: "[!]", glyphFailed: "[x]",
 }
 
-func (p palette) sgr(id string) string {
-	switch p.mode {
-	case colorTrue:
-		if hex, ok := p.trueHex[key(id)]; ok {
-			var r, g, b int
-			if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b); err == nil {
-				return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
-			}
+// spinFrames is the running marker. Braille reads as motion at a glance and
+// costs one cell; the ASCII rung falls back to a rotating bar inside [*],
+// because braille is not safe on a legacy console.
+var (
+	spinFrames  = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	spinASCII   = []rune{'|', '/', '-', '\\'}
+	barFill     = '█'
+	barTrack    = '░'
+	legendBlock = "▪"
+)
+
+// The phase row's columns, in characters. Fixed widths are the point: the
+// numbers line up down the block, so a slow phase is found by scanning one
+// column rather than reading every row.
+const (
+	colStatus  = 3
+	colName    = 26
+	colVolume  = 11
+	colCovered = 8
+	colTook    = 9
+	colElapsed = 9
+
+	// The narrow tier, once volume and took are gone.
+	narrowCovered = 10
+	narrowElapsed = 8
+)
+
+// row is one phase line. Which columns survive depends on the width: took goes
+// first, then volume, because they are the two a reader can do without — status,
+// name, coverage and the elapsed clock are the four that answer "what happened
+// and how far in".
+func (p palette) row(s progress.Snapshot, width int, spin int) string {
+	status, hex := statusOf(s)
+
+	statusW := colStatus
+	if p.mode == colorNone {
+		statusW++
+		if s.Running {
+			status = "[" + string(spinASCII[spin%len(spinASCII)]) + "]"
+		} else {
+			status = asciiStatus[status]
 		}
-	case color256:
-		if i, ok := p.idx256[key(id)]; ok {
-			return fmt.Sprintf("\x1b[38;5;%dm", i)
-		}
-	case color16:
-		if c, ok := p.ansi16[key(id)]; ok {
-			return fmt.Sprintf("\x1b[%dm", c)
-		}
+	} else if s.Running {
+		status = string(spinFrames[spin%len(spinFrames)])
+	}
+
+	// A running row has no took and no coverage yet: only the elapsed clock
+	// moves, so the columns cannot reflow under the reader when they land.
+	took, covered := "", ""
+	if !s.Running {
+		took = "+" + fmtDur(s.Elapsed)
+		covered = coverageOf(s)
+	}
+	// Two clocks, and they answer different questions: +took is what this phase
+	// COST, @elapsed is where the run stood when it ended.
+	elapsed := "@" + fmtDur(s.Offset+s.Elapsed)
+
+	var b strings.Builder
+	b.WriteString(p.paint(hex, pad(status, statusW)))
+	switch {
+	case width >= statusW+colName+colVolume+colCovered+colTook+colElapsed:
+		b.WriteString(p.fg(pad(s.Label, colName)))
+		b.WriteString(p.mut(rpad(volumeOf(s), colVolume)))
+		b.WriteString(p.paint(hex, rpad(covered, colCovered)))
+		b.WriteString(p.dim(rpad(took, colTook)))
+		b.WriteString(p.mut(rpad(elapsed, colElapsed)))
+	case width >= statusW+colName+colVolume+colCovered+colElapsed:
+		b.WriteString(p.fg(pad(s.Label, colName)))
+		b.WriteString(p.mut(rpad(volumeOf(s), colVolume)))
+		b.WriteString(p.paint(hex, rpad(covered, colCovered)))
+		b.WriteString(p.mut(rpad(elapsed, colElapsed)))
+	default:
+		// The four that survive: status, name, coverage, elapsed. The name gives
+		// up whatever the width still needs.
+		name := max(width-statusW-narrowCovered-narrowElapsed, 4)
+		b.WriteString(p.fg(pad(s.Label, name)))
+		b.WriteString(p.paint(hex, rpad(covered, narrowCovered)))
+		b.WriteString(p.mut(rpad(elapsed, narrowElapsed)))
+	}
+	// Clipped unconditionally: a row that wrapped would put every later erase out
+	// by a line and eat the scrollback above the block.
+	return clipStyled(b.String(), width)
+}
+
+// statusOf reduces a stage to the one thing the row leads with. Coverage decides
+// it: a frontend that ran but lowered only some of its files is PARTIAL, which
+// the old display could not say at all — it reported the phase as done and left
+// the completeness to a separate line further down.
+func statusOf(s progress.Snapshot) (glyph, hex string) {
+	switch {
+	case s.Failed:
+		return glyphFailed, badHex
+	case s.Running:
+		return glyphOK, accHex
+	case s.CoverTotal > 0 && s.Covered < s.CoverTotal:
+		return glyphPartial, partHex
+	}
+	return glyphOK, okHex
+}
+
+func coverageOf(s progress.Snapshot) string {
+	if s.CoverTotal > 0 {
+		return fmt.Sprintf("%d/%d", s.Covered, s.CoverTotal)
+	}
+	if s.Failed {
+		return "failed"
 	}
 	return ""
 }
 
-// paint wraps s in the stage's colour. With colour off it returns s unchanged,
-// which is what lets every caller be written once.
-func (p palette) paint(id, s string) string {
-	code := p.sgr(id)
-	if code == "" {
-		return s
+// volumeOf is how much work the phase represents. While it runs the reader wants
+// the fraction; once it is done the total is the durable fact.
+func volumeOf(s progress.Snapshot) string {
+	if s.Total <= 0 {
+		return ""
 	}
-	return code + s + "\x1b[0m"
+	if s.Running {
+		return fmt.Sprintf("%d of %d", s.Done, s.Total)
+	}
+	return strings.TrimSpace(fmt.Sprintf("%d %s", s.Total, s.Unit))
 }
 
-func (p palette) dim(s string) string {
-	return p.wrap(s, trackHex, track256, trackAnsi16)
+// The footer is exactly footerWidth columns, always. Its fields are fixed so the
+// bar cannot jitter as phase names change length: a label longer than its field
+// truncates instead.
+const (
+	footerWidth = 80
+	barCells    = 40
+	pctWidth    = 4
+	elapsedW    = 6
+	labelWidth  = 24
+	abortedText = "stopped"
+)
+
+// footer draws the bar, the percentage, the clock and the running phase. On
+// abort the percentage is replaced by "stopped" and the label is dropped: a
+// progress bar that races to 100% on a crash is a lie.
+// barCellsFor is how wide the bar may be. The trailing label leaves the footer
+// before the bar shortens — a two-character bar is worth less than the
+// percentage — and below that the bar gives up cells one at a time.
+func barCellsFor(width int) (cells int, withLabel bool) {
+	if width >= footerWidth {
+		return barCells, true
+	}
+	fixed := 2 + pctWidth + 2 + elapsedW
+	if width >= barCells+fixed {
+		return barCells, false
+	}
+	return max(width-fixed, 4), false
 }
 
-func (p palette) failed(s string) string {
-	return p.wrap(s, failedHex, failed256, failedAnsi16)
-}
-
-func (p palette) wrap(s, hex string, idx, ansi int) string {
-	var code string
-	switch p.mode {
-	case colorTrue:
-		var r, g, b int
-		if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b); err == nil {
-			code = fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
-		}
-	case color256:
-		code = fmt.Sprintf("\x1b[38;5;%dm", idx)
-	case color16:
-		code = fmt.Sprintf("\x1b[%dm", ansi)
-	}
-	if code == "" {
-		return s
-	}
-	return code + s + "\x1b[0m"
-}
-
-// cells apportions width columns across the segments by weight, giving every
-// started segment at least one column so a stage in flight is never invisible,
-// and making the widths sum to exactly width so the bar cannot wrap.
-func cells(segs []segment, width int) []int {
-	if width <= 0 || len(segs) == 0 {
-		return make([]int, len(segs))
-	}
-	var total float64
-	for _, s := range segs {
-		total += s.weight
-	}
-	out := make([]int, len(segs))
-	if total == 0 {
-		out[0] = width
-		return out
-	}
-	// A stage that ran too briefly to earn a column still gets one, or a fast
-	// stage disappears from the bar while its legend entry says it happened.
-	floor := 0
-	for _, s := range segs {
-		if s.started {
-			floor++
-		}
-	}
-	if floor > width {
-		floor = 0 // too narrow to guarantee anything; fall back to pure weight
-	}
-	// Largest-remainder apportionment: floor everything, then hand the leftover
-	// columns to the biggest fractional parts. Rounding each independently would
-	// not sum to width.
-	rem := make([]float64, len(segs))
-	used := 0
-	spare := width - floor
-	for i, s := range segs {
-		exact := float64(spare) * s.weight / total
-		out[i] = int(exact)
-		if s.started && floor > 0 {
-			out[i]++
-		}
-		rem[i] = exact - float64(int(exact))
-		used += out[i]
-	}
-	for used < width {
-		best, bestVal := -1, -1.0
-		for i := range segs {
-			if rem[i] > bestVal {
-				best, bestVal = i, rem[i]
-			}
-		}
-		out[best]++
-		rem[best] = -1
-		used++
-	}
-	return out
-}
-
-// bar renders the segmented bar body, without brackets.
-func (p palette) bar(segs []segment, width int) string {
-	widths := cells(segs, width)
+func (p palette) footer(segs []barSeg, cells int, pct float64, elapsed time.Duration, label string, aborted bool) string {
 	var b strings.Builder
-	for i, s := range segs {
-		w := widths[i]
-		if w == 0 {
-			continue
-		}
-		filled := int(float64(w)*s.fraction + 0.5)
-		if s.started && filled == 0 && s.fraction > 0 {
-			filled = 1 // a stage in flight always shows at least one cell
-		}
-		glyph := segGlyphs[i%len(segGlyphs)]
-		if p.mode != colorNone {
-			glyph = fullBlock
-		}
-		if s.failed {
-			// Colour alone must never be what tells you a frontend died.
-			glyph = '!'
-		}
-		if filled > 0 {
-			run := strings.Repeat(string(glyph), filled)
-			if s.failed {
-				b.WriteString(p.failed(run))
-			} else {
-				b.WriteString(p.paint(s.id, run))
-			}
-		}
-		if w-filled > 0 {
-			b.WriteString(p.dim(strings.Repeat(string(emptyBlock), w-filled)))
-		}
+	b.WriteString(p.bar(segs, cells, aborted))
+	b.WriteString("  ")
+	if aborted {
+		b.WriteString(p.bad(abortedText))
+		b.WriteString("  ")
+		b.WriteString(p.fg(rpad(fmtDur(elapsed), elapsedW)))
+		return b.String()
+	}
+	b.WriteString(p.mut(rpad(fmt.Sprintf("%.0f%%", pct*100), pctWidth)))
+	b.WriteString("  ")
+	b.WriteString(p.mut(rpad(fmtDur(elapsed), elapsedW)))
+	if label != "" {
+		b.WriteString("  ")
+		b.WriteString(p.acc(pad(clip(label, labelWidth), labelWidth)))
 	}
 	return b.String()
 }
 
-// legend names each stage in its own colour, with its elapsed time once it has
-// started. This is the "finished stage and the time it took" half of the
-// display, live rather than only at the end.
-// shortLabel drops the language prefix the running-stage text does not need — the
-// colour and position already say which stage it is, and the legend has to fit
-// several entries on one line.
-func shortLabel(label string) string {
-	label = strings.TrimSuffix(label, " parse & lower")
-	for _, cut := range []string{"go list (metadata)", "go parse & typecheck", "go SSA build", "go lowering"} {
-		if label == cut {
-			return strings.TrimPrefix(cut, "go ")
-		}
-	}
-	return label
-}
-
-// ledgerLine is what a finished stage leaves behind in the scrollback. It is
-// deliberately plain text with an ASCII outcome token, so it reads the same in a
-// terminal, in a screenshot and in a pasted bug report.
-func (p palette) ledgerLine(s progress.Snapshot, width int) string {
-	mark, paint := "✓", p.paint
-	if s.Failed {
-		mark, paint = "✗", func(_, str string) string { return p.failed(str) }
-	}
-	// A bare denominator says nothing on its own — 8626 of what? — so a stage
-	// that counts anything names its unit, and one that counts nothing shows no
-	// number at all rather than a zero.
-	count := ""
-	if s.Total > 0 {
-		count = fmt.Sprintf("%d %s", s.Total, s.Unit)
-		if s.Done != s.Total {
-			count = fmt.Sprintf("%d/%d %s", s.Done, s.Total, s.Unit)
-		}
-	}
-	// Two clocks, because they answer different questions: +d is what this stage
-	// COST, @d is where the run stood when it ended.
-	body := fmt.Sprintf("  %s %-24s %16s   %8s %9s", mark, s.Label, strings.TrimSpace(count),
-		"+"+fmtDur(s.Elapsed), "@"+fmtDur(s.Offset+s.Elapsed))
-	return paint(s.ID, clip(strings.TrimRight(body, " "), width))
-}
-
-// frame is the sticky block: the bar and its legend. Pure — a display can be
-// exercised entirely through this with no terminal at all. elapsed is the
-// scan's own wall clock, which cannot be derived from the stages: they overlap,
-// so neither their sum nor their maximum is the answer.
-func frame(stages []progress.Snapshot, width int, p palette, elapsed time.Duration, floor float64, expect []string) ([]string, float64) {
-	segs := plan(stages, expect)
-	if len(segs) == 0 {
-		return nil, floor
-	}
-	// Clamped monotone: re-weighting a finished stage to its real cost can move
-	// the arithmetic backwards, and a bar that retreats reads as a fault.
-	pct := max(overall(segs), floor)
-
-	// No brackets: the fill and the track already say where the bar ends.
-	suffix := fmt.Sprintf(" %3.0f%% %8s", pct*100, fmtDur(elapsed))
-	active, activeID := activeLabel(segs)
-	inner := width - 1 - len(suffix) - len(active)
-	if inner < 8 {
-		// Too narrow for a segmented bar; a percentage still fits.
-		return []string{clip(fmt.Sprintf("scanning %3.0f%% %s", pct*100, fmtDur(elapsed)), width-1)}, pct
-	}
-	return []string{p.bar(segs, inner) + suffix + p.paint(activeID, active)}, pct
-}
-
-// activeWidth caps the running-stage text so the bar itself keeps most of the
-// line even when several frontends run at once.
-const activeWidth = 30
-
-// activeLabel names what is running at this instant. It is what the bar carries
-// instead of a second legend row: a stage that has FINISHED is already written
-// into the scrollback with its elapsed time, so the one thing the sticky line
-// cannot get from anywhere else is where the scan is right now.
-func activeLabel(segs []segment) (text, id string) {
-	var names []string
+// bar is one run of cells per phase GROUP, sized by that group's share of the
+// work done so far, with the remainder left as track. Without colour it
+// collapses to a single bracketed run: per-group segments are a colour encoding,
+// and colourless they would read as a bar with unexplained gaps.
+func (p palette) bar(segs []barSeg, cells int, aborted bool) string {
+	filled := 0
 	for _, s := range segs {
-		if !s.running {
+		filled += s.cells
+	}
+	if p.mode == colorNone {
+		inner := cells - 2
+		filled = min(filled, inner)
+		return "[" + strings.Repeat("=", filled) + strings.Repeat("-", inner-filled) + "]"
+	}
+	var b strings.Builder
+	used := 0
+	for i, s := range segs {
+		hex := groupHex(s.group)
+		if aborted && i == len(segs)-1 {
+			hex = badHex
+		}
+		b.WriteString(p.paint(hex, strings.Repeat(string(barFill), s.cells)))
+		used += s.cells
+	}
+	if used < cells {
+		b.WriteString(p.track(strings.Repeat(string(barTrack), cells-used)))
+	}
+	return b.String()
+}
+
+// legend appears only at rest. Mid-run the reader is watching a bar move and the
+// trailing label already names the phase; at the end there is time to read what
+// the colours meant, and the per-group totals are the answer to "where did it
+// go".
+func (p palette) legend(groups []groupTime, width int) string {
+	var parts []string
+	for _, g := range groups {
+		if g.elapsed <= 0 {
 			continue
 		}
-		if id == "" {
-			id = s.id
+		parts = append(parts, p.paint(groupHex(g.name), legendBlock)+
+			p.dim(" "+g.name+" "+fmtDur(g.elapsed)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return clipStyled(strings.Join(parts, "  "), width)
+}
+
+// pad and rpad lay a cell out to a fixed COLUMN count. len() is bytes, and a
+// glyph like ✓ is three of them, so the width has to be counted in runes or the
+// columns drift the moment a non-ASCII marker appears.
+func pad(s string, w int) string {
+	if n := len([]rune(s)); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return clip(s, w)
+}
+
+func rpad(s string, w int) string {
+	if n := len([]rune(s)); n < w {
+		return strings.Repeat(" ", w-n) + s
+	}
+	return clip(s, w)
+}
+
+// clipStyled truncates to n VISIBLE columns, stepping over SGR sequences so an
+// escape is never counted as width and never cut in half.
+func clipStyled(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	seen := 0
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			j := i
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			b.WriteString(s[i:j])
+			i = j
+			continue
 		}
-		names = append(names, shortLabel(s.label))
+		if seen == n {
+			return b.String() + "\x1b[0m"
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteString(s[i : i+size])
+		i += size
+		seen++
 	}
-	if len(names) == 0 {
-		return "", ""
-	}
-	return clip("  "+strings.Join(names, " + ")+"…", activeWidth), id
+	return b.String()
 }

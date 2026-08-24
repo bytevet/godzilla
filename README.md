@@ -104,29 +104,46 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
 `--fail-on` (default: `medium`). Use the exit code as your CI gate.
 
-When stderr is a terminal, a scan shows its progress: a one-line segmented bar
-broken down by pipeline stage, naming whatever is running right now. Each stage
-leaves the scrollback a line as it finishes — what it cost (`+`) and where the
-run stood when it ended (`@`). The bar covers `--llm-review` too, which is the
-longest wait in a run.
+When stderr is a terminal, a scan shows its progress. Each phase is a row that
+carries its own completeness, so a language's coverage is read where the phase
+is; a running phase keeps a spinner and a clock, and gains its `took` and
+coverage only when it lands. The footer is a fixed 80 columns — a 40-cell bar
+segmented by phase group, then percent, elapsed and the running phase.
 
-Frontend warnings stream into a pane above the bar while the scan runs, so a
-forty-line `rustc` diagnostic cannot bury the stage list. The pane takes up to a
-third of the terminal and wraps rather than truncates, so a message is readable
-as it goes past. It is a preview: every captured line is written out in full, in
-order, when the scan finishes.
+Frontend warnings stream into a pane above the bar, each naming the language and
+the file it came from. It is a preview: every captured line is written out in
+full when the scan finishes.
 
 ```
-  ✓ go list (metadata)                            +0.34s    @0.36s
-  ✓ go parse & typecheck                          +0.59s    @0.95s
-  ✓ go lowering                    8636 funcs     +0.14s    @1.32s
-  37 warning(s), last 6
-    help: you might be missing a crate named `rouille`, add it to your project
-      and import it in your code
-    7 + extern crate rouille;
-    error: aborting due to 1 previous error
-    For more information about this error, try `rustc --explain E0432`.
-███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
+✓  walk                                             +0.02s   @0.02s
+!  javascript parse & lower     87 files    86/87   +0.09s   @0.11s
+✓  ruby parse & lower           47 files    47/47   +0.18s   @0.20s
+⠹  java parse & lower                                        @1.20s
+
+  6 warnings · last 2
+  rust      cannot find module or crate `reqwest` in this scope
+            → test/rust/ssrf_reqwest/src/lib.rs:12
+  rust      unresolved import `rouille`
+            → test/rust/web_rouille/src/lib.rs:7
+
+██████████████████████████████░░░░░░░░░░   76%   1.20s  go parse & typecheck
+```
+
+Three outcomes stay distinct without colour — `✓` complete, `!` partial, `✗`
+failed — and under `NO_COLOR` the status widens to `[+] [!] [x] [*]` and the bar
+collapses to a single `[====----]` run. Below 80 columns the `took` column goes
+first, then `volume`; status, name, coverage and the elapsed clock survive.
+
+At rest the bar completes, a legend names what each group cost, and a closing
+block states the outcome with its exit code and its reason:
+
+```
+███████████████████████████████████████████████████   100%   1.47s
+▪ frontends 2.10s  ▪ go 1.26s  ▪ analysis 0.10s
+
+  201 findings 76 critical  80 high  26 medium  19 low
+  incomplete  python, javascript, java, rust — cpp failed
+  exit 3      findings at or above -fail-on=medium
 ```
 
 The bar draws on **stderr only**, and findings stay on stdout, so redirecting

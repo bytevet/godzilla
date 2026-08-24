@@ -19,6 +19,8 @@ package frontend
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -200,12 +202,17 @@ func (b *Batch[R]) run(root string, files []string, isDir bool) (*ir.Program, in
 		mod, err := b.Result(&results[i])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: skipping %s: %v\n", b.Label, files[i], err)
+			// Reported to the display as well as to stderr: the row needs the
+			// language and the file, which are not recoverable from the text.
+			progress.Warn(lang, skipReason(err), rel(root, files[i])+errLine(err))
 			skipped++
 			convertErrs = append(convertErrs, err.Error())
 			continue
 		}
 		prog.Modules = append(prog.Modules, mod)
 	}
+	// Coverage belongs on the phase row, so it is recorded before Done.
+	stage.Cover(len(files)-skipped, len(files))
 	if len(prog.Modules) == 0 {
 		err := fmt.Errorf("%s: no %s files under %s converted successfully (%d file(s) failed): %s",
 			b.Label, b.Lang, root, len(convertErrs), strings.Join(convertErrs, "; "))
@@ -243,4 +250,47 @@ func runChunks(n int, fn func(start, end int)) {
 		go func(start, end int) { defer wg.Done(); fn(start, end) }(start, end)
 	}
 	wg.Wait()
+}
+
+// rel shortens an absolute path back to the scan root, which is how a reader
+// recognises the file. The display has one line for it and the prefix is the
+// least useful part.
+func rel(root, path string) string {
+	if r, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(r, "..") {
+		return r
+	}
+	return path
+}
+
+// skipReason pulls the part of a converter error a reader acts on. The wrapping
+// repeats the file path twice and the converter name three times before getting
+// to what the compiler actually said.
+//
+// FIRST LINE ONLY, and no embedded newline survives: the display lays warnings
+// out itself and counts the rows it drew, so a message carrying its own line
+// breaks would make that count wrong and corrupt the scrollback above the bar.
+func skipReason(err error) string {
+	msg, _, _ := strings.Cut(err.Error(), "\n")
+	msg = strings.Join(strings.Fields(msg), " ")
+	if i := strings.LastIndex(msg, ": "); i >= 0 && len(msg)-i-2 > 12 {
+		return msg[i+2:]
+	}
+	return msg
+}
+
+// errLine finds the source line a diagnostic is pointing at. rustc writes
+// `--> path:line:col`, python and esbuild write `line N`; between them that is
+// every frontend that reports one at all.
+var (
+	arrowLine = regexp.MustCompile(`-->[^\n]*?:(\d+):\d+`)
+	wordLine  = regexp.MustCompile(`\bline (\d+)\b`)
+)
+
+func errLine(err error) string {
+	for _, re := range []*regexp.Regexp{arrowLine, wordLine} {
+		if m := re.FindStringSubmatch(err.Error()); m != nil {
+			return ":" + m[1]
+		}
+	}
+	return ""
 }

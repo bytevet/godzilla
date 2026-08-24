@@ -45,10 +45,22 @@ type Stage struct {
 	// function from every worker, so this is the one genuinely hot write.
 	done atomic.Int64
 
-	mu       sync.Mutex
-	end      time.Time
-	finished bool
-	failed   bool
+	mu         sync.Mutex
+	end        time.Time
+	finished   bool
+	failed     bool
+	covered    int
+	coverTotal int
+}
+
+// Warning is a diagnostic a producer wants shown, already broken into the parts
+// a reader needs: which language it came from, what happened, and where. The
+// display shows these; the raw text a frontend also writes to stderr stays the
+// complete record.
+type Warning struct {
+	Lang     string
+	Message  string
+	Location string // "path:line", or empty
 }
 
 // Snapshot is one stage as a display sees it. Elapsed runs live while the stage
@@ -65,13 +77,21 @@ type Snapshot struct {
 	Elapsed time.Duration
 	Running bool
 	Failed  bool
+
+	// Covered is how much of the stage's input actually made it through, of
+	// CoverTotal. CoverTotal is 0 when the stage has nothing to report. This is
+	// what lets a phase row carry its own completeness, instead of a separate
+	// coverage line the reader has to map back onto the phases.
+	Covered    int
+	CoverTotal int
 }
 
 var (
-	mu      sync.Mutex
-	armed   bool
-	armedAt time.Time
-	ledger  []*Stage
+	mu       sync.Mutex
+	armed    bool
+	armedAt  time.Time
+	ledger   []*Stage
+	warnings []Warning
 )
 
 // Enable arms the registry for one scan and returns the function that disarms
@@ -88,7 +108,7 @@ func Enable() (disable func()) {
 	if armed {
 		return func() {}
 	}
-	armed, armedAt, ledger = true, now(), nil
+	armed, armedAt, ledger, warnings = true, now(), nil, nil
 	return func() {
 		mu.Lock()
 		armed = false
@@ -139,6 +159,36 @@ func (s *Stage) Done(err error) {
 	s.failed = err != nil
 }
 
+// Cover records how much of the stage's input reached the engine. A frontend
+// knows this only once it has collected its results, which is after the last
+// Advance and before Done.
+func (s *Stage) Cover(covered, total int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.covered, s.coverTotal = covered, total
+	s.mu.Unlock()
+}
+
+// Warn records a diagnostic for the display. It is additive: a producer that
+// calls it should still write its own text to stderr, which stays the record.
+func Warn(lang, message, location string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if !armed {
+		return
+	}
+	warnings = append(warnings, Warning{Lang: lang, Message: message, Location: location})
+}
+
+// Warnings returns every recorded diagnostic, in the order they were reported.
+func Warnings() []Warning {
+	mu.Lock()
+	defer mu.Unlock()
+	return slices.Clone(warnings)
+}
+
 // Stages returns every registered stage in registration order.
 func Stages() []Snapshot {
 	mu.Lock()
@@ -160,14 +210,16 @@ func (s *Stage) snapshot() Snapshot {
 		elapsed = s.end.Sub(s.start)
 	}
 	return Snapshot{
-		ID:      s.id,
-		Label:   s.label,
-		Total:   s.total,
-		Unit:    s.unit,
-		Done:    int(s.done.Load()),
-		Offset:  s.start.Sub(armedAt),
-		Elapsed: elapsed,
-		Running: !s.finished,
-		Failed:  s.failed,
+		ID:         s.id,
+		Label:      s.label,
+		Total:      s.total,
+		Unit:       s.unit,
+		Done:       int(s.done.Load()),
+		Offset:     s.start.Sub(armedAt),
+		Elapsed:    elapsed,
+		Running:    !s.finished,
+		Failed:     s.failed,
+		Covered:    s.covered,
+		CoverTotal: s.coverTotal,
 	}
 }

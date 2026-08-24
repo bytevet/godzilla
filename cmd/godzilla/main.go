@@ -107,6 +107,7 @@ func trapInterrupt(ui *tui.UI) {
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-ch
+		ui.Abort()
 		ui.Stop()
 		if sig == syscall.SIGTERM {
 			os.Exit(143)
@@ -310,6 +311,9 @@ func runScan(args []string) {
 		scanOpts = append(scanOpts, scan.WithProgress())
 	}
 	exitWith := func(code int) {
+		if code != exitClean {
+			ui.Abort()
+		}
 		ui.Stop()
 		os.Exit(code)
 	}
@@ -332,7 +336,10 @@ func runScan(args []string) {
 		res.Diag.PeakBytes = ms.Sys
 	}
 
-	if !*quiet {
+	// Only when piped. On a terminal the completeness is on the phase rows and
+	// again in the closing block, and this line — which ran off the right edge —
+	// is what that replaced.
+	if !*quiet && !st.on {
 		printCoverage(ui.Stdout(), res.Coverage, st)
 	}
 
@@ -420,6 +427,7 @@ func runScan(args []string) {
 		{*jsonPath, "JSON", report.WriteJSON},
 		{*sarifPath, "SARIF", report.WriteSARIF},
 	}
+	var written []string
 	for _, r := range reports {
 		if r.path == "" {
 			continue
@@ -428,7 +436,10 @@ func runScan(args []string) {
 			fmt.Fprintf(os.Stderr, "error: writing %s report: %v\n", r.kind, err)
 			os.Exit(exitError)
 		}
-		fmt.Fprintf(os.Stdout, "%s report written to %s\n", r.kind, r.path)
+		written = append(written, r.path)
+		if !st.on {
+			fmt.Fprintf(os.Stdout, "%s report written to %s\n", r.kind, r.path)
+		}
 	}
 
 	// A strict gate fails closed: if any detected language could not be analyzed,
@@ -445,10 +456,27 @@ func runScan(args []string) {
 		}
 	}
 
+	code, reason := exitClean, "no findings at or above -fail-on="+string(threshold)
 	if gated > 0 {
-		os.Exit(exitFindings)
+		code, reason = exitFindings, "findings at or above -fail-on="+string(threshold)
 	}
-	os.Exit(exitClean)
+	if st.on && !*quiet {
+		counts := map[rules.Severity]int{}
+		active := 0
+		for _, f := range findings {
+			if !f.Suppressed {
+				counts[f.Severity]++
+				active++
+			}
+		}
+		fmt.Fprintln(os.Stdout)
+		summary{
+			st: st, counts: counts, total: active, reports: written,
+			coverage: res.Coverage, rules: len(ruleSet.Rules), langs: len(res.Coverage),
+			code: code, reason: reason,
+		}.write(os.Stdout)
+	}
+	os.Exit(code)
 }
 
 // printFinding renders one finding. The two layouts are deliberate: piped
@@ -562,13 +590,11 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 		fmt.Fprintln(w)
 	}
 
-	if len(active) > 0 || len(suppressed) > 0 {
-		count := st.good
-		if gated > 0 {
-			count = st.bad
-		}
-		fmt.Fprintf(w, "%d finding(s); %s; %d suppressed.\n",
-			len(active), count(fmt.Sprintf("%d at/above %q", gated, threshold)), len(suppressed))
+	// On a terminal the closing block says all of this, with the exit code and
+	// the coverage beside it; printing both would state the count twice.
+	if !st.on && (len(active) > 0 || len(suppressed) > 0) {
+		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n",
+			len(active), gated, threshold, len(suppressed))
 	}
 	return gated
 }

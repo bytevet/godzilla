@@ -212,7 +212,10 @@ func TestInterruptFlushesTheDisplay(t *testing.T) {
 				seen.Write(buf[:n])
 				got := seen.String()
 				mu.Unlock()
-				if strings.Contains(got, "skipping") {
+				// The PANE header, which is drawn live. Captured stderr is only
+				// written out when the display stops, so waiting for it would
+				// mean waiting for the very thing being interrupted.
+				if strings.Contains(got, "warnings") {
 					once.Do(func() { close(captured) })
 				}
 			}
@@ -223,8 +226,8 @@ func TestInterruptFlushesTheDisplay(t *testing.T) {
 	}()
 
 	// Interrupt only once a warning has actually been captured — that is the
-	// thing this test is about, and waiting for it also guarantees the scan is
-	// still running.
+	// thing this test is about, and the pane showing it proves the scan is still
+	// running.
 	select {
 	case <-captured:
 	case <-time.After(90 * time.Second):
@@ -251,7 +254,9 @@ func TestInterruptFlushesTheDisplay(t *testing.T) {
 	if code != 130 {
 		t.Errorf("exit code = %d, want 130 (128+SIGINT):\n%s", code, got)
 	}
-	if !strings.Contains(got, "scanned in") {
+	// The closing frame an interrupted run draws: the bar says "stopped" rather
+	// than completing, which only happens if Stop ran.
+	if !strings.Contains(got, "stopped") {
 		t.Errorf("the display was not stopped on the signal:\n%s", got)
 	}
 	// The pane clips to the terminal width; only Stop writes a warning in full,

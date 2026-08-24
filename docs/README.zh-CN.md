@@ -97,25 +97,42 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 **退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
 （默认 `medium`）的检出项。直接把退出码用作 CI 门禁即可。
 
-当 stderr 是终端时，扫描会显示进度：一条按流水线阶段分段的单行进度条，并标出当前正在跑的
-阶段。每个阶段结束时会在上方回滚区留下一行——本阶段耗时（`+`）以及结束时的累计耗时
-（`@`）。`--llm-review` 这段全流程最久的等待也计入进度条。
+当 stderr 是终端时，扫描会显示进度。每个阶段占一行，并在行内直接给出自己的完成度，
+因此某种语言的覆盖率就在对应阶段旁边；正在运行的阶段带一个转轮和计时，只有在结束时
+才补上 `took` 和覆盖率。底部固定 80 列——40 格进度条按阶段分组着色，其后依次是百分比、
+累计耗时和当前阶段。
 
-扫描过程中，前端告警会实时滚动显示在进度条上方的面板里，这样一份四十行的 `rustc`
-诊断也不会淹没阶段列表。面板最多占终端高度的三分之一，超长的行会折行而不是截断，
-因此消息滚过时仍然可读。面板只是预览：扫描结束时，所有捕获到的告警都会按原顺序完整输出。
+前端告警实时滚动显示在进度条上方的面板里，每条都标明来自哪种语言、发生在哪个文件。
+面板只是预览：扫描结束时，所有捕获到的输出都会完整写出。
 
 ```
-  ✓ go list (metadata)                            +0.34s    @0.36s
-  ✓ go parse & typecheck                          +0.59s    @0.95s
-  ✓ go lowering                    8636 funcs     +0.14s    @1.32s
-  37 warning(s), last 6
-    help: you might be missing a crate named `rouille`, add it to your project
-      and import it in your code
-    7 + extern crate rouille;
-    error: aborting due to 1 previous error
-    For more information about this error, try `rustc --explain E0432`.
-███████████████████████████████████░░░░░░░░░░░░░░  71%    1.40s  taint…
+✓  walk                                             +0.02s   @0.02s
+!  javascript parse & lower     87 files    86/87   +0.09s   @0.11s
+✓  ruby parse & lower           47 files    47/47   +0.18s   @0.20s
+⠹  java parse & lower                                        @1.20s
+
+  6 warnings · last 2
+  rust      cannot find module or crate `reqwest` in this scope
+            → test/rust/ssrf_reqwest/src/lib.rs:12
+  rust      unresolved import `rouille`
+            → test/rust/web_rouille/src/lib.rs:7
+
+██████████████████████████████░░░░░░░░░░   76%   1.20s  go parse & typecheck
+```
+
+三种结果在没有颜色时同样可区分——`✓` 完整、`!` 部分、`✗` 失败；在 `NO_COLOR` 下状态位
+会加宽为 `[+] [!] [x] [*]`，进度条退化成单段 `[====----]`。终端窄于 80 列时，先去掉
+`took` 列，再去掉 `volume` 列；状态、名称、覆盖率和累计耗时这四列始终保留。
+
+结束时进度条走满，图例说明每个分组各花了多少时间，最后一段给出结论、退出码及其原因：
+
+```
+████████████████████████████████████████████████████   100%   1.47s
+▪ frontends 2.10s  ▪ go 1.26s  ▪ analysis 0.10s
+
+  201 findings 76 critical  80 high  26 medium  19 low
+  incomplete  python, javascript, java, rust — cpp failed
+  exit 3      findings at or above -fail-on=medium
 ```
 
 进度条只画在 **stderr** 上，检出项仍走 stdout，因此单独重定向其中任意一个都不受影响。

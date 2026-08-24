@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/bytevet/godzilla/internal/rules"
+	"github.com/bytevet/godzilla/internal/scan"
 )
 
 // styler colours the findings report when stdout is an interactive terminal.
@@ -114,3 +117,95 @@ func (s styler) wrap(text string, indent int) []string {
 // for, and undifferentiated they read as one long path.
 func (s styler) loc(text string) string    { return s.sgr("36", text) }
 func (s styler) callee(text string) string { return s.sgr("33", text) }
+
+// summary is the block that closes an interactive run: what was found, where the
+// report went, whether the scan actually covered the code, and the exit code
+// WITH its reason.
+//
+// The exit code is spelled out because the CLI has four and a CI condition that
+// treats any non-zero alike cannot tell a working gate from a broken scanner —
+// 3 is "findings at or above -fail-on", 1 is "the scanner failed".
+type summary struct {
+	st       styler
+	counts   map[rules.Severity]int
+	total    int
+	reports  []string
+	coverage []scan.LangCoverage
+	rules    int
+	langs    int
+	code     int
+	reason   string
+}
+
+func (s summary) write(w io.Writer) {
+	label := func(k string) string { return s.st.dim(pad(k, 12)) }
+
+	if s.total == 0 {
+		fmt.Fprintf(w, "  %s%s\n", s.st.good(pad("no findings", 13)),
+			s.st.dim(fmt.Sprintf("%d rules over %d languages, all sinks clean", s.rules, s.langs)))
+	} else {
+		var parts []string
+		for _, sev := range rules.Severities {
+			if sev == rules.SeverityInfo {
+				continue // the gate never turns on info; the strip stays four wide
+			}
+			n := s.counts[sev]
+			text := fmt.Sprintf("%d %s", n, sev)
+			if n == 0 {
+				parts = append(parts, s.st.dim(text))
+				continue
+			}
+			parts = append(parts, s.st.severity(sev, text))
+		}
+		fmt.Fprintf(w, "  %s%s\n",
+			s.st.bad(pad(fmt.Sprintf("%d findings", s.total), 13)), strings.Join(parts, "  "))
+	}
+	for _, r := range s.reports {
+		fmt.Fprintf(w, "  %s%s\n", label("report"), s.st.loc(r))
+	}
+
+	// Coverage is repeated here on purpose: three findings from a scan that
+	// skipped 47 Java files is a different claim from three from a clean scan.
+	if line, clean := coverageLine(s.st, s.coverage); clean {
+		fmt.Fprintf(w, "  %s%s\n", label("coverage"), line)
+	} else {
+		fmt.Fprintf(w, "  %s%s\n", label("incomplete"), line)
+	}
+	fmt.Fprintf(w, "  %s%s\n", label(fmt.Sprintf("exit %d", s.code)), s.st.dim(s.reason))
+}
+
+// coverageLine names the languages that did not fully land, or says so when they
+// all did. "No findings" is only trustworthy next to a statement of what was
+// actually analysed.
+func coverageLine(st styler, cov []scan.LangCoverage) (string, bool) {
+	var partial, failed []string
+	var files, lowered int
+	for _, c := range cov {
+		files += c.Files
+		lowered += c.Files - c.Skipped
+		switch {
+		case !c.Converted:
+			failed = append(failed, c.Language)
+		case c.Skipped > 0:
+			partial = append(partial, c.Language)
+		}
+	}
+	if len(partial) == 0 && len(failed) == 0 {
+		return st.good("complete") + st.dim(fmt.Sprintf(" — %d of %d files lowered", lowered, files)), true
+	}
+	out := strings.Join(partial, ", ")
+	if len(failed) > 0 {
+		if out != "" {
+			out += " — "
+		}
+		out += st.bad(strings.Join(failed, ", ") + " failed")
+	}
+	return out, false
+}
+
+func pad(s string, w int) string {
+	if n := len([]rune(s)); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return s
+}

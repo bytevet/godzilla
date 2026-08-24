@@ -75,6 +75,8 @@ type UI struct {
 	// relative to the cursor, so this is the display's entire screen state.
 	drawn   int
 	lastPct float64
+	aborted bool
+	spin    int
 
 	stopOnce sync.Once
 }
@@ -111,7 +113,6 @@ func Start(opts Options) *UI {
 		u.size = terminalSize
 	}
 	u.stdout = os.Stdout
-	applyPalette(&u.pal)
 	u.start = u.now()
 
 	if opts.Capture {
@@ -167,6 +168,18 @@ func (s stdoutWriter) Write(p []byte) (int, error) {
 	}
 	u.mu.Unlock()
 	return len(p), nil
+}
+
+// Abort marks the run as having stopped early, so the closing frame says
+// "stopped" instead of completing. A progress bar that races to 100% on a crash
+// is a lie.
+func (u *UI) Abort() {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	u.aborted = true
+	u.mu.Unlock()
 }
 
 // OnStop registers a function to run when the display stops — the hook the
@@ -266,88 +279,88 @@ func (u *UI) addWarning(line string) {
 	u.mu.Unlock()
 }
 
-// paneBudget is how many rows the live pane may take, including its header: a
-// third of the terminal, floored so it is always worth having. The rest of the
-// screen stays the user's.
-func paneBudget(height int) int {
-	return max(height/3, 4)
-}
+// paneRows caps the warning tail. Warnings accumulate into the hundreds on a
+// repository with unbuildable samples; the block never grows past what a reader
+// can take in between frames, and the full set lands at the end.
+const paneRows = 2
 
-// pane is the warnings block above the bar — a tail of the captured stderr
-// stream, newest last, as much of it as the budget allows.
+// pane is the warning tail above the footer. Each entry names the LANGUAGE it
+// came from and the file it happened in — which raw captured stderr could not,
+// because the position is buried in prose that repeats the converter name three
+// times before saying what the compiler found.
 //
-// Lines are WRAPPED here rather than left to the terminal. The display's erase
-// sequence is a row count, so a line the terminal wrapped on its own would make
-// that count wrong and eat the scrollback above the bar. Wrapping rather than
-// clipping is what makes a message readable while it streams past; the clipped
-// form hid the half of a rustc diagnostic that says what went wrong.
+// Lines are wrapped here rather than left to the terminal: the erase sequence is
+// a row count, so a line the terminal wrapped on its own would make that count
+// wrong and eat the scrollback above the block.
 func (u *UI) pane(width, height int) []string {
-	u.mu.Lock()
-	all := slices.Clone(u.warnings)
-	u.mu.Unlock()
-
-	// Blank lines are separators inside a compiler diagnostic. The full record
-	// keeps them; the pane does not, because its budget is a handful of rows and
-	// a blank one spends a row on nothing. Counting them would also make the
-	// header lie — a blank line occupies no row, so "last 8" would name lines
-	// that are not on screen.
-	lines := make([]string, 0, len(all))
-	for _, l := range all {
-		if strings.TrimSpace(l) != "" {
-			lines = append(lines, l)
-		}
-	}
-
-	n := len(lines)
-	budget := paneBudget(height) - 1 // the header takes one
-	if n == 0 || budget < 1 {
+	all := progress.Warnings()
+	if len(all) == 0 {
 		return nil
 	}
+	shown := all
+	if len(shown) > paneRows {
+		shown = shown[len(shown)-paneRows:]
+	}
 
-	// Filled from the NEWEST line backwards, so a burst pushes older output out
-	// of the pane instead of the newest never reaching it.
-	var rows []string
-	shown := 0
-	for i := n - 1; i >= 0 && len(rows) < budget; i-- {
-		w := wrapRows(lines[i], width-1)
-		if room := budget - len(rows); len(w) > room {
-			w = w[len(w)-room:] // a single over-long line keeps its tail
+	head := fmt.Sprintf("  %d warnings", len(all))
+	if len(shown) < len(all) {
+		head = fmt.Sprintf("  %d warnings · last %d", len(all), len(shown))
+	}
+	out := []string{u.pal.dim(clip(head, width-1))}
+
+	// Wide enough for "javascript", the longest frontend name. The gutter is
+	// written separately rather than baked into the field, or a name that fills
+	// the field exactly would run straight into the message.
+	const langCol, gutter = 10, 2
+	const textCol = 2 + langCol + gutter
+	for _, w := range shown {
+		lang := pad(clip(w.Lang, langCol), langCol)
+		body := wrapRows(w.Message, width-1-textCol)
+		for i, line := range body {
+			if i == 0 {
+				out = append(out, "  "+u.pal.paint(u.warnHex(w.Lang), lang)+
+					strings.Repeat(" ", gutter)+u.pal.fg(line))
+				continue
+			}
+			out = append(out, strings.Repeat(" ", textCol)+u.pal.dim(line))
 		}
-		rows = append(w, rows...)
-		shown++
+		if w.Location != "" {
+			out = append(out, strings.Repeat(" ", textCol)+
+				u.pal.dim(clip("→ "+w.Location, width-1-textCol)))
+		}
 	}
-
-	head := fmt.Sprintf("  %d warning(s)", n)
-	if shown < n {
-		head = fmt.Sprintf("  %d warning(s), last %d", n, shown)
-	}
-	out := make([]string, 0, len(rows)+1)
-	out = append(out, u.pal.dim(clip(head, width-1)))
-	for _, r := range rows {
-		out = append(out, u.pal.dim(r))
+	if maxRows := max(height/3, 4); len(out) > maxRows {
+		out = out[:maxRows]
 	}
 	return out
 }
 
-// wrapRows breaks one captured line into the rows it will occupy, indenting the
-// continuations so a wrap reads as a wrap. It breaks on columns, not words: this
-// is mostly paths and compiler diagnostics, where a word boundary is rare and
-// the useful part is often at the end.
+// warnHex colours the language tag by what became of that frontend: a warning
+// from a frontend that gave up entirely reads differently from one that skipped
+// a file and carried on.
+func (u *UI) warnHex(lang string) string {
+	for _, s := range progress.Stages() {
+		if s.ID == strings.ToLower(lang)+".convert" && s.Failed {
+			return badHex
+		}
+	}
+	return partHex
+}
+
+// wrapRows breaks a message into the rows it will occupy. It breaks on columns,
+// not words: this is mostly paths and compiler diagnostics, where a word
+// boundary is rare and the useful part is often at the end.
 func wrapRows(line string, width int) []string {
-	const head, cont = "    ", "      "
+	width = max(width, 1)
 	r := []rune(line)
+	if len(r) == 0 {
+		return nil
+	}
 	var out []string
-	for first := true; len(r) > 0; first = false {
-		prefix := cont
-		if first {
-			prefix = head
-		}
-		room := width - len([]rune(prefix))
-		if room < 8 {
-			return append(out, clip(prefix+string(r), width))
-		}
-		out = append(out, prefix+string(r[:min(room, len(r))]))
-		r = r[min(room, len(r)):]
+	for len(r) > 0 {
+		n := min(width, len(r))
+		out = append(out, string(r[:n]))
+		r = r[n:]
 	}
 	return out
 }
@@ -378,6 +391,7 @@ func (u *UI) render(final bool) {
 	}
 
 	u.mu.Lock()
+	aborted := u.aborted
 	logs := u.pending
 	u.pending = nil
 	if final && u.partial != "" {
@@ -388,10 +402,34 @@ func (u *UI) render(final bool) {
 
 	var block []string
 	if !final {
-		var bar []string
-		bar, u.lastPct = frame(stages, w, u.pal, u.now().Sub(u.start), u.lastPct, u.expect)
-		block = append(u.pane(w, h), bar...)
-		// Trimmed from the TOP: the bar is the one row that must never be cut.
+		u.spin++
+		segs := plan(stages, u.expect)
+		cells, withLabel := barCellsFor(w)
+		runs, pct := bars(segs, cells)
+		u.lastPct = max(pct, u.lastPct)
+
+		// A running phase gets its own live row. It is the one row that has to be
+		// redrawn rather than promoted, because its clock is still moving.
+		for _, st := range stages {
+			if st.Running {
+				block = append(block, u.pal.row(st, w, u.spin))
+			}
+		}
+		if len(block) > 0 {
+			block = append(block, "")
+		}
+		if pane := u.pane(w, h); len(pane) > 0 {
+			block = append(block, pane...)
+			block = append(block, "")
+		}
+		label := ""
+		if withLabel {
+			label = runningLabel(segs)
+		}
+		block = append(block, u.pal.footer(runs, cells, u.lastPct,
+			u.now().Sub(u.start), label, false))
+
+		// Trimmed from the TOP: the footer is the one row that must never be cut.
 		if maxRows := h - 1; len(block) > maxRows {
 			block = block[len(block)-maxRows:]
 		}
@@ -419,7 +457,7 @@ func (u *UI) render(final bool) {
 	}
 	events := make([]event, 0, len(logs)+len(promote))
 	for _, s := range promote {
-		events = append(events, event{u.start.Add(s.Offset + s.Elapsed), u.out, u.pal.ledgerLine(s, w-1)})
+		events = append(events, event{u.start.Add(s.Offset + s.Elapsed), u.out, u.pal.row(s, w, 0)})
 	}
 	for _, l := range logs {
 		events = append(events, event{l.at, u.stdout, l.text})
@@ -457,7 +495,23 @@ func (u *UI) render(final bool) {
 		for _, l := range rest {
 			add(u.out, l+"\n")
 		}
-		add(u.out, fmt.Sprintf("  scanned in %s\n", fmtDur(u.now().Sub(u.start))))
+		// The closing frame: the bar at rest, then the legend. The legend appears
+		// ONLY here — mid-run the reader is watching a bar move and the trailing
+		// label already names the phase; at rest there is time to read what the
+		// colours meant, and the per-group totals answer "where did it go".
+		segs := plan(stages, u.expect)
+		cells, _ := barCellsFor(w)
+		runs, pct := bars(segs, cells)
+		if !aborted {
+			pct = 1
+			runs, _ = bars(completed(segs), cells)
+		}
+		add(u.out, u.pal.footer(runs, cells, pct, u.now().Sub(u.start), "", aborted)+"\n")
+		if !aborted {
+			if l := u.pal.legend(groupTimes(segs), w-1); l != "" {
+				add(u.out, l+"\n")
+			}
+		}
 		u.drawn = 0
 	} else {
 		// No trailing newline: the cursor stays on the last block line, so the

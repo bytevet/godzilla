@@ -11,38 +11,198 @@ import (
 
 func snap(id, label string, total, done, ms int, running, failed bool) progress.Snapshot {
 	return progress.Snapshot{
-		ID: id, Label: label, Total: total, Done: done,
+		ID: id, Label: label, Total: total, Done: done, Unit: "files",
 		Elapsed: time.Duration(ms) * time.Millisecond, Running: running, Failed: failed,
 	}
 }
 
+func covered(s progress.Snapshot, got, want int) progress.Snapshot {
+	s.Covered, s.CoverTotal = got, want
+	return s
+}
+
 func midScan() []progress.Snapshot {
 	return []progress.Snapshot{
-		snap("walk", "walk", 0, 0, 20, false, false),
-		snap("go.list", "go list (metadata)", 0, 0, 310, false, false),
-		snap("go.load", "go parse & typecheck", 0, 0, 420, true, false),
-		snap("python.convert", "python parse & lower", 1180, 640, 280, true, false),
+		snap("walk", "walk", 281, 281, 20, false, false),
+		covered(snap("javascript.convert", "javascript parse & lower", 87, 87, 40, false, false), 86, 87),
+		covered(snap("rust.convert", "rust parse & lower", 24, 24, 330, false, true), 21, 24),
+		snap("go.list", "go list (metadata)", 0, 0, 500, false, false),
+		snap("go.load", "go parse & typecheck", 0, 0, 550, true, false),
 	}
 }
 
-// The erase sequence moves the cursor up by the row count of the last frame, so
-// a bar line that wrapped would put every subsequent erase out by one and eat
-// the scrollback above it. Nothing the display authors may exceed the width.
-func TestAuthoredLinesNeverExceedTheWidth(t *testing.T) {
-	long := []progress.Snapshot{
-		snap("walk", strings.Repeat("very-long-stage-label ", 12), 0, 0, 20, false, false),
-		snap("python.convert", strings.Repeat("x", 300), 10, 3, 90, true, false),
+// The footer's fields are fixed so the bar cannot jitter as phase names change
+// length. At full width that is exactly 80 columns: a 40-cell bar, percent in 4,
+// elapsed in 6, label in 24, two spaces between each.
+func TestFooterIsExactlyEightyColumns(t *testing.T) {
+	segs := plan(midScan(), nil)
+	for _, mode := range []colorMode{colorNone, color256, colorTrue} {
+		p := palette{mode: mode}
+		cells, withLabel := barCellsFor(80)
+		if !withLabel || cells != barCells {
+			t.Fatalf("mode %d: width 80 should carry a full bar and a label", mode)
+		}
+		runs, pct := bars(segs, cells)
+		got := p.footer(runs, cells, pct, 6500*time.Millisecond, "go parse & typecheck", false)
+		if n := visibleWidth(got); n != footerWidth {
+			t.Errorf("mode %d: footer is %d columns, want %d:\n%q", mode, n, footerWidth, got)
+		}
 	}
-	for _, w := range []int{120, 80, 60, 40, 24, 12, 6, 3, 1} {
+}
+
+// A phase name longer than its field truncates rather than pushing the layout
+// out — that is what "fixed fields" buys.
+func TestALongLabelDoesNotWidenTheFooter(t *testing.T) {
+	segs := plan(midScan(), nil)
+	runs, pct := bars(segs, barCells)
+	got := palette{mode: colorTrue}.footer(runs, barCells, pct, time.Second,
+		strings.Repeat("very-long-phase-name ", 6), false)
+	if n := visibleWidth(got); n != footerWidth {
+		t.Errorf("footer is %d columns, want %d:\n%q", n, footerWidth, got)
+	}
+}
+
+// The bar's runs must sum to the filled length and never exceed the cell count,
+// or the footer gains or loses a column and the erase arithmetic drifts.
+func TestBarRunsNeverExceedTheCellCount(t *testing.T) {
+	segs := plan(midScan(), nil)
+	for _, cells := range []int{4, 9, 17, 40, 64} {
+		runs, pct := bars(segs, cells)
+		sum := 0
+		for _, r := range runs {
+			if r.cells < 0 {
+				t.Fatalf("cells %d: negative run %v", cells, runs)
+			}
+			sum += r.cells
+		}
+		if want := int(float64(cells)*pct + 0.5); sum != want {
+			t.Errorf("cells %d: runs sum to %d, want the filled length %d", cells, sum, want)
+		}
+		if sum > cells {
+			t.Errorf("cells %d: runs overflow the bar: %d", cells, sum)
+		}
+	}
+}
+
+// Coverage decides the status glyph. This is the whole point of folding coverage
+// onto the row: a frontend that ran but lowered only some of its files is
+// PARTIAL, which the separate coverage line could only say somewhere else.
+func TestStatusComesFromCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   progress.Snapshot
+		want string
+	}{
+		{"all files lowered", covered(snap("ruby.convert", "ruby", 47, 47, 10, false, false), 47, 47), glyphOK},
+		{"some files skipped", covered(snap("java.convert", "java", 48, 48, 10, false, false), 1, 48), glyphPartial},
+		{"frontend gave up", covered(snap("rust.convert", "rust", 24, 24, 10, false, true), 21, 24), glyphFailed},
+		{"nothing to count", snap("go.ssa", "go SSA build", 0, 0, 10, false, false), glyphOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, _ := statusOf(tc.in); got != tc.want {
+				t.Errorf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A running row has no took and no coverage: only the elapsed clock moves, so
+// the columns cannot reflow under the reader when the phase lands.
+func TestARunningRowShowsNoFinalColumns(t *testing.T) {
+	running := covered(snap("go.load", "go parse & typecheck", 10, 4, 550, true, false), 4, 10)
+	got := palette{mode: colorNone}.row(running, 80, 0)
+	if strings.Contains(got, "+0.55s") {
+		t.Errorf("a running row must not show a took column: %q", got)
+	}
+	if strings.Contains(got, "4/10") {
+		t.Errorf("a running row must not show coverage yet: %q", got)
+	}
+	if !strings.Contains(got, "@0.55s") {
+		t.Errorf("a running row must show the elapsed clock: %q", got)
+	}
+}
+
+// Four states stay distinct with no colour at all. Colour is a second channel
+// carrying the same fact, never the only one.
+func TestStatesAreDistinctWithoutColour(t *testing.T) {
+	p := palette{mode: colorNone}
+	rows := map[string]string{
+		"ok":      p.row(covered(snap("a", "ruby", 4, 4, 10, false, false), 4, 4), 80, 0),
+		"partial": p.row(covered(snap("b", "java", 4, 4, 10, false, false), 1, 4), 80, 0),
+		"failed":  p.row(covered(snap("c", "rust", 4, 4, 10, false, true), 1, 4), 80, 0),
+		"running": p.row(snap("d", "go", 4, 1, 10, true, false), 80, 0),
+	}
+	for name, got := range rows {
+		if strings.ContainsRune(got, 0x1b) {
+			t.Errorf("%s: colour escape leaked into a no-colour row: %q", name, got)
+		}
+	}
+	markers := map[string]string{"ok": "[+]", "partial": "[!]", "failed": "[x]"}
+	for name, want := range markers {
+		if !strings.HasPrefix(rows[name], want) {
+			t.Errorf("%s: row should lead with %q: %q", name, want, rows[name])
+		}
+	}
+	if !strings.HasPrefix(rows["running"], "[") || rows["running"][:3] == "[+]" {
+		t.Errorf("running should carry a spinner bracket: %q", rows["running"])
+	}
+}
+
+// Columns drop in a fixed order as width falls: took first, then volume. Status,
+// name, coverage and elapsed are the four that survive.
+func TestColumnsDropInOrder(t *testing.T) {
+	s := covered(snap("java.convert", "java parse & lower", 48, 48, 990, false, false), 1, 48)
+	p := palette{mode: colorNone}
+
+	full := p.row(s, 80, 0)
+	for _, want := range []string{"48 files", "1/48", "+0.99s", "@0.99s"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("full row is missing %q: %q", want, full)
+		}
+	}
+	noTook := p.row(s, colStatus+colName+colVolume+colCovered+colElapsed+2, 0)
+	if strings.Contains(noTook, "+0.99s") {
+		t.Errorf("took should be the first column dropped: %q", noTook)
+	}
+	if !strings.Contains(noTook, "48 files") {
+		t.Errorf("volume should outlast took: %q", noTook)
+	}
+	narrow := p.row(s, 44, 0)
+	if strings.Contains(narrow, "48 files") {
+		t.Errorf("volume should be the second column dropped: %q", narrow)
+	}
+	for _, want := range []string{"1/48", "@0.99s"} {
+		if !strings.Contains(narrow, want) {
+			t.Errorf("narrow row lost %q, which must survive: %q", want, narrow)
+		}
+	}
+}
+
+// Nothing the display AUTHORS may exceed the width. A line that wrapped would
+// put every later erase out by a row and eat the scrollback above the block.
+func TestAuthoredLinesNeverExceedTheWidth(t *testing.T) {
+	long := covered(snap("python.convert", strings.Repeat("very-long-stage-label ", 12), 300, 3, 90, true, false), 3, 300)
+	segs := plan(midScan(), nil)
+	for _, w := range []int{120, 80, 62, 40, 24, 12, 6, 2} {
 		for _, mode := range []colorMode{colorNone, colorTrue} {
-			p := palette{mode: mode, trueHex: map[string]string{"walk": "#2fbfa8"}}
-			for _, st := range [][]progress.Snapshot{midScan(), long} {
-				lines, _ := frame(st, w, p, time.Second, 0, nil)
-				for _, line := range lines {
-					if n := visibleWidth(line); n > w {
-						t.Errorf("width %d mode %d: line is %d columns: %q", w, mode, n, line)
-					}
+			p := palette{mode: mode}
+			for _, st := range append(midScan(), long) {
+				if n := visibleWidth(p.row(st, w, 3)); n > w {
+					t.Errorf("width %d mode %d: row is %d columns: %q", w, mode, n, p.row(st, w, 3))
 				}
+			}
+			cells, withLabel := barCellsFor(w)
+			runs, pct := bars(segs, cells)
+			label := ""
+			if withLabel {
+				label = "go parse & typecheck"
+			}
+			f := p.footer(runs, cells, pct, time.Second, label, false)
+			if n := visibleWidth(f); n > max(w, footerWidth) {
+				t.Errorf("width %d mode %d: footer is %d columns: %q", w, mode, n, f)
+			}
+			if n := visibleWidth(p.legend(groupTimes(segs), w-1)); n > w {
+				t.Errorf("width %d mode %d: legend is %d columns", w, mode, n)
 			}
 		}
 	}
@@ -51,137 +211,71 @@ func TestAuthoredLinesNeverExceedTheWidth(t *testing.T) {
 // Truncation must not cut a multi-byte rune in half, or the terminal renders a
 // replacement glyph and the column count is wrong too.
 func TestTruncationIsRuneSafe(t *testing.T) {
-	st := []progress.Snapshot{snap("python.convert", "解析与降级パース", 10, 4, 120, true, false)}
-	for _, w := range []int{4, 8, 10, 16, 30} {
-		lines, _ := frame(st, w, palette{mode: colorNone}, time.Second, 0, nil)
-		for _, line := range lines {
-			if !utf8.ValidString(line) {
-				t.Errorf("width %d produced invalid UTF-8: %q", w, line)
+	st := covered(snap("python.convert", "解析与降级パース", 10, 4, 120, false, false), 4, 10)
+	for _, w := range []int{4, 8, 10, 16, 30, 80} {
+		got := palette{mode: colorTrue}.row(st, w, 0)
+		if !utf8.ValidString(got) {
+			t.Errorf("width %d produced invalid UTF-8: %q", w, got)
+		}
+	}
+}
+
+// On abort the percentage is replaced and the label dropped: a progress bar that
+// races to 100% on a crash is a lie.
+func TestAbortReplacesThePercentage(t *testing.T) {
+	segs := plan(midScan(), nil)
+	runs, pct := bars(segs, barCells)
+	got := palette{mode: colorNone}.footer(runs, barCells, pct, 1180*time.Millisecond, "go SSA build", true)
+	if !strings.Contains(got, abortedText) {
+		t.Errorf("an aborted footer should say %q: %q", abortedText, got)
+	}
+	if strings.Contains(got, "%") {
+		t.Errorf("an aborted footer must not claim a percentage: %q", got)
+	}
+	if strings.Contains(got, "go SSA build") {
+		t.Errorf("an aborted footer drops the running label: %q", got)
+	}
+}
+
+// The bar reads left to right as time, so groups appear in pipeline order.
+func TestBarRunsAreInPipelineOrder(t *testing.T) {
+	segs := plan([]progress.Snapshot{
+		snap("llm", "LLM review", 39, 39, 5210, false, false),
+		snap("taint", "taint propagation", 39, 39, 20, false, false),
+		snap("go.list", "go list (metadata)", 0, 0, 500, false, false),
+		snap("ruby.convert", "ruby parse & lower", 47, 47, 430, false, false),
+	}, nil)
+	runs, _ := bars(segs, barCells)
+	var got []string
+	for _, r := range runs {
+		got = append(got, r.group)
+	}
+	want := []string{groupFrontends, groupGo, groupAnalysis, groupLLM}
+	var filtered []string
+	for _, w := range want {
+		for _, g := range got {
+			if g == w {
+				filtered = append(filtered, w)
+				break
 			}
 		}
 	}
+	if strings.Join(got, ",") != strings.Join(filtered, ",") {
+		t.Errorf("bar runs are out of pipeline order: %v", got)
+	}
 }
 
-// Segments must sum to exactly the bar's interior, or the bar is a column short
-// or long and the line wraps.
-func TestSegmentsFillTheBarExactly(t *testing.T) {
+// The legend names only groups that actually ran, with what they cost.
+func TestLegendCoversTheGroupsThatRan(t *testing.T) {
 	segs := plan(midScan(), nil)
-	for _, w := range []int{1, 7, 13, 40, 64, 200} {
-		got := cells(segs, w)
-		sum := 0
-		for _, c := range got {
-			if c < 0 {
-				t.Fatalf("width %d: negative cell count %v", w, got)
-			}
-			sum += c
-		}
-		if sum != w {
-			t.Errorf("width %d: cells sum to %d, want %d (%v)", w, sum, w, got)
+	got := palette{mode: colorNone}.legend(groupTimes(segs), 200)
+	for _, want := range []string{groupFrontends, groupGo} {
+		if !strings.Contains(got, want) {
+			t.Errorf("legend is missing %q: %q", want, got)
 		}
 	}
-}
-
-// A stage too fast to earn a column still has to appear, or the legend claims
-// something happened that the bar does not show.
-func TestAStartedStageAlwaysGetsAColumn(t *testing.T) {
-	segs := plan(midScan(), nil)
-	got := cells(segs, 40)
-	for i, s := range segs {
-		if s.started && got[i] == 0 {
-			t.Errorf("started stage %q got no column: %v", s.id, got)
-		}
-	}
-}
-
-// The bar reads left to right as time, so the order is the pipeline's, not the
-// order goroutines happened to register in.
-func TestSegmentsAreInPipelineOrder(t *testing.T) {
-	// Deliberately registered out of order, as concurrent frontends would.
-	st := []progress.Snapshot{
-		snap("taint", "taint propagation", 3, 1, 5, true, false),
-		snap("python.convert", "python parse & lower", 4, 4, 30, false, false),
-		snap("go.list", "go list (metadata)", 0, 0, 10, false, false),
-		snap("walk", "walk", 0, 0, 2, false, false),
-	}
-	var ids []string
-	for _, s := range plan(st, nil) {
-		ids = append(ids, s.id)
-	}
-	want := []string{"walk", "go.list", "go.load", "go.ssa", "go.lower", "python.convert", "index", "ruleselect", "taint"}
-	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Errorf("order = %v\nwant  %v", ids, want)
-	}
-}
-
-// Seeing any go.* stage means the other three are coming. Without that the bar
-// would read as good as finished the moment `go list` returned.
-func TestGoSubStagesAreCountedBeforeTheyStart(t *testing.T) {
-	only := []progress.Snapshot{
-		snap("walk", "walk", 0, 0, 20, false, false),
-		snap("go.list", "go list (metadata)", 0, 0, 310, false, false),
-	}
-	segs := plan(only, nil)
-	var pending []string
-	for _, s := range segs {
-		if !s.started {
-			pending = append(pending, s.id)
-		}
-	}
-	for _, want := range []string{"go.load", "go.ssa", "go.lower"} {
-		if !strings.Contains(strings.Join(pending, ","), want) {
-			t.Errorf("%s is not being counted yet; pending = %v", want, pending)
-		}
-	}
-	if pct := overall(segs); pct > 0.5 {
-		t.Errorf("overall = %.2f with only `go list` done; the later Go phases are not being counted", pct)
-	}
-}
-
-// A stage that has not registered yet must still read as English.
-func TestPendingStagesAreNamed(t *testing.T) {
-	for _, s := range plan(midScan(), nil) {
-		if strings.Contains(s.label, ".") && !strings.Contains(s.label, " ") {
-			t.Errorf("stage %q shows a raw id as its label: %q", s.id, s.label)
-		}
-	}
-}
-
-// An estimate must never claim a stage finished; only Done may do that.
-func TestAnEstimateNeverReachesComplete(t *testing.T) {
-	running := snap("go.load", "go parse & typecheck", 0, 0, 60_000, true, false)
-	if got := completion(running); got >= 1 {
-		t.Errorf("completion = %v for a stage far past its prior, want < 1", got)
-	}
-	done := snap("go.load", "go parse & typecheck", 0, 0, 1, false, false)
-	if got := completion(done); got != 1 {
-		t.Errorf("completion = %v for a finished stage, want 1", got)
-	}
-}
-
-// Finishing re-weights a stage to what it actually cost, which is what makes the
-// bar re-scale rather than keep believing the prior.
-func TestFinishingReweightsToActualCost(t *testing.T) {
-	slow := []progress.Snapshot{snap("go.load", "go parse & typecheck", 0, 0, 30_000, false, false)}
-	var w float64
-	for _, s := range plan(slow, nil) {
-		if s.id == "go.load" {
-			w = s.weight
-		}
-	}
-	if w <= priorOf("go.load") {
-		t.Errorf("weight = %v after a 30s run, want it re-scaled above the %v prior", w, priorOf("go.load"))
-	}
-}
-
-// Colour is an enhancement; the breakdown has to survive without it.
-func TestFailureIsVisibleWithoutColour(t *testing.T) {
-	st := []progress.Snapshot{
-		snap("walk", "walk", 0, 0, 20, false, false),
-		snap("python.convert", "python parse & lower", 4, 4, 30, false, true),
-	}
-	lines, _ := frame(st, 80, palette{mode: colorNone}, time.Second, 0, nil)
-	if !strings.Contains(lines[0], "!") {
-		t.Errorf("a failed stage is indistinguishable in a colourless bar: %q", lines[0])
+	if strings.Contains(got, groupLLM) {
+		t.Errorf("legend names a group that never ran: %q", got)
 	}
 }
 
@@ -202,79 +296,4 @@ func visibleWidth(s string) int {
 		n++
 	}
 	return n
-}
-
-// The sticky block is ONE line. Every finished stage is already promoted into
-// the scrollback with its elapsed time, so a second legend row would spend a
-// row of the user's terminal restating it.
-func TestTheStickyBarIsASingleLine(t *testing.T) {
-	for _, w := range []int{200, 120, 80, 60, 40} {
-		for _, st := range [][]progress.Snapshot{midScan(), {snap("walk", "walk", 0, 0, 20, true, false)}} {
-			if lines, _ := frame(st, w, palette{mode: colorTrue}, time.Second, 0, nil); len(lines) != 1 {
-				t.Errorf("width %d: bar occupies %d lines, want 1: %q", w, len(lines), lines)
-			}
-		}
-	}
-}
-
-// The line has to say where the scan is now — that is the job the legend row
-// used to do, and the one thing the scrollback cannot show.
-func TestTheBarNamesWhatIsRunning(t *testing.T) {
-	st := []progress.Snapshot{snap("go.lower", "go lowering", 100, 40, 200, true, false)}
-	lines, _ := frame(st, 80, palette{mode: colorNone}, time.Second, 0, nil)
-	if !strings.Contains(lines[0], "lowering") {
-		t.Errorf("bar does not name the running stage: %q", lines[0])
-	}
-}
-
-// A stage no scan stage implies — the LLM review — has to be in the denominator
-// from the first frame. Discovered only when it starts, it would leave the bar
-// pinned near 100% for the longest wait in the run.
-func TestAReservedStageIsCountedBeforeItRegisters(t *testing.T) {
-	st := midScan()
-	var found bool
-	for _, s := range plan(st, []string{"llm"}) {
-		if s.id == "llm" {
-			found = true
-			if s.started {
-				t.Error("a reserved stage must not read as started")
-			}
-		}
-	}
-	if !found {
-		t.Fatal("reserved stage llm is missing from the plan")
-	}
-	with, without := overall(plan(st, []string{"llm"})), overall(plan(st, nil))
-	if with >= without {
-		t.Errorf("reserving a stage did not grow the denominator: %v vs %v", with, without)
-	}
-}
-
-// The scrollback line is what the user actually reads after the scan, so it has
-// to answer its own questions: did it pass, how much work was it, what did this
-// stage cost, and where in the run did it land.
-func TestLedgerLineIsSelfExplanatory(t *testing.T) {
-	p := palette{mode: colorNone}
-	ok := progress.Snapshot{ID: "go.lower", Label: "go lowering", Total: 8626, Done: 8626,
-		Unit: "funcs", Offset: 1280 * time.Millisecond, Elapsed: 140 * time.Millisecond}
-	got := p.ledgerLine(ok, 100)
-	for _, want := range []string{"✓", "go lowering", "8626 funcs", "+0.14s", "@1.42s"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("ledger line is missing %q: %q", want, got)
-		}
-	}
-	if strings.Contains(got, "ok") {
-		t.Errorf("the outcome should be a mark, not a word: %q", got)
-	}
-
-	bad := progress.Snapshot{ID: "java.convert", Label: "java parse & lower",
-		Failed: true, Offset: 500 * time.Millisecond, Elapsed: 940 * time.Millisecond}
-	got = p.ledgerLine(bad, 100)
-	if !strings.Contains(got, "✗") {
-		t.Errorf("a failed stage is not marked: %q", got)
-	}
-	// A stage with nothing to count must not invent a zero.
-	if strings.Contains(got, " 0 ") {
-		t.Errorf("uncountable stage shows a bogus count: %q", got)
-	}
 }
