@@ -169,6 +169,7 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 它只监听本地回环地址，且每次启动只转换一次：不监听文件变化，也不会重新转换。`make build`
 与 `go build ./...` 会同时构建这两个可执行文件，两个 Docker 镜像也都带上了它们
 （见[用 Docker 运行](#用-docker-运行)）。
+
 ### 环境变量
 
 日常配置都通过命令行参数完成（`godzilla scan -h`），环境变量只负责运维层面的设置：

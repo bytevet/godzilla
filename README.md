@@ -185,6 +185,7 @@ go run ./cmd/godzilla-playground <path>          # or: godzilla-playground <path
 It binds loopback only and lowers once per invocation — no watching, no
 re-lowering. `make build` and `go build ./...` build both binaries, and both
 Docker images ship them ([Run with Docker](#run-with-docker)).
+
 ### Environment variables
 
 Everything routine is a CLI flag (`godzilla scan -h`); the environment only
