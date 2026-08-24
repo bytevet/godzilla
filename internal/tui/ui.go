@@ -110,7 +110,10 @@ func Start(opts Options) *UI {
 		u.now = time.Now
 	}
 	if u.size == nil {
-		u.size = terminalSize
+		// Bound to the real stderr NOW, before startCapture swaps os.Stderr for
+		// the pipe: a pipe has no size.
+		tty := os.Stderr
+		u.size = func() (int, int) { return terminalSize(tty) }
 	}
 	u.stdout = os.Stdout
 	u.start = u.now()

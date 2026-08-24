@@ -39,12 +39,16 @@ func Enabled(quiet bool) bool {
 	return isTTY(os.Stderr)
 }
 
-// terminalSize is the live size of the terminal behind stderr. It is re-queried
-// every frame rather than tracked through SIGWINCH: an ioctl ten times a second
-// costs nothing, and it means a resize can never leave the display believing a
-// stale width — which would make its erase sequence's row count wrong.
-func terminalSize() (w, h int) {
-	w, h, err := term.GetSize(int(os.Stderr.Fd()))
+// terminalSize is the live size of the terminal behind f. It is re-queried every
+// frame rather than tracked through SIGWINCH: an ioctl ten times a second costs
+// nothing, and it means a resize can never leave the display believing a stale
+// width — which would make its erase sequence's row count wrong.
+//
+// f is the ORIGINAL stderr, held by the display. Asking os.Stderr would ask the
+// capture pipe, which is not a terminal and has no size, so every scan would
+// silently render at the 80x24 fallback and a resize would do nothing.
+func terminalSize(f *os.File) (w, h int) {
+	w, h, err := term.GetSize(int(f.Fd()))
 	if err != nil || w <= 0 {
 		return 80, 24
 	}
