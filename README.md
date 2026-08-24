@@ -251,6 +251,7 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 | SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DOM XSS (client-side navigation) | — | — | ✅ | — | — | — |
 | Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
 | Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
 | Server-side template injection | — | ✅ | — | — | — | — |
@@ -267,6 +268,11 @@ releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 - **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
   single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
   flagged as template-injection XSS (CWE-79). Pure Go, no Node.
+- **JavaScript** also flags **client-side navigation** (`location.href = x`,
+  `location.assign/replace`, `window.open`) as XSS, not just an open redirect. A
+  server's `Location:` header is safe from this — browsers refuse to follow one to
+  a `javascript:` URL — but assigning that same string to `location` in the page
+  executes it, so encoding the value does not help and only a scheme allowlist does.
 - **Ruby** also scans **ERB** templates (`.erb`), where a Rails view puts request
   input on the page. Rails auto-escapes `<%= %>`, so only the escape-bypassing
   forms — `<%== %>`, `raw`, `.html_safe` — are treated as XSS sinks.

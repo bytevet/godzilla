@@ -1,0 +1,11 @@
+# Every navigation carries the URL's own query string, so the attacker picks the
+# SCHEME -- `javascript:` included, which a browser executes on assignment even
+# though it refuses to follow one in a server's Location header.
+#
+# window.location.replace is the case that pins the source/sink ordering: a
+# `js:window.location*` SOURCE glob used to match it, and the engine classifies
+# source before sink, so the broad glob DISARMED the sink rather than merely
+# widening the sources. See _js-sfc-xss.yaml.
+findings:
+  - rule: js-dom-xss
+    min: 4
