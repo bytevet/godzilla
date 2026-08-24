@@ -1,0 +1,4 @@
+# The `{ href: next }` case is why the frontend does NOT model an element
+# property write: `a.href` is indistinguishable from any object's field without
+# type information, so modeling it would fire on every plain object literal.
+findings: []

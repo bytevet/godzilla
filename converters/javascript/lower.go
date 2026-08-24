@@ -207,6 +207,18 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 	return inst
 }
 
+// emitCallValues is emitCall over ALREADY-LOWERED arguments, for a synthetic call
+// whose operand the caller has evaluated: re-lowering the expression would
+// duplicate its side effects.
+func (fs *funcState) emitCallValues(callee string, args []*ir.Value, loc jsast.Loc) {
+	cc := calleeCommon(callee)
+	cc.Args = args
+	inst := fs.newValueInst(loc)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
+}
+
 // emitPromiseContinuation models `p.then(cb)` by emitting the call it actually
 // performs at runtime: cb(<p's resolved value>). Without it a promise is a wall
 // taint cannot cross, and in modern Node that wall sits across the middle of
@@ -916,6 +928,32 @@ func isComponentName(leaf string) bool {
 
 const reactHTMLSink = "js:__godzilla_react_html"
 
+// jsURLSink is the canonical callee for a value that becomes the browser's next
+// LOCATION. It exists because the dangerous construct is an assignment
+// (`location.href = x`), not a call, so no sink glob can name it -- the same
+// problem dangerouslySetInnerHTML has, solved the same way sfc.go solves v-html.
+// One name for every spelling, so a rule matches the construct rather than the
+// syntax the author happened to use.
+const jsURLSink = "js:__godzilla_js_url"
+
+// isNavigationAssign reports whether a dotted assignment target navigates the
+// browser. Writing a full URL here is an open redirect, and -- unlike a server's
+// Location header, which browsers refuse to follow to a non-HTTP(S) scheme -- a
+// `javascript:` URL assigned to location EXECUTES, so the same write is also XSS.
+//
+// Only `location` itself and its `href`. A path-only property (`pathname`,
+// `search`, `hash`) cannot carry a scheme or a host, so a write there is neither.
+// An element property (`a.href`, `iframe.src`) is deliberately absent: it is
+// indistinguishable from any object's `.href` field without type information, so
+// modeling it here would fire on every plain `{href: ...}` assignment.
+func isNavigationAssign(name string) bool {
+	switch name {
+	case "location", "location.href":
+		return true
+	}
+	return strings.HasSuffix(name, ".location") || strings.HasSuffix(name, ".location.href")
+}
+
 // emitReactHTMLSink gives React's dangerouslySetInnerHTML a callee to match.
 // It is the framework's one documented escape from JSX auto-escaping, but unlike
 // Vue's v-html it is spelled as DATA, not a directive: the JSX lowering turns the
@@ -1296,6 +1334,11 @@ func (fs *funcState) lowerAssign(loc jsast.Loc, a *jsast.EBinary) *ir.Value {
 // visitStore in internal/analysis/taint.go). Destructuring targets are dropped.
 func (fs *funcState) assignTo(target jsast.Expr, val *ir.Value) {
 	target = unwrap(target)
+	// A navigation write is a SINK as well as a store; emit its marker before the
+	// store so the sink call carries the value the store is about to write.
+	if isNavigationAssign(syntacticCallee(fs.src, target)) {
+		fs.emitCallValues(jsURLSink, []*ir.Value{val}, target.Loc)
+	}
 	switch t := target.Data.(type) {
 	case *jsast.EIdentifier:
 		fs.write(fs.src.NameOf(t.Ref), val)
