@@ -94,16 +94,15 @@ func (p palette) row(s progress.Snapshot, width int, spin int) string {
 	var b strings.Builder
 	b.WriteString(p.paint(hex, pad(status, statusW)))
 	switch {
-	case width >= statusW+colName+colVolume+colCovered+colTook+colElapsed:
-		b.WriteString(p.fg(pad(s.Label, colName)))
-		b.WriteString(p.mut(rpad(volumeOf(s), colVolume)))
-		b.WriteString(p.paint(hex, rpad(covered, colCovered)))
-		b.WriteString(p.dim(rpad(took, colTook)))
-		b.WriteString(p.mut(rpad(elapsed, colElapsed)))
 	case width >= statusW+colName+colVolume+colCovered+colElapsed:
 		b.WriteString(p.fg(pad(s.Label, colName)))
 		b.WriteString(p.mut(rpad(volumeOf(s), colVolume)))
 		b.WriteString(p.paint(hex, rpad(covered, colCovered)))
+		// took is the first column to go: it is the one a reader can recover by
+		// subtracting two elapsed clocks.
+		if width >= statusW+colName+colVolume+colCovered+colTook+colElapsed {
+			b.WriteString(p.dim(rpad(took, colTook)))
+		}
 		b.WriteString(p.mut(rpad(elapsed, colElapsed)))
 	default:
 		// The four that survive: status, name, coverage, elapsed. The name gives
@@ -200,7 +199,7 @@ func (p palette) footer(segs []barSeg, cells int, pct float64, elapsed time.Dura
 	b.WriteString(p.mut(rpad(fmtDur(elapsed), elapsedW)))
 	if label != "" {
 		b.WriteString("  ")
-		b.WriteString(p.acc(pad(clip(label, labelWidth), labelWidth)))
+		b.WriteString(p.acc(pad(label, labelWidth)))
 	}
 	return b.String()
 }

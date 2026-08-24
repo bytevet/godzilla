@@ -85,9 +85,9 @@ func TestWrapPreservesEveryWord(t *testing.T) {
 	const msg = "Untrusted input flows into a database/sql query without parameterized " +
 		"arguments, which may allow SQL injection. Use placeholder parameters instead."
 	if got := (styler{}).wrap(msg, 6); len(got) != 1 || got[0] != msg {
-		t.Errorf("colour off must not wrap: %q", got)
+		t.Errorf("the piped layout must not wrap: %q", got)
 	}
-	lines := styler{on: true, width: 60}.wrap(msg, 6)
+	lines := styler{rich: true, width: 60}.wrap(msg, 6)
 	if len(lines) < 2 {
 		t.Fatalf("nothing was wrapped: %q", lines)
 	}
@@ -98,5 +98,28 @@ func TestWrapPreservesEveryWord(t *testing.T) {
 	}
 	if strings.Join(lines, " ") != msg {
 		t.Errorf("wrapping changed the text:\n%q", strings.Join(lines, " "))
+	}
+}
+
+// Colour and layout are different questions. NO_COLOR on a real terminal turns
+// painting off while the display keeps drawing — it has a colourless rung — so
+// the report must still be laid out for the terminal, not printed in the shape
+// tooling parses.
+func TestLayoutDoesNotDependOnColour(t *testing.T) {
+	plain := styler{rich: true, width: 80}
+	var b strings.Builder
+	printFinding(&b, 1, 1, analysis.Finding{
+		Severity: rules.SeverityHigh, RuleID: "go-sql-injection", CWE: "CWE-89",
+		Confidence: analysis.ConfidenceHigh, Message: "Untrusted input reaches a query.",
+	}, plain)
+	got := b.String()
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("colour leaked with painting off: %q", got)
+	}
+	if !strings.Contains(got, "1/1") {
+		t.Errorf("the terminal layout was dropped along with the colour: %q", got)
+	}
+	if strings.Contains(got, "sink:   ") {
+		t.Errorf("the piped layout was used on a terminal: %q", got)
 	}
 }

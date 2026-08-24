@@ -303,7 +303,8 @@ func runScan(args []string) {
 	}
 	// Asked about stdout, not about the display: the two streams can be a
 	// terminal and a file independently.
-	st := styler{on: tui.Color(os.Stdout), width: tui.Width(os.Stdout)}
+	st := styler{on: tui.Color(os.Stdout), rich: tui.Width(os.Stdout) > 0 && !*quiet,
+		width: tui.Width(os.Stdout)}
 	var ui *tui.UI
 	if ui = progressUI(*quiet, expect); ui != nil {
 		defer ui.Stop()
@@ -339,7 +340,7 @@ func runScan(args []string) {
 	// Only when piped. On a terminal the completeness is on the phase rows and
 	// again in the closing block, and this line — which ran off the right edge —
 	// is what that replaced.
-	if !*quiet && !st.on {
+	if !*quiet && !st.rich {
 		printCoverage(ui.Stdout(), res.Coverage, st)
 	}
 
@@ -407,7 +408,7 @@ func runScan(args []string) {
 	}
 
 	ui.Stop()
-	gated := printFindings(os.Stdout, findings, threshold, *quiet, st)
+	gated, active := printFindings(os.Stdout, findings, threshold, *quiet, st)
 
 	// res.Diag is already the report's input type, so there is nothing to map.
 	scanInfo := res.Diag
@@ -437,7 +438,7 @@ func runScan(args []string) {
 			os.Exit(exitError)
 		}
 		written = append(written, r.path)
-		if !st.on {
+		if !st.rich {
 			fmt.Fprintf(os.Stdout, "%s report written to %s\n", r.kind, r.path)
 		}
 	}
@@ -460,19 +461,16 @@ func runScan(args []string) {
 	if gated > 0 {
 		code, reason = exitFindings, "findings at or above -fail-on="+string(threshold)
 	}
-	if st.on && !*quiet {
+	if st.rich {
 		counts := map[rules.Severity]int{}
-		active := 0
-		for _, f := range findings {
-			if !f.Suppressed {
-				counts[f.Severity]++
-				active++
-			}
+		for _, f := range active {
+			counts[f.Severity]++
 		}
 		fmt.Fprintln(os.Stdout)
 		summary{
-			st: st, counts: counts, total: active, reports: written,
-			coverage: res.Coverage, rules: len(ruleSet.Rules), langs: len(res.Coverage),
+			st: st, counts: counts, total: len(active), reports: written,
+			coverage: res.Coverage, failed: res.Failed(),
+			rules: len(ruleSet.Rules), langs: len(res.Coverage),
 			code: code, reason: reason,
 		}.write(os.Stdout)
 	}
@@ -486,7 +484,7 @@ func runScan(args []string) {
 // which is the difference between skimming two hundred findings and not.
 func printFinding(w io.Writer, n, of int, f analysis.Finding, st styler) {
 	tag := "[" + string(f.Severity) + "]"
-	if !st.on {
+	if !st.rich {
 		fmt.Fprintf(w, "%s %s (%s, confidence: %s)\n", tag, f.RuleID, f.CWE, f.Confidence)
 		fmt.Fprintf(w, "  %s\n", f.Message)
 		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", analysis.PosString(f.SinkPos), f.SinkCallee)
@@ -540,7 +538,7 @@ func writeReportRaw(path string, write func(io.Writer) error) (err error) {
 // and returns how many meet or exceed the gate threshold. When quiet, it still
 // computes the gate count but prints nothing — for CI that consumes a report
 // file and only needs the exit code.
-func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool, st styler) int {
+func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Severity, quiet bool, st styler) (int, []analysis.Finding) {
 	slices.SortStableFunc(findings, analysis.CompareFindings)
 
 	// Suppressed findings (judged false positives by the LLM reviewer) are
@@ -564,7 +562,7 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 	}
 
 	if quiet {
-		return gated
+		return gated, active
 	}
 
 	if len(active) == 0 {
@@ -592,9 +590,9 @@ func printFindings(w io.Writer, findings []analysis.Finding, threshold rules.Sev
 
 	// On a terminal the closing block says all of this, with the exit code and
 	// the coverage beside it; printing both would state the count twice.
-	if !st.on && (len(active) > 0 || len(suppressed) > 0) {
+	if !st.rich && (len(active) > 0 || len(suppressed) > 0) {
 		fmt.Fprintf(w, "%d finding(s); %d at/above %q; %d suppressed.\n",
 			len(active), gated, threshold, len(suppressed))
 	}
-	return gated
+	return gated, active
 }

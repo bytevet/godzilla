@@ -189,6 +189,18 @@ func Warnings() []Warning {
 	return slices.Clone(warnings)
 }
 
+// WarnTail returns the total recorded and the last n, which is what a display
+// showing a capped tail actually needs. Cloning the whole log every frame is the
+// one cost here that grows with the length of the scan.
+func WarnTail(n int) (total int, tail []Warning) {
+	mu.Lock()
+	defer mu.Unlock()
+	if n > len(warnings) {
+		n = len(warnings)
+	}
+	return len(warnings), slices.Clone(warnings[len(warnings)-n:])
+}
+
 // Stages returns every registered stage in registration order.
 func Stages() []Snapshot {
 	mu.Lock()

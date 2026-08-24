@@ -19,9 +19,14 @@ import (
 //
 // 16-colour SGR only. The report is read on whatever the user's terminal is,
 // and there is no palette here worth a truecolor escape.
+// on and rich are separate questions and must stay so. NO_COLOR on a real
+// terminal turns colour OFF while the display keeps drawing — it has a
+// colourless rung — so using "may I paint?" to decide the report's SHAPE would
+// print the piped layout under a live TUI.
 type styler struct {
-	on    bool
-	width int // terminal columns, for laying the message out; 0 when unknown
+	on    bool // may paint
+	rich  bool // stdout is an interactive terminal: lay the report out for it
+	width int  // terminal columns, for laying the message out; 0 when unknown
 }
 
 func (s styler) sgr(code, text string) string {
@@ -90,7 +95,7 @@ func (s styler) coverage(line string) string {
 // because that is the shape anything parsing it was written against.
 func (s styler) wrap(text string, indent int) []string {
 	limit := s.width - indent
-	if !s.on || limit < 24 {
+	if !s.rich || limit < 24 {
 		return []string{text}
 	}
 	var lines []string
@@ -131,6 +136,7 @@ type summary struct {
 	total    int
 	reports  []string
 	coverage []scan.LangCoverage
+	failed   []scan.LangCoverage // scan's own verdict, not a second reading of it
 	rules    int
 	langs    int
 	code     int
@@ -166,7 +172,7 @@ func (s summary) write(w io.Writer) {
 
 	// Coverage is repeated here on purpose: three findings from a scan that
 	// skipped 47 Java files is a different claim from three from a clean scan.
-	if line, clean := coverageLine(s.st, s.coverage); clean {
+	if line, clean := coverageLine(s.st, s.coverage, s.failed); clean {
 		fmt.Fprintf(w, "  %s%s\n", label("coverage"), line)
 	} else {
 		fmt.Fprintf(w, "  %s%s\n", label("incomplete"), line)
@@ -177,16 +183,22 @@ func (s summary) write(w io.Writer) {
 // coverageLine names the languages that did not fully land, or says so when they
 // all did. "No findings" is only trustworthy next to a statement of what was
 // actually analysed.
-func coverageLine(st styler, cov []scan.LangCoverage) (string, bool) {
-	var partial, failed []string
+func coverageLine(st styler, cov, failedCov []scan.LangCoverage) (string, bool) {
+	// Which languages FAILED is scan's call — Result.Failed also gates -strict,
+	// and a second reading of the same fields here could disagree with the exit
+	// code the same run produces.
+	failedSet := make(map[string]bool, len(failedCov))
+	var failed []string
+	for _, c := range failedCov {
+		failedSet[c.Language] = true
+		failed = append(failed, c.Language)
+	}
+	var partial []string
 	var files, lowered int
 	for _, c := range cov {
 		files += c.Files
 		lowered += c.Files - c.Skipped
-		switch {
-		case !c.Converted:
-			failed = append(failed, c.Language)
-		case c.Skipped > 0:
+		if !failedSet[c.Language] && c.Skipped > 0 {
 			partial = append(partial, c.Language)
 		}
 	}

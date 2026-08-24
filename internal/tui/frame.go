@@ -54,13 +54,13 @@ var groupOrder = []string{groupFrontends, groupGo, groupAnalysis, groupLLM}
 // known until a frontend starts. Every language's convert stage ranks here.
 const convertSlot = "*.convert"
 
-// stages is the ONE table the bar keeps about the pipeline, in pipeline ORDER —
+// pipeline is the ONE table the bar keeps about the pipeline, in pipeline ORDER —
 // a stage's rank is its index, so the bar reads left to right as time. Adding a
 // stage is a line here rather than an edit to a weight map, a label map and a
 // sort. Its colour lives in palette.go, keyed by the same ids: a separate
 // concern, because that has to be expressed three times over for three colour
 // depths.
-var stages = []stage{
+var pipeline = []stage{
 	{id: "walk", label: "walk", prior: 0.02, always: true, group: groupFrontends},
 	{id: "go.list", label: "go list (metadata)", prior: 0.10, group: groupGo},
 	{id: "go.load", label: "go parse & typecheck", prior: 0.55, group: groupGo},
@@ -73,21 +73,25 @@ var stages = []stage{
 	{id: "llm", label: "LLM review", prior: 6.0, group: groupLLM},
 }
 
+// index is every stage id's place in the table, resolved once. slot() is on the
+// sort's comparison path, which runs a few hundred times a frame.
+var index = func() map[string]int {
+	out := make(map[string]int, len(pipeline))
+	for i, st := range pipeline {
+		out[st.id] = i
+	}
+	return out
+}()
+
 // slot maps a stage id onto its table entry. An unregistered language's convert
 // stage and an id the table has never heard of both land on the convert slot,
 // which is where an unknown frontend stage belongs in the run.
 func slot(id string) (stage, int) {
-	for i, st := range stages {
-		if st.id == id {
-			return st, i
-		}
+	i, ok := index[id]
+	if !ok {
+		i = index[convertSlot]
 	}
-	for i, st := range stages {
-		if st.id == convertSlot {
-			return st, i
-		}
-	}
-	return stage{}, len(stages)
+	return pipeline[i], i
 }
 
 // groupName is the phase group a stage belongs to.
@@ -97,31 +101,6 @@ func groupName(id string) string {
 		return groupFrontends
 	}
 	return st.group
-}
-
-// groupOf returns every id that runs alongside id, itself included.
-func groupOf(id string) []string {
-	st, _ := slot(id)
-	if st.group == "" {
-		return nil
-	}
-	var out []string
-	for _, s := range stages {
-		if s.group == st.group {
-			out = append(out, s.id)
-		}
-	}
-	return out
-}
-
-func alwaysStages() []string {
-	var out []string
-	for _, s := range stages {
-		if s.always {
-			out = append(out, s.id)
-		}
-	}
-	return out
 }
 
 // labelFor names a stage that has not registered yet. Without it the bar shows a
@@ -175,9 +154,14 @@ func plan(stages []progress.Snapshot, expect []string) []segment {
 		}
 	}
 
-	expected := alwaysStages()
-	if sawGo {
-		expected = append(expected, groupOf("go.list")...)
+	// A stage the pipeline guarantees is coming is counted before it registers,
+	// so the denominator does not grow under the bar. Seeing any Go phase means
+	// the other three are on their way.
+	var expected []string
+	for _, st := range pipeline {
+		if st.always || (sawGo && st.group == groupGo) {
+			expected = append(expected, st.id)
+		}
 	}
 	expected = append(expected, expect...)
 	expected = append(expected, order...)
@@ -227,21 +211,15 @@ func completion(s progress.Snapshot) float64 {
 // Languages sort among themselves alphabetically for a stable display: their
 // goroutines race to register.
 func pipelineOrder(ids []string) []string {
-	rank := func(id string) int {
-		_, i := slot(id)
-		return i
-	}
 	out := append([]string{}, ids...)
-	// Insertion sort: the list is a dozen entries and must be stable.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0; j-- {
-			a, b := out[j-1], out[j]
-			if rank(a) < rank(b) || (rank(a) == rank(b) && a <= b) {
-				break
-			}
-			out[j-1], out[j] = b, a
+	slices.SortStableFunc(out, func(a, b string) int {
+		_, ra := slot(a)
+		_, rb := slot(b)
+		if ra != rb {
+			return ra - rb
 		}
-	}
+		return strings.Compare(a, b)
+	})
 	return out
 }
 
@@ -302,52 +280,22 @@ func bars(segs []segment, cells int) ([]barSeg, float64) {
 	}
 	pct := min(finished/total, 1)
 
-	// Largest remainder over the FILLED cells only, so the runs always sum to
-	// exactly the filled length and the bar never gains or loses a column.
+	// Cumulative rounding, so the runs sum to the filled length by CONSTRUCTION:
+	// the last cumulative term is `finished`, which makes the final boundary
+	// exactly `filled`. Apportioning largest-remainder instead needs a spent
+	// marker and a guard against the hand-out loop not terminating.
 	filled := int(float64(cells)*pct + 0.5)
-	type share struct {
-		group string
-		frac  float64
-		cells int
-	}
-	var shares []share
-	assigned := 0
+	var out []barSeg
+	var cum, prev float64
 	for _, g := range groupOrder {
 		if done[g] <= 0 {
 			continue
 		}
-		exact := float64(filled) * done[g] / finished
-		n := int(exact)
-		shares = append(shares, share{g, exact - float64(n), n})
-		assigned += n
-	}
-	// One pass: the remainders are handed out largest first, and there are never
-	// more than len(shares) of them to hand out.
-	slices.SortStableFunc(shares, func(a, b share) int {
-		switch {
-		case a.frac > b.frac:
-			return -1
-		case a.frac < b.frac:
-			return 1
-		}
-		return 0
-	})
-	for i := range shares {
-		if assigned >= filled {
-			break
-		}
-		shares[i].cells++
-		assigned++
-	}
-	// Back into pipeline order: the bar reads left to right as time.
-	slices.SortStableFunc(shares, func(a, b share) int {
-		return slices.Index(groupOrder, a.group) - slices.Index(groupOrder, b.group)
-	})
-
-	var out []barSeg
-	for _, sh := range shares {
-		if sh.cells > 0 {
-			out = append(out, barSeg{group: sh.group, cells: sh.cells})
+		cum += done[g]
+		n := int(float64(filled)*cum/finished+0.5) - int(float64(filled)*prev/finished+0.5)
+		prev = cum
+		if n > 0 {
+			out = append(out, barSeg{group: g, cells: n})
 		}
 	}
 	return out, pct

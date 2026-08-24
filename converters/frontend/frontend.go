@@ -257,9 +257,9 @@ func runChunks(n int, fn func(start, end int)) {
 // least useful part.
 func rel(root, path string) string {
 	if r, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(r, "..") {
-		return r
+		return filepath.ToSlash(r)
 	}
-	return path
+	return filepath.ToSlash(path)
 }
 
 // skipReason pulls the part of a converter error a reader acts on. The wrapping

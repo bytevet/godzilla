@@ -56,7 +56,6 @@ type UI struct {
 	mu       sync.Mutex
 	pending  []logLine       // Stdout() lines waiting to be flushed above the bar
 	warnings []string        // every captured stderr line, in arrival order
-	shown    int             // how many of them have reached the real stderr
 	promoted map[string]bool // stages already written into the scrollback
 	onStop   []func()
 
@@ -273,7 +272,7 @@ func (u *UI) startCapture() {
 func (u *UI) unflushed() bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.shown < len(u.warnings)
+	return len(u.warnings) > 0
 }
 
 func (u *UI) addWarning(line string) {
@@ -296,18 +295,13 @@ const paneRows = 2
 // a row count, so a line the terminal wrapped on its own would make that count
 // wrong and eat the scrollback above the block.
 func (u *UI) pane(width, height int) []string {
-	all := progress.Warnings()
-	if len(all) == 0 {
+	total, shown := progress.WarnTail(paneRows)
+	if total == 0 {
 		return nil
 	}
-	shown := all
-	if len(shown) > paneRows {
-		shown = shown[len(shown)-paneRows:]
-	}
-
-	head := fmt.Sprintf("  %d warnings", len(all))
-	if len(shown) < len(all) {
-		head = fmt.Sprintf("  %d warnings · last %d", len(all), len(shown))
+	head := fmt.Sprintf("  %d warnings", total)
+	if len(shown) < total {
+		head = fmt.Sprintf("  %d warnings · last %d", total, len(shown))
 	}
 	out := []string{u.pal.dim(clip(head, width-1))}
 
@@ -318,7 +312,7 @@ func (u *UI) pane(width, height int) []string {
 	const textCol = 2 + langCol + gutter
 	failed := failedLangs()
 	for _, w := range shown {
-		lang := pad(clip(w.Lang, langCol), langCol)
+		lang := pad(w.Lang, langCol)
 		body := wrapRows(w.Message, width-1-textCol)
 		for i, line := range body {
 			if i == 0 {
@@ -504,8 +498,8 @@ func (u *UI) render(final bool) {
 		// goes to the real stderr in arrival order, so a warning is never lost
 		// and `godzilla scan 2>&1 | grep` still finds it.
 		u.mu.Lock()
-		rest := slices.Clone(u.warnings[u.shown:])
-		u.shown = len(u.warnings)
+		rest := u.warnings
+		u.warnings = nil
 		u.mu.Unlock()
 		for _, l := range rest {
 			add(u.out, l+"\n")

@@ -206,6 +206,10 @@ func (c *Converter) ConvertFile(path string) (_ *ir.Program, convErr error) {
 	if n := totalSources - len(covered); n > 0 {
 		c.skipped = n
 	}
+	// The row carries its own completeness, so it has to hear about the skips
+	// too — otherwise a phase reads ✓ while the closing block calls java
+	// incomplete.
+	stage.Cover(len(covered), totalSources)
 	return prog, nil
 }
 
