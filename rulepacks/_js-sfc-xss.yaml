@@ -6,8 +6,13 @@
 # inline.
 sources:
   # Browser-controlled input (the URL and cookies).
-  - "js:window.location*"
+  #
+  # Read PROPERTIES, spelled out. A `js:window.location*` prefix would also match
+  # `window.location.assign`, and the engine classifies source BEFORE sink, so the
+  # broad glob silently disarmed that sink instead of merely widening the sources.
+  - "js:window.location"
   - "js:*.location.href"
+  - "js:*.location.pathname"
   - "js:*.location.search"
   - "js:*.location.hash"
   - "js:document.URL"

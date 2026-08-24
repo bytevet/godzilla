@@ -12,6 +12,9 @@ rules:
     when: 'not hostFixed()'
     sinks:
       - "js:*.redirect"
+      # Client-side navigation is js-dom-xss's, not this rule's: this rule's
+      # sources are server-side (Express), and in the browser the same write also
+      # EXECUTES a `javascript:` URL, so CWE-79 is the finding worth reporting.
     sanitizers:
       - "js:encodeURIComponent"
     propagators: []
