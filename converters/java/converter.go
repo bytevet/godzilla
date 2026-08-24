@@ -43,7 +43,21 @@ type Converter struct {
 	// inv, when set (ConvertInventory), is the scan pipeline's pre-walked file
 	// inventory; indexJavaSources reads it instead of re-walking the tree.
 	inv *walkignore.Inventory
+	// skipped counts .java files the walk found that no produced class came
+	// from. See Skipped.
+	skipped int
 }
+
+// Skipped reports how many .java files under the scan root produced no gIR.
+//
+// This frontend compiles a whole directory as ONE unit, so a collision between
+// independent projects that happen to share class names takes out every file
+// but one — and the survivor still reports a clean conversion. Without this the
+// scan says java=ok having lowered a single file out of fifty, which is exactly
+// the "analyzed and clean" vs "never analyzed" confusion LangCoverage exists to
+// prevent. internal/scan picks it up through the Skipped() duck type that every
+// per-file frontend already satisfies.
+func (c *Converter) Skipped() int { return c.skipped }
 
 func NewConverter() *Converter { return &Converter{} }
 
@@ -169,10 +183,20 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 	// Resolve each class's SourceFile ("Login.java") to a real path under the
 	// scan root so findings anchor to the source file instead of the scan
 	// directory (FE-8). Fall back to the scan path when the source is unknown.
-	sourceIdx := c.indexJavaSources(abs)
+	sourceIdx, totalSources := c.indexJavaSources(abs)
+	covered := make(map[string]bool, len(doc.Classes))
 	prog := &ir.Program{Mode: "bytecode"}
 	for _, cl := range doc.Classes {
-		prog.Modules = append(prog.Modules, convertClass(cl, resolveJavaSource(abs, sourceIdx, cl.Source)))
+		src := resolveJavaSource(abs, sourceIdx, cl.Source)
+		// resolveJavaSource falls back to the scan path when a class's SourceFile
+		// names nothing in the index, so only real .java paths count as covered.
+		if strings.HasSuffix(src, ".java") {
+			covered[src] = true
+		}
+		prog.Modules = append(prog.Modules, convertClass(cl, src))
+	}
+	if n := totalSources - len(covered); n > 0 {
+		c.skipped = n
 	}
 	return prog, nil
 }
@@ -182,10 +206,15 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 // With a scan-pipeline inventory attached (ConvertInventory) the index comes
 // from that cached walk — same pruned tree, same walk order, so the same
 // first-wins winner — instead of a fresh one.
-func (c *Converter) indexJavaSources(root string) map[string]string {
+// The returned count is of .java FILES, not index entries: the index is keyed on
+// base name and keeps the first path for each, so sixteen Handler.java in
+// sixteen sample directories are one entry and fifteen uncovered files.
+func (c *Converter) indexJavaSources(root string) (map[string]string, int) {
 	idx := map[string]string{}
+	total := 0
 	add := func(p, name string) {
 		if strings.HasSuffix(name, ".java") {
+			total++
 			if _, seen := idx[name]; !seen {
 				idx[name] = p
 			}
@@ -195,7 +224,7 @@ func (c *Converter) indexJavaSources(root string) map[string]string {
 		for _, p := range c.inv.AbsFiles() {
 			add(p, filepath.Base(p))
 		}
-		return idx
+		return idx, total
 	}
 	base := root
 	if fi, err := os.Stat(root); err == nil && !fi.IsDir() {
@@ -205,7 +234,7 @@ func (c *Converter) indexJavaSources(root string) map[string]string {
 		add(p, d.Name())
 		return nil
 	})
-	return idx
+	return idx, total
 }
 
 // resolveJavaSource picks the source path for a class: its SourceFile base name

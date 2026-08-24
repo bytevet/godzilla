@@ -1,0 +1,4 @@
+# Control for regexp_taint. The regexp propagator must not manufacture taint:
+# a rule's own sanitizer is classified before a propagator, and a constant
+# subject stays untainted.
+findings: []

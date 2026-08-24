@@ -269,3 +269,50 @@ func TestScanDiagnostics(t *testing.T) {
 		})
 	}
 }
+
+// CoverageSummary is the line BOTH binaries print, which is what makes sharing
+// it the enforcement of "the wording agrees". That only holds while the wording
+// is pinned somewhere.
+func TestCoverageSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []LangCoverage
+		want string
+	}{
+		{"none detected", nil, ""},
+		{"converted", []LangCoverage{{Language: "go", Detected: true, Converted: true}}, "coverage: go=ok"},
+		{"frontend failed", []LangCoverage{{Language: "cpp", Detected: true}}, "coverage: cpp=FAILED"},
+		{
+			// A frontend that ran but dropped files is neither ok nor failed, and
+			// the ratio is the part that distinguishes the two.
+			"partial", []LangCoverage{{Language: "js", Detected: true, Converted: true, Files: 10, Skipped: 3}},
+			"coverage: js=PARTIAL(7/10 files)",
+		},
+		{
+			"degraded", []LangCoverage{{Language: "go", Detected: true, Converted: true, Degraded: true}},
+			"coverage: go=DEGRADED",
+		},
+		{
+			// Degraded outranks PARTIAL: a trimmed dependency closure is why the
+			// findings are thinner, and naming the dropped FILES instead would
+			// point at the wrong cause.
+			"degraded outranks partial", []LangCoverage{
+				{Language: "go", Detected: true, Converted: true, Degraded: true, Files: 10, Skipped: 3},
+			},
+			"coverage: go=DEGRADED",
+		},
+		{
+			"several", []LangCoverage{
+				{Language: "go", Detected: true, Converted: true},
+				{Language: "python", Detected: true},
+			},
+			"coverage: go=ok, python=FAILED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CoverageSummary(tc.in); got != tc.want {
+				t.Errorf("CoverageSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

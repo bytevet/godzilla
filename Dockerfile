@@ -3,6 +3,8 @@
 # Godzilla scan-ready images. Two runtime targets:
 #   slim (default / :latest) — Go, JavaScript/TS, Python, Ruby, and secrets.
 #   full (:full)             — slim + Java (JDK 25) + Rust.
+# Both carry the `godzilla` scanner and the `godzilla-playground` gIR/rule
+# explorer; see the ENTRYPOINT note at the end of the slim stage for running it.
 # C/C++ (the opt-in cgo/libLLVM backend) is deliberately not included; the
 # default binary compiles the C/C++ stub, so no cgo is needed here.
 #
@@ -17,9 +19,9 @@
 # Java frontend hard-requires a JDK 24+ (Temurin 25).
 
 # ---------------------------------------------------------------------------
-# builder — compile the pure-Go binary (CGO disabled: portable, static).
+# builder — compile the pure-Go binaries (CGO disabled: portable, static).
 # ---------------------------------------------------------------------------
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 WORKDIR /src
 
 # Warm the module cache in its own layer so source-only edits don't re-download.
@@ -31,10 +33,12 @@ COPY . .
 # Stamped into `godzilla version` and the SARIF/JSON report metadata, matching
 # the Makefile's -ldflags contract (main.version). Overridden by the release
 # workflow with the tag/edge version.
+# ./cmd/... rather than a named package: every command is built and stamped, so
+# adding one does not need a matching edit here. Both declare main.version.
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
-      -o /out/godzilla ./cmd/godzilla
+      -o /out/ ./cmd/...
 
 # ---------------------------------------------------------------------------
 # slim — Go + JavaScript/TS + Python + Ruby (+ secrets). ~600-700 MB.
@@ -52,7 +56,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 ruby ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /out/godzilla /usr/local/bin/godzilla
+COPY --from=builder /out/ /usr/local/bin/
 
 # Run as a non-root user; give `go` writable cache dirs under /tmp. GOTOOLCHAIN
 # is pinned local so scanning never triggers a surprise toolchain download
@@ -67,6 +71,14 @@ WORKDIR /src
 
 # `docker run -v "$PWD:/src" ghcr.io/bytevet/godzilla` scans the mounted repo;
 # any argument (version, scan --sarif …) overrides the default CMD.
+#
+# The playground is the other binary, reached by overriding the entrypoint. It
+# must be told to bind 0.0.0.0 — its 127.0.0.1 default is the CONTAINER's
+# loopback, which no port publish can reach — and browsed as localhost, since it
+# serves only loopback Host headers:
+#   docker run --rm -p 7391:7391 -v "$PWD:/src" \
+#     --entrypoint godzilla-playground ghcr.io/bytevet/godzilla \
+#     -addr 0.0.0.0:7391 -open=false /src
 ENTRYPOINT ["godzilla"]
 CMD ["scan", "."]
 

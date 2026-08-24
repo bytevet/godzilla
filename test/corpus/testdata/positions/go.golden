@@ -34,6 +34,8 @@ go/outparam_fill|go-command-injection|go:godzilla-samples/outparam_fill.handler|
 go/path_traversal_servefile|go-path-traversal|go:servefilept.handler|go:net/http.ServeFile|src=test/go/path_traversal_servefile/main.go:9:6|sink=test/go/path_traversal_servefile/main.go:11:16
 go/path_traversal|go-path-traversal|go:godzilla/test/go/path_traversal.main$1|go:os.Open|src=test/go/path_traversal/main.go:12:27|sink=test/go/path_traversal/main.go:16:20
 go/propagator_default|go-command-injection|go:godzilla-samples/propagator_default.main$1|go:os/exec.Command|src=test/go/propagator_default/main.go:15:26|sink=test/go/propagator_default/main.go:17:15
+go/regexp_taint|go-open-redirect|go:godzilla-samples/regexp_taint.main$1|go:net/http.Redirect|src=test/go/regexp_taint/main.go:15:30|sink=test/go/regexp_taint/main.go:18:16
+go/regexp_taint|go-open-redirect|go:godzilla-samples/regexp_taint.main$2|go:net/http.Redirect|src=test/go/regexp_taint/main.go:22:27|sink=test/go/regexp_taint/main.go:24:16
 go/request_helper|go-command-injection|go:godzilla/test/go/request_helper.handler|go:os/exec.Command|src=test/go/request_helper/main.go:16:6|sink=test/go/request_helper/main.go:17:14
 go/return_flow|go-command-injection|go:godzilla-samples/return_flow.main$1|go:os/exec.Command|src=test/go/return_flow/main.go:19:26|sink=test/go/return_flow/main.go:21:15
 go/return_struct_field|go-sql-injection|go:godzilla-samples/return_struct_field.handler|go:(*database/sql.DB).Query|src=test/go/return_struct_field/main.go:17:6|sink=test/go/return_struct_field/main.go:25:17
