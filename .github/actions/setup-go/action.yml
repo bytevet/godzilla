@@ -1,0 +1,51 @@
+name: Set up Go with a rolling build cache
+description: >
+  actions/setup-go plus a build cache that actually turns over. setup-go keys its
+  cache on go.sum alone, so the Go BUILD cache it restores is frozen at whenever
+  go.sum last changed — every run then recompiles the whole module and re-runs
+  every test from that snapshot. Measured on this repo: `go test ./...` is 92s
+  cold and 0.7s warm, with all 26 packages served from the test cache. That is
+  the difference this action is for.
+
+  Restoring a stale build cache is always safe: it is content-addressed, so an
+  entry either matches the exact inputs or is ignored.
+
+inputs:
+  cache-key-suffix:
+    description: >
+      Set when a job compiles with different flags than the others (build tags,
+      cgo), so its objects do not evict theirs on every run.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        # Both caches are handled below; setup-go's would fight for the paths
+        # and pin them to the go.sum key this action exists to get away from.
+        cache: false
+
+    # Asked rather than hard-coded: the paths differ by runner OS and by whether
+    # GOPATH is set in the environment.
+    - id: paths
+      shell: bash
+      run: |
+        echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+        echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ${{ steps.paths.outputs.build }}
+          ${{ steps.paths.outputs.mod }}
+        # The SHA makes every run save a fresh entry; restore-keys fall back to
+        # the most recent prior one. Without the SHA the key would already exist
+        # and the save would be skipped — which is exactly how the build cache
+        # came to be frozen in the first place.
+        key: go-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          go-${{ runner.os }}-${{ inputs.cache-key-suffix }}-${{ hashFiles('go.sum') }}-
+          go-${{ runner.os }}-${{ inputs.cache-key-suffix }}-

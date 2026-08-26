@@ -24,9 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
 
       - name: gofmt
         run: |
@@ -51,9 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
       - uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
@@ -77,15 +73,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          cache-key-suffix: llvm
 
-      - name: Install LLVM 22 + clang
+      # Same script the Dockerfile runs, so the LLVM the binding is built against
+      # cannot drift from the one the images ship. `llvm.sh 22 all` pulled the
+      # whole toolchain — lldb, lld, clangd — where the build needs the headers
+      # and the tests need a matching clang.
+      - name: Install LLVM + clang
         run: |
-          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 22 all
+          scripts/install-llvm.sh 22 llvm-22-dev clang-22
           echo "LLVM_CONFIG=llvm-config-22" >> "$GITHUB_ENV"
 
       - name: gate (build + vet + test, -tags llvm)
@@ -102,9 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
       - uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
@@ -115,7 +111,7 @@ jobs:
       # this job runs (the rouille web sample), so its dependency tree is not
       # re-downloaded and re-compiled every run. The cache key includes the rustc
       # version, so a stable-toolchain bump transparently starts a fresh cache
-      # (Go/Gradle are already cached by setup-go / setup-gradle).
+      # (Go is cached by .github/actions/setup-go, Gradle by setup-gradle).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: test/rust/web_rouille

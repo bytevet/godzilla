@@ -165,8 +165,11 @@ RUN apt-get update \
 # frontend would use whatever the base image happens to ship, which may emit a
 # bitcode version the linked libLLVM cannot read.
 COPY scripts/install-llvm.sh /tmp/
+# The purge is here, not in the script: it is right in a layer and wrong on a CI
+# runner, where a later step may still want wget. Same RUN, so it still shrinks.
 RUN /tmp/install-llvm.sh "${LLVM_MAJOR}" "clang-${LLVM_MAJOR}" "libllvm${LLVM_MAJOR}" \
-    && rm /tmp/install-llvm.sh
+    && apt-get purge -y wget gnupg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* /tmp/install-llvm.sh
 ENV GODZILLA_CC=clang-${LLVM_MAJOR} \
     GODZILLA_CXX=clang++-${LLVM_MAJOR}
 
