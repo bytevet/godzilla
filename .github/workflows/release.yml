@@ -87,7 +87,11 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
+          # full is FROM slim, so it also reads slim's scope — otherwise the
+          # full job rebuilds the entire base stage the slim job just built.
+          cache-from: |
+            type=gha,scope=${{ matrix.variant }}
+            type=gha,scope=slim
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
       # Building only proves the Dockerfile parses. The commands come from one

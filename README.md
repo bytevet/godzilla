@@ -262,7 +262,7 @@ without installing anything. They live on GHCR in two variants:
 | Image | Size | Scans |
 |---|---|---|
 | `ghcr.io/bytevet/godzilla` (`:latest`) | ~600–700 MB | Go · JavaScript/TS · Python · Ruby · secrets |
-| `ghcr.io/bytevet/godzilla:full` | ~1.5–2 GB | everything in slim **+ Java + Rust** |
+| `ghcr.io/bytevet/godzilla:full` | ~2–2.5 GB | everything in slim **+ Java + Rust + C/C++** |
 
 The entrypoint is `godzilla` and the default command is `scan .`, so mounting a
 repo at `/src` scans it immediately.
@@ -275,7 +275,7 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
   scan --sarif /src/results.sarif --fail-on high /src
 
-# Java/Rust need the full image
+# Java, Rust and C/C++ need the full image
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
 
 # The playground is the image's other binary. Bind 0.0.0.0 — the 127.0.0.1
@@ -286,8 +286,10 @@ docker run --rm -p 7391:7391 -v "$PWD:/src" \
   -addr 0.0.0.0:7391 -open=false /src
 ```
 
-The slim image **skips** Java and Rust with a coverage warning rather than
-failing. Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full` (full) track
+The slim image **skips** Java, Rust and C/C++ with a coverage warning rather
+than failing. C/C++ is the reason the two images carry different binaries rather
+than the same one plus extra packages: it binds libLLVM through cgo, so `full`
+ships a build the slim image cannot produce. Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full` (full) track
 releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
 
 ## Supported languages & detections

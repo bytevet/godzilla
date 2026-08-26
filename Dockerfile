@@ -2,11 +2,15 @@
 #
 # Godzilla scan-ready images. Two runtime targets:
 #   slim (default / :latest) — Go, JavaScript/TS, Python, Ruby, and secrets.
-#   full (:full)             — slim + Java (JDK 25) + Rust.
+#   full (:full)             — slim + Java (JDK 25) + Rust + C/C++.
 # Both carry the `godzilla` scanner and the `godzilla-playground` gIR/rule
 # explorer; see the ENTRYPOINT note at the end of the slim stage for running it.
-# C/C++ (the opt-in cgo/libLLVM backend) is deliberately not included; the
-# default binary compiles the C/C++ stub, so no cgo is needed here.
+#
+# C/C++ is the one frontend that is not merely a toolchain away: it binds libLLVM
+# through cgo under the `llvm` build tag, so it needs a DIFFERENT binary, not
+# just another package. full therefore replaces slim's static binaries with cgo
+# ones from builder-llvm. That is why full is a superset in languages but not in
+# linkage.
 #
 # The frontends shell out to a language toolchain at scan time, and the scan
 # pipeline degrades per-language: an image missing a toolchain simply skips that
@@ -41,12 +45,56 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/ ./cmd/...
 
 # ---------------------------------------------------------------------------
+# builder-llvm — the same commands, built with the C/C++ frontend compiled in.
+#
+# Only the `full` stage consumes this, and BuildKit skips stages nothing depends
+# on, so a `--target slim` build never pays for it.
+#
+# LLVM_MAJOR must match the major that tinygo.org/x/go-llvm binds (go.mod), and
+# the same number is pinned in .github/workflows/ci.yml's test-llvm job. The
+# `byollvm` tag means "use the CGO flags I give you" rather than go-llvm's own
+# per-version build tags, so llvm-config is the only thing that has to agree.
+# ---------------------------------------------------------------------------
+FROM golang:1.27-bookworm AS builder-llvm
+ARG LLVM_MAJOR=22
+WORKDIR /src
+
+# llvm.sh installs the whole toolchain (lldb, lld, clangd); the build needs only
+# the headers and llvm-config, so the repo is added directly.
+RUN . /etc/os-release \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends wget gnupg ca-certificates \
+    && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+       | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_MAJOR} main" \
+       > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "llvm-${LLVM_MAJOR}-dev" \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+ARG VERSION=dev
+RUN LC="llvm-config-${LLVM_MAJOR}" \
+    && CGO_ENABLED=1 \
+       CGO_CPPFLAGS="$($LC --cppflags)" \
+       CGO_CXXFLAGS="-std=c++17" \
+       CGO_LDFLAGS="$($LC --ldflags --libs --system-libs all)" \
+       go build -trimpath -tags "llvm byollvm" \
+         -ldflags "-s -w -X main.version=${VERSION}" \
+         -o /out/ ./cmd/...
+
+# ---------------------------------------------------------------------------
 # slim — Go + JavaScript/TS + Python + Ruby (+ secrets). ~600-700 MB.
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS slim
 
-# The Go frontend loads packages via `go list` (golang.org/x/tools), so the Go
-# toolchain must be present at scan time — copy the exact version used to build.
+# The Go frontend loads packages via `go list` (golang.org/x/tools), so a Go
+# toolchain must be present at SCAN time. It tracks go.mod's `go 1.26.5`, not the
+# builder above — GOTOOLCHAIN=local below means this is the only toolchain a scan
+# can use, so it has to be able to load a module written against that directive.
 COPY --from=golang:1.26-bookworm /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
@@ -83,9 +131,10 @@ ENTRYPOINT ["godzilla"]
 CMD ["scan", "."]
 
 # ---------------------------------------------------------------------------
-# full — slim + Java (JDK 25) + Rust. ~1.5-2 GB.
+# full — slim + Java (JDK 25) + Rust + C/C++. ~2-2.5 GB.
 # ---------------------------------------------------------------------------
 FROM slim AS full
+ARG LLVM_MAJOR=22
 USER root
 
 # Java frontend: a full JDK 24+ (java.lang.classfile + in-process javac). Pinned
@@ -107,6 +156,31 @@ RUN apt-get update \
     && chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME" \
     && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+# C/C++ frontend. Two halves, and both are needed: clang to emit the IR at scan
+# time, and libLLVM because these binaries are linked against it — slim's are
+# static, these are not.
+#
+# GODZILLA_CC/CXX pin the versioned drivers. Left to find plain `clang`, the
+# frontend would use whatever the base image happens to ship, which may emit a
+# bitcode version the linked libLLVM cannot read.
+RUN . /etc/os-release \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends wget gnupg ca-certificates \
+    && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+       | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_MAJOR} main" \
+       > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "clang-${LLVM_MAJOR}" "libllvm${LLVM_MAJOR}" \
+    && apt-get purge -y wget gnupg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+ENV GODZILLA_CC=clang-${LLVM_MAJOR} \
+    GODZILLA_CXX=clang++-${LLVM_MAJOR}
+
+# The cgo binaries REPLACE the static ones copied into slim. Last write wins, so
+# this must come after every other stage that puts something in /usr/local/bin.
+COPY --from=builder-llvm /out/ /usr/local/bin/
 
 USER godzilla
 # ENTRYPOINT, CMD, WORKDIR inherited from slim.
