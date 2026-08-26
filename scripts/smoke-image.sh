@@ -89,10 +89,23 @@ printf 'public class App { public static void main(String[] a) {} }\n' > "$fixtu
 printf 'pub fn hi() -> i32 { 1 }\n'                             > "$fixture/lib.rs"
 printf '#include <cstdio>\nint main() { std::printf("hi"); }\n' > "$fixture/main.cpp"
 
+# mktemp -d is 0700 and owned by the invoking user; the image runs as uid 1000,
+# which is a DIFFERENT user on a CI runner. Without this the container cannot
+# read the mount and the scan reports nothing. Docker Desktop on macOS hides it
+# by mapping ownership permissively, so it fails only on Linux.
+chmod -R a+rX "$fixture"
+
 echo "smoke: $img — expecting to scan: $want_langs"
-cov=$(docker run --rm -v "$fixture:/src:ro" "$img" scan /src 2>/dev/null | grep '^coverage:' || true)
+set +e
+scan=$(docker run --rm -v "$fixture:/src:ro" "$img" scan /src 2>&1)
+set -e
+cov=$(printf '%s\n' "$scan" | grep '^coverage:' || true)
 if [ -z "$cov" ]; then
-  echo "smoke: FAIL the scan printed no coverage line" >&2
+  # The scan output IS the diagnosis here — a mount it cannot read, a missing
+  # shared library, a toolchain that will not start — so print it rather than
+  # leaving the next reader to reproduce it.
+  echo "smoke: FAIL the scan printed no coverage line. Its output was:" >&2
+  printf '%s\n' "$scan" >&2
   exit 1
 fi
 echo "smoke: $cov"
