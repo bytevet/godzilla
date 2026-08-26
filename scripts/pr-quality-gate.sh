@@ -322,26 +322,132 @@ gate_corpus() {
 
 pass_fail_text() { [[ ${#GATE_FAILURES[@]} -eq 0 ]] && echo "✅ PASS" || echo "❌ FAIL"; }
 
+# The report is written so its LENGTH is the signal. A PR that changed nothing
+# gets one line; an axis appears only when it has something to say. The previous
+# layout printed four headed sections, a six-row corpus table and ninety lines of
+# raw benchstat whether or not any of it had moved — 132 lines to say "nothing
+# changed", which trains a reviewer to scroll past the one time it matters.
+#
+# Nothing is dropped: everything the old report showed is in the details block.
+
+# join_by is spelled out because `local IFS='" . "'; echo "${arr[*]}"` silently
+# joins on the FIRST CHARACTER of IFS only — a multi-character separator loses
+# everything after it, which turns the summary into a run-on sentence.
+join_by() {
+  local sep="$1" out="" x
+  shift
+  for x in "$@"; do out="${out:+$out$sep}$x"; done
+  printf '%s' "$out"
+}
+
+# geomean_summary condenses benchstat's three geomean rows into one line. Empty
+# when benchstat could not compute them (too few samples, or a benchmark set that
+# does not overlap between revisions).
+geomean_summary() {
+  [[ "$BENCH_STATUS" == "ok" ]] || return 0
+  awk '
+    /^geomean/ {
+      d = $NF
+      if (d !~ /%$/) next
+      if (n == 0)      t = d
+      else if (n == 1) b = d
+      else if (n == 2) a = d
+      n++
+    }
+    END {
+      if (n == 0) exit
+      printf "time %s", t
+      if (n > 1) printf " · B/op %s", b
+      if (n > 2) printf " · allocs %s", a
+    }
+  ' <<<"$BENCH_TEXT"
+}
+
+# corpus_delta prints a one-line change summary, or nothing when the numbers are
+# identical on both revisions.
+corpus_delta() {
+  [[ $DO_CORPUS -eq 1 ]] || return 0
+  [[ "$CORPUS_BASE" == "ERR" || "$CORPUS_HEAD" == "ERR" ]] && {
+    echo "could not be scored (base=\`${CORPUS_BASE}\`, head=\`${CORPUS_HEAD}\`)"; return 0; }
+  local n_b tp_b fp_b fn_b p_b r_b f_b n_h tp_h fp_h fn_h p_h r_h f_h
+  read -r n_b tp_b fp_b fn_b p_b r_b f_b <<<"$CORPUS_BASE"
+  read -r n_h tp_h fp_h fn_h p_h r_h f_h <<<"$CORPUS_HEAD"
+  local out=()
+  [[ "$tp_b" != "$tp_h" ]] && out+=("TP ${tp_b}→${tp_h}")
+  [[ "$fp_b" != "$fp_h" ]] && out+=("FP ${fp_b}→${fp_h}")
+  [[ "$fn_b" != "$fn_h" ]] && out+=("FN ${fn_b}→${fn_h}")
+  [[ "$p_b" != "$p_h" ]]   && out+=("precision ${p_b}→${p_h}")
+  [[ "$r_b" != "$r_h" ]]   && out+=("recall ${r_b}→${r_h}")
+  [[ "$n_b" != "$n_h" ]]   && out+=("sample count ${n_b}→${n_h} ⚠️")
+  (( ${#out[@]} == 0 )) && return 0
+  join_by ' · ' "${out[@]}"; echo
+}
+
+rules_delta() {
+  local out=()
+  [[ -n "$RULES_ADDED" ]]    && out+=("added $(echo "$RULES_ADDED" | paste -sd',' - | sed 's/,/, /g')")
+  [[ -n "$RULES_REMOVED" ]]  && out+=("removed $(echo "$RULES_REMOVED" | paste -sd',' - | sed 's/,/, /g')")
+  [[ -n "$RULES_MODIFIED" ]] && out+=("modified $(echo "$RULES_MODIFIED" | paste -sd',' - | sed 's/,/, /g')")
+  (( PROPAGATORS_CHANGED == 1 )) && out+=("**default propagators changed — affects every rule**")
+  (( ${#out[@]} == 0 )) && return 0
+  join_by ' · ' "${out[@]}"; echo
+}
+
 emit_md() {
-  echo "## 🛡️ Quality Gate — \`${BASE_SHORT}\`..\`${HEAD_SHORT}\`"
+  local verdict corpus rules geo
+  if [[ $DO_GATE -eq 1 ]]; then verdict="$(pass_fail_text)"; else verdict="ℹ️ informational (\`--no-gate\`)"; fi
+  corpus="$(corpus_delta)"
+  rules="$(rules_delta)"
+  geo="$(geomean_summary)"
+
+  echo "## 🛡️ Quality Gate ${verdict} — \`${BASE_SHORT}\`..\`${HEAD_SHORT}\`"
   echo
-  if [[ $DO_GATE -eq 1 ]]; then
-    echo "**Result: $(pass_fail_text)**"
-  else
-    echo "**Result: informational (\`--no-gate\`)**"
-  fi
+
+  # What tripped the gate leads, always, on its own lines.
   if [[ ${#GATE_FAILURES[@]} -gt 0 ]]; then
+    for f in "${GATE_FAILURES[@]}"; do echo "❌ $f"; done
     echo
-    for f in "${GATE_FAILURES[@]}"; do echo "- ❌ $f"; done
+  fi
+
+  local said=0
+  if [[ $LOC_FILES -gt 0 ]]; then
+    echo "**Code**    +${LOC_ADDED} / −${LOC_REMOVED} · ${LOC_FILES} product-source file(s)"; said=1
+  fi
+  if [[ -n "$rules" ]];  then echo "**Rules**   ${rules}"; said=1; fi
+  if [[ -n "$corpus" ]]; then echo "**Corpus**  ${corpus}"; said=1; fi
+  if [[ "$BENCH_STATUS" != "ok" ]]; then
+    echo "**Perf**    ${BENCH_STATUS}"; said=1
+  elif [[ ${#GATE_FAILURES[@]} -gt 0 && -n "$geo" ]]; then
+    echo "**Perf**    geomean ${geo}"; said=1
+  fi
+
+  # The quiet case: one sentence, and the reader is done.
+  if [[ $said -eq 0 ]]; then
+    local parts=("no product-source change")
+    if [[ $DO_CORPUS -eq 1 && "$CORPUS_HEAD" != "ERR" ]]; then
+      local n_h tp_h fp_h fn_h
+      read -r n_h tp_h fp_h fn_h _ _ _ <<<"$CORPUS_HEAD"
+      parts+=("corpus unchanged (${tp_h} TP / ${fp_h} FP / ${fn_h} FN over N=${n_h})")
+    fi
+    parts+=("no rule changes")
+    [[ -n "$geo" ]] && parts+=("no significant perf change (geomean ${geo})")
+    echo "$(join_by ' · ' "${parts[@]}")."
   fi
   echo
 
-  # --- Metric 1 --------------------------------------------------------------
-  echo "### 1 · Lines changed (excluding tests)"
+  echo "<details><summary>Full metrics</summary>"
   echo
-  echo "Net **+${LOC_ADDED} / −${LOC_REMOVED}** across **${LOC_FILES}** product-source file(s)."
-  # Guard on LOC_FILES (an int), not ${#LOC_DIR_ADDED[@]}: reading the length of
-  # an empty `declare -A` associative array trips `set -u` in bash.
+  emit_md_detail
+  echo
+  echo "</details>"
+}
+
+# emit_md_detail is everything the summary elides — the same content the report
+# used to show unconditionally.
+emit_md_detail() {
+  echo "**Lines changed** (excludes \`*_test.go\`, \`testdata/\`, \`test/\`, generated \`*.pb.go\`)"
+  echo
+  echo "Net +${LOC_ADDED} / −${LOC_REMOVED} across ${LOC_FILES} file(s) in \`${LOC_INCLUDES[*]}\`."
   if [[ $LOC_FILES -gt 0 ]]; then
     echo
     echo "| Area | + | − |"
@@ -351,17 +457,15 @@ emit_md() {
     done
   fi
   echo
-  echo "> Counts \`${LOC_INCLUDES[*]}\`; excludes \`*_test.go\`, \`testdata/\`, \`test/\`, generated \`*.pb.go\`."
-  echo
 
-  # --- Metric 2 --------------------------------------------------------------
-  echo "### 2 · Corpus signal/noise (TP / FP / FN)"
+  echo "**Corpus signal/noise**"
   echo
   if [[ $DO_CORPUS -eq 0 ]]; then
     echo "_skipped (\`--no-corpus\`)._"
   elif [[ "$CORPUS_BASE" == "ERR" || "$CORPUS_HEAD" == "ERR" ]]; then
-    echo "⚠️ Could not parse the scorer output on one side (base=\`${CORPUS_BASE}\`, head=\`${CORPUS_HEAD}\`)."
+    echo "⚠️ Could not parse the scorer output (base=\`${CORPUS_BASE}\`, head=\`${CORPUS_HEAD}\`)."
   else
+    local n_b tp_b fp_b fn_b p_b r_b f_b n_h tp_h fp_h fn_h p_h r_h f_h
     read -r n_b tp_b fp_b fn_b p_b r_b f_b <<<"$CORPUS_BASE"
     read -r n_h tp_h fp_h fn_h p_h r_h f_h <<<"$CORPUS_HEAD"
     echo "| Metric | Base | Head | Δ |"
@@ -374,33 +478,20 @@ emit_md() {
     echo "| F1 | $f_b | $f_h | $(awk -v a="$f_b" -v b="$f_h" 'BEGIN{printf "%+.3f",b-a}') |"
     echo
     if [[ "$n_b" != "$n_h" ]]; then
-      echo "> ⚠️ Sample count differs (base N=$n_b, head N=$n_h) — the PR added/removed corpus samples, or a toolchain differs between checkouts. The raw TP/FN deltas partly reflect that, so read precision/recall (rates) rather than the counts."
+      echo "> ⚠️ Sample count differs (base N=$n_b, head N=$n_h) — the PR added/removed corpus samples, or a toolchain differs between checkouts. Read precision/recall (rates) rather than the counts."
     else
       echo "> Scored over N=$n_b samples on both revisions."
     fi
   fi
   echo
 
-  # --- Metric 3 --------------------------------------------------------------
-  echo "### 3 · Rule changes"
+  echo "**Rule changes**"
   echo
-  local none=1
-  if [[ -n "$RULES_ADDED" ]];    then echo "- **Added:** $(echo "$RULES_ADDED" | paste -sd',' - | sed 's/,/, /g')"; none=0; fi
-  if [[ -n "$RULES_REMOVED" ]];  then echo "- **Removed:** $(echo "$RULES_REMOVED" | paste -sd',' - | sed 's/,/, /g')"; none=0; fi
-  if [[ -n "$RULES_MODIFIED" ]]; then echo "- **Modified:** $(echo "$RULES_MODIFIED" | paste -sd',' - | sed 's/,/, /g')"; none=0; fi
-  if [[ $PROPAGATORS_CHANGED -eq 1 ]]; then
-    echo "- **Default propagators** (\`internal/rules/propagators.go\`) changed — affects every rule."
-    none=0
-  fi
-  [[ $none -eq 1 ]] && echo "_No rule additions, removals, or modifications._"
+  local r; r="$(rules_delta)"
+  if [[ -n "$r" ]]; then echo "$r"; else echo "_None._"; fi
   echo
 
-  # --- Metric 4 --------------------------------------------------------------
-  echo "### 4 · Performance · **gated** (benchstat, count=${BENCH_COUNT})"
-  echo
-  echo "Engine hot paths **and** per-language full-pipeline scans, all compared by"
-  echo "benchstat so the base→head difference is statistically reliable rather than"
-  echo "wall-clock noise. A language whose toolchain is absent is skipped."
+  echo "**Performance** (benchstat, count=${BENCH_COUNT})"
   echo
   if [[ "$BENCH_STATUS" != "ok" ]]; then
     echo "_${BENCH_STATUS}._"
@@ -409,10 +500,9 @@ emit_md() {
     echo "$BENCH_TEXT"
     echo '```'
     echo
-    echo "> Gate blocks on a regression that is significant at alpha=${BENCH_ALPHA} (benchstat marks anything weaker as \`~\`) on: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}") — time \`sec/op\` > ${PERF_THRESHOLD}%, memory \`B/op\`/\`allocs/op\` > ${MEM_THRESHOLD}%. The strict alpha keeps subprocess/GC run-to-run noise on the heavier scans from tripping the gate."
+    echo "> Gated on a regression significant at alpha=${BENCH_ALPHA} (benchstat marks anything weaker as \`~\`) for: $(IFS=', '; echo "${KEY_BENCHMARKS[*]}") — time \`sec/op\` > ${PERF_THRESHOLD}%, memory \`B/op\`/\`allocs/op\` > ${MEM_THRESHOLD}%. The strict alpha keeps subprocess/GC noise on the heavier scans from tripping the gate."
   fi
   echo
-  echo "---"
   echo "_Both revisions were built and benchmarked back-to-back on this runner; numbers are only comparable within a single run._"
 }
 
