@@ -16,11 +16,17 @@
 # pipeline degrades per-language: an image missing a toolchain simply skips that
 # language (with a stderr warning) and still runs every other frontend plus the
 # secrets scanner. So slim scans Go/JS/Python/Ruby out of the box; use :full for
-# Java/Rust.
+# Java, Rust and C/C++. scripts/smoke-image.sh holds that list and asserts it.
 #
 # Base images are pinned on purpose (see the release workflow's Dependabot config
 # for automated bumps): the runtime `go` must track go.mod's `go 1.26.5`, and the
 # Java frontend hard-requires a JDK 24+ (Temurin 25).
+
+# The LLVM major the C/C++ frontend binds. Declared once, before the first FROM,
+# so the builder's libLLVM and the runtime's clang cannot drift apart; each stage
+# opts in with a bare `ARG LLVM_MAJOR`. It must match the major that
+# tinygo.org/x/go-llvm targets (go.mod) and the pin in ci.yml's test-llvm job.
+ARG LLVM_MAJOR=22
 
 # ---------------------------------------------------------------------------
 # builder — compile the pure-Go binaries (CGO disabled: portable, static).
@@ -56,21 +62,13 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # per-version build tags, so llvm-config is the only thing that has to agree.
 # ---------------------------------------------------------------------------
 FROM golang:1.27-bookworm AS builder-llvm
-ARG LLVM_MAJOR=22
+ARG LLVM_MAJOR
 WORKDIR /src
 
-# llvm.sh installs the whole toolchain (lldb, lld, clangd); the build needs only
-# the headers and llvm-config, so the repo is added directly.
-RUN . /etc/os-release \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends wget gnupg ca-certificates \
-    && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-       | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_MAJOR} main" \
-       > /etc/apt/sources.list.d/llvm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends "llvm-${LLVM_MAJOR}-dev" \
-    && rm -rf /var/lib/apt/lists/*
+# Installed BEFORE the source copy, and the source is not copied until after: an
+# edit to any .go file must not re-run a multi-minute apt install.
+COPY scripts/install-llvm.sh /tmp/
+RUN /tmp/install-llvm.sh "${LLVM_MAJOR}" "llvm-${LLVM_MAJOR}-dev" && rm /tmp/install-llvm.sh
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -92,10 +90,12 @@ RUN LC="llvm-config-${LLVM_MAJOR}" \
 FROM debian:bookworm-slim AS slim
 
 # The Go frontend loads packages via `go list` (golang.org/x/tools), so a Go
-# toolchain must be present at SCAN time. It tracks go.mod's `go 1.26.5`, not the
-# builder above — GOTOOLCHAIN=local below means this is the only toolchain a scan
-# can use, so it has to be able to load a module written against that directive.
-COPY --from=golang:1.26-bookworm /usr/local/go /usr/local/go
+# toolchain must be present at SCAN time. Taken from the builder rather than
+# pinned again: a second `golang:` reference is a second thing for Dependabot to
+# bump, and the two had already drifted (builder 1.27, runtime 1.26) under a
+# comment claiming they matched. GOTOOLCHAIN=local below makes this the only
+# toolchain a scan can use, so newer is strictly safer.
+COPY --from=builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # python3 (stdlib ast) and ruby (stdlib Ripper) are the Python/Ruby frontends'
@@ -134,7 +134,7 @@ CMD ["scan", "."]
 # full — slim + Java (JDK 25) + Rust + C/C++. ~2-2.5 GB.
 # ---------------------------------------------------------------------------
 FROM slim AS full
-ARG LLVM_MAJOR=22
+ARG LLVM_MAJOR
 USER root
 
 # Java frontend: a full JDK 24+ (java.lang.classfile + in-process javac). Pinned
@@ -164,17 +164,9 @@ RUN apt-get update \
 # GODZILLA_CC/CXX pin the versioned drivers. Left to find plain `clang`, the
 # frontend would use whatever the base image happens to ship, which may emit a
 # bitcode version the linked libLLVM cannot read.
-RUN . /etc/os-release \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends wget gnupg ca-certificates \
-    && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-       | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_MAJOR} main" \
-       > /etc/apt/sources.list.d/llvm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends "clang-${LLVM_MAJOR}" "libllvm${LLVM_MAJOR}" \
-    && apt-get purge -y wget gnupg && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+COPY scripts/install-llvm.sh /tmp/
+RUN /tmp/install-llvm.sh "${LLVM_MAJOR}" "clang-${LLVM_MAJOR}" "libllvm${LLVM_MAJOR}" \
+    && rm /tmp/install-llvm.sh
 ENV GODZILLA_CC=clang-${LLVM_MAJOR} \
     GODZILLA_CXX=clang++-${LLVM_MAJOR}
 
