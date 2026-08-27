@@ -1,10 +1,11 @@
 version: 2
 
 # Keep the deliberately-pinned Docker base images (Dockerfile) and the pinned
-# GitHub Actions (ci.yml, release.yml, security.yml) current via reviewable PRs,
+# GitHub Actions (the workflows and .github/actions/) current via reviewable PRs,
 # so we get reproducible pins without `latest`'s silent drift.
 updates:
-  # Base images: golang:1.26-bookworm, debian:bookworm-slim, eclipse-temurin:25-jdk.
+  # Base images: golang:1.27-bookworm, debian:bookworm-slim, eclipse-temurin:25-jdk.
+  # The scan-time Go toolchain is COPYed from the builder, so there is one pin.
   - package-ecosystem: docker
     directory: /
     schedule:

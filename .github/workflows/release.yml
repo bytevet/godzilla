@@ -87,14 +87,19 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
+          # full is FROM slim, so it also reads slim's scope — otherwise the
+          # full job rebuilds the entire base stage the slim job just built.
+          cache-from: |
+            type=gha,scope=${{ matrix.variant }}
+            type=gha,scope=slim
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
-      # Building only proves the Dockerfile parses. The commands come from one
-      # `go build ./cmd/...`, so one silently ceasing to ship is a real failure
-      # mode — and an invisible one, because the image still builds and the
-      # scanner still works. The script enumerates ./cmd/ the same way the
-      # Dockerfile does, so a new command is covered without editing either.
+      # Building only proves the Dockerfile parses. Two things can be wrong in an
+      # image that builds: a command silently stops shipping, and — since C/C++
+      # is COMPILED IN rather than installed — a variant can ship a binary built
+      # without the `llvm` tag, which starts fine and merely reports cpp=FAILED.
+      # The script enumerates ./cmd/ the same way the Dockerfile does, and the
+      # variant tells it which languages to hold the image to.
       #
       # Only on pull_request: that is where the image can be loaded rather than
       # pushed, and where failing still prevents the merge. A push builds
@@ -102,4 +107,7 @@ jobs:
       # and nothing left to gate by the time it exists.
       - name: Smoke test the image
         if: github.event_name == 'pull_request'
-        run: scripts/smoke-image.sh ghcr.io/${{ github.repository }}:smoke${{ matrix.suffix }}
+        # The tag comes from the meta step rather than being rebuilt by hand: on a
+        # pull_request every other tag rule is disabled, so this output IS the
+        # single `smoke` tag, and renaming it cannot silently orphan this step.
+        run: scripts/smoke-image.sh "${{ steps.meta.outputs.tags }}" "${{ matrix.variant }}"

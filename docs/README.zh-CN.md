@@ -240,7 +240,7 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 | 镜像 | 体积 | 可扫描 |
 |---|---|---|
 | `ghcr.io/bytevet/godzilla`（`:latest`） | 约 600–700 MB | Go · JavaScript/TS · Python · Ruby · 凭据 |
-| `ghcr.io/bytevet/godzilla:full` | 约 1.5–2 GB | slim 的全部内容**外加 Java 与 Rust** |
+| `ghcr.io/bytevet/godzilla:full` | 约 2–2.5 GB | slim 的全部内容**外加 Java、Rust 与 C/C++** |
 
 入口点是 `godzilla`，默认命令为 `scan .`，因此把仓库挂载到 `/src` 就会立即开始扫描。
 
@@ -252,7 +252,7 @@ docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
   scan --sarif /src/results.sarif --fail-on high /src
 
-# Java/Rust 需要 full 镜像
+# Java、Rust 与 C/C++ 需要 full 镜像
 docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla:full
 
 # Playground 是镜像里的另一个可执行文件。要显式绑定 0.0.0.0：默认的 127.0.0.1 指的是
@@ -262,7 +262,7 @@ docker run --rm -p 7391:7391 -v "$PWD:/src" \
   -addr 0.0.0.0:7391 -open=false /src
 ```
 
-slim 镜像遇到 Java 和 Rust 时会跳过并给出覆盖率警告，而不是直接失败。标签规则：
+slim 镜像遇到 Java、Rust 和 C/C++ 时会跳过并给出覆盖率警告，而不是直接失败。C/C++ 也正是两个镜像不共用同一份二进制的原因：它通过 cgo 绑定 libLLVM，因此 full 里装的是 slim 无法产出的另一种构建。标签规则：
 `X.Y.Z`/`X.Y`/`latest`（slim）与 `X.Y.Z-full`/`full`（full）跟随发布版本，
 `edge`/`edge-full` 跟随 `main` 分支。支持 amd64 与 arm64 双架构。
 
