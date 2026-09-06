@@ -76,16 +76,3 @@ func TestOpenAIReviewer_ErrorStatus(t *testing.T) {
 		t.Errorf("expected an error on a 401 response")
 	}
 }
-
-// TestNewReviewer_ProviderSelection verifies the factory routes on
-// GODZILLA_LLM_PROVIDER.
-func TestNewReviewer_ProviderSelection(t *testing.T) {
-	t.Setenv("GODZILLA_LLM_PROVIDER", "openai")
-	if _, ok := NewReviewer(nil).(*OpenAIReviewer); !ok {
-		t.Errorf("provider=openai should select the OpenAI reviewer")
-	}
-	t.Setenv("GODZILLA_LLM_PROVIDER", "")
-	if _, ok := NewReviewer(nil).(*AnthropicReviewer); !ok {
-		t.Errorf("default provider should select the Anthropic reviewer")
-	}
-}

@@ -53,6 +53,19 @@
 | canonical name | 规范名 | |
 | logical argument index | 逻辑参数下标 | 规则里 `#<n>` 指定的那个下标。 |
 
+## LLM 复核与命令行后端
+
+`-llm-review` 这一阶段的配置面词汇（`internal/llm`、README 的环境变量一节）：
+
+| English | 中文 | 说明 |
+|---|---|---|
+| agent CLI | 智能体 CLI | 指 `claude`、`agy` 这类已登录的编码智能体命令行工具，不是 Godzilla 自己的 CLI；首次出现写「编码智能体（coding agent）CLI」。 |
+| profile（某个 CLI 的调用方式） | 调用配置 | 不译「配置文件」：它是代码里针对某个 CLI 固定下来的一套调用参数，磁盘上并没有这个文件。 |
+| one-shot | 单次执行 | 跑一次拿到结果就结束，不进入交互会话。 |
+| no tools / toolless | 不带任何工具 | 不写「无工具」——那会被读成工具缺失，而这里是刻意不授予。 |
+| interactive picker | 交互式选择菜单 | 固定用这一个说法，不要换成「交互式选择」或「选择菜单」。 |
+| placeholder | 占位符 | |
+
 ## 漏洞类别
 
 沿用中文安全社区的通行叫法，不自造：

@@ -95,15 +95,3 @@ func (o *OpenAIReviewer) Review(ctx context.Context, f analysis.Finding, codeCon
 	}
 	return parseVerdict(out.Choices[0].Message.Content)
 }
-
-// NewReviewer selects the reviewer backend from GODZILLA_LLM_PROVIDER (LLM-9):
-// "openai" uses an OpenAI-compatible endpoint (one-shot; covers local/offline
-// servers), anything else (the default) uses the Anthropic reviewer with agentic
-// tools over the analyzed program. The Anthropic path also honors
-// ANTHROPIC_BASE_URL for an Anthropic-compatible proxy.
-func NewReviewer(tb ToolBox) Reviewer {
-	if strings.EqualFold(os.Getenv("GODZILLA_LLM_PROVIDER"), "openai") {
-		return NewOpenAIReviewer()
-	}
-	return NewAnthropicReviewer().WithTools(tb)
-}

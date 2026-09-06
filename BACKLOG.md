@@ -115,6 +115,7 @@ toolchain-gated, net-new frontends, or deferred perf work.
 | LLM-7 | med | ✅ `6ac4a91` | Richer verdict (confidence/exploitability) + kept findings annotated as LLM-confirmed. |
 | LLM-8 | med | ✅ `1cd91ee` | Prompt carries rule vocabulary; `parseVerdict` no longer treats a bare "false" as a drop. |
 | LLM-9 | low | ✅ `0302ec7` | OpenAI-compatible adapter (Ollama/vLLM/llama.cpp) routed by `GODZILLA_LLM_PROVIDER`. |
+| LLM-10 | med | ✅ | Agent-CLI backend: `-llm-review` drives an already-logged-in `claude`/`agy` (or a `{{prompt}}` template in `GODZILLA_LLM_CLI_CMD`) as a subprocess, so the stage no longer requires an API key. Backend resolves before the scan and is never auto-detected — unpinned runs prompt, or fail. A profile ships only where the reviewer can be denied write access to the repo it audits: `claude` gets read-only tools (`--allowedTools Read,Grep`), `agy` runs toolless, `cursor-agent` gets no profile (undisableable write/bash in print mode). |
 
 ## Trust & quality measurement (TRUST)
 

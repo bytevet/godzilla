@@ -30,7 +30,7 @@ go test ./converters/go/ -run TestGIRv2Metadata
 # 0 clean, 1 error, 2 usage, 3 findings at/above -fail-on (default: medium).
 go run ./cmd/godzilla scan ./test/go/sql_injection
 go run ./cmd/godzilla scan --html /tmp/report.html --fail-on high <path>
-go run ./cmd/godzilla scan --llm-review <path>          # needs ANTHROPIC_API_KEY (or `ant auth`)
+go run ./cmd/godzilla scan --llm-review <path>          # ANTHROPIC_API_KEY, or GODZILLA_LLM_CLI=claude|agy
 
 # Java scanning needs a JDK 24+ `java`; Rust needs `rustc`; both degrade gracefully if absent.
 # C/C++ is the opt-in cgo backend — build/test it via the Makefile *-llvm targets (needs libLLVM):
@@ -151,10 +151,20 @@ the leaf package **`internal/scaninfo`** so `internal/scan` can fill it and `int
 it without report importing scan — that would drag every frontend, including the cgo C/C++ one, into
 a rendering package. `WriteJSON` and `WriteSARIF` (2.1.0,
 severity→level) feed tooling and GitHub code scanning. `llm/review.go` is dependency-free (interface, confidence-gated `Filter` with fail-open
-semantics, prompt builder, verdict parser); `anthropic.go` and `openai.go` are the backends (default
-`claude-haiku-4-5`; `GODZILLA_LLM_MODEL` overrides the model,
+semantics, prompt builder, verdict parser); `anthropic.go` and `openai.go` are the API backends
+(default `claude-haiku-4-5`; `GODZILLA_LLM_MODEL` overrides the model,
 `GODZILLA_LLM_PROVIDER=openai` + `GODZILLA_LLM_BASE_URL` selects an
-OpenAI-compatible endpoint, e.g. a local model).
+OpenAI-compatible endpoint, e.g. a local model). `agentcli.go` is the third — the per-CLI
+profiles and a reviewer that drives an **already-logged-in agent CLI** as a subprocess, the
+Python/Ruby frontends' shell-out shape, so a user with no API key can still run the stage; it
+pins no model, inheriting the CLI session's unless `GODZILLA_LLM_MODEL` says otherwise.
+`resolve.go` picks the backend BEFORE the scan (provider → CLI_CMD → CLI → API key → interactive
+picker) and never auto-detects — an auto-picked CLI spends a subscription quota nobody approved,
+so an unpinned non-interactive run FAILS instead. **A CLI gets a built-in profile only if the
+reviewer can be denied write access to the repo it audits**: `claude` alone runs with tools
+(`--allowedTools Read,Grep`, read-only), `agy` runs one-shot and toolless, and `cursor-agent` gets
+no profile — its print mode's write/bash access cannot be disabled. `GODZILLA_LLM_CLI_CMD` (a
+`{{prompt}}` template) is where an unprofiled tool goes, on the user's own judgement.
 
 **CLI (`cmd/godzilla/`).** `main.go` parses flags and sets the severity-gated exit code; `rules.go` adds
 `rules list|lint|test`. The per-extension frontend dispatch, module merge, engine + dangerous-call +

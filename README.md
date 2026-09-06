@@ -49,8 +49,11 @@ flowchart LR
   scan-diagnostics panel), **JSON** and **SARIF 2.1.0** (for GitHub code
   scanning), and a severity-gated **exit code**.
 - **Optional LLM review.** A pluggable, off-by-default stage sends findings at or
-  below **medium** confidence to Claude to trim false positives; High-confidence
-  findings are never reviewed, and the stage fails open.
+  below **medium** confidence to a model to trim false positives; High-confidence
+  findings are never reviewed, and the stage fails open. It runs on an API key
+  (Anthropic, or any OpenAI-compatible endpoint) *or* on an agent CLI you are
+  already signed into — `claude` or `agy` — driven as a subprocess, so no API key
+  is required.
 - **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
@@ -84,9 +87,10 @@ godzilla scan --sarif results.sarif --json results.json ./path/to/project
 # Add your own rules on top of the built-ins
 godzilla scan --rules myrules.yaml ./path/to/project
 
-# Triage medium/low-confidence findings with an LLM (needs ANTHROPIC_API_KEY).
-# A scan whose findings are all High reports "0 reviewed" — that is the gate
-# working, not a failure.
+# Triage medium/low-confidence findings with an LLM — via an API key, or via an
+# agent CLI you are already signed into (GODZILLA_LLM_CLI=claude). A scan whose
+# findings are all High reports "0 reviewed" — that is the gate working, not a
+# failure.
 godzilla scan --llm-review ./path/to/project
 
 # Changed-files mode: gate only what a commit touched (one process, one gate)
@@ -244,11 +248,33 @@ carries operator concerns:
 | `GODZILLA_ALLOW_BUILD=1` | Same opt-in as `-allow-build`: lets a scan run the project's build tool (Maven/Gradle/Cargo). |
 | `GODZILLA_RUSTC`, `GODZILLA_CARGO` | Paths to the Rust toolchain binaries (default: `rustc`, `cargo` on `PATH`). |
 | `GODZILLA_CC`, `GODZILLA_CXX` | C/C++ compilers for the opt-in LLVM backend (default: `clang`, `clang++`). |
-| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5` for Anthropic, `gpt-4o-mini` for OpenAI). |
+| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5` for Anthropic, `gpt-4o-mini` for OpenAI). Unset, an agent CLI inherits whatever model its own session is configured for. |
 | `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
+| `GODZILLA_LLM_CLI` | Run `-llm-review` through an agent CLI you are already signed into — `claude` or `agy` — instead of an API key. Naming the tool is what selects the backend. |
+| `GODZILLA_LLM_CLI_CMD` | Drive an agent CLI that has no built-in profile, `cursor-agent` included: a command template containing a `{{prompt}}` placeholder, whose stdout is parsed as the verdict. What that command may do is then yours to vet. |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
 | `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
 | `GODZILLA_PROGRESS` | Force the scan's progress display on (`1`) or off (`0`). By default it runs only when stderr is a terminal and `CI` is unset. |
+
+The reviewer's backend is resolved **before the scan starts**, first match wins:
+`GODZILLA_LLM_PROVIDER=openai` → `GODZILLA_LLM_CLI_CMD` → `GODZILLA_LLM_CLI` →
+`ANTHROPIC_API_KEY`. Nothing is auto-detected. With none of them set, `-llm-review`
+shows an interactive pick of the agent CLIs found on `PATH`; where that prompt
+cannot be shown — CI, `-quiet`, piped output — or no CLI is found, the scan fails
+right there, naming the remedies, rather than once the analysis has already been
+paid for.
+
+Two consequences of driving a CLI are worth knowing before pinning one. **Tools:**
+a reviewer must never write into the repo it is auditing, and `claude` is the only
+CLI that can be held to that — `--allowedTools Read,Grep` is read-only, so it alone
+reviews with tools. `agy` runs one-shot with none: a weaker review, but a confined
+one, and Godzilla never passes `--dangerously-skip-permissions` or `--force`.
+`cursor-agent` has no built-in profile, its print mode carrying write and bash
+access that cannot be turned off. **Cost:** a CLI brings its own session, model and
+billing. Measured with `claude`, a review cost **$0.1123 per finding** on an
+inherited Opus session; `GODZILLA_LLM_MODEL=haiku` brought that to **$0.0216**,
+which is the lever when the bill matters. Only findings at or below medium
+confidence are reviewed at all.
 
 Subprocess deadlines are flags, not environment: `-parse-timeout` (default
 `2m0s`, each per-file parse/dump) and `-build-timeout` (default `10m0s`, a

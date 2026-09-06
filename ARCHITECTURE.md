@@ -237,10 +237,20 @@ line, rather than dying.
 
 - **Confidence** — every finding is scored (intra = High, cross-function = Medium),
   and the pipeline routes low-confidence findings to the reviewer stage.
-- **LLM reviewer** (`internal/llm/`) — a pluggable, Anthropic-backed stage that
-  adjudicates uncertain findings and discards false positives. Confidence-gated,
-  **fail-open** (never drops a finding on an API error), and off by default
-  (`--llm-review`).
+- **LLM reviewer** (`internal/llm/`) — a pluggable stage that adjudicates uncertain
+  findings and discards false positives. Confidence-gated, **fail-open** (never drops
+  a finding on a backend error), and off by default (`--llm-review`). Three backends:
+  Anthropic, any OpenAI-compatible endpoint, and an **already-logged-in agent CLI**
+  driven as a subprocess (`GODZILLA_LLM_CLI`) — the same shell-out shape the
+  Python/Ruby frontends use, and what lets a user with no API key run the stage at
+  all. The backend resolves before the scan starts and is never auto-detected: an
+  unpinned run either prompts or fails outright, because picking an agent CLI spends
+  its subscription quota. A CLI gets a built-in profile only if the reviewer can be
+  denied write access to the repo under audit: `claude` reviews with read-only tools
+  (`--allowedTools Read,Grep`), `agy` one-shot with none — weaker, but confined — and
+  `cursor-agent` gets no profile at all, its print mode's write and bash access being
+  undisableable. Anything unprofiled goes through `GODZILLA_LLM_CLI_CMD`, where the
+  choice is explicit and the user's.
 - **Report** (`internal/report/`) — a self-contained **HTML** report with severity,
   confidence, and code snippets, plus **JSON** and **SARIF 2.1.0** (`--json` /
   `--sarif`, the latter for GitHub code scanning). The CLI sets a severity-gated

@@ -69,9 +69,12 @@ flags:
   -html <file>      write an HTML report to <file>
   -json <file>      write a JSON report to <file>
   -sarif <file>     write a SARIF 2.1.0 report to <file>
-  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY;
-                    set GODZILLA_LLM_PROVIDER=openai + GODZILLA_LLM_BASE_URL for a local/
-                    OpenAI-compatible server, e.g. Ollama/vLLM)
+  -llm-review       triage lower-confidence findings with an LLM. Needs one of: ANTHROPIC_API_KEY;
+                    GODZILLA_LLM_CLI=<agent CLI you are signed into>; GODZILLA_LLM_CLI_CMD=<a
+                    {{prompt}} command template>; or GODZILLA_LLM_PROVIDER=openai +
+                    GODZILLA_LLM_BASE_URL for a local OpenAI-compatible server (Ollama/vLLM).
+                    With none set, an interactive terminal offers a choice and any other
+                    context fails immediately — a backend is never auto-detected.
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
   -dep-budget <n>   cap on the third-party Go source promoted to full analysis: a byte count
                     (suffixes K/M/G), "off" for no cap, or "auto" (default) to size it from
@@ -250,6 +253,23 @@ func runScan(args []string) {
 	})
 	proc.SetTimeouts(*parseTimeout, *buildTimeout)
 	report.Version = version // stamp the tool version into SARIF/JSON reports
+
+	// Resolve the reviewer BEFORE the scan. A run with no usable backend has to
+	// fail in a second rather than after minutes of analysis, and the picker must
+	// ask before that wait, not after it. Naming the backend here is also the
+	// consent signal: driving an agent CLI spends the user's subscription quota.
+	var llmChoice llm.Choice
+	if *llmReview {
+		c, err := llm.Resolve(*quiet)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(exitUsage)
+		}
+		llmChoice = c
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "LLM review: using the %s.\n", llm.ProviderName(c))
+		}
+	}
 
 	// Collect scan targets: a `-files` list (stdin with '-'), one or more
 	// positional paths, or the single positional path of the classic invocation.
@@ -433,24 +453,37 @@ func runScan(args []string) {
 
 	if *llmReview {
 		var stats llm.ReviewStats
-		// Select the reviewer backend (LLM-9: GODZILLA_LLM_PROVIDER=openai uses an
-		// OpenAI-compatible/local endpoint; default is Anthropic with read-only
-		// agency over the scanned project — LLM-4).
-		reviewer := llm.NewReviewer(llm.NewFileToolBox(res.Program, path))
+		reviewer := llmChoice.New(path, llm.NewFileToolBox(res.Program, path))
+		if !*quiet {
+			fmt.Fprintf(ui.Stdout(), "LLM review: sending %d finding(s) at or below medium confidence.\n",
+				llm.CountReviewable(findings, analysis.ConfidenceMedium))
+		}
 		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
 		ui.Stop()
-		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
-			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
-		if stats.Skipped > 0 {
-			fmt.Fprintf(os.Stdout, "note: %d finding(s) past the review cap were kept unreviewed.\n", stats.Skipped)
+		// -quiet is contracted to emit literally nothing; the gate still carries the
+		// verdict through the exit code and the report files.
+		if !*quiet {
+			// Spend is reported as MEASURED, never estimated: a CLI backend inherits
+			// whatever model that session is configured for, which is unknowable
+			// until the replies come back.
+			var spend string
+			if c, ok := reviewer.(interface{ CostUSD() float64 }); ok && c.CostUSD() > 0 {
+				spend = fmt.Sprintf(" $%.4f.", c.CostUSD())
+			}
+			fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).%s\n",
+				stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors, spend)
+			if stats.Skipped > 0 {
+				fmt.Fprintf(os.Stdout, "note: %d finding(s) past the review cap were kept unreviewed.\n", stats.Skipped)
+			}
+			if stats.Errors > 0 {
+				fmt.Fprintf(os.Stdout, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
+			}
+			if stats.Reviewed > 0 && stats.Errors == stats.Reviewed {
+				fmt.Fprintf(os.Stdout, "warning: --llm-review adjudicated 0 findings; every call to the %s failed. Check that it is installed and signed in.\n",
+					llm.ProviderName(llmChoice))
+			}
+			fmt.Fprintln(os.Stdout)
 		}
-		if stats.Errors > 0 {
-			fmt.Fprintf(os.Stdout, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
-		}
-		if stats.Reviewed > 0 && stats.Errors == stats.Reviewed {
-			fmt.Fprintln(os.Stdout, "warning: --llm-review adjudicated 0 findings (the reviewer was a no-op; check ANTHROPIC_API_KEY).")
-		}
-		fmt.Fprintln(os.Stdout)
 	}
 
 	ui.Stop()

@@ -45,7 +45,10 @@ flowchart LR
   路径片段、语法高亮与扫描诊断面板）、**JSON**、**SARIF 2.1.0**（对接 GitHub code
   scanning），以及按严重级别决定的**退出码**。
 - **可选的 LLM 复核。** 一个可插拔、默认关闭的阶段，把置信度在 **medium** 及以下的检出项
-  交给 Claude 复核以削减误报；High 置信度的检出项不送审，该阶段出错时一律放行。
+  交给模型复核以削减误报；High 置信度的检出项不送审，该阶段出错时一律放行。它既可以用
+  API key（Anthropic，或任意兼容 OpenAI 的接口），也可以驱动一个你已经登录的编码智能体
+  （coding agent）CLI —— `claude` 或 `agy` —— 作为子进程运行，因此并不强制要求
+  API key。
 - **单一自包含可执行文件。** Go 与 JS 的解析是纯 Go 实现；Python、Ruby、Java、Rust 会调用
   `PATH` 上的工具链；缺失时会跳过该语言，并在覆盖率中标出。
 
@@ -78,7 +81,8 @@ godzilla scan --sarif results.sarif --json results.json ./path/to/project
 # 在内置规则之外追加自己的规则
 godzilla scan --rules myrules.yaml ./path/to/project
 
-# 用 LLM 复核 medium/low 置信度的检出项（需要 ANTHROPIC_API_KEY）。
+# 用 LLM 复核 medium/low 置信度的检出项：可以用 API key，也可以用你已经登录的智能体
+# CLI（GODZILLA_LLM_CLI=claude）。
 # 若一次扫描的检出项全是 High，会显示 "0 reviewed"，这说明门槛在正常工作，并非故障。
 godzilla scan --llm-review ./path/to/project
 
@@ -222,11 +226,28 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 | `GODZILLA_ALLOW_BUILD=1` | 与 `-allow-build` 等价的显式开关：允许扫描过程运行被扫描项目的构建工具（Maven/Gradle/Cargo）。 |
 | `GODZILLA_RUSTC`、`GODZILLA_CARGO` | Rust 工具链的可执行文件路径（默认使用 `PATH` 上的 `rustc`、`cargo`）。 |
 | `GODZILLA_CC`、`GODZILLA_CXX` | 可选 LLVM 后端使用的 C/C++ 编译器（默认 `clang`、`clang++`）。 |
-| `GODZILLA_LLM_MODEL` | 覆盖 `-llm-review` 使用的模型（Anthropic 默认 `claude-haiku-4-5`，OpenAI 默认 `gpt-4o-mini`）。 |
+| `GODZILLA_LLM_MODEL` | 覆盖 `-llm-review` 使用的模型（Anthropic 默认 `claude-haiku-4-5`，OpenAI 默认 `gpt-4o-mini`）。不设置时，智能体 CLI 沿用它自己会话所配置的模型。 |
 | `GODZILLA_LLM_PROVIDER=openai`、`GODZILLA_LLM_BASE_URL` | 为 `-llm-review` 指定兼容 OpenAI 的接口（例如本地模型）。 |
+| `GODZILLA_LLM_CLI` | 让 `-llm-review` 通过你已经登录的智能体 CLI 运行 —— `claude` 或 `agy` —— 而不使用 API key。指定工具名本身就是在选择后端。 |
+| `GODZILLA_LLM_CLI_CMD` | 驱动没有内置调用配置的智能体 CLI，`cursor-agent` 也在此列：一条含 `{{prompt}}` 占位符的命令模板，其 stdout 会被解析为复核结论。这条命令能做什么，由你自己把关。 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `-llm-review` 的凭据（Anthropic 也支持 `ant auth` 配置）。 |
 | `GOMEMLIMIT` | 原样尊重：一旦设置，Godzilla 就不再自动设定软内存上限。 |
 | `GODZILLA_PROGRESS` | 强制开启（`1`）或关闭（`0`）扫描进度显示。默认只在 stderr 是终端、且未设置 `CI` 时才启用。 |
+
+复核后端在**扫描开始之前**就已确定，按顺序取第一个命中的：`GODZILLA_LLM_PROVIDER=openai`
+→ `GODZILLA_LLM_CLI_CMD` → `GODZILLA_LLM_CLI` → `ANTHROPIC_API_KEY`。这里没有任何自动
+探测：以上全部未设置时，`-llm-review` 会把 `PATH` 上找到的智能体 CLI 列成交互式选择菜单；
+而当终端无法交互时（CI、`-quiet`、输出被重定向），或者 `PATH` 上一个都没找到，
+扫描会当场失败并给出补救办法，而不是等分析跑完、成本已经付出之后才失败。
+
+在固定某个 CLI 之前，有两件事值得先知道。**工具权限：** 复核用的智能体绝不能写入正在被
+审计的仓库，而只有 `claude` 能被约束到这一点 —— `--allowedTools Read,Grep` 是只读的，所以
+它是唯一带工具复核的。`agy` 以单次执行、不带任何工具的方式运行：复核质量更弱，但被限制住
+了；Godzilla 也从不传 `--dangerously-skip-permissions` 或 `--force`。`cursor-agent` 则没有
+内置调用配置 —— 它的 print 模式带有无法关闭的写入与 bash 权限。**成本：** 驱动 CLI 就意味着
+沿用该 CLI 自己的会话、模型与计费。以 `claude` 实测：沿用一个 Opus 会话时，每个检出项约
+**$0.1123**；设 `GODZILLA_LLM_MODEL=haiku` 后降到约 **$0.0216** —— 在意账单时，就用它固定
+一个更便宜的模型。另外，只有置信度在 medium 及以下的检出项才会被送去复核。
 
 子进程超时由命令行参数控制，而非环境变量：`-parse-timeout`（默认 `2m0s`，作用于单个文件
 的解析/导出子进程）与 `-build-timeout`（默认 `10m0s`，作用于 `-allow-build` 下的整项目
