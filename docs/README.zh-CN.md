@@ -31,6 +31,73 @@ flowchart LR
 
 > 状态：功能可用、有测试覆盖，但项目仍处于早期。参见[状态与局限](#状态与局限)。
 
+## 快速试用
+
+两种方式都能用一条命令跑完扫描并生成 **HTML 报告**，且都不需要克隆本仓库。
+
+[![asciicast](https://asciinema.org/a/1264739.svg)](https://asciinema.org/a/1264739)
+
+### 方式一 — Docker（无需安装）
+
+镜像已内置各语言工具链，无需任何前置准备：
+
+```bash
+docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
+  scan --html /src/godzilla-report.html /src
+```
+
+检出项会打印到终端，`godzilla-report.html` 则生成在当前目录下，用浏览器打开即可。挂载点
+必须**可写**，因为报告要写回其中。
+
+默认镜像覆盖 Go、JavaScript/TypeScript、Python、Ruby 与凭据检测；Java、Rust 与 C/C++ 需
+要 `ghcr.io/bytevet/godzilla:full`。两个变体的体积与标签规则见
+[用 Docker 运行](#用-docker-运行)。
+
+### 方式二 — go install
+
+```bash
+go install github.com/bytevet/godzilla/cmd/godzilla@latest    # 或者，在克隆的仓库里：
+go build -o godzilla ./cmd/godzilla
+
+godzilla scan --html godzilla-report.html ./path/to/project
+```
+
+需要 **Go 1.26.5+**。Go 与 JavaScript/TypeScript 的解析是纯 Go 实现，装好即可用；Python、
+Ruby、Java、Rust 各自需要对应工具链（`python3`、`ruby`、JDK 24+ 的 `java`、`rustc`）位于
+`PATH` 上；缺失时会跳过该语言，并在覆盖率中标出，而不会让扫描失败。
+
+以上命令产出的可执行文件，版本号都显示为 `dev`。在克隆的仓库里改用 `make build`，即可带上
+当前 tag 的版本号（用 `godzilla version` 查看）。
+
+### 你会得到什么
+
+HTML 报告是一个自包含的单文件：可筛选、可排序，含污点传播路径片段、语法高亮与扫描诊断
+面板。无论本次扫描是否有检出，它都会生成，并且始终是在终端输出**之外**额外生成：
+
+```
+$ godzilla scan ./test/go/sql_injection
+coverage: go=ok
+
+[high] go-sql-injection (CWE-89, confidence: medium)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
+  source: .../main.go:43:6
+  in:     go:(*.../sql_injection.User).GetByID
+
+[high] go-sql-injection (CWE-89, confidence: high)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
+  source: .../main.go:58:27
+  in:     go:.../sql_injection.main$1
+
+2 finding(s); 2 at/above "medium"; 0 suppressed.
+```
+
+**退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
+（默认 `medium`）的检出项。在真实代码上首次运行通常会得到 `3`——这说明门禁在起作用，并非
+故障。`1` 是个例外：报告文件写不出来时扫描会以 `1` 退出，门禁结论也就丢失了，只读的
+Docker 挂载正是这种情况。
+
 ## 特性
 
 - **跨过程污点追踪。** 跨函数调用追踪不可信数据（污点源 source → 净化函数 sanitizer →
@@ -49,21 +116,51 @@ flowchart LR
 - **单一自包含可执行文件。** Go 与 JS 的解析是纯 Go 实现；Python、Ruby、Java、Rust 会调用
   `PATH` 上的工具链；缺失时会跳过该语言，并在覆盖率中标出。
 
-## 安装
+## 受支持的语言与检测能力
 
-```bash
-go install github.com/bytevet/godzilla/cmd/godzilla@latest    # 或者，在克隆的仓库里：
-go build -o godzilla ./cmd/godzilla
-```
+| | Go | Python | JavaScript | Java | Rust | Ruby |
+|---|---|---|---|---|---|---|
+| 解析器 | `golang.org/x/tools` SSA | `python3` `ast` | esbuild AST（纯 Go）；原生支持 TS/JSX/ESM；Flow 语法就地抹除；支持 `.vue`/`.svelte` 单文件组件 | JVM 字节码（`java.lang.classfile`） | rustc MIR | `ruby` Ripper；支持 `.erb` 模板 |
+| SQL 注入 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 命令注入 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 路径穿越 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 反射型 XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 开放重定向 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DOM XSS（客户端跳转） | — | — | ✅ | — | — | — |
+| 不安全的反序列化 | — | ✅ | ✅ | ✅ | — | ✅ |
+| 代码注入（`eval`） | — | ✅ | ✅ | — | — | ✅ |
+| 服务端模板注入 | — | ✅ | — | — | — | — |
+| LDAP / XPath 注入 | — | ✅ | — | — | — | — |
+| Zip slip | — | ✅ | — | — | — | — |
+| 框架配置不安全 | — | ✅ | — | — | — | — |
+| 弱加密 | ✅ | — | — | ✅ | — | — |
 
-需要 **Go 1.26.5+**。扫描 Python、Ruby、Java、Rust 还需对应工具链（`python3`、`ruby`、
-JDK 24+ 的 `java`、`rustc`）位于 `PATH` 上；缺失时会跳过该语言，并在覆盖率中标出。也可
-以都不装，直接[用 Docker 运行](#用-docker-运行)。
+> **硬编码凭据**（CWE-798）由 `kind: secret` 规则在**所有**语言中检测：正则会作用于 gIR
+> 中的字符串常量，*以及*任何前端都不解析的配置文件（`.env`、compose、CI YAML），与污点
+> 引擎相互独立。你可以用 `--rules` 补充自己的凭据格式。
 
-以上两条命令产出的可执行文件，版本号都显示为 `dev`。想带上当前 tag 的版本号，请改用
-`make build`，再用 `godzilla version` 查看。
+- **JavaScript** 还支持 **Vue**（`.vue`）与 **Svelte**（`.svelte`）单文件组件：不可信
+  数据流入 `v-html`、`:href` 或 `{@html}` 会判定为模板注入型 XSS（CWE-79）。纯 Go 实现，
+  不依赖 Node。
+- **JavaScript** 还会把**客户端跳转**（`location.href = x`、`location.assign`/`replace`、
+  `window.open`）判定为 XSS，而不仅仅是开放重定向。服务端的 `Location:` 响应头不受此影响
+  —— 浏览器不会跟随跳转到 `javascript:` URL —— 但把同样的字符串赋值给页面里的 `location`
+  会直接执行，因此对取值做编码没有用，只有校验协议白名单才有效。
+- **Ruby** 还支持 **ERB** 模板（`.erb`），也就是 Rails 视图把请求数据渲染到页面的地方。
+  Rails 会自动转义 `<%= %>`，因此只有绕过转义的写法（`<%== %>`、`raw`、`.html_safe`）
+  才被视为 XSS 汇点。
+- **Java** 分析的是 JVM **字节码**，因此 `.class` 与 `.jar` 同样可扫；需要 JDK 24+ 的
+  `java`。Maven/Gradle 项目会先构建，以便第三方依赖出现在 classpath 上。
+- **Rust** 分析的是 **rustc MIR**，包含在默认可执行文件中，只需 `rustc`。带
+  `Cargo.toml` 的项目会先构建，以便把 Web 框架的请求访问器识别为污点源。
+- **C / C++** 通过 **LLVM IR** 分析，属于可选的 **cgo** 构建（`make build-llvm`，需要
+  libLLVM 与 clang），*不包含*在默认可执行文件中。它额外提供命令注入、路径穿越、格式化
+  字符串、SQL 注入与缓冲区溢出检查。
 
-## 快速上手
+各前端的完整细节见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
+
+## 用法
 
 ```bash
 # 用内置规则扫描一个目录（或单个源文件）
@@ -94,8 +191,11 @@ git diff --name-only --cached | godzilla scan -files -
 git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on high
 ```
 
-**退出码：** `0` 无问题 · `1` 出错 · `2` 用法有误 · `3` 存在达到或超过 `--fail-on`
-（默认 `medium`）的检出项。直接把退出码用作 CI 门禁即可。
+直接把进程退出码用作 CI 门禁即可，具体取值见[你会得到什么](#你会得到什么)。
+
+## 参考
+
+### 扫描进度显示
 
 当 stderr 是终端时，扫描会显示进度。每个阶段占一行，并在行内直接给出自己的完成度，
 因此某种语言的覆盖率就在对应阶段旁边；正在运行的阶段带一个转轮和计时，只有在结束时
@@ -127,7 +227,7 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 结束时进度条走满，图例说明每个分组各花了多少时间，最后一段给出结论、退出码及其原因：
 
 ```
-████████████████████████████████████████████████████   100%   1.47s
+███████████████████████████████████████████████████   100%   1.47s
 ▪ frontends 2.10s  ▪ go 1.26s  ▪ analysis 0.10s
 
   201 findings 76 critical  80 high  26 medium  19 low
@@ -139,25 +239,6 @@ git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on
 stdout 是终端时，检出项会按严重级别着色——这是独立判断的，所以
 `godzilla scan > report.txt` 写出的仍是纯文本。stderr 不是终端时、加了 `-quiet` 时、
 以及设置了 `CI` 时，以上全部自动关闭。
-
-```
-$ godzilla scan ./test/go/sql_injection
-coverage: go=ok
-
-[high] go-sql-injection (CWE-89, confidence: medium)
-  Untrusted input flows into a database/sql query without parameterized arguments...
-  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
-  source: .../main.go:43:6
-  in:     go:(*.../sql_injection.User).GetByID
-
-[high] go-sql-injection (CWE-89, confidence: high)
-  Untrusted input flows into a database/sql query without parameterized arguments...
-  sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
-  source: .../main.go:58:27
-  in:     go:.../sql_injection.main$1
-
-2 finding(s); 2 at/above "medium"; 0 suppressed.
-```
 
 ### 大型 Go 仓库
 
@@ -192,11 +273,11 @@ coverage: go=DEGRADED
 
 界面分三栏：文件树、源码、gIR。源码与 gIR 两侧保持联动，点击任一侧都会高亮另一侧。每个
 调用都会显示自己的规范名，每个参数的逻辑下标以角标标出，点一下即可得到对应的模式串；静态
-解析的方法调用，其接收者显示为 `recv` 且不参与编号 —— 下标差一（off-by-one）的误读由此消除。底部面板可以把一条
-规范名模式放到当前模块上试匹配，报告它命中了多少个调用，以及每个 `#<n>` 实际指向哪个参数。
-汇点与污点源的标记、以及模式匹配本身，都在服务端走真正的 `internal/rules` 匹配逻辑，因此
-界面呈现的是引擎自身的判断，而不是另一套实现。扫描时遍历到、却没有任何前端能够下降的文件，
-会单独列出并标记：这类文件对所有规则都是不可见的。
+解析的方法调用，其接收者显示为 `recv` 且不参与编号 —— 下标差一（off-by-one）的误读由此
+消除。底部面板可以把一条规范名模式放到当前模块上试匹配，报告它命中了多少个调用，以及每个
+`#<n>` 实际指向哪个参数。汇点与污点源的标记、以及模式匹配本身，都在服务端走真正的
+`internal/rules` 匹配逻辑，因此界面呈现的是引擎自身的判断，而不是另一套实现。扫描时遍历
+到、却没有任何前端能够下降的文件，会单独列出并标记：这类文件对所有规则都是不可见的。
 
 ```bash
 go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground <path>
@@ -262,53 +343,14 @@ docker run --rm -p 7391:7391 -v "$PWD:/src" \
   -addr 0.0.0.0:7391 -open=false /src
 ```
 
-slim 镜像遇到 Java、Rust 和 C/C++ 时会跳过并给出覆盖率警告，而不是直接失败。C/C++ 也正是两个镜像不共用同一份二进制的原因：它通过 cgo 绑定 libLLVM，因此 full 里装的是 slim 无法产出的另一种构建。标签规则：
+把报告写回挂载点（`/src` 下的 `--html`、`--json`、`--sarif`）要求挂载可写，而容器以
+uid 1000 运行 —— 如果宿主机上你的 uid 不是它，请加上 `--user "$(id -u):$(id -g)"`。
+
+slim 镜像遇到 Java、Rust 和 C/C++ 时会跳过并给出覆盖率警告，而不是直接失败。C/C++ 也正
+是两个镜像不共用同一份可执行文件的原因：它通过 cgo 绑定 libLLVM，因此 full 里装的是
+slim 无法产出的另一种构建。标签规则：
 `X.Y.Z`/`X.Y`/`latest`（slim）与 `X.Y.Z-full`/`full`（full）跟随发布版本，
 `edge`/`edge-full` 跟随 `main` 分支。支持 amd64 与 arm64 双架构。
-
-## 受支持的语言与检测能力
-
-| | Go | Python | JavaScript | Java | Rust | Ruby |
-|---|---|---|---|---|---|---|
-| 解析器 | `golang.org/x/tools` SSA | `python3` `ast` | esbuild AST（纯 Go）；原生支持 TS/JSX/ESM；Flow 语法就地抹除；支持 `.vue`/`.svelte` 单文件组件 | JVM 字节码（`java.lang.classfile`） | rustc MIR | `ruby` Ripper；支持 `.erb` 模板 |
-| SQL 注入 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 命令注入 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 路径穿越 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 反射型 XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 开放重定向 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| DOM XSS（客户端跳转） | — | — | ✅ | — | — | — |
-| 不安全的反序列化 | — | ✅ | ✅ | ✅ | — | ✅ |
-| 代码注入（`eval`） | — | ✅ | ✅ | — | — | ✅ |
-| 服务端模板注入 | — | ✅ | — | — | — | — |
-| LDAP / XPath 注入 | — | ✅ | — | — | — | — |
-| Zip slip | — | ✅ | — | — | — | — |
-| 框架配置不安全 | — | ✅ | — | — | — | — |
-| 弱加密 | ✅ | — | — | ✅ | — | — |
-
-> **硬编码凭据**（CWE-798）由 `kind: secret` 规则在**所有**语言中检测：正则会作用于 gIR
-> 中的字符串常量，*以及*任何前端都不解析的配置文件（`.env`、compose、CI YAML），与污点
-> 引擎相互独立。你可以用 `--rules` 补充自己的凭据格式。
-
-- **JavaScript** 还支持 **Vue**（`.vue`）与 **Svelte**（`.svelte`）单文件组件：不可信
-  数据流入 `v-html`、`:href` 或 `{@html}` 会判定为模板注入型 XSS（CWE-79）。纯 Go 实现，
-  不依赖 Node。
-- **JavaScript** 还会把**客户端跳转**（`location.href = x`、`location.assign`/`replace`、
-  `window.open`）判定为 XSS，而不仅仅是开放重定向。服务端的 `Location:` 响应头不受此影响
-  —— 浏览器不会跟随跳转到 `javascript:` URL —— 但把同样的字符串赋值给页面里的 `location`
-  会直接执行，因此对取值做编码没有用，只有校验协议白名单才有效。
-- **Ruby** 还支持 **ERB** 模板（`.erb`），也就是 Rails 视图把请求数据渲染到页面的地方。
-  Rails 会自动转义 `<%= %>`，因此只有绕过转义的写法（`<%== %>`、`raw`、`.html_safe`）
-  才被视为 XSS 汇点。
-- **Java** 分析的是 JVM **字节码**，因此 `.class` 与 `.jar` 同样可扫；需要 JDK 24+ 的
-  `java`。Maven/Gradle 项目会先构建，以便第三方依赖出现在 classpath 上。
-- **Rust** 分析的是 **rustc MIR**，包含在默认可执行文件中，只需 `rustc`。带
-  `Cargo.toml` 的项目会先构建，以便把 Web 框架的请求访问器识别为污点源。
-- **C / C++** 通过 **LLVM IR** 分析，属于可选的 **cgo** 构建（`make build-llvm`，需要
-  libLLVM 与 clang），*不包含*在默认可执行文件中。它额外提供命令注入、路径穿越、格式化
-  字符串、SQL 注入与缓冲区溢出检查。
-
-各前端的完整细节见 [ARCHITECTURE.md](../ARCHITECTURE.md)。
 
 ## 编写规则
 

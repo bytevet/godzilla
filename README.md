@@ -32,6 +32,79 @@ flowchart LR
 
 > Status: usable and tested, but young. See [Status & limitations](#status--limitations).
 
+## Try it
+
+Two ways to get a scan and an **HTML report** out of Godzilla in a single
+command. Neither needs a clone of this repository.
+
+[![asciicast](https://asciinema.org/a/1264739.svg)](https://asciinema.org/a/1264739)
+
+### Option 1 — Docker (nothing to install)
+
+The image ships the language toolchains, so there is nothing to set up first:
+
+```bash
+docker run --rm -v "$PWD:/src" ghcr.io/bytevet/godzilla \
+  scan --html /src/godzilla-report.html /src
+```
+
+Findings print to the terminal and `godzilla-report.html` lands in the current
+directory — open it in a browser. The mount has to be **writable**, since the
+report is written back into it.
+
+The default image covers Go, JavaScript/TypeScript, Python, Ruby and secrets;
+Java, Rust and C/C++ need `ghcr.io/bytevet/godzilla:full`. Both variants, their
+sizes and their tags are under [Run with Docker](#run-with-docker).
+
+### Option 2 — go install
+
+```bash
+go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone:
+go build -o godzilla ./cmd/godzilla
+
+godzilla scan --html godzilla-report.html ./path/to/project
+```
+
+Requires **Go 1.26.5+**. Go and JavaScript/TypeScript parsing is pure Go and
+works immediately; Python, Ruby, Java and Rust each need that language's
+toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`. A missing one
+is skipped and reported in the coverage line rather than failing the scan.
+
+Either command produces a binary that reports its version as `dev`. From a clone,
+`make build` stamps it with the current tag (`godzilla version`).
+
+### What you get
+
+The HTML report is a single self-contained file — filterable and sortable, with
+taint-flow snippets, syntax highlighting and a scan-diagnostics panel. It is
+written whether or not the scan found anything, and always *in addition to* the
+terminal output:
+
+```
+$ godzilla scan ./test/go/sql_injection
+coverage: go=ok
+
+[high] go-sql-injection (CWE-89, confidence: medium)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
+  source: .../main.go:43:6
+  in:     go:(*.../sql_injection.User).GetByID
+
+[high] go-sql-injection (CWE-89, confidence: high)
+  Untrusted input flows into a database/sql query without parameterized arguments...
+  sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
+  source: .../main.go:58:27
+  in:     go:.../sql_injection.main$1
+
+2 finding(s); 2 at/above "medium"; 0 suppressed.
+```
+
+**Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
+`--fail-on` (default: `medium`). A first run on real code usually exits `3` —
+that is the gate firing, not a failure. The exception is `1`: if the report file
+cannot be written, the scan exits `1` and the gate verdict is lost, which is what
+a read-only Docker mount looks like.
+
 ## Features
 
 - **Inter-procedural taint tracking.** Follows untrusted data across function
@@ -54,22 +127,56 @@ flowchart LR
 - **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
-## Install
+## Supported languages & detections
 
-```bash
-go install github.com/bytevet/godzilla/cmd/godzilla@latest    # or, from a clone:
-go build -o godzilla ./cmd/godzilla
-```
+| | Go | Python | JavaScript | Java | Rust | Ruby |
+|---|---|---|---|---|---|---|
+| Parser | `golang.org/x/tools` SSA | `python3` `ast` | esbuild AST (pure Go); TS/JSX/ESM natively; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper; `.erb` templates |
+| SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DOM XSS (client-side navigation) | — | — | ✅ | — | — | — |
+| Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
+| Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
+| Server-side template injection | — | ✅ | — | — | — | — |
+| LDAP / XPath injection | — | ✅ | — | — | — | — |
+| Zip slip | — | ✅ | — | — | — | — |
+| Insecure framework config | — | ✅ | — | — | — | — |
+| Weak crypto | ✅ | — | — | ✅ | — | — |
 
-Requires **Go 1.26.5+**. Scanning Python, Ruby, Java, or Rust also needs that
-language's toolchain (`python3`, `ruby`, a JDK 24+ `java`, `rustc`) on `PATH`,
-each degrading gracefully when absent. Or skip install and
-[run with Docker](#run-with-docker).
+> **Hardcoded secrets** (CWE-798) are detected in **all** languages by
+> `kind: secret` rules — regexps run over gIR string constants *and* over config
+> files no frontend parses (`.env`, compose, CI YAML), independent of the taint
+> engine. Add your own credential format with `--rules`.
 
-Both commands above produce a binary that reports its version as `dev`. Use
-`make build` for one stamped with the current tag (`godzilla version`).
+- **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
+  single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
+  flagged as template-injection XSS (CWE-79). Pure Go, no Node.
+- **JavaScript** also flags **client-side navigation** (`location.href = x`,
+  `location.assign/replace`, `window.open`) as XSS, not just an open redirect. A
+  server's `Location:` header is safe from this — browsers refuse to follow one to
+  a `javascript:` URL — but assigning that same string to `location` in the page
+  executes it, so encoding the value does not help and only a scheme allowlist does.
+- **Ruby** also scans **ERB** templates (`.erb`), where a Rails view puts request
+  input on the page. Rails auto-escapes `<%= %>`, so only the escape-bypassing
+  forms — `<%== %>`, `raw`, `.html_safe` — are treated as XSS sinks.
+- **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
+  JDK 24+ `java`. Maven/Gradle projects are built first so third-party deps are on
+  the classpath.
+- **Rust** analyzes **rustc MIR** and ships in the default binary; only `rustc` is
+  needed. A `Cargo.toml` project is built so web-framework request accessors are
+  recognized as sources.
+- **C / C++** are analyzed via **LLVM IR** — an opt-in **cgo** build
+  (`make build-llvm`, needs libLLVM + clang), *not* in the default binary. Adds
+  command injection, path traversal, format string, SQL injection, and
+  buffer-overflow checks.
 
-## Quick start
+Full frontend details are in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Usage
 
 ```bash
 # Scan a directory (or a single source file) with the built-in rules
@@ -101,8 +208,12 @@ files, so a docs-only commit passes cleanly:
 git diff --name-only --cached --diff-filter=d | godzilla scan -files - --fail-on high
 ```
 
-**Exit codes:** `0` clean · `1` error · `2` bad usage · `3` findings at/above
-`--fail-on` (default: `medium`). Use the exit code as your CI gate.
+Use the process exit code as your CI gate; the values are listed under
+[What you get](#what-you-get).
+
+## Reference
+
+### Scan progress display
 
 When stderr is a terminal, a scan shows its progress. Each phase is a row that
 carries its own completeness, so a language's coverage is read where the phase
@@ -151,25 +262,6 @@ either one on its own still works. Findings are coloured by severity when stdout
 is a terminal — asked separately, so `godzilla scan > report.txt` writes a plain
 file. All of it turns itself off when stderr is not a terminal, under `-quiet`,
 and when `CI` is set.
-
-```
-$ godzilla scan ./test/go/sql_injection
-coverage: go=ok
-
-[high] go-sql-injection (CWE-89, confidence: medium)
-  Untrusted input flows into a database/sql query without parameterized arguments...
-  sink:   .../main.go:40:20  ->  go:(*database/sql.DB).QueryRow
-  source: .../main.go:43:6
-  in:     go:(*.../sql_injection.User).GetByID
-
-[high] go-sql-injection (CWE-89, confidence: high)
-  Untrusted input flows into a database/sql query without parameterized arguments...
-  sink:   .../main.go:62:24  ->  go:(*database/sql.DB).Query
-  source: .../main.go:58:27
-  in:     go:.../sql_injection.main$1
-
-2 finding(s); 2 at/above "medium"; 0 suppressed.
-```
 
 ### Large Go repositories
 
@@ -286,60 +378,15 @@ docker run --rm -p 7391:7391 -v "$PWD:/src" \
   -addr 0.0.0.0:7391 -open=false /src
 ```
 
+Writing a report back into the mount (`--html`, `--json`, `--sarif` under `/src`)
+needs it writable, and the container runs as uid 1000 — on a host where that is
+not your uid, add `--user "$(id -u):$(id -g)"`.
+
 The slim image **skips** Java, Rust and C/C++ with a coverage warning rather
 than failing. C/C++ is the reason the two images carry different binaries rather
 than the same one plus extra packages: it binds libLLVM through cgo, so `full`
 ships a build the slim image cannot produce. Tags: `X.Y.Z`/`X.Y`/`latest` (slim) and `X.Y.Z-full`/`full` (full) track
 releases; `edge`/`edge-full` track `main`. Multi-arch (amd64 + arm64).
-
-## Supported languages & detections
-
-| | Go | Python | JavaScript | Java | Rust | Ruby |
-|---|---|---|---|---|---|---|
-| Parser | `golang.org/x/tools` SSA | `python3` `ast` | esbuild AST (pure Go); TS/JSX/ESM natively; Flow blanked in place; `.vue`/`.svelte` SFCs | JVM bytecode (`java.lang.classfile`) | rustc MIR | `ruby` Ripper; `.erb` templates |
-| SQL injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Command injection | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Path traversal | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SSRF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Reflected XSS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| DOM XSS (client-side navigation) | — | — | ✅ | — | — | — |
-| Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
-| Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
-| Server-side template injection | — | ✅ | — | — | — | — |
-| LDAP / XPath injection | — | ✅ | — | — | — | — |
-| Zip slip | — | ✅ | — | — | — | — |
-| Insecure framework config | — | ✅ | — | — | — | — |
-| Weak crypto | ✅ | — | — | ✅ | — | — |
-
-> **Hardcoded secrets** (CWE-798) are detected in **all** languages by
-> `kind: secret` rules — regexps run over gIR string constants *and* over config
-> files no frontend parses (`.env`, compose, CI YAML), independent of the taint
-> engine. Add your own credential format with `--rules`.
-
-- **JavaScript** also scans **Vue** (`.vue`) and **Svelte** (`.svelte`)
-  single-file components: untrusted data reaching `v-html`/`:href` or `{@html}` is
-  flagged as template-injection XSS (CWE-79). Pure Go, no Node.
-- **JavaScript** also flags **client-side navigation** (`location.href = x`,
-  `location.assign/replace`, `window.open`) as XSS, not just an open redirect. A
-  server's `Location:` header is safe from this — browsers refuse to follow one to
-  a `javascript:` URL — but assigning that same string to `location` in the page
-  executes it, so encoding the value does not help and only a scheme allowlist does.
-- **Ruby** also scans **ERB** templates (`.erb`), where a Rails view puts request
-  input on the page. Rails auto-escapes `<%= %>`, so only the escape-bypassing
-  forms — `<%== %>`, `raw`, `.html_safe` — are treated as XSS sinks.
-- **Java** analyzes JVM **bytecode** (so it scans `.class`/`.jar` too); needs a
-  JDK 24+ `java`. Maven/Gradle projects are built first so third-party deps are on
-  the classpath.
-- **Rust** analyzes **rustc MIR** and ships in the default binary; only `rustc` is
-  needed. A `Cargo.toml` project is built so web-framework request accessors are
-  recognized as sources.
-- **C / C++** are analyzed via **LLVM IR** — an opt-in **cgo** build
-  (`make build-llvm`, needs libLLVM + clang), *not* in the default binary. Adds
-  command injection, path traversal, format string, SQL injection, and
-  buffer-overflow checks.
-
-Full frontend details are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Writing rules
 
