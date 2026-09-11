@@ -524,17 +524,21 @@ func runScan(args []string) {
 }
 
 // printFinding renders one finding. The two layouts are deliberate: piped
-// output is what tooling and the CLI tests were written against and stays byte
-// for byte what it has always been, while a terminal gets the message wrapped
-// to the window with a hanging indent and the fields aligned into columns —
-// which is the difference between skimming two hundred findings and not.
+// output stays plain, since tooling and the CLI tests were written against it,
+// while a terminal gets the message wrapped to the window with a hanging indent
+// and the fields aligned into columns — which is the difference between skimming
+// two hundred findings and not.
 func printFinding(w io.Writer, n, of int, f analysis.Finding, st styler) {
 	tag := "[" + string(f.Severity) + "]"
+	entry := entryLine(f)
 	if !st.rich {
 		fmt.Fprintf(w, "%s %s (%s, confidence: %s)\n", tag, f.RuleID, f.CWE, f.Confidence)
 		fmt.Fprintf(w, "  %s\n", f.Message)
 		fmt.Fprintf(w, "  sink:   %s  ->  %s\n", analysis.PosString(f.SinkPos), f.SinkCallee)
 		fmt.Fprintf(w, "  source: %s\n", analysis.PosString(f.SourcePos))
+		if entry != "" {
+			fmt.Fprintf(w, "  entry:  %s\n", entry)
+		}
 		fmt.Fprintf(w, "  in:     %s\n\n", f.Function)
 		return
 	}
@@ -553,7 +557,25 @@ func printFinding(w io.Writer, n, of int, f analysis.Finding, st styler) {
 	fmt.Fprintf(w, "  %s %s %s %s\n", st.dim("sink  "),
 		st.loc(analysis.PosString(f.SinkPos)), st.dim("→"), st.callee(f.SinkCallee))
 	fmt.Fprintf(w, "  %s %s\n", st.dim("source"), st.loc(analysis.PosString(f.SourcePos)))
+	if entry != "" {
+		fmt.Fprintf(w, "  %s %s\n", st.dim("entry "), st.loc(entry))
+	}
 	fmt.Fprintf(w, "  %s %s\n\n", st.dim("in    "), st.dim(f.Function))
+}
+
+// entryLine renders the first hop of the flow that lies in scanned code, or ""
+// when it says nothing the source line did not. It is what makes a finding whose
+// modeled source is a framework internal actionable: without it the only
+// location offered is a file in the module cache, which the reader cannot fix.
+func entryLine(f analysis.Finding) string {
+	if f.EntryPos == nil || analysis.PosString(f.EntryPos) == analysis.PosString(f.SourcePos) {
+		return ""
+	}
+	loc := analysis.PosString(f.EntryPos)
+	if f.EntryFunc != "" {
+		loc += "  in  " + f.EntryFunc
+	}
+	return loc
 }
 
 // printCoverage prints the scan's per-language coverage summary. The trailing

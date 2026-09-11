@@ -184,3 +184,94 @@ func operandsAndCallArgs(inst *ir.Instruction) []*ir.Value {
 	}
 	return vals
 }
+
+// storeSite is one write into aggregate memory: the instruction (for its
+// position) and the value it wrote. STORE keeps the value at operand 1 and
+// go.map.update at operand 2, so the value is resolved once here rather than
+// re-derived per opcode at every use.
+type storeSite struct {
+	inst *ir.Instruction
+	val  *ir.Value
+}
+
+// storeIndex maps a root base register to the writes into memory rooted at it,
+// in program order. It is the INVERSE of visitStore/taintContainer (and
+// visitMapUpdate): the forward transfer deposits a stored value's taint on the
+// container's register, after which nothing in the container's def-use chain
+// mentions the value that was put there. Without this edge the backward path
+// walk arrives at the ALLOC and stops, so a flow through a slice literal, a
+// variadic pack or a struct field write loses every hop before the container —
+// which in Go is most real code (see funcAnalysis.localHops).
+//
+// Keyed by rootBaseReg, the same resolution recordParamMemoryTaint uses to
+// decide a store writes into a parameter, so field paths (base#fN), nested
+// accesses and array elements all land under the key their taint did.
+type storeIndex map[string][]storeSite
+
+// buildStoreIndex indexes fn's aggregate writes for the backward path walk.
+// Returns nil for a body with none, which is the common case and lets the walk
+// skip the lookup entirely.
+func buildStoreIndex(fn *ir.Function, defs map[string]*ir.Instruction) storeIndex {
+	var idx storeIndex
+	add := func(inst *ir.Instruction, addr, val *ir.Value) {
+		reg := addr.GetRegName()
+		if reg == "" || val == nil {
+			return
+		}
+		root := rootBaseReg(defs, reg)
+		if root == "" {
+			return
+		}
+		if idx == nil {
+			idx = storeIndex{}
+		}
+		idx[root] = append(idx[root], storeSite{inst: inst, val: val})
+	}
+	for _, blk := range fn.Blocks {
+		if blk == nil {
+			continue
+		}
+		for _, inst := range blk.Instrs {
+			if inst == nil {
+				continue
+			}
+			ops := inst.GetOperands()
+			switch {
+			case inst.Op == ir.OpCode_OP_CODE_STORE && len(ops) >= 2:
+				add(inst, ops[0], ops[1])
+			case inst.GetIntrinsic() == mapUpdateIntrinsic && len(ops) >= 3:
+				add(inst, ops[0], ops[2])
+			}
+		}
+	}
+	return idx
+}
+
+// taintedStore returns the FIRST write in program order into the memory rooted at
+// reg that carries ORIGIN: the write whose deposit the forward pass actually
+// recorded on the container.
+//
+// Both halves of that are what keep the path honest, because a container is
+// tainted as a UNIT — `taintContainer` cannot name an index, so every element
+// write marks the whole container, and `markTainted` is first-write-wins. So the
+// origin the backward walk is tracing is precisely the one the first tainted
+// write deposited; picking the LATEST tainted write instead splices a different
+// value's lines into the middle of this flow (`m["x"] = a; m["y"] = b`, sink
+// reads m["x"], path shows the `b` assignment). Matching the origin then keeps a
+// genuinely unrelated source out even when it wrote the same container first.
+//
+// Nil when no write carries this origin, which returns the walk to its existing
+// stop — a path that ends early is a smaller lie than one with a wrong hop in it.
+func (s storeIndex) taintedStore(defs map[string]*ir.Instruction, tainted taintState, reg string, origin *ir.Position) *storeSite {
+	if len(s) == 0 {
+		return nil
+	}
+	for _, site := range s[rootBaseReg(defs, reg)] {
+		// Pointer identity, as everywhere else the engine compares origins: the
+		// transfer helpers propagate the source's own *ir.Position unchanged.
+		if p, ok := isTainted(tainted, site.val); ok && p == origin {
+			return &site
+		}
+	}
+	return nil
+}

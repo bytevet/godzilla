@@ -86,12 +86,22 @@ type Finding struct {
 	RuleSanitizers []string
 	RuleSources    []string
 
-	// Steps is the ordered taint path from source to sink (inclusive), when it
-	// can be reconstructed intra-procedurally by walking the def-use chain. It
-	// powers SARIF codeFlows (which GitHub code scanning renders as a data-flow)
-	// and richer triage. Empty when only the endpoints are known (e.g. a flow
-	// whose middle crossed a function boundary).
-	Steps []*ir.Position
+	// Steps is the ordered taint path from source to sink (inclusive): every hop
+	// the value took, across functions as well as within them, each labelled with
+	// its kind and enclosing function (see provenance.go). It powers SARIF
+	// codeFlows (which GitHub code scanning renders as a data-flow), the HTML
+	// report's flow rail, and the LLM reviewer's per-hop context. Empty only when
+	// no path could be reconstructed at all.
+	Steps []FlowStep
+
+	// EntryPos and EntryFunc name the first hop that lies in SCANNED code — the
+	// line a reader can open and fix. They exist because SourcePos need not be
+	// actionable: when a framework's own request accessor is the modeled source,
+	// the flow legitimately begins inside a dependency, and pointing an engineer
+	// at a file in the module cache is what makes a true finding unusable. Nil
+	// when the whole path lies outside the scanned scope.
+	EntryPos  *ir.Position
+	EntryFunc string
 
 	// Suppressed marks a finding that a downstream triage stage (the LLM
 	// reviewer) judged a false positive. A suppressed finding is RETAINED, not

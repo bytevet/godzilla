@@ -105,6 +105,10 @@ type sarifMessage struct {
 
 type sarifLocation struct {
 	PhysicalLocation sarifPhysicalLocation `json:"physicalLocation"`
+	// Message labels the location when there is something to say about it — what
+	// a thread-flow step did, and in which function. Omitted (and so absent from
+	// a result's own locations) when there is not.
+	Message *sarifMessage `json:"message,omitempty"`
 }
 
 type sarifRelatedLocation struct {
@@ -255,6 +259,16 @@ func securitySeverity(sev rules.Severity) string {
 	}
 }
 
+// stepLabel is what a code-scanning UI shows against one thread-flow step: what
+// happened, and where. Without it every step renders as a bare file:line and the
+// navigable data flow says nothing the location did not.
+func stepLabel(s analysis.FlowStep) string {
+	if s.Func == "" {
+		return string(s.Kind)
+	}
+	return string(s.Kind) + " · " + s.Func
+}
+
 // sarifLocationFor builds a SARIF location from an *ir.Position, returning
 // ok=false when pos is nil so callers can omit the location entirely.
 func sarifLocationFor(pos *ir.Position) (sarifLocation, bool) {
@@ -295,10 +309,11 @@ func sarifURI(filename string) string {
 // sarifCodeFlowFor builds a SARIF codeFlow (one threadFlow) from the ordered
 // taint-path positions. Returns ok=false when there are fewer than two mappable
 // steps (nothing to render as a flow).
-func sarifCodeFlowFor(steps []*ir.Position) (sarifCodeFlow, bool) {
+func sarifCodeFlowFor(steps []analysis.FlowStep) (sarifCodeFlow, bool) {
 	tfls := make([]sarifThreadFlowLocation, 0, len(steps))
-	for _, p := range steps {
-		if loc, ok := sarifLocationFor(p); ok {
+	for _, s := range steps {
+		if loc, ok := sarifLocationFor(s.Pos); ok {
+			loc.Message = &sarifMessage{Text: stepLabel(s)}
 			tfls = append(tfls, sarifThreadFlowLocation{Location: loc})
 		}
 	}

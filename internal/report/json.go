@@ -36,8 +36,13 @@ type jsonFinding struct {
 	SinkCallee  string        `json:"sinkCallee"`
 	Source      *jsonLocation `json:"source"`
 	Sink        *jsonLocation `json:"sink"`
+	// Entry is the first hop of the flow inside the SCANNED code — the line to
+	// open when the source itself is a framework internal. Omitted when the whole
+	// path lies outside the scanned scope.
+	Entry     *jsonLocation `json:"entry,omitempty"`
+	EntryFunc string        `json:"entryFunction,omitempty"`
 	// Path is the ordered source->sink taint flow (when reconstructable).
-	Path []*jsonLocation `json:"path,omitempty"`
+	Path []*jsonPathStep `json:"path,omitempty"`
 	// Suppressed findings (judged false positives by the LLM reviewer) are
 	// retained in the output, flagged, with the reviewer's reason — never
 	// silently dropped.
@@ -55,6 +60,20 @@ type jsonLocation struct {
 	File   string `json:"file"`
 	Line   int32  `json:"line"`
 	Column int32  `json:"column"`
+}
+
+// jsonPathStep is one hop of the taint flow: a location plus what happened
+// there. The location fields are inlined rather than nested so a consumer that
+// read the old position-only path keeps working unchanged.
+type jsonPathStep struct {
+	File     string `json:"file"`
+	Line     int32  `json:"line"`
+	Column   int32  `json:"column"`
+	Function string `json:"function,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	// InScope is false for a hop inside a lowered dependency, which the reader
+	// can see but not fix.
+	InScope bool `json:"inScope"`
 }
 
 // WriteJSON renders findings as a single indented JSON document to w:
@@ -83,6 +102,8 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 			SinkCallee:        f.SinkCallee,
 			Source:            jsonLocationFor(f.SourcePos),
 			Sink:              jsonLocationFor(f.SinkPos),
+			Entry:             jsonLocationFor(f.EntryPos),
+			EntryFunc:         f.EntryFunc,
 			Path:              jsonPathFor(f.Steps),
 			Suppressed:        f.Suppressed,
 			SuppressedBy:      f.SuppressedBy,
@@ -97,15 +118,22 @@ func WriteJSON(w io.Writer, findings []analysis.Finding) error {
 	return enc.Encode(doc)
 }
 
-// jsonPathFor converts the taint-path positions to JSON locations, or nil when
-// there is no multi-step path to report.
-func jsonPathFor(steps []*ir.Position) []*jsonLocation {
+// jsonPathFor converts the taint path to JSON steps, or nil when there is no
+// multi-step path to report.
+func jsonPathFor(steps []analysis.FlowStep) []*jsonPathStep {
 	if len(steps) < 2 {
 		return nil
 	}
-	out := make([]*jsonLocation, 0, len(steps))
-	for _, p := range steps {
-		out = append(out, jsonLocationFor(p))
+	out := make([]*jsonPathStep, 0, len(steps))
+	for _, s := range steps {
+		out = append(out, &jsonPathStep{
+			File:     s.Pos.GetFilename(),
+			Line:     s.Pos.GetLine(),
+			Column:   s.Pos.GetColumn(),
+			Function: s.Func,
+			Kind:     string(s.Kind),
+			InScope:  s.InScope,
+		})
 	}
 	return out
 }

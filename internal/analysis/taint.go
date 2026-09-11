@@ -314,8 +314,13 @@ func visitFieldRead(inst *ir.Instruction, tainted taintState) {
 	}
 }
 
+// mapUpdateIntrinsic is the frontend marker for a keyed container write
+// (m[k] = v). Named because both the forward transfer (visitMapUpdate) and its
+// inverse (buildStoreIndex) must recognize the same instruction.
+const mapUpdateIntrinsic = "go.map.update"
+
 func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, tainted taintState) {
-	if inst.Intrinsic == "go.map.update" {
+	if inst.Intrinsic == mapUpdateIntrinsic {
 		visitMapUpdate(inst, defs, tainted)
 		return
 	}
@@ -376,45 +381,6 @@ func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 	}
 	markTainted(tainted, reg, pos)
 	taintContainer(defs, tainted, reg, pos)
-}
-
-// reconstructPath best-effort recovers the taint path from source to sink by
-// walking the def-use chain backward from the sink's tainted argument, following
-// the first tainted operand at each hop and collecting each defining
-// instruction's position. It returns the path ordered source -> ... -> sink
-// (with srcPos first and sinkPos last), consecutive duplicates removed. The walk
-// is bounded and stops at a register with no tainted operand (a source result, a
-// seeded parameter, or an opaque value), so the result may be a partial
-// intra-procedural segment — good enough to render a data flow.
-func reconstructPath(defs map[string]*ir.Instruction, tainted taintState, argReg string, srcPos, sinkPos *ir.Position) []*ir.Position {
-	var rev []*ir.Position // sink -> ... -> source order while walking
-	if sinkPos != nil {
-		rev = append(rev, sinkPos)
-	}
-	seen := map[string]bool{}
-	for reg := argReg; reg != "" && !seen[reg]; {
-		seen[reg] = true
-		def := defs[reg]
-		if def == nil {
-			break
-		}
-		if p := def.GetPos(); p != nil {
-			rev = append(rev, p)
-		}
-		reg = firstTaintedOperandReg(tainted, def)
-	}
-	if srcPos != nil {
-		rev = append(rev, srcPos)
-	}
-	// Reverse to source -> sink and drop consecutive duplicate positions.
-	path := make([]*ir.Position, 0, len(rev))
-	for i := len(rev) - 1; i >= 0; i-- {
-		if len(path) > 0 && samePos(path[len(path)-1], rev[i]) {
-			continue
-		}
-		path = append(path, rev[i])
-	}
-	return path
 }
 
 // firstTaintedOperandReg returns the register name of def's first tainted
@@ -488,13 +454,13 @@ func firstTainted(tainted taintState, vals []*ir.Value) (reg string, pos *ir.Pos
 // Deliberately NOT used for the sink check, which stays field-blind: a sink fires
 // on the value actually passed, and widening it there would report a sink that
 // received a clean field of a partly-tainted struct.
-func firstTaintedArg(tainted taintState, vals []*ir.Value) (*ir.Position, bool) {
+func firstTaintedArg(tainted taintState, vals []*ir.Value) (*ir.Value, *ir.Position, bool) {
 	for _, v := range vals {
 		if p, hit := isTaintedArg(tainted, v); hit {
-			return p, true
+			return v, p, true
 		}
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 // markTainted records reg as tainted with the given origin, unless it is

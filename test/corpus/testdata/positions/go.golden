@@ -47,6 +47,8 @@ go/sql_injection|go-sql-injection|go:godzilla/test/go/sql_injection.main$1|go:(*
 go/sqli_pathvalue|go-sql-injection|go:sqlipathvalue.handler|go:(*database/sql.DB).Query|src=test/go/sqli_pathvalue/main.go:13:6|sink=test/go/sqli_pathvalue/main.go:15:23
 go/ssrf|go-ssrf|go:godzilla-samples/ssrf.main$1|go:net/http.Get|src=test/go/ssrf/main.go:10:28|sink=test/go/ssrf/main.go:13:24
 go/stdlib_wrap|go-command-injection|go:godzilla/test/go/stdlib_wrap.main$1|go:os/exec.Command|src=test/go/stdlib_wrap/webctx/webctx.go:19:12|sink=test/go/stdlib_wrap/main.go:19:15
+go/taint_flow_chain|go-command-injection|go:godzilla-samples/taint_flow_chain.run|go:os/exec.Command|src=test/go/taint_flow_chain/main.go:16:6|sink=test/go/taint_flow_chain/main.go:36:18
+go/taint_path_memory|go-command-injection|go:godzilla-samples/taint_path_memory.handler|go:os/exec.Command|src=test/go/taint_path_memory/main.go:24:6|sink=test/go/taint_path_memory/main.go:33:18
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:113:14
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:114:14
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:115:14

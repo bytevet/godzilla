@@ -116,10 +116,10 @@ func TestSARIF_EmitsCodeFlowFromSteps(t *testing.T) {
 		Severity: rules.SeverityHigh,
 		Message:  "sqli",
 		SinkPos:  &ir.Position{Filename: "h.go", Line: 42, Column: 3},
-		Steps: []*ir.Position{
-			{Filename: "h.go", Line: 10, Column: 5},
-			{Filename: "h.go", Line: 20, Column: 7},
-			{Filename: "h.go", Line: 42, Column: 3},
+		Steps: []analysis.FlowStep{
+			{Pos: &ir.Position{Filename: "h.go", Line: 10, Column: 5}, Func: "go:main.h", Kind: analysis.StepSource, InScope: true},
+			{Pos: &ir.Position{Filename: "h.go", Line: 20, Column: 7}, Func: "go:main.h", Kind: analysis.StepStep, InScope: true},
+			{Pos: &ir.Position{Filename: "h.go", Line: 42, Column: 3}, Func: "go:main.h", Kind: analysis.StepSink, InScope: true},
 		},
 	}
 	var buf bytes.Buffer

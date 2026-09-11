@@ -130,10 +130,10 @@ func TestWriteHTML_TaintFlow(t *testing.T) {
 		SourcePos:  &ir.Position{Filename: "h.go", Line: 10, Column: 5},
 		SinkPos:    &ir.Position{Filename: "h.go", Line: 42, Column: 9},
 		SinkCallee: "go:database/sql.(*DB).Query",
-		Steps: []*ir.Position{
-			{Filename: "h.go", Line: 10, Column: 5},
-			{Filename: "h.go", Line: 25, Column: 3},
-			{Filename: "h.go", Line: 42, Column: 9},
+		Steps: []analysis.FlowStep{
+			{Pos: &ir.Position{Filename: "h.go", Line: 10, Column: 5}, Func: "go:main.handler", Kind: analysis.StepSource, InScope: true},
+			{Pos: &ir.Position{Filename: "h.go", Line: 25, Column: 3}, Func: "go:main.handler", Kind: analysis.StepStep, InScope: true},
+			{Pos: &ir.Position{Filename: "h.go", Line: 42, Column: 9}, Func: "go:main.handler", Kind: analysis.StepSink, InScope: true},
 		},
 	}
 	endpointsOnly := analysis.Finding{
@@ -454,5 +454,24 @@ func TestDiagDropsUnknownRows(t *testing.T) {
 	}
 	if strings.Contains(out, `class="dv"></span>`) {
 		t.Error("a diagnostics row rendered a blank value")
+	}
+}
+
+// TestShortFunc pins the flow row's function label. The awkward case is a Go
+// method, whose canonical name puts the receiver's "(*" BEFORE the import path,
+// so a naive cut at the last slash leaves an unbalanced ")".
+func TestShortFunc(t *testing.T) {
+	for name, want := range map[string]string{
+		"go:(*net/http.Client).Do":                    "(*http.Client).Do",
+		"go:(net/http.ResponseWriter).Write":          "(http.ResponseWriter).Write",
+		"go:github.com/gin-gonic/gin.(*Context).Get":  "gin.(*Context).Get",
+		"go:godzilla-samples/taint_flow_chain.run":    "taint_flow_chain.run",
+		"py:app.handler":                              "app.handler",
+		"ruby:app/cells/report_cell.ReportCell.title": "report_cell.ReportCell.title",
+		"": "",
+	} {
+		if got := shortFunc(name); got != want {
+			t.Errorf("shortFunc(%q) = %q, want %q", name, got, want)
+		}
 	}
 }

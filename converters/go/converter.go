@@ -1291,6 +1291,18 @@ func (c *Converter) convertInstructionInto(irInst *ir.Instruction, pos *ir.Posit
 	case *ssa.MakeClosure:
 		irInst.Op = ir.OpCode_OP_CODE_INTRINSIC
 		irInst.Intrinsic = "builtin.make_closure"
+		// A closure built implicitly (`go func(){…}()`) carries no position of its
+		// own, so fall back to the func literal's. This instruction is the capture
+		// BOUNDARY on a taint path — the hop that explains how the value got into
+		// the closure body — and a hop with no position cannot be shown at all.
+		if irInst.Pos == nil {
+			if fn, ok := i.Fn.(*ssa.Function); ok {
+				if p := fn.Pos(); p.IsValid() {
+					fp := c.fset.Position(p)
+					irInst.Pos = &ir.Position{Filename: fp.Filename, Line: int32(fp.Line), Column: int32(fp.Column)}
+				}
+			}
+		}
 		irInst.Operands = append(irInst.Operands, c.convertValue(i.Fn))
 		for _, v := range i.Bindings {
 			irInst.Operands = append(irInst.Operands, c.convertValue(v))

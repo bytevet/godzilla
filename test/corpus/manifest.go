@@ -115,18 +115,25 @@ type Expectation struct {
 // that substring. This upgrades the oracle from "rule fired" to "rule fired at
 // the right place", catching a finding that reports the wrong location (which a
 // count-only oracle silently accepts).
+//
+// Path is the same idea for the FLOW rather than its endpoint: the listed source
+// lines must appear, in order, along one finding's taint path. Endpoint
+// assertions cannot see a path that lost its middle — the source and sink stay
+// right while every hop between them vanishes — which is exactly the regression
+// this catches. Hand-written and never regenerated, like Line and Sink.
 type ExpectedFinding struct {
-	Rule string `yaml:"rule"`
-	Min  int    `yaml:"min"`
-	Max  int    `yaml:"max,omitempty"`
-	Line int32  `yaml:"line,omitempty"`
-	Sink string `yaml:"sink,omitempty"`
+	Rule string  `yaml:"rule"`
+	Min  int     `yaml:"min"`
+	Max  int     `yaml:"max,omitempty"`
+	Line int32   `yaml:"line,omitempty"`
+	Sink string  `yaml:"sink,omitempty"`
+	Path []int32 `yaml:"path,omitempty"`
 }
 
 // matchesLocation reports whether any finding of rule ef.Rule satisfies ef's
 // optional Line/Sink assertions. With neither set, it is vacuously true.
 func (ef ExpectedFinding) matchesLocation(findings []analysis.Finding) bool {
-	if ef.Line == 0 && ef.Sink == "" {
+	if ef.Line == 0 && ef.Sink == "" && len(ef.Path) == 0 {
 		return true
 	}
 	for _, f := range findings {
@@ -137,6 +144,9 @@ func (ef ExpectedFinding) matchesLocation(findings []analysis.Finding) bool {
 			continue
 		}
 		if ef.Sink != "" && !strings.Contains(f.SinkCallee, ef.Sink) {
+			continue
+		}
+		if !f.PathCovers(ef.Path) {
 			continue
 		}
 		return true
@@ -190,7 +200,10 @@ func expectationFrom(findings []analysis.Finding, prev Expectation) Expectation 
 	for _, r := range rules {
 		ef := ExpectedFinding{Rule: r, Min: counts[r]}
 		if old, ok := kept[r]; ok {
-			ef.Max, ef.Line, ef.Sink = old.Max, old.Line, old.Sink
+			// Every hand-written assertion is carried over: regeneration re-derives
+			// only the COUNT, and dropping one here would silently delete the
+			// independent ground truth the count-only oracle exists to be checked by.
+			ef.Max, ef.Line, ef.Sink, ef.Path = old.Max, old.Line, old.Sink, old.Path
 		}
 		e.Findings = append(e.Findings, ef)
 	}

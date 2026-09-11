@@ -1,0 +1,14 @@
+# Expected findings for this sample (see test/README.md).
+#
+# `path` is the whole point: ONE sink, reached through three intervening calls.
+# Line/sink assertions cannot see this sample break — the endpoints stay right
+# while every hop between them disappears — so the oracle names the middle.
+#
+# TODO: this sample also has TWO routes into the one sink (/list and /search),
+# and only one finding is reported for them. Restoring both is the entrypoint
+# work tracked separately; when it lands, add `min: 2` here.
+findings:
+    - rule: go-command-injection
+      line: 36
+      sink: os/exec.Command
+      path: [16, 17, 18, 28, 32, 36]

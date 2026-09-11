@@ -223,10 +223,10 @@ func TestBuildPrompt_And_Context_IncludeTaintPath(t *testing.T) {
 		Message:   "cmd injection",
 		SourcePos: &ir.Position{Filename: src, Line: 3, Column: 8},
 		SinkPos:   &ir.Position{Filename: src, Line: 5, Column: 3},
-		Steps: []*ir.Position{
-			{Filename: src, Line: 3, Column: 8},
-			{Filename: src, Line: 4, Column: 8},
-			{Filename: src, Line: 5, Column: 3},
+		Steps: []analysis.FlowStep{
+			{Pos: &ir.Position{Filename: src, Line: 3, Column: 8}, Func: "go:main.h", Kind: analysis.StepSource, InScope: true},
+			{Pos: &ir.Position{Filename: src, Line: 4, Column: 8}, Func: "go:main.h", Kind: analysis.StepStep, InScope: true},
+			{Pos: &ir.Position{Filename: src, Line: 5, Column: 3}, Func: "go:main.h", Kind: analysis.StepSink, InScope: true},
 		},
 	}
 

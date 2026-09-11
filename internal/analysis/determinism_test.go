@@ -47,14 +47,14 @@ func TestStringParamOriginsAllMatches(t *testing.T) {
 
 	origin := &ir.Position{Filename: "a.go", Line: 7}
 	other := &ir.Position{Filename: "a.go", Line: 9}
-	seeds := paramPositions{0: origin, 1: origin, 2: origin, 3: other}
+	seeds := paramFacts{0: {origin: origin}, 1: {origin: origin}, 2: {origin: origin}, 3: {origin: other}}
 
 	// Param 1 is an int and param 3 carries a different origin, so neither is a
 	// wrapper parameter for this flow.
 	if got := stringParamOrigins(fn, seeds, origin); !slices.Equal(got, []int{0, 2}) {
 		t.Errorf("stringParamOrigins = %v, want [0 2]", got)
 	}
-	if got := stringParamOrigins(fn, paramPositions{1: origin}, origin); len(got) != 0 {
+	if got := stringParamOrigins(fn, paramFacts{1: {origin: origin}}, origin); len(got) != 0 {
 		t.Errorf("a non-string parameter must not be summarized, got %v", got)
 	}
 	if got := stringParamOrigins(fn, seeds, &ir.Position{}); len(got) != 0 {
@@ -71,7 +71,7 @@ func TestStringParamOriginsSkipsReceiver(t *testing.T) {
 		Params: []*ir.Type{str},
 	}}
 	origin := &ir.Position{Filename: "a.go", Line: 3}
-	if got := stringParamOrigins(fn, paramPositions{0: origin, 1: origin}, origin); !slices.Equal(got, []int{1}) {
+	if got := stringParamOrigins(fn, paramFacts{0: {origin: origin}, 1: {origin: origin}}, origin); !slices.Equal(got, []int{1}) {
 		t.Errorf("stringParamOrigins = %v, want [1]", got)
 	}
 }

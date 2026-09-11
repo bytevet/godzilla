@@ -28,12 +28,14 @@ type Expectation struct {
 }
 
 // Expected asserts a rule fires at least Min times (default 1), optionally at a
-// sink Line and/or a sink callee containing Sink.
+// sink Line and/or a sink callee containing Sink, and optionally along a taint
+// Path visiting the listed source lines in order.
 type Expected struct {
-	Rule string `yaml:"rule"`
-	Min  int    `yaml:"min"`
-	Line int32  `yaml:"line,omitempty"`
-	Sink string `yaml:"sink,omitempty"`
+	Rule string  `yaml:"rule"`
+	Min  int     `yaml:"min"`
+	Line int32   `yaml:"line,omitempty"`
+	Sink string  `yaml:"sink,omitempty"`
+	Path []int32 `yaml:"path,omitempty"`
 }
 
 // Result is the outcome of checking one sample directory.
@@ -105,7 +107,7 @@ func (r *Result) fail(msg string) {
 }
 
 func matchesLocation(ef Expected, findings []analysis.Finding) bool {
-	if ef.Line == 0 && ef.Sink == "" {
+	if ef.Line == 0 && ef.Sink == "" && len(ef.Path) == 0 {
 		return true
 	}
 	for _, f := range findings {
@@ -116,6 +118,9 @@ func matchesLocation(ef Expected, findings []analysis.Finding) bool {
 			continue
 		}
 		if ef.Sink != "" && !strings.Contains(f.SinkCallee, ef.Sink) {
+			continue
+		}
+		if !f.PathCovers(ef.Path) {
 			continue
 		}
 		return true

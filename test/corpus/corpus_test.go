@@ -114,6 +114,7 @@ func TestCorpus(t *testing.T) {
 				t.Fatalf("scan: %v", err)
 			}
 			positions.add(t, name, res.Findings)
+			assertPathsAreContinuous(t, res.Findings)
 			got := countByRule(res.Findings)
 
 			expected := map[string]bool{}
@@ -130,7 +131,7 @@ func TestCorpus(t *testing.T) {
 					t.Errorf("rule %q: want <= %d finding(s), got %d", ef.Rule, ef.Max, got[ef.Rule])
 				}
 				if !ef.matchesLocation(res.Findings) {
-					t.Errorf("rule %q: no finding matched the expected location (line=%d sink=%q)", ef.Rule, ef.Line, ef.Sink)
+					t.Errorf("rule %q: no finding matched the expected location (line=%d sink=%q path=%v)", ef.Rule, ef.Line, ef.Sink, ef.Path)
 				}
 			}
 			for rule, n := range got {

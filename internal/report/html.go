@@ -343,14 +343,18 @@ type findingView struct {
 	ReviewNote        string
 }
 
-// flowStep is one position along the taint flow, rendered inside a nested
-// <details>. Kind is always one of source/step/sink — the template expands
-// everything that is not a "step". The snippet is best-effort.
+// flowStep is one row of the rendered taint flow, a nested <details>. Kind is
+// the engine's StepKind, plus "deps" for a row standing in for a run of
+// dependency hops — the template opens source and sink and leaves the rest
+// closed. Snippet and Folded are alternatives: a real hop carries source lines,
+// a "deps" row carries the locations it folded.
 type flowStep struct {
 	Index   int
 	Kind    string
 	Loc     string
+	Func    string
 	Snippet *codeSnippet
+	Folded  []string
 }
 
 func newFindingView(cache srclines.Cache, root string, f analysis.Finding) findingView {
@@ -426,47 +430,103 @@ func sortKey(root string, pos *ir.Position) string {
 	return fmt.Sprintf("%s:%06d:%06d", displayPath(root, pos.GetFilename()), pos.GetLine(), pos.GetColumn())
 }
 
-// buildFlow builds the taint flow. When the engine reconstructed an
-// intra-procedural path (Finding.Steps), each step is a position along it;
-// otherwise it falls back to the source and sink endpoints and flags the flow
-// as endpoints-only.
+// buildFlow builds the taint flow. Each hop carries its own kind and enclosing
+// function, so nothing here re-derives a label from an index. Without a
+// reconstructed path it falls back to the source and sink endpoints and flags
+// the flow as endpoints-only.
+//
+// A run of consecutive DEPENDENCY hops collapses into one row. A flow through a
+// web framework crosses several of the framework's own frames, and a reader who
+// cannot edit any of them is served better by "3 frames in gin@v1.10.1", still
+// expandable, than by three rows to scroll past. The first and last hop never
+// collapse: a flow that begins or ends inside a dependency must still say where.
 func buildFlow(cache srclines.Cache, root string, f analysis.Finding) (steps []flowStep, endpointsOnly bool) {
-	// kinds[i] labels position i as source/step/sink.
-	var positions []*ir.Position
-	var kinds []string
-	if len(f.Steps) > 0 {
-		positions = f.Steps
-		kinds = make([]string, len(positions))
-		for i := range kinds {
-			kinds[i] = "step"
-		}
-		kinds[0] = "source"
-		if len(positions) > 1 {
-			kinds[len(positions)-1] = "sink"
-		}
-	} else {
+	hops := f.Steps
+	if len(hops) == 0 {
 		endpointsOnly = true
 		// Label by role, not index, so a finding with only a sink (e.g. a
 		// dangerous-call finding with no source) is never mislabeled "source".
 		if f.SourcePos != nil {
-			positions = append(positions, f.SourcePos)
-			kinds = append(kinds, "source")
+			hops = append(hops, analysis.FlowStep{Pos: f.SourcePos, Kind: analysis.StepSource})
 		}
 		if f.SinkPos != nil {
-			positions = append(positions, f.SinkPos)
-			kinds = append(kinds, "sink")
+			hops = append(hops, analysis.FlowStep{Pos: f.SinkPos, Kind: analysis.StepSink})
 		}
 	}
-	steps = make([]flowStep, 0, len(positions))
-	for i, p := range positions {
+	steps = make([]flowStep, 0, len(hops))
+	for i := 0; i < len(hops); i++ {
+		if n := foldableRun(hops, i); n > 1 {
+			folded := make([]string, 0, n)
+			for _, h := range hops[i : i+n] {
+				folded = append(folded, displayPos(root, h.Pos)+"  "+shortFunc(h.Func))
+			}
+			steps = append(steps, flowStep{
+				Index:  len(steps) + 1,
+				Kind:   "deps",
+				Loc:    fmt.Sprintf("%d frames in %s", n, depGroup(root, hops[i].Pos)),
+				Folded: folded,
+			})
+			i += n - 1
+			continue
+		}
+		h := hops[i]
 		steps = append(steps, flowStep{
-			Index:   i + 1,
-			Kind:    kinds[i],
-			Loc:     displayPos(root, p),
-			Snippet: buildSnippet(cache, p),
+			Index:   len(steps) + 1,
+			Kind:    string(h.Kind),
+			Loc:     displayPos(root, h.Pos),
+			Func:    shortFunc(h.Func),
+			Snippet: buildSnippet(cache, h.Pos),
 		})
 	}
 	return steps, endpointsOnly
+}
+
+// foldableRun returns how many consecutive hops from i are dependency frames in
+// the same group and may be folded — 0 or 1 meaning "render this hop normally".
+// The endpoints are excluded so the source and sink always keep their own row.
+func foldableRun(hops []analysis.FlowStep, i int) int {
+	if i == 0 || i >= len(hops)-1 || hops[i].InScope {
+		return 0
+	}
+	group := depGroup("", hops[i].Pos)
+	n := 0
+	for j := i; j < len(hops)-1 && !hops[j].InScope && depGroup("", hops[j].Pos) == group; j++ {
+		n++
+	}
+	return n
+}
+
+// depGroup names the dependency a hop lies in, for the folded row's label. It
+// reads the directory out of displayPath rather than re-parsing the filename, so
+// the module@version shortening stays defined in exactly one place.
+func depGroup(root string, pos *ir.Position) string {
+	d := path.Dir(displayPath(root, pos.GetFilename()))
+	if d == "." || d == "/" {
+		return "dependencies"
+	}
+	return strings.TrimPrefix(d, "dep: ")
+}
+
+// shortFunc renders a canonical FQN for a one-line flow row: the language tag and
+// the leading path segments are dropped, since the file location beside it
+// already says where the code lives.
+//
+// The leading "(*" of a Go method is kept even though it precedes the import
+// path — "go:(*net/http.Client).Do" is shortened to "(*http.Client).Do", not to
+// "http.Client).Do", which reads as broken output rather than as a name.
+func shortFunc(name string) string {
+	if _, rest, ok := strings.Cut(name, ":"); ok {
+		name = rest
+	}
+	i := strings.LastIndex(name, "/")
+	if i < 0 {
+		return name
+	}
+	lead := 0
+	for lead < len(name) && (name[lead] == '(' || name[lead] == '*') {
+		lead++
+	}
+	return name[:lead] + name[i+1:]
 }
 
 // confidenceNote returns a short plain-language explanation of a confidence
@@ -515,7 +575,7 @@ func commonRoot(findings []analysis.Finding) string {
 		consider(f.SourcePos)
 		consider(f.SinkPos)
 		for _, s := range f.Steps {
-			consider(s)
+			consider(s.Pos)
 		}
 	}
 	if !have || len(common) == 0 {

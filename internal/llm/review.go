@@ -234,10 +234,13 @@ func writeFindingFacts(b *strings.Builder, f analysis.Finding) {
 	fmt.Fprintf(b, "Sink callee: %s\n", f.SinkCallee)
 	fmt.Fprintf(b, "Source location: %s\n", analysis.PosString(f.SourcePos))
 	fmt.Fprintf(b, "Sink location: %s\n", analysis.PosString(f.SinkPos))
+	if f.EntryPos != nil {
+		fmt.Fprintf(b, "Entry point (first hop in scanned code): %s in %s\n", analysis.PosString(f.EntryPos), f.EntryFunc)
+	}
 	if len(f.Steps) >= 2 {
 		b.WriteString("Taint path (source -> sink):\n")
-		for _, p := range f.Steps {
-			fmt.Fprintf(b, "  - %s\n", analysis.PosString(p))
+		for _, s := range f.Steps {
+			fmt.Fprintf(b, "  - [%s] %s in %s%s\n", s.Kind, analysis.PosString(s.Pos), s.Func, dependencyNote(s))
 		}
 	}
 	writeRuleDefinition(b, f)
@@ -318,6 +321,15 @@ func parseVerdict(text string) (Verdict, error) {
 	return v, nil
 }
 
+// dependencyNote marks a hop the developer cannot edit, so the reviewer weighs a
+// frame inside a library differently from one in the code under review.
+func dependencyNote(s analysis.FlowStep) string {
+	if s.InScope {
+		return ""
+	}
+	return " [dependency]"
+}
+
 // codeContextFor gathers the source lines the reviewer needs to judge a finding.
 // With a reconstructed taint path (Steps) it snippets EVERY hop, so the reviewer
 // sees any sanitizer between source and sink rather than only the two endpoints;
@@ -327,21 +339,17 @@ func codeContextFor(cache srclines.Cache, f analysis.Finding) string {
 	var b strings.Builder
 	if len(f.Steps) >= 2 {
 		seen := map[string]bool{}
-		for i, p := range f.Steps {
-			key := fmt.Sprintf("%s:%d", p.GetFilename(), p.GetLine())
+		for _, s := range f.Steps {
+			// Keyed on the FUNCTION too: two hops can share a line in different
+			// frames (a recursive helper, a line hosting two calls), and dropping
+			// the second would hide a frame the reviewer is being asked to judge.
+			key := fmt.Sprintf("%s:%d:%s", s.Pos.GetFilename(), s.Pos.GetLine(), s.Func)
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
-			if snip := snippet(cache, p, 2); snip != "" {
-				label := "step"
-				switch i {
-				case 0:
-					label = "source"
-				case len(f.Steps) - 1:
-					label = "sink"
-				}
-				fmt.Fprintf(&b, "-- %s (%s) --\n", label, analysis.PosString(p))
+			if snip := snippet(cache, s.Pos, 2); snip != "" {
+				fmt.Fprintf(&b, "-- %s (%s) in %s%s --\n", s.Kind, analysis.PosString(s.Pos), s.Func, dependencyNote(s))
 				b.WriteString(snip)
 			}
 		}

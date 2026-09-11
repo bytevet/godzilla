@@ -25,6 +25,18 @@
 // That is what the LLM reviewer triages on, and it is deliberately independent of
 // severity, which is what the CI gate keys on.
 //
+// # The taint path
+//
+// A finding also carries the PATH the value took (Finding.Steps), reconstructed
+// two different ways because the two halves of the problem are different:
+// def-use recovers what happened INSIDE a function, on demand and after the
+// fact; a trail records what happened BETWEEN them, as it happens, because
+// def-use has nothing to walk across a call. Every cross-function summary
+// therefore carries a taintFact — an origin plus its trail — never a bare
+// position. See provenance.go; the invariant a change here must preserve is that
+// a path never teleports: wherever two adjacent hops sit in different functions,
+// the earlier one is the boundary that crossed.
+//
 // # Precision guards
 //
 // These are the parts most likely to be "simplified" into a regression; each is
@@ -54,7 +66,8 @@
 // # Files
 //
 // interproc.go the worklist and call handling; taint.go transfer helpers;
-// flow.go path reconstruction; guards.go dominator guards; callgraph.go CHA;
+// provenance.go the taint path; flow.go the per-function structural indexes
+// (CFG, escape analysis, the store index); guards.go dominator guards; callgraph.go CHA;
 // ssrf.go host-fixedness; dangerous.go call-site rules; secrets.go CWE-798;
 // fingerprint.go baseline identity; finding.go the shared Finding type.
 package analysis

@@ -551,11 +551,16 @@ func (fs *funcState) lowerBody(stmts []interface{}) {
 // emits its own RET (see lowerStmt); this covers the fall-through value.
 func (fs *funcState) lowerDefBody(stmts []interface{}) {
 	var last *ir.Value
+	var lastNode interface{}
 	for _, s := range stmts {
 		last = fs.lowerStmt(s)
+		lastNode = s
 	}
 	if last != nil {
-		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{last}})
+		// Positioned at the expression being returned: an implicit return has no
+		// syntax of its own, and a RET with no Pos becomes a ":0:0" hop on the
+		// reported taint path (source mapping is mandatory — see CLAUDE.md).
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Pos: posFrom(fs.filename, lastNode), Operands: []*ir.Value{last}})
 	}
 }
 
@@ -614,14 +619,14 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 		// ["return", args] — RET of the returned value, so the engine's
 		// taint-return summary sees it.
 		v := fs.lowerSeqLast(extractArgs(at(s, 1)))
-		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Pos: posFrom(fs.filename, s), Operands: []*ir.Value{v}})
 		fs.terminated = true // the current block ends here; no fall-through edge.
 		return v
 	case "return0":
 		// Ripper's tag for an argument-less `return`. The RET terminates the block;
 		// without this case it would fall through to a ruby.unsupported intrinsic.
 		v := ssabuild.Str("")
-		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Operands: []*ir.Value{v}})
+		fs.emit(&ir.Instruction{Op: ir.OpCode_OP_CODE_RET, Pos: posFrom(fs.filename, s), Operands: []*ir.Value{v}})
 		fs.terminated = true
 		return v
 	case "def", "defs", "class", "module", "sclass":

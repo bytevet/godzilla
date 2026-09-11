@@ -386,6 +386,10 @@ input[type="search"] { flex: 1 1 170px; min-width: 110px; }
 .step.source .kind { color: var(--accent-text); }
 .step.sink .kind { color: var(--crit); }
 .step .loc { color: var(--text); }
+.step .fn { color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step.deps { background: transparent; border-style: dashed; }
+.step.deps .kind, .step.deps .loc { color: var(--subtle); }
+.folded { padding: 2px 10px 8px 10px; font: 400 11px/1.7 var(--mono); color: var(--subtle); }
 .step .chev { margin-left: auto; color: var(--subtle); font-size: 10px; transition: transform .15s ease; }
 .step[open] .chev { transform: rotate(90deg); }
 
@@ -616,9 +620,9 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
         <div class="subhead">Taint flow &middot; {{len .Flow}} step{{if ne (len .Flow) 1}}s{{end}}{{if .FlowEndpointsOnly}} &middot; endpoints only{{end}}</div>
         <div class="flow">
           {{range .Flow}}
-          <details class="step {{if eq .Kind "source"}}source{{else if eq .Kind "sink"}}sink{{else}}mid{{end}}" data-idx="{{.Index}}"{{if ne .Kind "step"}} open{{end}}>
-            <summary><span class="kind">{{.Kind}}</span><span class="loc">{{.Loc}}</span><span class="chev" aria-hidden="true">&#9656;</span></summary>
-            {{if .Snippet}}<pre class="snippet"><code class="src">{{template "snippet" .Snippet}}</code></pre>{{else}}<div class="snippet-missing">source not available</div>{{end}}
+          <details class="step {{if eq .Kind "source"}}source{{else if eq .Kind "sink"}}sink{{else if eq .Kind "deps"}}deps{{else}}mid{{end}}" data-idx="{{.Index}}"{{if or (eq .Kind "source") (eq .Kind "sink")}} open{{end}}>
+            <summary><span class="kind">{{.Kind}}</span><span class="loc">{{.Loc}}</span>{{with .Func}}<span class="fn">{{.}}</span>{{end}}<span class="chev" aria-hidden="true">&#9656;</span></summary>
+            {{if .Folded}}<div class="folded">{{range .Folded}}<div>{{.}}</div>{{end}}</div>{{else if .Snippet}}<pre class="snippet"><code class="src">{{template "snippet" .Snippet}}</code></pre>{{else}}<div class="snippet-missing">source not available</div>{{end}}
           </details>
           {{end}}
         </div>

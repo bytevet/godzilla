@@ -1,0 +1,15 @@
+# Expected findings for this sample (see test/README.md).
+#
+# The `path` lines ARE the assertion. Line 27 (the transform), 28 (the struct
+# literal), 30 (the map write) and 32 (the slice literal) each sit behind a
+# memory write, and a walk that cannot invert one of those silently drops the
+# hops before it while still reporting the same source and sink.
+#
+# The decoy on lines 26/31 must stay OUT of the path; `path` cannot express an
+# absence, so internal/analysis/provenance_test.go pins that half.
+findings:
+    - rule: go-command-injection
+      max: 1
+      line: 33
+      sink: os/exec.Command
+      path: [24, 25, 27, 28, 30, 32, 33]
