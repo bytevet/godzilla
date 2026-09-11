@@ -414,8 +414,8 @@ func (u *UI) render(final bool) {
 		u.spin++
 		segs := plan(stages, u.expect)
 		cells, withLabel := barCellsFor(w)
-		runs, pct := bars(segs, cells)
-		u.lastPct = max(pct, u.lastPct)
+		u.lastPct = max(pctOf(segs), u.lastPct)
+		runs := bars(segs, cells, u.lastPct)
 
 		// A running phase gets its own live row. It is the one row that has to be
 		// redrawn rather than promoted, because its clock is still moving.
@@ -510,11 +510,14 @@ func (u *UI) render(final bool) {
 		// colours meant, and the per-group totals answer "where did it go".
 		segs := plan(stages, u.expect)
 		cells, _ := barCellsFor(w)
-		runs, pct := bars(segs, cells)
+		// At rest every started stage is done, so the bar is drawn from that view
+		// rather than the plan's. Kept in its own variable: the legend below reports
+		// what each group COST, which is a property of the original plan.
+		barSegs, pct := segs, pctOf(segs)
 		if !aborted {
-			pct = 1
-			runs, _ = bars(completed(segs), cells)
+			barSegs, pct = completed(segs), 1
 		}
+		runs := bars(barSegs, cells, pct)
 		add(u.out, u.pal.footer(runs, cells, pct, u.now().Sub(u.start), "", aborted)+"\n")
 		if !aborted {
 			if l := u.pal.legend(groupTimes(segs), w-1); l != "" {

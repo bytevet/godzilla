@@ -262,23 +262,38 @@ type groupTime struct {
 	elapsed time.Duration
 }
 
-// bars apportions the footer's filled cells among the phase groups and returns
-// the overall percentage. Cells go by each group's COMPLETED weight, so the
-// filled length IS the progress and the track is what remains — the bar cannot
-// be full while work is outstanding.
-func bars(segs []segment, cells int) ([]barSeg, float64) {
-	done := map[string]float64{}
+// pctOf is the fraction of the planned work that is complete.
+func pctOf(segs []segment) float64 {
 	var total, finished float64
 	for _, s := range segs {
 		total += s.weight
+		finished += s.weight * s.fraction
+	}
+	if total <= 0 {
+		return 0
+	}
+	return min(finished/total, 1)
+}
+
+// bars apportions pct of the footer's cells among the phase groups, by each
+// group's share of the work COMPLETED so far, leaving the rest as track.
+//
+// pct is the CALLER's, not recomputed here, and that is the whole point: the
+// live footer ratchets its percentage so the bar never runs backwards, and a bar
+// sized from the raw fraction while the number came from the ratchet drew
+// "100%" against a bar six cells short. The bar and the number beside it are one
+// fact drawn two ways, so they take one number.
+func bars(segs []segment, cells int, pct float64) []barSeg {
+	done := map[string]float64{}
+	var finished float64
+	for _, s := range segs {
 		d := s.weight * s.fraction
 		finished += d
 		done[groupName(s.id)] += d
 	}
-	if total <= 0 {
-		return nil, 0
+	if finished <= 0 {
+		return nil
 	}
-	pct := min(finished/total, 1)
 
 	// Cumulative rounding, so the runs sum to the filled length by CONSTRUCTION:
 	// the last cumulative term is `finished`, which makes the final boundary
@@ -298,7 +313,7 @@ func bars(segs []segment, cells int) ([]barSeg, float64) {
 			out = append(out, barSeg{group: g, cells: n})
 		}
 	}
-	return out, pct
+	return out
 }
 
 // groupTimes totals what each group cost, in pipeline order.

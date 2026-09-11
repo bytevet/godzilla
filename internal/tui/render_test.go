@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +44,8 @@ func TestFooterIsExactlyEightyColumns(t *testing.T) {
 		if !withLabel || cells != barCells {
 			t.Fatalf("mode %d: width 80 should carry a full bar and a label", mode)
 		}
-		runs, pct := bars(segs, cells)
+		pct := pctOf(segs)
+		runs := bars(segs, cells, pct)
 		got := p.footer(runs, cells, pct, 6500*time.Millisecond, "go parse & typecheck", false)
 		if n := visibleWidth(got); n != footerWidth {
 			t.Errorf("mode %d: footer is %d columns, want %d:\n%q", mode, n, footerWidth, got)
@@ -54,7 +57,8 @@ func TestFooterIsExactlyEightyColumns(t *testing.T) {
 // out — that is what "fixed fields" buys.
 func TestALongLabelDoesNotWidenTheFooter(t *testing.T) {
 	segs := plan(midScan(), nil)
-	runs, pct := bars(segs, barCells)
+	pct := pctOf(segs)
+	runs := bars(segs, barCells, pct)
 	got := palette{mode: colorTrue}.footer(runs, barCells, pct, time.Second,
 		strings.Repeat("very-long-phase-name ", 6), false)
 	if n := visibleWidth(got); n != footerWidth {
@@ -67,7 +71,8 @@ func TestALongLabelDoesNotWidenTheFooter(t *testing.T) {
 func TestBarRunsNeverExceedTheCellCount(t *testing.T) {
 	segs := plan(midScan(), nil)
 	for _, cells := range []int{4, 9, 17, 40, 64} {
-		runs, pct := bars(segs, cells)
+		pct := pctOf(segs)
+		runs := bars(segs, cells, pct)
 		sum := 0
 		for _, r := range runs {
 			if r.cells < 0 {
@@ -192,7 +197,8 @@ func TestAuthoredLinesNeverExceedTheWidth(t *testing.T) {
 				}
 			}
 			cells, withLabel := barCellsFor(w)
-			runs, pct := bars(segs, cells)
+			pct := pctOf(segs)
+			runs := bars(segs, cells, pct)
 			label := ""
 			if withLabel {
 				label = "go parse & typecheck"
@@ -224,7 +230,8 @@ func TestTruncationIsRuneSafe(t *testing.T) {
 // races to 100% on a crash is a lie.
 func TestAbortReplacesThePercentage(t *testing.T) {
 	segs := plan(midScan(), nil)
-	runs, pct := bars(segs, barCells)
+	pct := pctOf(segs)
+	runs := bars(segs, barCells, pct)
 	got := palette{mode: colorNone}.footer(runs, barCells, pct, 1180*time.Millisecond, "go SSA build", true)
 	if !strings.Contains(got, abortedText) {
 		t.Errorf("an aborted footer should say %q: %q", abortedText, got)
@@ -245,7 +252,7 @@ func TestBarRunsAreInPipelineOrder(t *testing.T) {
 		snap("go.list", "go list (metadata)", 0, 0, 500, false, false),
 		snap("ruby.convert", "ruby parse & lower", 47, 47, 430, false, false),
 	}, nil)
-	runs, _ := bars(segs, barCells)
+	runs := bars(segs, barCells, pctOf(segs))
 	var got []string
 	for _, r := range runs {
 		got = append(got, r.group)
@@ -297,3 +304,47 @@ func visibleWidth(s string) int {
 	}
 	return n
 }
+
+// The bar and the percentage beside it are the same fact drawn two ways, so
+// they have to come from the same number. They did not: the live footer
+// ratchets its percentage (a progress bar must never run backwards) while the
+// runs were apportioned from the raw, un-ratcheted fraction — so any frame in
+// which the ratchet was ahead printed "100%" against a bar six cells short.
+func TestBarFillMatchesThePrintedPercent(t *testing.T) {
+	segs := plan(midScan(), nil)
+	for _, pct := range []float64{0, 0.25, 0.5, 0.85, 0.999, 1} {
+		runs := bars(segs, barCells, pct)
+		got := palette{mode: colorTrue}.footer(runs, barCells, pct, time.Second, "taint propagation", false)
+		fill, shown := barFillAndPercent(t, got)
+		if want := int(float64(barCells)*pct + 0.5); fill != want {
+			t.Errorf("pct %.3f: bar shows %d/%d filled, want %d", pct, fill, barCells, want)
+		}
+		// What the reader actually compares: a bar at 100% must have no track left.
+		if shown == 100 && fill != barCells {
+			t.Errorf("pct %.3f: footer prints 100%% with %d of %d cells filled", pct, fill, barCells)
+		}
+	}
+}
+
+// barFillAndPercent reads back a rendered footer: how many cells are filled, and
+// the percentage printed beside them.
+func barFillAndPercent(t *testing.T, footer string) (fill, pct int) {
+	t.Helper()
+	plain := stripANSI(footer)
+	for _, r := range plain {
+		if r == barFill {
+			fill++
+		}
+	}
+	m := percentRe.FindStringSubmatch(plain)
+	if m == nil {
+		t.Fatalf("cannot read the percentage from %q", plain)
+	}
+	pct, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("percentage %q: %v", m[1], err)
+	}
+	return fill, pct
+}
+
+var percentRe = regexp.MustCompile(`(\d+)%`)
