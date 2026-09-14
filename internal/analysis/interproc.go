@@ -1982,8 +1982,28 @@ func eachArgParam(cc *ir.CallCommon, f func(paramIdx int, arg *ir.Value)) {
 // Shared by the lowered-method branch and the CHA dispatch loop in handleCall,
 // which resolve different targets but seed them identically. Both call sites
 // are under IsInvoke, so `pi > 0` is exactly "not the receiver".
-func (fa *funcAnalysis) seedInvokeArgs(inst *ir.Instruction, target string) {
+// ambiguous=true suppresses the RECEIVER seed (param 0) while still seeding the
+// arguments. When the engine cannot tell which implementation runs it binds all
+// of them, and the two slots are not alike: an argument is passed to whichever
+// one actually runs, so seeding it approximates one real call, whereas the
+// receiver IS the object, and claiming it could be each of several unrelated
+// types makes every one of those bodies read its own fields and dispatch again —
+// the error compounds through the dependency closure instead of staying local.
+//
+// `defer c.Request.Body.Close()` is the shape that showed it: a tainted request
+// body seeded the receiver of every io.ReadCloser in the program, and the taint
+// walked out through three unrelated libraries into a config reader, so every
+// configuration value read back as attacker-controlled.
+//
+// This is the discipline the untyped_dispatch branch below already applies,
+// narrowed rather than copied: there an ambiguous call seeds NOTHING, here it
+// still seeds arguments. A rule-modelled propagator is unaffected either way —
+// propagatorOperands carries a receiver's taint without going through here.
+func (fa *funcAnalysis) seedInvokeArgs(inst *ir.Instruction, target string, ambiguous bool) {
 	eachArgParam(inst.Call, func(pi int, arg *ir.Value) {
+		if pi == 0 && ambiguous {
+			return
+		}
 		if p, ok := isTaintedArg(fa.tainted, arg); ok {
 			fa.addEffect(target, pi, p, arg, inst)
 		}
@@ -2214,7 +2234,7 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			// the last argument — an off-by-one that silently loses every
 			// cross-function instance flow. (Go interface INVOKEs name an abstract
 			// method absent from byKey, so the CHA block below handles them.)
-			fa.seedInvokeArgs(inst, callee)
+			fa.seedInvokeArgs(inst, callee, false)
 		} else {
 			// Static/free function or Go method call: args already align with
 			// params (Args[0]==Params[0]==receiver for a Go method). isTaintedArg
@@ -2332,12 +2352,16 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 				impls = fa.receiverImpls(inst.Call, impls)
 			}
 			if len(impls) == 1 {
-				fa.seedInvokeArgs(inst, impls[0])
+				fa.seedInvokeArgs(inst, impls[0], false)
 				fa.pullReturnTaint(inst, impls[0])
 			}
 		} else {
+			// Ambiguity is counted AFTER the signature and interface bounds have
+			// narrowed the candidate set, so a call that resolves to one
+			// implementation still seeds its receiver normally.
+			ambiguous := len(impls) > 1
 			for _, impl := range impls {
-				fa.seedInvokeArgs(inst, impl)
+				fa.seedInvokeArgs(inst, impl, ambiguous)
 				fa.pullReturnTaint(inst, impl)
 			}
 		}

@@ -26,6 +26,7 @@ go/global_taint|go-command-injection|go:godzilla-samples/global_taint.runHandler
 go/gorilla_mux|go-command-injection|go:godzilla/test/go/gorilla_mux.main$1|go:os/exec.Command|src=test/go/gorilla_mux/main.go:15:19|sink=test/go/gorilla_mux/main.go:16:15
 go/header_source|go-command-injection|go:godzilla-samples/header_source.main$1|go:os/exec.Command|src=test/go/header_source/main.go:11:23|sink=test/go/header_source/main.go:13:15
 go/higher_order_callback|go-command-injection|go:godzilla-samples/higher_order_callback.runCmd|go:os/exec.Command|src=test/go/higher_order_callback/main.go:21:6|sink=test/go/higher_order_callback/main.go:14:14
+go/iface_receiver_fanout|go-command-injection|go:(godzilla-samples/iface_receiver_fanout.tag).Put|go:os/exec.Command|src=test/go/iface_receiver_fanout/main.go:56:6|sink=test/go/iface_receiver_fanout/main.go:36:18
 go/interface_dispatch|go-command-injection|go:(*godzilla-samples/interface_dispatch.shellRunner).Run|go:os/exec.Command|src=test/go/interface_dispatch/main.go:23:24|sink=test/go/interface_dispatch/main.go:15:14
 go/interproc|go-command-injection|go:godzilla-samples/interproc.runCommand|go:os/exec.Command|src=test/go/interproc/main.go:22:26|sink=test/go/interproc/main.go:18:14
 go/map_key_select|go-path-traversal|go:godzilla/test/go/map_key_select.contentsTainted|go:os.ReadFile|src=test/go/map_key_select/main.go:30:6|sink=test/go/map_key_select/main.go:33:20

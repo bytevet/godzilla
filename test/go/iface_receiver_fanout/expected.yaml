@@ -1,0 +1,15 @@
+# Expected findings for this sample (see test/README.md).
+#
+# EXACTLY one, and both halves matter. Line 36 is tag.Put reading its tainted
+# ARGUMENT — an argument reaches whichever implementation actually runs, so it
+# must fire. Line 48 is audit.Put reading its OWN constant field, and can only
+# fire if an ambiguous dispatch seeded a receiver the engine merely guessed at.
+#
+# max is the control. min + line is what stops a fix that silences interface
+# dispatch wholesale from passing.
+findings:
+    - rule: go-command-injection
+      min: 1
+      max: 1
+      line: 36
+      sink: os/exec.Command
