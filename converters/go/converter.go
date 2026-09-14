@@ -1504,7 +1504,15 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		}
 	case *types.Named:
 		irType.Kind = ir.TypeKind_TYPE_KIND_NAMED
+		// PACKAGE-QUALIFIED. A bare "Encoder" cannot be told from another package's
+		// Encoder, and it cannot be matched against a method's canonical name
+		// ("go:(*github.com/klauspost/compress/zstd.Encoder).Close"), which is where
+		// every other type identity in the engine comes from. A universe type
+		// (error) has no package and keeps its bare name.
 		irType.Name = typ.Obj().Name()
+		if pkg := typ.Obj().Pkg(); pkg != nil {
+			irType.Name = pkg.Path() + "." + irType.Name
+		}
 		irType.UnderlyingType = c.convertType(typ.Underlying())
 	// Handle more...
 	default:

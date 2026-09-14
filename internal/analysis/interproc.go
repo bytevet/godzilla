@@ -2,8 +2,6 @@ package analysis
 
 import (
 	"fmt"
-	"github.com/bytevet/godzilla/internal/irwalk"
-	"github.com/bytevet/godzilla/internal/progress"
 	"maps"
 	"runtime"
 	"slices"
@@ -13,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bytevet/godzilla/internal/irwalk"
+	"github.com/bytevet/godzilla/internal/progress"
 	"github.com/bytevet/godzilla/internal/rules"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
@@ -66,7 +66,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	indirectCallees := buildIndirectCallees(byKey)
 	keys := slices.Sorted(maps.Keys(byKey))
 	idx := &sharedIndex{
-		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls, classMethods: buildClassMethods(byKey),
+		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls, classMethods: buildClassMethods(byKey), boxedTypes: buildBoxedTypes(prog),
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable:     e.reportable,
 		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
@@ -672,6 +672,84 @@ func buildClassMethods(byKey map[string]*ir.Function) map[string]map[string]bool
 	return classes
 }
 
+// buildBoxedTypes returns the concrete types the program actually converts to an
+// interface: Go's OP_CODE_MAKE_INTERFACE operands, which is precisely the RTA set.
+//
+// It is what bounds dispatch on an interface that declares ONE method, where
+// method-set containment can say nothing — every type with an Error() satisfies
+// error. Without it, `case error: return s.Error()` inside a generic any→string
+// helper binds to every error type in the program, the helper becomes
+// taint-returning for all of its callers, and a config reader downstream of it
+// hands out tainted configuration program-wide.
+//
+// Empty for every frontend but Go (no other emits the opcode), which switches the
+// bound off rather than breaking it.
+func buildBoxedTypes(prog *ir.Program) map[string]bool {
+	boxed := map[string]bool{}
+	for _, fn := range irwalk.Funcs(prog) {
+		// Only instruction RESULT types are collected, not the full def map
+		// fnIndexFor would build: this pass runs over every lowered function,
+		// including the dependency closure the worklist never reaches.
+		var regTypes map[string]*ir.Type
+		var operands []*ir.Value
+		for inst := range irwalk.Instrs(fn) {
+			if inst.Name != "" && inst.Type != nil {
+				if regTypes == nil {
+					regTypes = map[string]*ir.Type{}
+				}
+				regTypes[inst.Name] = inst.Type
+			}
+			if inst.Op == ir.OpCode_OP_CODE_MAKE_INTERFACE {
+				if ops := inst.GetOperands(); len(ops) > 0 {
+					operands = append(operands, ops[0])
+				}
+			}
+		}
+		for _, op := range operands {
+			var t *ir.Type
+			if c := op.GetConstant(); c != nil {
+				t = c.GetType()
+			} else if reg := op.GetRegName(); reg != "" {
+				t = regTypes[reg]
+			}
+			if name := concreteTypeName(t); name != "" {
+				boxed[name] = true
+			}
+		}
+	}
+	return boxed
+}
+
+// concreteTypeName reduces a type to the qualified name its methods' canonical
+// names are spelled with, dropping pointer-ness — T and *T share a method set for
+// this purpose, and normalising both sides only widens the candidate set, which
+// is the safe direction.
+func concreteTypeName(t *ir.Type) string {
+	for range 8 {
+		switch t.GetKind() {
+		case ir.TypeKind_TYPE_KIND_NAMED:
+			return t.GetName()
+		case ir.TypeKind_TYPE_KIND_POINTER:
+			t = t.GetElemType()
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+// receiverTypeName extracts the qualified type out of a receiver key —
+// "github.com/x/zstd.Encoder" from "go:(*github.com/x/zstd.Encoder)" — so a
+// candidate can be compared against the boxed set. Empty when the key is not in
+// that parenthesised Go method shape, which keeps the candidate.
+func receiverTypeName(recvKey string) string {
+	open := strings.IndexByte(recvKey, '(')
+	if open < 0 || !strings.HasSuffix(recvKey, ")") {
+		return ""
+	}
+	return strings.TrimPrefix(recvKey[open+1:len(recvKey)-1], "*")
+}
+
 // receiverKeyOf returns the fully-qualified receiver portion of a method's
 // canonical name — "go:(*net/http.Client)" for "go:(*net/http.Client).Do". It is
 // deliberately NOT classOfMethodKey's bare name: two packages may each define an
@@ -709,7 +787,10 @@ type sharedIndex struct {
 	// classMethods maps a receiver type (as spelled in its methods' canonical
 	// names) to the method names defined on it — the program's own class
 	// hierarchy, recovered from the lowered functions. See buildClassMethods.
-	classMethods    map[string]map[string]bool
+	classMethods map[string]map[string]bool
+	// boxedTypes is the set of concrete types the program ever converts to an
+	// interface — its RTA set. See buildBoxedTypes.
+	boxedTypes      map[string]bool
 	callers         map[string][]string // callee -> its callers (reverse call graph)
 	globalReaders   map[string][]string // global name -> functions that read it (ENG-6)
 	indirectCallees map[string]bool     // functions containing an indirect (function-value) call
@@ -2127,14 +2208,24 @@ func (fa *funcAnalysis) interfaceImpls(cc *ir.CallCommon, impls []string) []stri
 	// candidate for `Close` is some unrelated type that merely spells it — the
 	// case most in need of rejecting, not least.
 	want := interfaceMethods(fa.typeOfValue(cc.GetValue()))
-	if len(want) < 2 {
+	boxed := fa.idx.boxedTypes
+	if len(want) < 2 && len(boxed) == 0 {
 		return impls
 	}
 	kept := make([]string, 0, len(impls))
 	for _, impl := range impls {
-		if has := fa.idx.classMethods[receiverKeyOf(impl)]; len(has) == 0 || covers(has, want) {
-			kept = append(kept, impl)
+		recv := receiverKeyOf(impl)
+		// RTA first: it is the only one of the two bounds that bites on a
+		// one-method interface, where containment can say nothing.
+		if name := receiverTypeName(recv); len(boxed) > 0 && name != "" && !boxed[name] {
+			continue
 		}
+		if len(want) >= 2 {
+			if has := fa.idx.classMethods[recv]; len(has) > 0 && !covers(has, want) {
+				continue
+			}
+		}
+		kept = append(kept, impl)
 	}
 	if len(kept) == len(impls) {
 		return impls
