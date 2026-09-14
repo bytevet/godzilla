@@ -1,0 +1,6 @@
+# Expected findings for this sample (see test/README.md).
+#
+# Empty on purpose: this is a false-positive control for CHA method-name
+# collisions. Any finding here means an interface call bound to a same-named
+# method on a type the call site cannot reach.
+findings: []

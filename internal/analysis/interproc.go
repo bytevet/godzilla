@@ -66,7 +66,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	indirectCallees := buildIndirectCallees(byKey)
 	keys := slices.Sorted(maps.Keys(byKey))
 	idx := &sharedIndex{
-		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls,
+		byKey: byKey, modByKey: modByKey, methodImpls: methodImpls, classMethods: buildClassMethods(byKey),
 		callers: callers, globalReaders: globalReaders, indirectCallees: indirectCallees, keys: keys,
 		reportable:     e.reportable,
 		reqSourceHosts: buildReqSourceHosts(byKey, modByKey, e.rs, e.reportable),
@@ -643,6 +643,47 @@ func buildFuncIndex(prog *ir.Program) (map[string]*ir.Function, map[string]*ir.M
 // (returnTaint, paramTaint), the order decides which origin a callee's summary
 // keeps and therefore whether a flow reports at all. Unsorted, a scan returned a
 // different finding count on each run.
+// buildClassMethods indexes every lowered method under its receiver type,
+// giving the engine the one thing the IR does not carry: which methods a type
+// actually has. gIR's named types record a name and an underlying type, not a
+// method set — but every method IS a lowered function whose canonical name spells
+// its receiver, so the method set can be recovered without a frontend change.
+//
+// It is what makes a type-resolved INVOKE bindable to the types that really
+// implement the interface, instead of to everything sharing a method NAME.
+func buildClassMethods(byKey map[string]*ir.Function) map[string]map[string]bool {
+	classes := map[string]map[string]bool{}
+	for name, fn := range byKey {
+		bare := fn.GetMethodName()
+		if bare == "" {
+			continue
+		}
+		recv := receiverKeyOf(name)
+		if recv == "" {
+			continue
+		}
+		set := classes[recv]
+		if set == nil {
+			set = map[string]bool{}
+			classes[recv] = set
+		}
+		set[bare] = true
+	}
+	return classes
+}
+
+// receiverKeyOf returns the fully-qualified receiver portion of a method's
+// canonical name — "go:(*net/http.Client)" for "go:(*net/http.Client).Do". It is
+// deliberately NOT classOfMethodKey's bare name: two packages may each define an
+// "Encoder", and conflating them is the very mistake this index exists to stop.
+func receiverKeyOf(methodKey string) string {
+	i := strings.LastIndexByte(methodKey, '.')
+	if i <= 0 {
+		return ""
+	}
+	return methodKey[:i]
+}
+
 func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 	methodImpls := map[string][]string{}
 	for name, fn := range byKey {
@@ -662,9 +703,13 @@ func buildMethodImpls(byKey map[string]*ir.Function) map[string][]string {
 // rebuilding per rule — removes an O(program × rules) instruction walk whose
 // allocation churn capped parallel scaling.
 type sharedIndex struct {
-	byKey           map[string]*ir.Function
-	modByKey        map[string]*ir.Module
-	methodImpls     map[string][]string
+	byKey       map[string]*ir.Function
+	modByKey    map[string]*ir.Module
+	methodImpls map[string][]string
+	// classMethods maps a receiver type (as spelled in its methods' canonical
+	// names) to the method names defined on it — the program's own class
+	// hierarchy, recovered from the lowered functions. See buildClassMethods.
+	classMethods    map[string]map[string]bool
 	callers         map[string][]string // callee -> its callers (reverse call graph)
 	globalReaders   map[string][]string // global name -> functions that read it (ENG-6)
 	indirectCallees map[string]bool     // functions containing an indirect (function-value) call
@@ -2033,10 +2078,13 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// ONLY when the name is unambiguous: otherwise a polymorphic name like
 		// `execute` would seed taint into every same-named method across unrelated
 		// classes, a cross-object fan-out that floods real code with false
-		// positives. A type-resolved invoke (a Go interface method) carries the
-		// standard type-bounded CHA over-approximation, so it fans out to every
-		// implementer.
-		impls := fa.idx.methodImpls[inst.Call.GetMethodName()]
+		// positives. A type-resolved invoke fans out to every implementer, the
+		// standard CHA over-approximation — bounded first by what the call site's
+		// own signature rules out (see signatureAllows), since methodImpls is
+		// keyed on the bare name and `Query` alone spans a repository, an ORM and
+		// a request accessor.
+		impls := fa.signatureImpls(inst.Call, fa.idx.methodImpls[inst.Call.GetMethodName()])
+		impls = fa.interfaceImpls(inst.Call, impls)
 		if inst.Call.GetUntypedDispatch() {
 			// An ambiguous name is not always an unknown receiver: `h = C()` then
 			// `h.load(x)` names the class right there (see receiverImpls).
@@ -2054,6 +2102,213 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 			}
 		}
 	}
+}
+
+// interfaceImpls narrows CHA candidates to the types that actually implement the
+// interface being invoked, when the receiver's static type says which one it is.
+//
+// Without it a call on an interface value binds by METHOD NAME alone, and one
+// `f.Close()` on a tainted file seeds the receiver of every Close in the
+// program. That does not stay contained: the polluted method returns taint, its
+// own calls bind by name in turn, and the flow walks from a multipart file into
+// a compression encoder into an RPC buffer — a reported path through four
+// unrelated libraries the value never entered.
+//
+// Applied only when the interface names at least two methods, since a
+// single-method interface (io.Closer) constrains nothing that the method name
+// did not already, and only against classes the index knows something about —
+// an unknown class is kept, so a partially-lowered dependency loses no edge.
+func (fa *funcAnalysis) interfaceImpls(cc *ir.CallCommon, impls []string) []string {
+	if len(impls) == 0 {
+		return impls
+	}
+	// Deliberately NOT skipped for a single candidate. The standard library is not
+	// lowered, so an io.ReadCloser's real implementations are absent and the lone
+	// candidate for `Close` is some unrelated type that merely spells it — the
+	// case most in need of rejecting, not least.
+	want := interfaceMethods(fa.typeOfValue(cc.GetValue()))
+	if len(want) < 2 {
+		return impls
+	}
+	kept := make([]string, 0, len(impls))
+	for _, impl := range impls {
+		if has := fa.idx.classMethods[receiverKeyOf(impl)]; len(has) == 0 || covers(has, want) {
+			kept = append(kept, impl)
+		}
+	}
+	if len(kept) == len(impls) {
+		return impls
+	}
+	return kept
+}
+
+// covers reports whether a class defines every method the interface requires.
+func covers(has map[string]bool, want []string) bool {
+	for _, m := range want {
+		if !has[m] {
+			return false
+		}
+	}
+	return true
+}
+
+// interfaceMethods returns the method names of the interface t denotes, or nil
+// when t is not one. It unwraps named types and pointers, which is how a
+// receiver's type arrives (a named interface, `multipart.File`), with a bounded
+// loop so a malformed self-referential type cannot spin.
+func interfaceMethods(t *ir.Type) []string {
+	for range 8 {
+		switch t.GetKind() {
+		case ir.TypeKind_TYPE_KIND_INTERFACE:
+			names := make([]string, 0, len(t.GetMethods()))
+			for _, m := range t.GetMethods() {
+				if n := m.GetName(); n != "" {
+					names = append(names, n)
+				}
+			}
+			return names
+		case ir.TypeKind_TYPE_KIND_NAMED:
+			t = t.GetUnderlyingType()
+		case ir.TypeKind_TYPE_KIND_POINTER:
+			t = t.GetElemType()
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// signatureImpls drops the CHA candidates the call site's own shape rules out.
+// Returns impls unchanged when nothing is ruled out, so the common case
+// allocates nothing.
+func (fa *funcAnalysis) signatureImpls(cc *ir.CallCommon, impls []string) []string {
+	args := cc.GetArgs()
+	kept := impls
+	for i, impl := range impls {
+		if fa.signatureAllows(fa.idx.byKey[impl], args) {
+			if len(kept) != len(impls) {
+				kept = append(kept, impl)
+			}
+			continue
+		}
+		if len(kept) == len(impls) { // first rejection: copy the prefix out
+			kept = append(make([]string, 0, len(impls)-1), impls[:i]...)
+		}
+	}
+	return kept
+}
+
+// signatureAllows reports whether fn could be the callee of a call carrying
+// these logical arguments. It is a NEGATIVE test: false only when the signature
+// PROVES fn cannot be it.
+//
+// buildMethodImpls indexes by bare method name, because a name is all the IR
+// guarantees across languages — so "Query" collects every Query in the program:
+// a repository's, an ORM's, a web framework's request accessor. Binding a call
+// to all of them makes `c.Query(key)` the reported source of a flow that began
+// at a database lookup: a false positive whose path leads a reader into a
+// dependency the value never touched.
+//
+// Only the Go frontend populates Function.Signature today. A nil signature means
+// UNKNOWN and always passes, which is what stops the five frontends that emit
+// none from losing every dynamic-dispatch edge; a frontend opts into the
+// narrowing by populating signatures, and needs no change here.
+func (fa *funcAnalysis) signatureAllows(fn *ir.Function, args []*ir.Value) bool {
+	sig := fn.GetSignature()
+	if sig == nil {
+		return true
+	}
+	// Signature.Params excludes the receiver, and an INVOKE keeps its receiver in
+	// Call.Value, so the two lists line up without a shift.
+	params := sig.GetParams()
+	if sig.GetVariadic() {
+		if len(args) < len(params)-1 {
+			return false
+		}
+	} else if len(args) != len(params) {
+		return false
+	}
+	for i, a := range args {
+		if i >= len(params) {
+			break // the variadic tail accepts anything
+		}
+		if !typesAgree(fa.typeOfValue(a), params[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// typesAgree compares an argument's type with a parameter's on the one signal
+// every frontend spells identically: the basic kind. Everything else agrees by
+// default — an unknown type on either side, and any named/struct/pointer/
+// interface type, whose identity the IR does not carry precisely enough to
+// reject on without inventing false negatives.
+func typesAgree(arg, param *ir.Type) bool {
+	if arg.GetKind() != ir.TypeKind_TYPE_KIND_BASIC || param.GetKind() != ir.TypeKind_TYPE_KIND_BASIC {
+		return true
+	}
+	ak, pk := arg.GetBasicKind(), param.GetBasicKind()
+	if ak == ir.BasicTypeKind_BASIC_TYPE_KIND_UNSPECIFIED || pk == ir.BasicTypeKind_BASIC_TYPE_KIND_UNSPECIFIED {
+		return true
+	}
+	return ak == pk
+}
+
+// typeOfValue is valueType plus the one source of type information a def-use
+// lookup cannot reach: a PARAMETER has no defining instruction, so a receiver
+// held in one — `body.Close()` inside a helper that took body as an argument —
+// would otherwise be typeless, and a typeless receiver constrains nothing.
+func (fa *funcAnalysis) typeOfValue(v *ir.Value) *ir.Type {
+	if t := valueType(fa.defs, v); t != nil {
+		return t
+	}
+	return fa.paramType(v.GetRegName())
+}
+
+// paramType returns the declared type of the parameter held in reg. fn.Params
+// carries the receiver first while Signature.Params excludes it, so the index
+// shifts — the same offset stringParamOrigins applies.
+func (fa *funcAnalysis) paramType(reg string) *ir.Type {
+	if reg == "" {
+		return nil
+	}
+	sig := fa.fn.GetSignature()
+	if sig == nil {
+		return nil
+	}
+	off := 0
+	if sig.GetRecv() != nil {
+		off = 1
+	}
+	for i, p := range fa.fn.Params {
+		if p.GetRegName() != reg {
+			continue
+		}
+		if i < off {
+			return sig.GetRecv()
+		}
+		if j := i - off; j < len(sig.GetParams()) {
+			return sig.GetParams()[j]
+		}
+		return nil // a captured free variable, past the declared parameters
+	}
+	return nil
+}
+
+// valueType returns the static type of a call argument: a constant carries its
+// own, a register takes its defining instruction's result type. Nil (unknown)
+// for anything else, which every consumer treats as "no information".
+func valueType(defs map[string]*ir.Instruction, v *ir.Value) *ir.Type {
+	if c := v.GetConstant(); c != nil {
+		return c.GetType()
+	}
+	if reg := v.GetRegName(); reg != "" {
+		if d := defs[reg]; d != nil {
+			return d.GetType()
+		}
+	}
+	return nil
 }
 
 // receiverImpls narrows an ambiguous untyped-dispatch INVOKE to the
