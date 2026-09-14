@@ -13,10 +13,22 @@ rules:
     extend: $_go-common.yaml
     when: 'not hostFixed()'
     sinks:
-      - "go:*net/http.Get"
-      - "go:*net/http.Post"
+      # The injection point is the URL, and only the URL. Unpinned, taint in the
+      # HTTP METHOD or the request BODY reads as a tainted destination — which is
+      # how a header value routed through a request builder was reported as SSRF.
+      - "go:*net/http.Get#0"
+      - "go:*net/http.Post#0" # Post(url, contentType, body)
+      - "go:*net/http.NewRequest#1" # NewRequest(method, url, body)
+      # Split from the line above rather than left as a NewRequest* glob: the URL
+      # sits one argument further along here, so a single pattern would pin the
+      # wrong operand for one of the two. A pattern with no trailing `*` is a
+      # SUFFIX match (rules.classifyGlob), so neither swallows the other.
+      - "go:*net/http.NewRequestWithContext#2" # (ctx, method, url, body)
+      # Do takes the whole request, so there is no index to pin. It fires on taint
+      # reaching the request REGISTER, not one of its fields: the sink check is
+      # isTainted, which ignores the access-path keys, so a request whose header
+      # or body is tainted does not qualify.
       - "go:*net/http*.Client*.Do"
-      - "go:*net/http.NewRequest*"
     # No sanitizer neutralizes tainted input for a request URL; the fix is
     # allow-listing the destination host, not escaping.
     sanitizers: []

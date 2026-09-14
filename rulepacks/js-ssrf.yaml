@@ -19,10 +19,13 @@ rules:
     # caught, mirroring js-command-injection's broad `js:*.exec`.
     when: 'not hostFixed()'
     sinks:
-      - "js:*http.get"
-      - "js:*https.get"
-      - "js:*axios*"
-      - "js:*fetch"
+      # Pinned to the URL operand, as every other language's SSRF pack is: the
+      # second argument of each of these is an options/config/init object, and
+      # taint in a header or a body there is not a tainted destination.
+      - "js:*http.get#0"
+      - "js:*https.get#0"
+      - "js:*axios*#0"
+      - "js:*fetch#0"
     # No built-in sanitizer neutralizes tainted input for a request URL; the
     # fix is allow-listing the destination host, not escaping.
     sanitizers:
