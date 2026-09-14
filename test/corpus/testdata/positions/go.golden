@@ -30,7 +30,8 @@ go/interface_dispatch|go-command-injection|go:(*godzilla-samples/interface_dispa
 go/interproc|go-command-injection|go:godzilla-samples/interproc.runCommand|go:os/exec.Command|src=test/go/interproc/main.go:22:26|sink=test/go/interproc/main.go:18:14
 go/map_key_select|go-path-traversal|go:godzilla/test/go/map_key_select.contentsTainted|go:os.ReadFile|src=test/go/map_key_select/main.go:30:6|sink=test/go/map_key_select/main.go:33:20
 go/open_redirect|go-open-redirect|go:godzilla-samples/open_redirect.main$1|go:net/http.Redirect|src=test/go/open_redirect/main.go:6:31|sink=test/go/open_redirect/main.go:8:16
-go/outparam_fill|go-command-injection|go:godzilla-samples/outparam_fill.handler|go:os/exec.Command|src=test/go/outparam_fill/main.go:13:6|sink=test/go/outparam_fill/main.go:20:18
+go/outbound_request_param|go-ssrf|go:godzilla-samples/outbound_request_param.vulnSend|go:net/http.NewRequest|src=test/go/outbound_request_param/main.go:35:6|sink=test/go/outbound_request_param/main.go:37:29
+go/outparam_fill|go-command-injection|go:godzilla-samples/outparam_fill.handler|go:os/exec.Command|src=test/go/outparam_fill/main.go:17:6|sink=test/go/outparam_fill/main.go:20:18
 go/path_traversal_servefile|go-path-traversal|go:servefilept.handler|go:net/http.ServeFile|src=test/go/path_traversal_servefile/main.go:9:6|sink=test/go/path_traversal_servefile/main.go:11:16
 go/path_traversal|go-path-traversal|go:godzilla/test/go/path_traversal.main$1|go:os.Open|src=test/go/path_traversal/main.go:12:27|sink=test/go/path_traversal/main.go:16:20
 go/propagator_default|go-command-injection|go:godzilla-samples/propagator_default.main$1|go:os/exec.Command|src=test/go/propagator_default/main.go:15:26|sink=test/go/propagator_default/main.go:17:15
@@ -38,7 +39,7 @@ go/regexp_taint|go-open-redirect|go:godzilla-samples/regexp_taint.main$1|go:net/
 go/regexp_taint|go-open-redirect|go:godzilla-samples/regexp_taint.main$2|go:net/http.Redirect|src=test/go/regexp_taint/main.go:22:27|sink=test/go/regexp_taint/main.go:24:16
 go/request_helper|go-command-injection|go:godzilla/test/go/request_helper.handler|go:os/exec.Command|src=test/go/request_helper/main.go:16:6|sink=test/go/request_helper/main.go:17:14
 go/return_flow|go-command-injection|go:godzilla-samples/return_flow.main$1|go:os/exec.Command|src=test/go/return_flow/main.go:19:26|sink=test/go/return_flow/main.go:21:15
-go/return_struct_field|go-sql-injection|go:godzilla-samples/return_struct_field.handler|go:(*database/sql.DB).Query|src=test/go/return_struct_field/main.go:17:6|sink=test/go/return_struct_field/main.go:25:17
+go/return_struct_field|go-sql-injection|go:godzilla-samples/return_struct_field.handler|go:(*database/sql.DB).Query|src=test/go/return_struct_field/main.go:23:6|sink=test/go/return_struct_field/main.go:25:17
 go/sanitizer_bypass|go-command-injection|go:godzilla-samples/sanitizer_bypass.main$1|go:os/exec.Command|src=test/go/sanitizer_bypass/main.go:20:26|sink=test/go/sanitizer_bypass/main.go:23:15
 go/secrets|secret-aws-access-key|go:godzilla-samples/secrets.main||src=-|sink=-
 go/secrets|secret-jwt|go:godzilla-samples/secrets.main||src=-|sink=-

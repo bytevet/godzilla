@@ -712,10 +712,8 @@ func newHTTPRequestSource(name string, pos *ir.Position) *ir.Instruction {
 //
 // Three kinds of value are seeded:
 //
-//   - Any *http.Request PARAMETER of any function — an inbound request handed to
-//     a function is attacker-controlled regardless of what else it takes, so no
-//     ResponseWriter co-parameter is required (that would miss helpers and
-//     framework internals which receive the request alone).
+//   - The *http.Request PARAMETER of a SERVER handler — a function that also
+//     takes an http.ResponseWriter, which is what a server hands a handler.
 //   - Any framework CONTEXT parameter of a route-registered handler
 //     (collectRouteHandlers) — a *gin.Context / echo.Context / *fiber.Ctx we have
 //     no other knowledge of.
@@ -725,9 +723,18 @@ func newHTTPRequestSource(name string, pos *ir.Position) *ir.Instruction {
 //     out in a field read off the embedded *http.Request rather than a modeled
 //     stdlib call.
 //
-// Only inbound requests are seeded: an OUTBOUND request is an http.NewRequest*
-// call RESULT (a *ssa.Call / *ssa.Extract), never a parameter or a field read, so
-// it is excluded structurally and no proven-safe outbound flow is tainted.
+// The ResponseWriter requirement is what separates INBOUND from OUTBOUND. A
+// request to SEND is routinely passed as a parameter — `DoRequest(client
+// *http.Client, req *http.Request, …)` is the shape every HTTP helper takes — so
+// seeding on the parameter type alone marks the program's own outbound requests
+// attacker-controlled, and `client.Do(req)` then reports SSRF at HIGH confidence.
+// A writer is the one thing an outbound path never carries.
+//
+// Nothing is lost by the narrowing: a helper the handler passes the request to
+// receives its taint through the ordinary parameter channel (the engine's
+// addEffect), so seeding it a second time only adds the outbound false positive.
+// Both tiers below are unaffected, and the framework-nested case (beego's
+// `c.Ctx.Request`) rides on the field-read tier, not on this one.
 func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 	if len(irFunc.Blocks) == 0 {
 		return
@@ -737,10 +744,12 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 	// framework context param — one source per distinct register, prepended.
 	var paramSeeds []string
 	seen := map[string]bool{}
-	for _, p := range f.Params {
-		if isNamedTypePtr(p.Type(), "net/http", "Request") && !seen[p.Name()] {
-			paramSeeds = append(paramSeeds, p.Name())
-			seen[p.Name()] = true
+	if servesResponse(f) {
+		for _, p := range f.Params {
+			if isNamedTypePtr(p.Type(), "net/http", "Request") && !seen[p.Name()] {
+				paramSeeds = append(paramSeeds, p.Name())
+				seen[p.Name()] = true
+			}
 		}
 	}
 	if reg, ok := c.routeHandlers[f]; ok && reg != "" && !seen[reg] {
@@ -806,6 +815,17 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		}
 		irBlock.Instrs = out
 	}
+}
+
+// servesResponse reports whether f takes an http.ResponseWriter — the marker of a
+// function a SERVER calls, as opposed to one that builds or sends a request.
+func servesResponse(f *ssa.Function) bool {
+	for _, p := range f.Params {
+		if isNamedType(p.Type(), "net/http", "ResponseWriter") {
+			return true
+		}
+	}
+	return false
 }
 
 // inboundRequestValue reports whether an SSA instruction reads an inbound
