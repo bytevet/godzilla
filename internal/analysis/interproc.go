@@ -1300,6 +1300,51 @@ func isStringType(t *ir.Type) bool {
 	}
 }
 
+// carriesPayload reports whether a value of type t could carry an injection
+// payload. A number or a bool cannot: it renders as digits or as `true`/`false`
+// whatever the request asked for, so a database row id that is tainted only
+// because the struct around it is tainted can reach `exec.Command` without
+// spelling a single shell metacharacter.
+//
+// ONE-SIDED. It answers false only where the declared type PROVES the value
+// inert, and true for everything it cannot classify — a nil type, an unspecified
+// basic kind, a pointer, an aggregate, an interface. Only the Go frontend
+// populates Instruction.Type, so everywhere else this is a no-op rather than a
+// misfire.
+func carriesPayload(t *ir.Type) bool {
+	if t.GetKind() == ir.TypeKind_TYPE_KIND_NAMED {
+		if u := t.GetUnderlyingType(); u != nil {
+			t = u
+		}
+	}
+	if t.GetKind() != ir.TypeKind_TYPE_KIND_BASIC || isByteOrRuneScalar(t) {
+		return true
+	}
+	switch t.GetBasicKind() {
+	case ir.BasicTypeKind_BASIC_TYPE_KIND_BOOL,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_INT,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_INT8,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_INT16,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_INT64,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UINT,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UINT16,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UINT32,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UINT64,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UINTPTR,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_FLOAT32,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_FLOAT64,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_COMPLEX64,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_COMPLEX128,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UNTYPED_BOOL,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UNTYPED_INT,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UNTYPED_FLOAT,
+		ir.BasicTypeKind_BASIC_TYPE_KIND_UNTYPED_COMPLEX:
+		return false
+	default:
+		return true
+	}
+}
+
 // isErrorType reports whether t is the universe `error`. A named type declared
 // in a package is lowered package-qualified, so the bare name cannot collide.
 func isErrorType(t *ir.Type) bool {
@@ -1505,6 +1550,20 @@ type funcAnalysis struct {
 	// (recordParamMemoryTaint), since a body without one never consults it.
 	paramReg      map[string]int
 	paramRegBuilt bool
+	// paramOrigins maps a seeded parameter's taint ORIGIN back to the parameter
+	// indices carrying it, which is how a RET decides what the returned taint
+	// depends on. Origin POINTER IDENTITY is what carries that transitively: the
+	// transfer helpers hand a source's own *ir.Position on unchanged through
+	// nested calls, so taint that reached the return three frames deeper still
+	// arrives under the origin this function's parameter was seeded with.
+	paramOrigins map[*ir.Position][]int32
+	// importedGlobal records that this visit read taint out of a global. A
+	// global's recorded origin can BE the *ir.Position a parameter was seeded
+	// with (test/go/termination_stress stores a parameter into a global), so once
+	// one is imported no returned origin can be attributed to a parameter and the
+	// return summary must stay unconditional — attributing it is the one way this
+	// narrowing loses a real flow.
+	importedGlobal bool
 
 	// res accumulates this visit's outcome; the *Seen maps dedup the
 	// cross-function effects appended to it. All the working-state maps above and
@@ -1543,6 +1602,13 @@ func (fa *funcAnalysis) run() funcResult {
 					seedState = taintState{}
 				}
 				fa.importParamTaint(seedState, reg, fact)
+				if fact.origin != nil {
+					if fa.paramOrigins == nil {
+						fa.paramOrigins = map[*ir.Position][]int32{}
+					}
+					o := fact.origin
+					fa.paramOrigins[o] = append(fa.paramOrigins[o], int32(idx))
+				}
 			}
 		}
 	}
@@ -1854,6 +1920,7 @@ func (fa *funcAnalysis) readGlobalTaint(inst *ir.Instruction) {
 		if fact, ok := fa.rs.globalTaint[g]; ok {
 			// cross-function -> Medium, and the trail records the publishing store
 			fa.importTaint(fa.tainted, inst.Name, fact, fa.step(inst.GetPos(), StepGlobal))
+			fa.importedGlobal = true
 		}
 	}
 }
@@ -1934,12 +2001,42 @@ func (fa *funcAnalysis) pullReturnTaint(inst *ir.Instruction, target string) {
 	if !ok || inst.Name == "" {
 		return
 	}
+	if !fa.callFeedsParams(inst.Call, ro.params) {
+		return
+	}
 	hop := fa.step(inst.GetPos(), StepReturn)
 	if len(ro.paths) == 0 {
 		fa.importTaint(fa.tainted, inst.Name, ro, hop)
 		return
 	}
 	fa.importPathTaint(fa.tainted, inst.Name, ro, hop)
+}
+
+// callFeedsParams reports whether THIS call site supplies the taint the callee's
+// return summary depends on — a tainted argument at one of `params`. That is the
+// whole of the input-dependence check: a summary the callee recorded under one
+// caller's taint is otherwise handed back to every other caller, and one false
+// positive at a shared helper multiplies across all of them (ENG-14b).
+//
+// An empty set is an unconditional summary and every site pulls it. So does a
+// site that does not MAP one of the parameters — a closure's captured free
+// variable, seeded by builtin.make_closure rather than by the call — since this
+// channel may only narrow what it can account for.
+func (fa *funcAnalysis) callFeedsParams(cc *ir.CallCommon, params []int32) bool {
+	if len(params) == 0 || cc == nil {
+		return true
+	}
+	feeds, mapped := false, 0
+	eachArgParam(cc, func(pi int, arg *ir.Value) {
+		if !slices.Contains(params, int32(pi)) {
+			return
+		}
+		mapped++
+		if _, ok := isTaintedArg(fa.tainted, arg); ok {
+			feeds = true
+		}
+	})
+	return feeds || mapped < len(params)
 }
 
 // calleeClass is one callee's classification under the pass's rule: the result
@@ -2081,7 +2178,9 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// string/encoding transforms; without them one `strings.TrimSpace` silently
 		// drops taint). Operands include the RECEIVER of a method call
 		// (Call.Value, e.g. Java/JS `tainted.trim()`), not just the arguments.
-		if inst.Name != "" {
+		// Type-gated like every other derived result (see markResult): a
+		// propagator that hands back a number hands back no payload.
+		if inst.Name != "" && carriesPayload(inst.GetType()) {
 			if _, pos, ok := firstTainted(fa.tainted, propagatorOperands(inst)); ok {
 				fa.markCallResult(inst, pos)
 			}
@@ -2099,7 +2198,7 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// would be pure waste here (Args is always empty).
 		if inst.Name != "" && inst.GetIntrinsic() == memberReadIntrinsic {
 			if pos, ok := isTainted(fa.tainted, inst.Call.GetValue()); ok {
-				markTainted(fa.tainted, inst.Name, pos)
+				markResult(fa.tainted, inst, pos)
 			}
 		}
 	}
@@ -2578,7 +2677,7 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 		fa.visitReturn(inst)
 	default:
 		if propagatingOps[inst.Op] {
-			markTaintFromOperands(fa.tainted, inst.Name, inst.GetOperands())
+			markTaintFromOperands(fa.tainted, inst, inst.GetOperands())
 		}
 	}
 }
@@ -2595,7 +2694,7 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 func (fa *funcAnalysis) visitReturn(inst *ir.Instruction) {
 	// Once the summary is already whole-value there is nothing left to widen, so
 	// skip the scan and its per-miss key allocation on every later pass.
-	if fa.res.returns.whole() {
+	if fa.res.returns.maximal() {
 		return
 	}
 	ops := inst.GetOperands()
@@ -2621,7 +2720,55 @@ func (fa *funcAnalysis) visitReturn(inst *ir.Instruction) {
 	}
 	fact := fa.exportFact(val, pos, inst, StepReturn)
 	fact.paths = paths
+	fact.params = fa.returnedParams(ops, paths)
 	fa.res.returns.widenTo(fact)
+}
+
+// returnedParams reports which PARAMETERS the taint this RET carries depends on,
+// by looking the origins it actually returns up in paramOrigins. Nil means
+// unconditional — every caller pulls the summary.
+//
+// Unconditional is the answer whenever the dependence cannot be established, and
+// that is not a shortcut: a callee whose taint originates INSIDE it (a framework
+// accessor reading the request off a field, test/go/framework_field_source)
+// depends on no parameter at all, and must still reach the caller that called it
+// with a constant.
+func (fa *funcAnalysis) returnedParams(ops []*ir.Value, paths []int32) []int32 {
+	if fa.importedGlobal || len(fa.paramOrigins) == 0 {
+		return nil
+	}
+	var out []int32
+	add := func(pos *ir.Position) bool {
+		idxs, ok := fa.paramOrigins[pos]
+		if !ok {
+			return false
+		}
+		out = append(out, idxs...)
+		return true
+	}
+	if len(ops) == 1 && len(paths) > 0 {
+		// One returned aggregate with its tainted fields enumerated: each path key
+		// holds its own origin, so the base register's would speak for fields it
+		// did not deliver.
+		reg := ops[0].GetRegName()
+		for _, p := range paths {
+			pos, ok := fa.tainted[fieldPathKey(reg, p)]
+			if !ok || !add(pos) {
+				return nil
+			}
+		}
+	} else {
+		for _, op := range ops {
+			pos, ok := isTaintedArg(fa.tainted, op)
+			if ok && !add(pos) {
+				// One returned operand no parameter delivered makes the whole summary
+				// unconditional; a union would claim a dependence it does not have.
+				return nil
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // returnedTaint finds the taint a RET carries and the access paths of the

@@ -143,17 +143,31 @@ type taintFact struct {
 	// an array element. Narrower is never the safe default here: it would drop a
 	// flow, so only a nameable path may narrow.
 	paths []int32
+	// params narrows the fact from every caller to the PARAMETERS the returned
+	// taint depends on, and is recorded only by the return channel. A caller
+	// pulls the summary only when it passed taint at one of them, so one caller
+	// tainting a shared helper no longer hands taint back to every other caller
+	// (ENG-14b).
+	//
+	// Empty means UNCONDITIONAL — the taint has no parameter to depend on (a
+	// request accessor that reads the request inside the callee) or could not be
+	// attributed to one. That is the pre-existing behaviour and the only safe
+	// default: a parameter set narrower than the truth drops a real flow.
+	params []int32
 }
 
-// whole reports whether f taints the entire returned value, the maximal state:
-// nothing can widen it further.
+// whole reports whether f taints the entire returned value.
 func (f taintFact) whole() bool { return f.origin != nil && len(f.paths) == 0 }
 
-// widenTo merges src into f MONOTONICALLY and reports whether f grew. The whole
-// value absorbs any path set and path sets union, so a body with several returns
-// summarizes all of them and a later worklist visit can widen what an earlier one
-// narrowed. Growth is what re-enqueues a callee's callers; the union is bounded
-// by the returned value's arity, so the worklist still converges.
+// maximal reports whether f is at the top of BOTH narrowing lattices — the whole
+// value, pulled by every caller — so nothing can widen it further.
+func (f taintFact) maximal() bool { return f.whole() && len(f.params) == 0 }
+
+// widenTo merges src into f MONOTONICALLY and reports whether f grew, on either
+// narrowing axis: a body with several returns summarizes all of them and a later
+// worklist visit can widen what an earlier one narrowed. Growth is what
+// re-enqueues a callee's callers; both unions are bounded by the function's
+// arity, so the worklist still converges.
 //
 // The first origin and trail win, as they do on every other summary channel: they
 // name one of the flows, and which one a reader is shown does not change whether
@@ -166,25 +180,33 @@ func (f *taintFact) widenTo(src taintFact) bool {
 		*f = src
 		return true
 	}
-	if len(f.paths) == 0 {
-		return false
+	paths, pathsGrew := widenSet(f.paths, src.paths)
+	params, paramsGrew := widenSet(f.params, src.params)
+	f.paths, f.params = paths, params
+	return pathsGrew || paramsGrew
+}
+
+// widenSet unions two of a taintFact's narrowing sets and reports whether dst
+// grew. EMPTY is the maximal element on both axes — the whole value for paths,
+// every caller for params — so it absorbs anything and is never narrowed back.
+func widenSet(dst, src []int32) ([]int32, bool) {
+	if len(dst) == 0 {
+		return dst, false
 	}
-	if len(src.paths) == 0 {
-		f.paths = nil
-		return true
+	if len(src) == 0 {
+		return nil, true
 	}
-	out := slices.Clone(f.paths)
-	for _, p := range src.paths {
+	out := slices.Clone(dst)
+	for _, p := range src {
 		if !slices.Contains(out, p) {
 			out = append(out, p)
 		}
 	}
-	if len(out) == len(f.paths) {
-		return false
+	if len(out) == len(dst) {
+		return dst, false
 	}
 	slices.Sort(out)
-	f.paths = out
-	return true
+	return out, true
 }
 
 // step builds a hop in the function being analyzed.

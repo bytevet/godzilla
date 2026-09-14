@@ -1,0 +1,14 @@
+# Expected findings for this sample (see test/README.md).
+#
+# EXACTLY one: the string field reaching the shell at line 38. The uint64 ID
+# reaches an identical shell at line 33 out of the same wholly-tainted struct
+# and must NOT be reported — a number renders as digits.
+#
+# max is what makes this a control: without it the numeric false positive would
+# fire alongside the real finding and the sample would still pass.
+findings:
+    - rule: go-command-injection
+      min: 1
+      max: 1
+      line: 38
+      sink: Command

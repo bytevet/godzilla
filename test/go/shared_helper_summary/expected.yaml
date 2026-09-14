@@ -1,0 +1,14 @@
+# Expected findings for this sample (see test/README.md).
+#
+# EXACTLY one: the handler that passed request data through `normalize`. The
+# handler that passed a constant reaches an identical sink through the same
+# helper, so only a per-call-site return summary can tell the two apart.
+#
+# max is the whole assertion; line is what keeps it honest, since a summary that
+# leaked the other way round would still leave the count at one.
+findings:
+    - rule: go-command-injection
+      min: 1
+      max: 1
+      line: 28
+      sink: Command

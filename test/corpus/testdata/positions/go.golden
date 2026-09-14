@@ -29,6 +29,7 @@ go/higher_order_callback|go-command-injection|go:godzilla-samples/higher_order_c
 go/interface_dispatch|go-command-injection|go:(*godzilla-samples/interface_dispatch.shellRunner).Run|go:os/exec.Command|src=test/go/interface_dispatch/main.go:23:24|sink=test/go/interface_dispatch/main.go:15:14
 go/interproc|go-command-injection|go:godzilla-samples/interproc.runCommand|go:os/exec.Command|src=test/go/interproc/main.go:22:26|sink=test/go/interproc/main.go:18:14
 go/map_key_select|go-path-traversal|go:godzilla/test/go/map_key_select.contentsTainted|go:os.ReadFile|src=test/go/map_key_select/main.go:30:6|sink=test/go/map_key_select/main.go:33:20
+go/numeric_id_arg|go-command-injection|go:godzilla-samples/numeric_id_arg.announce|go:os/exec.Command|src=test/go/numeric_id_arg/main.go:41:6|sink=test/go/numeric_id_arg/main.go:38:18
 go/open_redirect|go-open-redirect|go:godzilla-samples/open_redirect.main$1|go:net/http.Redirect|src=test/go/open_redirect/main.go:6:31|sink=test/go/open_redirect/main.go:8:16
 go/outbound_request_param|go-ssrf|go:godzilla-samples/outbound_request_param.vulnSend|go:net/http.NewRequest|src=test/go/outbound_request_param/main.go:35:6|sink=test/go/outbound_request_param/main.go:37:29
 go/outparam_fill|go-command-injection|go:godzilla-samples/outparam_fill.handler|go:os/exec.Command|src=test/go/outparam_fill/main.go:17:6|sink=test/go/outparam_fill/main.go:20:18
@@ -43,6 +44,7 @@ go/return_struct_field|go-sql-injection|go:godzilla-samples/return_struct_field.
 go/sanitizer_bypass|go-command-injection|go:godzilla-samples/sanitizer_bypass.main$1|go:os/exec.Command|src=test/go/sanitizer_bypass/main.go:20:26|sink=test/go/sanitizer_bypass/main.go:23:15
 go/secrets|secret-aws-access-key|go:godzilla-samples/secrets.main||src=-|sink=-
 go/secrets|secret-jwt|go:godzilla-samples/secrets.main||src=-|sink=-
+go/shared_helper_summary|go-command-injection|go:godzilla-samples/shared_helper_summary.runTagged|go:os/exec.Command|src=test/go/shared_helper_summary/main.go:26:6|sink=test/go/shared_helper_summary/main.go:28:18
 go/sql_injection|go-sql-injection|go:(*godzilla/test/go/sql_injection.User).GetByID|go:(*database/sql.DB).QueryRow|src=test/go/sql_injection/main.go:43:6|sink=test/go/sql_injection/main.go:40:20
 go/sql_injection|go-sql-injection|go:godzilla/test/go/sql_injection.main$1|go:(*database/sql.DB).Query|src=test/go/sql_injection/main.go:58:27|sink=test/go/sql_injection/main.go:62:24
 go/sqli_pathvalue|go-sql-injection|go:sqlipathvalue.handler|go:(*database/sql.DB).Query|src=test/go/sqli_pathvalue/main.go:13:6|sink=test/go/sqli_pathvalue/main.go:15:23

@@ -330,15 +330,15 @@ func visitFieldRead(inst *ir.Instruction, tainted taintState) {
 	if base == "" {
 		// Non-register base (e.g. a global): can't form a path key, so fall back
 		// to the conservative operand propagation.
-		markTaintFromOperands(tainted, inst.Name, ops)
+		markTaintFromOperands(tainted, inst, ops)
 		return
 	}
 	if pos, ok := tainted[fieldPathKey(base, inst.GetFieldIndex())]; ok {
-		markTainted(tainted, inst.Name, pos)
+		markResult(tainted, inst, pos)
 		return
 	}
 	if pos, ok := tainted[base]; ok {
-		markTainted(tainted, inst.Name, pos)
+		markResult(tainted, inst, pos)
 	}
 }
 
@@ -359,7 +359,7 @@ func visitIntrinsic(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 	if inst.Name == "" || !intrinsicPropagators[inst.Intrinsic] {
 		return
 	}
-	markTaintFromOperands(tainted, inst.Name, inst.GetOperands())
+	markTaintFromOperands(tainted, inst, inst.GetOperands())
 }
 
 // visitIndexRead propagates an element read -- `m[k]`, `a[i]`, go.map.lookup --
@@ -386,7 +386,7 @@ func visitIndexRead(inst *ir.Instruction, tainted taintState) {
 	if len(ops) == 0 {
 		return
 	}
-	markTaintFromOperands(tainted, inst.Name, ops[:1])
+	markTaintFromOperands(tainted, inst, ops[:1])
 }
 
 // visitMapUpdate handles the go.map.update intrinsic (m[k] = v). A tainted
@@ -543,13 +543,51 @@ func isByteOrRuneSlice(t *ir.Type) bool {
 	return k == ir.BasicTypeKind_BASIC_TYPE_KIND_UINT8 || k == ir.BasicTypeKind_BASIC_TYPE_KIND_INT32
 }
 
-// markTaintFromOperands marks `name` tainted (with the origin of the first
-// tainted operand) if name is non-empty and any operand is tainted.
-func markTaintFromOperands(tainted taintState, name string, operands []*ir.Value) {
-	if name == "" {
+// isByteOrRuneScalar reports whether t is a byte (uint8) or a rune (int32),
+// including a named type whose underlying type is one. It is the scalar
+// companion to isByteOrRuneSlice, and exists for the same idiom from the other
+// end: character-level string reconstruction reads one byte OUT of a string with
+// an INDEX before appending it, so this register is the one integer that must
+// stay taintable (test/go/byte_reconstruction pins it).
+func isByteOrRuneScalar(t *ir.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.GetKind() == ir.TypeKind_TYPE_KIND_NAMED {
+		if u := t.GetUnderlyingType(); u != nil {
+			t = u
+		}
+	}
+	if t.GetKind() != ir.TypeKind_TYPE_KIND_BASIC {
+		return false
+	}
+	k := t.GetBasicKind()
+	return k == ir.BasicTypeKind_BASIC_TYPE_KIND_UINT8 || k == ir.BasicTypeKind_BASIC_TYPE_KIND_INT32
+}
+
+// markResult marks inst's RESULT register tainted, unless the result's declared
+// type proves it cannot carry a payload.
+//
+// Every transfer that derives a result from tainted operands goes through this
+// or markTaintFromOperands, so the type gate cannot be forgotten at a new site.
+// Taint that ORIGINATES at an instruction (a source call, a seeded parameter, a
+// tainted global) is not derived and is deliberately not gated: a rule that
+// declares an accessor a source has said the value is untrusted whatever its
+// type.
+func markResult(tainted taintState, inst *ir.Instruction, pos *ir.Position) {
+	if !carriesPayload(inst.GetType()) {
+		return
+	}
+	markTainted(tainted, inst.Name, pos)
+}
+
+// markTaintFromOperands marks inst's RESULT register tainted (with the origin of
+// the first tainted operand) if any operand is tainted. Type-gated as markResult.
+func markTaintFromOperands(tainted taintState, inst *ir.Instruction, operands []*ir.Value) {
+	if inst.Name == "" || !carriesPayload(inst.GetType()) {
 		return
 	}
 	if _, pos, ok := firstTainted(tainted, operands); ok {
-		markTainted(tainted, name, pos)
+		markTainted(tainted, inst.Name, pos)
 	}
 }
