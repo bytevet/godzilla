@@ -1,0 +1,7 @@
+# Expected findings for this sample (see test/README.md).
+#
+# Empty on purpose: this is a false-positive control for a returned aggregate.
+# Only q.Filter is request-derived; the query is built from q.Table. Any finding
+# here means the return boundary widened the struct's field taint to the whole
+# value again.
+findings: []

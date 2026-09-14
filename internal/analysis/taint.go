@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -67,12 +68,11 @@ var propagatingOps = map[ir.OpCode]bool{
 	ir.OpCode_OP_CODE_UN_OP:       true,
 	ir.OpCode_OP_CODE_CONVERT:     true,
 	ir.OpCode_OP_CODE_TYPE_ASSERT: true, // v := x.(T): the result is x's value with a narrower static type
-	// FIELD / FIELD_ADDR are NOT here: struct-field reads are handled
-	// field-sensitively by visitFieldRead so tainting one field does not taint a
-	// read of a different field (see ENG-3). INDEX(_ADDR) are not here either --
-	// visitIndexRead reads them from the container only, because the KEY must not
-	// carry taint into the result.
-	ir.OpCode_OP_CODE_EXTRACT:        true,
+	// FIELD / FIELD_ADDR / EXTRACT are NOT here: they are handled
+	// field-sensitively by visitFieldRead so tainting one field or one tuple
+	// element does not taint a read of another (see ENG-3). INDEX(_ADDR) are not
+	// here either -- visitIndexRead reads them from the container only, because
+	// the KEY must not carry taint into the result.
 	ir.OpCode_OP_CODE_PHI:            true,
 	ir.OpCode_OP_CODE_MAKE_INTERFACE: true,
 	ir.OpCode_OP_CODE_LOAD:           true,
@@ -160,6 +160,29 @@ func fieldPathKey(base string, idx int32) string {
 // over-approximation). This preserves cross-function struct-field recall.
 func fieldAnyKey(base string) string {
 	return base + "#*"
+}
+
+// taintedFieldPaths returns the field indices of base that carry taint, sorted.
+// The "#f" prefix is what excludes fieldAnyKey's "#*", and the digits after it
+// are what stop `t1#f` from matching `t10#f0`.
+//
+// Reached only once the any-field marker has already matched, so a base with no
+// tainted path never pays the scan over the taint state.
+func taintedFieldPaths(tainted taintState, base string) []int32 {
+	prefix := base + "#f"
+	var out []int32
+	for k := range tainted {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		idx, err := strconv.Atoi(k[len(prefix):])
+		if err != nil {
+			continue
+		}
+		out = append(out, int32(idx))
+	}
+	slices.Sort(out)
+	return out
 }
 
 // isTaintedArg reports whether a call argument carries taint for the purpose of
@@ -284,12 +307,17 @@ func rootBaseReg(defs map[string]*ir.Instruction, reg string) string {
 	return reg
 }
 
-// visitFieldRead handles a FIELD / FIELD_ADDR read field-sensitively: the result
-// is tainted if the specific field's access path (base#f) was tainted, OR if the
-// whole base value is untrusted (e.g. a struct that came straight from a source
-// or a seeded parameter). This is what stops a tainted p.A from falsely tainting
-// a read of the clean p.B (ENG-3), while still flagging p.A and any field of a
-// wholly-untrusted struct.
+// visitFieldRead handles a FIELD / FIELD_ADDR / EXTRACT read field-sensitively:
+// the result is tainted if the specific access path (base#f) was tainted, OR if
+// the whole base value is untrusted (e.g. a struct that came straight from a
+// source or a seeded parameter). This is what stops a tainted p.A from falsely
+// tainting a read of the clean p.B (ENG-3), while still flagging p.A and any
+// field of a wholly-untrusted struct.
+//
+// EXTRACT belongs here because a multi-value return IS a struct: its element
+// index rides in the same FieldIndex slot. Propagating it blanket-wise is what
+// let `form, err := c.MultipartForm()` taint err, and every value that any
+// error string then reached.
 func visitFieldRead(inst *ir.Instruction, tainted taintState) {
 	if inst.Name == "" {
 		return
@@ -385,28 +413,43 @@ func visitMapUpdate(inst *ir.Instruction, defs map[string]*ir.Instruction, taint
 
 // firstTaintedOperandReg returns the register name of def's first tainted
 // operand (including the receiver of a method call), or "" if none.
+//
+// The any-field marker is consulted in a SECOND sweep, after no operand is
+// wholly tainted: a value tainted only on an access path (a returned tuple, a
+// returned struct) has no plain-register entry, so one sweep would end a path at
+// the call it flowed out of rather than continuing through it. Second, not
+// merged, so the ordinary whole-value hit costs no key construction.
 func firstTaintedOperandReg(tainted taintState, def *ir.Instruction) string {
+	if reg := scanOperandRegs(def, func(reg string) bool {
+		_, ok := tainted[reg]
+		return ok
+	}); reg != "" {
+		return reg
+	}
+	return scanOperandRegs(def, func(reg string) bool {
+		_, ok := tainted[fieldAnyKey(reg)]
+		return ok
+	})
+}
+
+// scanOperandRegs returns the first of def's operand registers satisfying want,
+// scanning a call's receiver and arguments before the plain operands.
+func scanOperandRegs(def *ir.Instruction, want func(string) bool) string {
 	if def.Call != nil {
 		if v := def.Call.GetValue(); v != nil {
-			if reg := v.GetRegName(); reg != "" {
-				if _, ok := tainted[reg]; ok {
-					return reg
-				}
+			if reg := v.GetRegName(); reg != "" && want(reg) {
+				return reg
 			}
 		}
 		for _, a := range def.Call.GetArgs() {
-			if reg := a.GetRegName(); reg != "" {
-				if _, ok := tainted[reg]; ok {
-					return reg
-				}
+			if reg := a.GetRegName(); reg != "" && want(reg) {
+				return reg
 			}
 		}
 	}
 	for _, op := range def.GetOperands() {
-		if reg := op.GetRegName(); reg != "" {
-			if _, ok := tainted[reg]; ok {
-				return reg
-			}
+		if reg := op.GetRegName(); reg != "" && want(reg) {
+			return reg
 		}
 	}
 	return ""

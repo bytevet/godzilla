@@ -1,0 +1,10 @@
+# Expected findings for this sample (see test/README.md).
+#
+# Exactly one: the value half of `v, err := lookup(r)` reaches the query and the
+# error half does not. `max: 1` is what makes this a control — a second finding
+# means the error element inherited the value element's taint again.
+findings:
+    - rule: go-sql-injection
+      min: 1
+      max: 1
+      line: 40

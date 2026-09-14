@@ -1162,8 +1162,8 @@ func analyzeInterproc(idx *sharedIndex, rule *rules.Rule) []Finding {
 		res := fa.run()
 		findings = append(findings, res.findings...)
 
-		if _, known := rs.returnTaint[name]; res.returns.origin != nil && !known {
-			rs.returnTaint[name] = res.returns
+		if prev := rs.returnTaint[name]; prev.widenTo(res.returns) {
+			rs.returnTaint[name] = prev
 			for _, caller := range callers[name] {
 				enqueue(caller)
 			}
@@ -1298,6 +1298,59 @@ func isStringType(t *ir.Type) bool {
 	default:
 		return false
 	}
+}
+
+// isErrorType reports whether t is the universe `error`. A named type declared
+// in a package is lowered package-qualified, so the bare name cannot collide.
+func isErrorType(t *ir.Type) bool {
+	return t.GetKind() == ir.TypeKind_TYPE_KIND_NAMED && t.GetName() == "error"
+}
+
+// payloadTuplePaths returns the element indices of a multi-value result that can
+// carry a payload: every element whose declared type is not `error`. An error is
+// excluded because a source or propagator builds it out of the FAILURE, not out
+// of the input — and once it is tainted, `err.Error()` launders that taint into
+// every string the program formats from it.
+//
+// Nil means "no distribution": the caller then taints the whole register, as it
+// always did. That covers a result that is not a tuple, one with no per-element
+// types (only the Go frontend populates them), and one where no element is an
+// error — there narrowing would buy nothing and could only lose a flow.
+func payloadTuplePaths(t *ir.Type) []int32 {
+	if t.GetKind() != ir.TypeKind_TYPE_KIND_TUPLE {
+		return nil
+	}
+	fields := t.GetFields()
+	out := make([]int32, 0, len(fields))
+	for i, f := range fields {
+		if !isErrorType(f.GetType()) {
+			out = append(out, int32(i))
+		}
+	}
+	if len(out) == 0 || len(out) == len(fields) {
+		return nil
+	}
+	return out
+}
+
+// markCallResult taints a call's result register with origin pos. A Go
+// multi-value result is distributed over its payload-carrying elements instead
+// of tainted whole, so the `err` half of `v, err := f()` does not inherit the
+// value half's taint — which is what keeps `u, err := url.Parse(raw)` flowing
+// through u while err stays clean.
+func (fa *funcAnalysis) markCallResult(inst *ir.Instruction, pos *ir.Position) {
+	if inst.Name == "" {
+		return
+	}
+	paths := payloadTuplePaths(inst.GetType())
+	if len(paths) == 0 {
+		markTainted(fa.tainted, inst.Name, pos)
+		return
+	}
+	for _, idx := range paths {
+		markTainted(fa.tainted, fieldPathKey(inst.Name, idx), pos)
+	}
+	markTainted(fa.tainted, fieldAnyKey(inst.Name), pos)
 }
 
 // stringParamOrigins returns the STRING parameters of fn that a tainted value
@@ -1877,9 +1930,16 @@ func (fa *funcAnalysis) seedInvokeArgs(inst *ir.Instruction, target string) {
 // summary; taint entered via a callee return crossed a function boundary,
 // so any finding it feeds must be Medium (interprocOrigins).
 func (fa *funcAnalysis) pullReturnTaint(inst *ir.Instruction, target string) {
-	if ro, ok := fa.rs.returnTaint[target]; ok && inst.Name != "" {
-		fa.importTaint(fa.tainted, inst.Name, ro, fa.step(inst.GetPos(), StepReturn))
+	ro, ok := fa.rs.returnTaint[target]
+	if !ok || inst.Name == "" {
+		return
 	}
+	hop := fa.step(inst.GetPos(), StepReturn)
+	if len(ro.paths) == 0 {
+		fa.importTaint(fa.tainted, inst.Name, ro, hop)
+		return
+	}
+	fa.importPathTaint(fa.tainted, inst.Name, ro, hop)
 }
 
 // calleeClass is one callee's classification under the pass's rule: the result
@@ -1971,9 +2031,7 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// result from its own return summary and defeat the sanitizer. Stop here.
 		return
 	case cls.isSrc:
-		if inst.Name != "" {
-			markTainted(fa.tainted, inst.Name, inst.Pos)
-		}
+		fa.markCallResult(inst, inst.Pos)
 	case cls.isSink:
 		inj := injectableArgs(cls.sinkArgs, inst.Call)
 		if srcReg, pos, ok := firstTainted(fa.tainted, inj); ok && !fa.rs.reported[inst] {
@@ -2024,7 +2082,9 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// drops taint). Operands include the RECEIVER of a method call
 		// (Call.Value, e.g. Java/JS `tainted.trim()`), not just the arguments.
 		if inst.Name != "" {
-			markTaintFromOperands(fa.tainted, inst.Name, propagatorOperands(inst))
+			if _, pos, ok := firstTainted(fa.tainted, propagatorOperands(inst)); ok {
+				fa.markCallResult(inst, pos)
+			}
 		}
 	default:
 		// A frontend-synthesized member read (builtin.member_read) off a base it
@@ -2500,7 +2560,7 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 		visitStore(inst, fa.defs, fa.tainted, fa.nonEscaping)
 		fa.recordGlobalStore(inst)
 		fa.recordParamMemoryTaint(inst)
-	case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR:
+	case ir.OpCode_OP_CODE_FIELD, ir.OpCode_OP_CODE_FIELD_ADDR, ir.OpCode_OP_CODE_EXTRACT:
 		visitFieldRead(inst, fa.tainted)
 	case ir.OpCode_OP_CODE_INDEX, ir.OpCode_OP_CODE_INDEX_ADDR:
 		visitIndexRead(inst, fa.tainted)
@@ -2515,32 +2575,84 @@ func (fa *funcAnalysis) visit(inst *ir.Instruction) {
 		}
 		visitIntrinsic(inst, fa.defs, fa.tainted)
 	case ir.OpCode_OP_CODE_RET:
-		// The cheap check goes FIRST: once the function is already known
-		// taint-returning the scan cannot change the outcome, and skipping it
-		// avoids isTaintedArg's per-miss key allocation on every later pass.
-		if val, pos, ok := firstTaintedArg(fa.tainted, inst.GetOperands()); fa.res.returns.origin == nil && ok {
-			// Interprocedural ENG-9: a tainted value returned on a path a
-			// validator guard dominates (`if !valid(x) { return "" }; return x`)
-			// is validated on every returning path, so the function is not
-			// taint-returning for this rule — the cross-function analogue of the
-			// guarded-sink suppression. The CFG guard covers multi-block functions;
-			// validated covers the single-block case where order is dominance.
-			retValidated := false
-			if fa.linearFn {
-				for _, op := range inst.GetOperands() {
-					if r := op.GetRegName(); r != "" && fa.validated[r] {
-						retValidated = true
-						break
-					}
-				}
-			}
-			if !retValidated && !fa.guards.guarded(fa.curBlock, pos, fa.tainted) {
-				fa.res.returns = fa.exportFact(val, pos, inst, StepReturn)
-			}
-		}
+		fa.visitReturn(inst)
 	default:
 		if propagatingOps[inst.Op] {
 			markTaintFromOperands(fa.tainted, inst.Name, inst.GetOperands())
 		}
 	}
+}
+
+// visitReturn summarizes what this function hands back: the taint's origin and
+// trail, plus WHICH parts of the returned value carry it. A multi-operand RET is
+// a Go multi-value return, so the operand index IS the element index a caller
+// will EXTRACT; a single returned aggregate contributes the field paths a store
+// marked on it. Both index one key space, so `v, err := f()` and a returned
+// struct's clean field are discriminated by the same mechanism.
+//
+// Whole-value taint remains the fallback whenever no path can be named, since
+// narrowing on a guess would drop a flow.
+func (fa *funcAnalysis) visitReturn(inst *ir.Instruction) {
+	// Once the summary is already whole-value there is nothing left to widen, so
+	// skip the scan and its per-miss key allocation on every later pass.
+	if fa.res.returns.whole() {
+		return
+	}
+	ops := inst.GetOperands()
+	val, pos, paths := fa.returnedTaint(ops)
+	if val == nil {
+		return
+	}
+	// Interprocedural ENG-9: a tainted value returned on a path a validator guard
+	// dominates (`if !valid(x) { return "" }; return x`) is validated on every
+	// returning path, so the function is not taint-returning for this rule — the
+	// cross-function analogue of the guarded-sink suppression. The CFG guard
+	// covers multi-block functions; validated covers the single-block case where
+	// order is dominance.
+	if fa.linearFn {
+		for _, op := range ops {
+			if r := op.GetRegName(); r != "" && fa.validated[r] {
+				return
+			}
+		}
+	}
+	if fa.guards.guarded(fa.curBlock, pos, fa.tainted) {
+		return
+	}
+	fact := fa.exportFact(val, pos, inst, StepReturn)
+	fact.paths = paths
+	fa.res.returns.widenTo(fact)
+}
+
+// returnedTaint finds the taint a RET carries and the access paths of the
+// returned value that hold it. Nil paths mean the whole value.
+func (fa *funcAnalysis) returnedTaint(ops []*ir.Value) (*ir.Value, *ir.Position, []int32) {
+	if len(ops) > 1 {
+		var val *ir.Value
+		var pos *ir.Position
+		var paths []int32
+		for i, op := range ops {
+			p, ok := isTaintedArg(fa.tainted, op)
+			if !ok {
+				continue
+			}
+			if val == nil {
+				val, pos = op, p
+			}
+			paths = append(paths, int32(i))
+		}
+		return val, pos, paths
+	}
+	val, pos, ok := firstTaintedArg(fa.tainted, ops)
+	if !ok {
+		return nil, nil, nil
+	}
+	// A single returned aggregate: the whole value being tainted subsumes any
+	// path, and a path set that cannot be enumerated (a nested field, an array
+	// element — both recorded as whole-container taint on the base) falls back to
+	// the whole value rather than to nothing.
+	if _, whole := isTainted(fa.tainted, val); whole {
+		return val, pos, nil
+	}
+	return val, pos, taintedFieldPaths(fa.tainted, val.GetRegName())
 }

@@ -1,6 +1,8 @@
 package analysis
 
 import (
+	"slices"
+
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
@@ -130,6 +132,59 @@ func (t *trail) steps() []FlowStep {
 type taintFact struct {
 	origin *ir.Position
 	trail  *trail
+	// paths narrows the fact from the whole value to the one-level ACCESS PATHS
+	// of it that actually carry the taint, and is recorded only by the return
+	// channel. A multi-value return's element index and a struct field index
+	// share one key space (fieldPathKey), so `v, err := f()` and `ticket.ID` are
+	// discriminated by the same mechanism.
+	//
+	// Empty means the WHOLE value, which is both what every other channel records
+	// and the fallback whenever the tainted part cannot be named — a nested field,
+	// an array element. Narrower is never the safe default here: it would drop a
+	// flow, so only a nameable path may narrow.
+	paths []int32
+}
+
+// whole reports whether f taints the entire returned value, the maximal state:
+// nothing can widen it further.
+func (f taintFact) whole() bool { return f.origin != nil && len(f.paths) == 0 }
+
+// widenTo merges src into f MONOTONICALLY and reports whether f grew. The whole
+// value absorbs any path set and path sets union, so a body with several returns
+// summarizes all of them and a later worklist visit can widen what an earlier one
+// narrowed. Growth is what re-enqueues a callee's callers; the union is bounded
+// by the returned value's arity, so the worklist still converges.
+//
+// The first origin and trail win, as they do on every other summary channel: they
+// name one of the flows, and which one a reader is shown does not change whether
+// the taint arrives.
+func (f *taintFact) widenTo(src taintFact) bool {
+	if src.origin == nil {
+		return false
+	}
+	if f.origin == nil {
+		*f = src
+		return true
+	}
+	if len(f.paths) == 0 {
+		return false
+	}
+	if len(src.paths) == 0 {
+		f.paths = nil
+		return true
+	}
+	out := slices.Clone(f.paths)
+	for _, p := range src.paths {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	if len(out) == len(f.paths) {
+		return false
+	}
+	slices.Sort(out)
+	f.paths = out
+	return true
 }
 
 // step builds a hop in the function being analyzed.
@@ -245,7 +300,11 @@ func (fa *funcAnalysis) recordEntry(state taintState, reg string, fact taintFact
 	}
 	markTainted(state, reg, fact.origin)
 	fa.markInterproc(fact.origin)
-	if t == nil {
+	fa.recordEntryTrail(reg, t)
+}
+
+func (fa *funcAnalysis) recordEntryTrail(reg string, t *trail) {
+	if reg == "" || t == nil {
 		return
 	}
 	if fa.entryTrail == nil {
@@ -254,6 +313,27 @@ func (fa *funcAnalysis) recordEntry(state taintState, reg string, fact taintFact
 	if _, seen := fa.entryTrail[reg]; !seen {
 		fa.entryTrail[reg] = t
 	}
+}
+
+// importPathTaint records taint arriving from a callee on specific ACCESS PATHS
+// of reg rather than on the whole value: the precise key is what an in-frame
+// field/element read consults, and the any-field marker is what the next call
+// boundary consults, so cross-call recall is unchanged while a read of a
+// different path stays clean.
+//
+// reg itself is left UNTAINTED — that is the point — but its entry trail is
+// recorded anyway: path reconstruction walks def-use through plain register
+// names, so without it a path would restart at this frame instead of continuing
+// into the callee.
+func (fa *funcAnalysis) importPathTaint(state taintState, reg string, fact taintFact, hop FlowStep) {
+	if reg == "" {
+		return
+	}
+	for _, idx := range fact.paths {
+		fa.importTaint(state, fieldPathKey(reg, idx), fact, hop)
+	}
+	fa.importTaint(state, fieldAnyKey(reg), fact, hop)
+	fa.recordEntryTrail(reg, fact.trail.push(hop))
 }
 
 // entryOf returns the first hop of a path that lies in scanned code — the line a

@@ -55,6 +55,7 @@ go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stres
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:115:14
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:116:14
 go/termination_stress|go-command-injection|go:godzilla/test/go/termination_stress.handler|go:os/exec.Command|src=test/go/termination_stress/main.go:111:6|sink=test/go/termination_stress/main.go:118:14
+go/tuple_error_return|go-sql-injection|go:godzilla-samples/tuple_error_return.vulnHandler|go:(*database/sql.DB).Query|src=test/go/tuple_error_return/main.go:31:6|sink=test/go/tuple_error_return/main.go:40:17
 go/type_assertion|go-sql-injection|go:typeassert.handler|go:(*database/sql.DB).Query|src=test/go/type_assertion/main.go:14:6|sink=test/go/type_assertion/main.go:17:23
 go/unknown_framework|go-command-injection|go:godzilla/test/go/unknown_framework.main$1|go:os/exec.Command|src=test/go/unknown_framework/main.go:19:16|sink=test/go/unknown_framework/main.go:21:15
 go/unknown_framework|go-sql-injection|go:godzilla/test/go/unknown_framework.main$1|go:(*database/sql.DB).Query|src=test/go/unknown_framework/main.go:19:16|sink=test/go/unknown_framework/main.go:25:18
