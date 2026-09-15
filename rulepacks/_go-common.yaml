@@ -36,7 +36,29 @@ sources:
   - "go:*gofiber/fiber*.Ctx*.Get"
   - "go:*fasthttp.RequestCtx*.FormValue"
   - "go:*fasthttp.RequestCtx*.UserValue"
+  # A binder fills a caller-allocated struct instead of returning the untrusted
+  # value — it returns only an error — so a bare source glob would taint
+  # nothing (and, worse, `err.Error()` reaching a sink through cast/config
+  # helpers was ENG-14b's false-positive chain). The "#0" spec names the
+  # out-parameter the call fills instead of its result; it is UNCONDITIONAL
+  # here because a binder reads the request itself, with nothing upstream
+  # needing to already be tainted. See test/go/binder_out_param.
+  - "go:*gin-gonic/gin.Context*.ShouldBind#0"
+  - "go:*gin-gonic/gin.Context*.ShouldBindJSON#0"
+  - "go:*gin-gonic/gin.Context*.ShouldBindQuery#0"
+  - "go:*gin-gonic/gin.Context*.ShouldBindUri#0"
+  - "go:*gin-gonic/gin.Context*.BindJSON#0"
+  - "go:*labstack/echo*Context*.Bind#0"
 request_object_sources:
   - "go:@net/http.Request"
 propagators:
   - "go:strings.Join"
+  # A decoder's out-parameter fill is a PROPAGATOR, not a source: unlike a
+  # binder, it does not read the request itself — it transforms whatever
+  # bytes it is handed — so the fill must be CONDITIONAL on some other operand
+  # (the data being decoded) already being tainted, or parsing a constant
+  # config blob would fabricate taint out of nothing. See
+  # test/go/json_unmarshal_taint and its _safe control.
+  - "go:encoding/json.Unmarshal#1"
+  - "go:gopkg.in/yaml*.Unmarshal#1"
+  - "go:encoding/xml.Unmarshal#1"

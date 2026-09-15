@@ -35,3 +35,19 @@ propagators:
   - "rust:*new_display"
   - "rust:*new_debug"
   - "rust:*Arguments::new"
+  # Older rustc (observed: 1.90.0; current stable 1.98 still prints the
+  # Arguments::new form above) lowers format!'s Arguments constructor through an
+  # inherent impl instead: core::fmt::rt::<impl Arguments<'_>>::new_v1 (args) /
+  # ::new_const (literal-only). normalizeName drops the `<impl Arguments<'_>>`
+  # group entirely, so the engine sees `rust:core::fmt::rt::new_v1` — anchored to
+  # `fmt::rt::`, not a bare `*rt::new_v1`, so a user module literally named `rt`
+  # cannot trip it. Purely additive: the entry above must keep matching current
+  # stable unchanged.
+  - "rust:*fmt::rt::new_v1"
+  - "rust:*fmt::rt::new_const"
+  # A placeholder carrying a width/precision/fill spec (`{:>10}`) lowers to a
+  # THIRD, differently-named constructor instead of new_v1 — same anchoring
+  # rationale as the two entries above. mir.go's reconstructFormatTemplate
+  # handles its template conservatively (no const generics to read an exact
+  # argument count from), never inventing a false "this host is fixed".
+  - "rust:*fmt::rt::new_v1_formatted"

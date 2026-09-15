@@ -1,0 +1,5 @@
+# FALSE-POSITIVE CONTROL: json.Unmarshal decodes a CONSTANT blob, so its
+# out-parameter fill (a propagator, conditional on another tainted operand)
+# must not fire. Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings: []

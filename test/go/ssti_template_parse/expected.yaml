@@ -1,0 +1,9 @@
+# Server-side template injection: the query parameter becomes the compiled
+# TEMPLATE SOURCE (text/template.Parse), not data substituted into a fixed
+# template — the #0 pin on Parse is what catches this rather than a tainted
+# Execute context (see ssti_template_parse_safe for that control).
+findings:
+    - rule: go-ssti
+      min: 1
+      line: 13
+      sink: Parse

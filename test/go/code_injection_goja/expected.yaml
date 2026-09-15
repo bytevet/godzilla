@@ -1,0 +1,9 @@
+# goja is a hermetic stub (./goja) for the real github.com/dop251/goja
+# embedded JS interpreter — same precedent as unknown_framework/miniweb.
+# RunString compiles and executes its argument as JavaScript, so
+# request-derived input reaching it is code injection.
+findings:
+    - rule: go-code-injection
+      min: 1
+      line: 14
+      sink: RunString

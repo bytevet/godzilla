@@ -1,0 +1,23 @@
+# Code injection (Go, CWE-95): untrusted input passed to an embedded
+# JavaScript interpreter (dop251/goja), which compiles and executes it as
+# code. go-command-injection models os/exec and nothing else that executes;
+# an interpreter linked INTO the process is the same sink class as a spawned
+# subprocess.
+rules:
+  - id: go-code-injection
+    languages: [go]
+    severity: critical
+    cwe: CWE-95
+    message: >-
+      Untrusted input flows into a goja JavaScript Runtime (RunString /
+      RunProgram) or Compile call, which executes it as code — remote code
+      execution via an embedded interpreter. Never evaluate user-controlled
+      strings as script; validate/allowlist the input instead.
+    extend: $_go-common.yaml
+    sinks:
+      - "go:*dop251/goja.Runtime*.RunString#0"
+      - "go:*dop251/goja.Runtime*.RunProgram#0"
+      - "go:*dop251/goja.Compile#1"
+    # No sanitizer neutralizes tainted input used as script source; avoid
+    # passing tainted data to an embedded interpreter entirely.
+    sanitizers: []

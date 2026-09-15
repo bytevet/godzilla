@@ -351,11 +351,47 @@ func validate(rs *rules.RuleSet) error {
 		if !rules.ValidConfidence(r.Confidence) {
 			problems = append(problems, fmt.Sprintf("rule %q has unrecognized confidence %q (want low|medium|high, or omit for the default)", r.ID, r.Confidence))
 		}
-		// See rules.InvalidSinkSpec: such a typo silently widens the sink to
-		// "all arguments".
+		// See rules.InvalidArgSpec: such a typo silently widens the sink to
+		// "all arguments", or falls a source/propagator back to "taint the
+		// result" instead of the out-parameter the author meant.
 		for _, s := range r.Sinks {
-			if rules.InvalidSinkSpec(s.Pattern) {
+			if rules.InvalidArgSpec(s.Pattern) {
 				problems = append(problems, fmt.Sprintf("rule %q has sink %q with a '#' injection-point spec but no valid (non-negative integer) argument index", r.ID, s.Pattern))
+			}
+		}
+		for _, s := range r.Sources {
+			if rules.InvalidArgSpec(s) {
+				problems = append(problems, fmt.Sprintf("rule %q has source %q with a '#' out-parameter spec but no valid (non-negative integer) argument index", r.ID, s))
+			}
+		}
+		for _, s := range r.Propagators {
+			if rules.InvalidArgSpec(s) {
+				problems = append(problems, fmt.Sprintf("rule %q has propagator %q with a '#' out-parameter spec but no valid (non-negative integer) argument index", r.ID, s))
+			}
+		}
+		// A "#" spec means nothing outside sources/sinks/propagators: these four
+		// lists are pure name matches, with no argument to name. Left unchecked,
+		// a copy-pasted "#0" becomes part of the literal glob text (classifyGlob
+		// has no notion of "#"), which can never match any real callee — a typo
+		// that silently drops the rule's coverage instead of failing to load.
+		for _, s := range r.Sanitizers {
+			if strings.Contains(s, "#") {
+				problems = append(problems, fmt.Sprintf("rule %q has sanitizer %q: '#' has no meaning on sanitizers", r.ID, s))
+			}
+		}
+		for _, s := range r.Validators {
+			if strings.Contains(s, "#") {
+				problems = append(problems, fmt.Sprintf("rule %q has validator %q: '#' has no meaning on validators", r.ID, s))
+			}
+		}
+		for _, c := range r.Callees {
+			if strings.Contains(c.Pattern, "#") {
+				problems = append(problems, fmt.Sprintf("rule %q has callee %q: '#' has no meaning on callees", r.ID, c.Pattern))
+			}
+		}
+		for _, s := range r.RequestObjectSources {
+			if strings.Contains(s, "#") {
+				problems = append(problems, fmt.Sprintf("rule %q has request_object_source %q: '#' has no meaning there", r.ID, s))
 			}
 		}
 		// Compile here (idempotent, so the engine's later Compile is a no-op) so a

@@ -1,0 +1,9 @@
+# Positive twin of ssrf_safe_format_spec: the spec-bearing `{:>10}` placeholder
+# carries the HOST here, so it must fire (CWE-918). Without this the
+# new_v1_formatted format! path had no positive control at all — both
+# spec-form samples were negative, so a taint chain that silently never
+# reached the sink at all was indistinguishable from one that reached it and
+# was correctly proven safe.
+findings:
+  - rule: rust-ssrf
+    min: 1

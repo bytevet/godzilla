@@ -88,7 +88,7 @@ func TestMatchSink(t *testing.T) {
 	}
 }
 
-func TestInvalidSinkSpec(t *testing.T) {
+func TestInvalidArgSpec(t *testing.T) {
 	cases := []struct {
 		entry string
 		want  bool
@@ -104,9 +104,54 @@ func TestInvalidSinkSpec(t *testing.T) {
 		{"go:*Query#0,x", true},      // one good, one bad -> reject (likely a typo)
 	}
 	for _, c := range cases {
-		if got := InvalidSinkSpec(c.entry); got != c.want {
-			t.Errorf("InvalidSinkSpec(%q) = %v, want %v", c.entry, got, c.want)
+		if got := InvalidArgSpec(c.entry); got != c.want {
+			t.Errorf("InvalidArgSpec(%q) = %v, want %v", c.entry, got, c.want)
 		}
+	}
+}
+
+// TestMatchSource locks in the out-parameter meaning of a source's "#" spec: a
+// bare pattern means "taint the result" (nil indices), while "#0" names the
+// out-parameter the call fills instead.
+func TestMatchSource(t *testing.T) {
+	r := &Rule{Sources: []string{
+		"go:*gin-gonic/gin.Context*.ShouldBind#0",
+		"go:*net/url*.Get", // bare = taint the result
+	}}
+
+	if args, ok := r.MatchSource("go:(*github.com/gin-gonic/gin.Context).ShouldBind"); !ok || !reflect.DeepEqual(args, []int32{0}) {
+		t.Errorf("ShouldBind: got (%v,%v), want ([0],true)", args, ok)
+	}
+	if args, ok := r.MatchSource("go:net/url.Get"); !ok || len(args) != 0 {
+		t.Errorf("Get (bare): got (%v,%v), want (nil,true)", args, ok)
+	}
+	if _, ok := r.MatchSource("go:fmt.Println"); ok {
+		t.Errorf("Println: expected no source match")
+	}
+	if !r.IsSource("go:(*github.com/gin-gonic/gin.Context).ShouldBind") {
+		t.Errorf("IsSource should match ShouldBind with the suffix stripped")
+	}
+}
+
+// TestMatchPropagator mirrors TestMatchSource for propagators, and checks that
+// a set-wide default propagator (RuleSet.DefaultPropagators, installed via
+// Compile) is consulted the same way as the rule's own list.
+func TestMatchPropagator(t *testing.T) {
+	r := &Rule{Propagators: []string{"go:encoding/json.Unmarshal#1"}}
+	rs := &RuleSet{Rules: []Rule{*r}, DefaultPropagators: []string{"go:strings.Join"}}
+	if err := rs.Compile(); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	r = &rs.Rules[0]
+
+	if args, ok := r.MatchPropagator("go:encoding/json.Unmarshal"); !ok || !reflect.DeepEqual(args, []int32{1}) {
+		t.Errorf("Unmarshal: got (%v,%v), want ([1],true)", args, ok)
+	}
+	if args, ok := r.MatchPropagator("go:strings.Join"); !ok || len(args) != 0 {
+		t.Errorf("Join (default, bare): got (%v,%v), want (nil,true)", args, ok)
+	}
+	if _, ok := r.MatchPropagator("go:fmt.Println"); ok {
+		t.Errorf("Println: expected no propagator match")
 	}
 }
 

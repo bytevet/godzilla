@@ -1,6 +1,8 @@
+go/binder_out_param|go-command-injection|go:godzilla/test/go/binder_out_param.main$1|go:os/exec.Command|src=test/go/binder_out_param/main.go:20:15|sink=test/go/binder_out_param/main.go:21:25
 go/byte_reconstruction|go-command-injection|go:godzilla-samples/byte_reconstruction.main$1|go:os/exec.Command|src=test/go/byte_reconstruction/main.go:27:26|sink=test/go/byte_reconstruction/main.go:31:15
 go/chi|go-command-injection|go:godzilla/test/go/chi.main$1|go:os/exec.Command|src=test/go/chi/main.go:17:23|sink=test/go/chi/main.go:18:19
 go/closure_capture|go-sql-injection|go:closurecapture.handler$1|go:(*database/sql.DB).Query|src=test/go/closure_capture/main.go:14:6|sink=test/go/closure_capture/main.go:17:18
+go/code_injection_goja|go-code-injection|go:godzilla/test/go/code_injection_goja.handler|go:(*github.com/dop251/goja.Runtime).RunString|src=test/go/code_injection_goja/main.go:11:6|sink=test/go/code_injection_goja/main.go:14:21
 go/command_injection_variadic|go-command-injection|go:cmdinjvariadic.handler|go:os/exec.Command|src=test/go/command_injection_variadic/main.go:12:6|sink=test/go/command_injection_variadic/main.go:14:18
 go/command_injection|go-command-injection|go:godzilla-samples/command_injection.main$1|go:os/exec.Command|src=test/go/command_injection/main.go:10:26|sink=test/go/command_injection/main.go:13:27
 go/comparison_result_safe|go-command-injection|go:comparison_result_safe.handler|go:os/exec.Command|src=test/go/comparison_result_safe/main.go:13:6|sink=test/go/comparison_result_safe/main.go:21:18
@@ -29,6 +31,7 @@ go/higher_order_callback|go-command-injection|go:godzilla-samples/higher_order_c
 go/iface_receiver_fanout|go-command-injection|go:(godzilla-samples/iface_receiver_fanout.tag).Put|go:os/exec.Command|src=test/go/iface_receiver_fanout/main.go:56:6|sink=test/go/iface_receiver_fanout/main.go:36:18
 go/interface_dispatch|go-command-injection|go:(*godzilla-samples/interface_dispatch.shellRunner).Run|go:os/exec.Command|src=test/go/interface_dispatch/main.go:23:24|sink=test/go/interface_dispatch/main.go:15:14
 go/interproc|go-command-injection|go:godzilla-samples/interproc.runCommand|go:os/exec.Command|src=test/go/interproc/main.go:22:26|sink=test/go/interproc/main.go:18:14
+go/json_unmarshal_taint|go-command-injection|go:godzilla/test/go/json_unmarshal_taint.handler|go:os/exec.Command|src=test/go/json_unmarshal_taint/main.go:19:6|sink=test/go/json_unmarshal_taint/main.go:23:24
 go/map_key_select|go-path-traversal|go:godzilla/test/go/map_key_select.contentsTainted|go:os.ReadFile|src=test/go/map_key_select/main.go:30:6|sink=test/go/map_key_select/main.go:33:20
 go/numeric_id_arg|go-command-injection|go:godzilla-samples/numeric_id_arg.announce|go:os/exec.Command|src=test/go/numeric_id_arg/main.go:41:6|sink=test/go/numeric_id_arg/main.go:38:18
 go/open_redirect|go-open-redirect|go:godzilla-samples/open_redirect.main$1|go:net/http.Redirect|src=test/go/open_redirect/main.go:6:31|sink=test/go/open_redirect/main.go:8:16
@@ -50,6 +53,7 @@ go/sql_injection|go-sql-injection|go:(*godzilla/test/go/sql_injection.User).GetB
 go/sql_injection|go-sql-injection|go:godzilla/test/go/sql_injection.main$1|go:(*database/sql.DB).Query|src=test/go/sql_injection/main.go:58:27|sink=test/go/sql_injection/main.go:62:24
 go/sqli_pathvalue|go-sql-injection|go:sqlipathvalue.handler|go:(*database/sql.DB).Query|src=test/go/sqli_pathvalue/main.go:13:6|sink=test/go/sqli_pathvalue/main.go:15:23
 go/ssrf|go-ssrf|go:godzilla-samples/ssrf.main$1|go:net/http.Get|src=test/go/ssrf/main.go:10:28|sink=test/go/ssrf/main.go:13:24
+go/ssti_template_parse|go-ssti|go:godzilla/test/go/ssti_template_parse.handler|go:(*text/template.Template).Parse|src=test/go/ssti_template_parse/main.go:11:6|sink=test/go/ssti_template_parse/main.go:13:38
 go/stdlib_wrap|go-command-injection|go:godzilla/test/go/stdlib_wrap.main$1|go:os/exec.Command|src=test/go/stdlib_wrap/webctx/webctx.go:19:12|sink=test/go/stdlib_wrap/main.go:19:15
 go/taint_flow_chain|go-command-injection|go:godzilla-samples/taint_flow_chain.run|go:os/exec.Command|src=test/go/taint_flow_chain/main.go:16:6|sink=test/go/taint_flow_chain/main.go:36:18
 go/taint_path_memory|go-command-injection|go:godzilla-samples/taint_path_memory.handler|go:os/exec.Command|src=test/go/taint_path_memory/main.go:24:6|sink=test/go/taint_path_memory/main.go:33:18

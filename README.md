@@ -140,8 +140,8 @@ a read-only Docker mount looks like.
 | Open redirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | DOM XSS (client-side navigation) | — | — | ✅ | — | — | — |
 | Insecure deserialization | — | ✅ | ✅ | ✅ | — | ✅ |
-| Code injection (`eval`) | — | ✅ | ✅ | — | — | ✅ |
-| Server-side template injection | — | ✅ | — | — | — | — |
+| Code injection (`eval`) | ✅ | ✅ | ✅ | — | — | ✅ |
+| Server-side template injection | ✅ | ✅ | — | — | — | — |
 | LDAP / XPath injection | — | ✅ | — | — | — | — |
 | Zip slip | — | ✅ | — | — | — | — |
 | Insecure framework config | — | ✅ | — | — | — | — |

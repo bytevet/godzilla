@@ -86,7 +86,8 @@ type Converter struct {
 
 	// depBudget caps the total source bytes of third-party packages promoted to
 	// Phase-B syntax roots; negative is unlimited. degradedNote is non-empty
-	// exactly when the budget excluded some of them (see Degraded).
+	// when the budget excluded some of them, a loaded package failed to
+	// type-check cleanly, or both — joined with "; " (see Degraded).
 	depBudget    int64
 	degradedNote string
 }
@@ -176,11 +177,24 @@ func (c *Converter) ConvertFile(path string) (*ir.Program, error) {
 		}
 	}
 
-	prog, fset, err := loadAndBuildSSA(dir, pattern, extraRoots)
+	prog, fset, loadErrs, err := loadAndBuildSSA(dir, pattern, extraRoots)
 	if err != nil {
 		return nil, err
 	}
 	c.fset = fset
+	// A package that failed to load cleanly (e.g. a broken toolchain, a
+	// type-check error) still converts on whatever built, so this must not fail
+	// the scan — but it must not read as clean either, hence Degraded() instead
+	// of silence. Appended, not overwritten: the dependency-budget note above is
+	// a SEPARATE fact and both must survive a scan hit by both.
+	if loadErrs > 0 {
+		note := fmt.Sprintf("%d Go package(s) failed to load cleanly; findings from those packages may be incomplete", loadErrs)
+		if c.degradedNote == "" {
+			c.degradedNote = note
+		} else {
+			c.degradedNote += "; " + note
+		}
+	}
 	// AllFunctions is a full-program traversal; compute it once and share it
 	// between route-handler detection and the grouping below.
 	allFns := ssautil.AllFunctions(prog)
@@ -417,7 +431,7 @@ func sourceSize(p *packages.Package) int64 {
 // syntax) its SSA packages are created bodyless, so prog.Build() skips stdlib
 // bodies too. Making every lowered package an explicit ROOT (never a bare dep)
 // is what keeps its Syntax+TypesInfo complete without NeedDeps.
-func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *token.FileSet, error) {
+func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *token.FileSet, int, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
@@ -433,16 +447,17 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	initial, err := packages.Load(cfg, append([]string{pattern}, extraRoots...)...)
 	if err != nil {
 		loadStage.Done(err)
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	if len(initial) == 0 {
-		return nil, nil, fmt.Errorf("no Go packages found under %s", dir)
+		return nil, nil, 0, fmt.Errorf("no Go packages found under %s", dir)
 	}
 	// Conversion continues on whatever built, so partial/vulnerable code still
-	// converts. The summary goes to stderr — a stdout write would corrupt
-	// machine-readable output when the user pipes findings.
+	// converts — but the caller must not report a clean scan over it, so the
+	// count (not just a stderr line) travels back to become a Degraded() note.
 	loadStage.Done(nil)
-	if packages.PrintErrors(initial) > 0 {
+	loadErrs := packages.PrintErrors(initial)
+	if loadErrs > 0 {
 		fmt.Fprintln(os.Stderr, "warning: some Go packages failed to load cleanly; findings from those packages may be incomplete")
 	}
 
@@ -508,7 +523,7 @@ func loadAndBuildSSA(dir, pattern string, extraRoots []string) (*ssa.Program, *t
 	ssaStage := progress.Start("go.ssa", "go SSA build", 0, "")
 	prog.Build()
 	ssaStage.Done(nil)
-	return prog, initial[0].Fset, nil
+	return prog, initial[0].Fset, loadErrs, nil
 }
 
 // lowerModules lowers the target packages and every dependency loaded with
@@ -1440,7 +1455,9 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 }
 
 // canonicalFunc returns a language-prefixed, cross-language-comparable name
-// for a Go function, e.g. "go:net/http.(*Request).FormValue".
+// for a Go function, e.g. "go:(*net/http.Request).FormValue" — receiver FIRST,
+// which is what ssa.Function.String() prints and therefore what a rule glob has
+// to match.
 func (c *Converter) canonicalFunc(f *ssa.Function) string {
 	return "go:" + c.fnString(f)
 }

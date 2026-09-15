@@ -33,8 +33,13 @@ func lowerMIR(text, filename, root string) *ir.Module {
 	if abs, err := filepath.Abs(root); root != "" && err == nil {
 		root = abs
 	}
+	// Promoted consts (the format! literal-pieces arrays an older rustc emits;
+	// see promotedPieces) are separate top-level MIR items, not inside any `fn`
+	// body, so they are collected once over the whole dump and threaded into
+	// every function that references one.
+	promoted := promotedPieces(text)
 	for _, body := range splitFns(text) {
-		if fn := lowerFn(body, filename, root); fn != nil {
+		if fn := lowerFn(body, filename, root, promoted); fn != nil {
 			mod.Functions = append(mod.Functions, fn)
 		}
 	}
@@ -78,6 +83,14 @@ type lowerState struct {
 	instrs   []*ir.Instruction
 	firstPos *ir.Position
 	lastPos  *ir.Position // last span accepted as user code
+
+	// promoted is this module's promoted-const literal-piece arrays (see
+	// promotedPieces), keyed by the path a `const` operand names it with (e.g.
+	// "f::promoted[0]"). piecesByLocal is the per-function projection of that:
+	// which MIR local currently holds which promoted const's pieces, recorded
+	// when `assign` lowers `_N = const <path>;` — see reconstructFormatTemplate.
+	promoted      map[string][]string
+	piecesByLocal map[string][]string
 }
 
 var (
@@ -103,12 +116,16 @@ var (
 	unOps = map[string]bool{"Neg": true, "Not": true, "PtrMetadata": true}
 )
 
-func lowerFn(body []string, filename, root string) *ir.Function {
+func lowerFn(body []string, filename, root string, promoted map[string][]string) *ir.Function {
 	name, params := parseHeader(body[0])
 	if name == "" {
 		return nil
 	}
-	st := &lowerState{filename: filename, root: root, env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{}}
+	st := &lowerState{
+		filename: filename, root: root,
+		env: map[string]*ir.Value{}, agg: map[string][]*ir.Value{}, intr: map[string]string{},
+		promoted: promoted, piecesByLocal: map[string][]string{},
+	}
 	fn := &ir.Function{
 		Name:          name,
 		ObjectName:    name,
@@ -417,9 +434,33 @@ func (st *lowerState) assign(dst, expr string, pos *ir.Position, isCall bool) {
 		}
 		st.setAgg(dst, splitTop(body, ','), "builtin.aggregate", pos)
 	case strings.HasPrefix(expr, "move "), strings.HasPrefix(expr, "copy "), localRe.MatchString(expr):
+		if before, ok := cutCast(expr); ok {
+			// `copy X as T (Kind)` / `move X as T (Kind)`: an operand-PREFIXED
+			// cast (e.g. the unsizing coercion `copy _8 as &[&str] (PointerCoercion
+			// (Unsize, Implicit))` new_v1_formatted's slice params go through),
+			// not a bare place. Caught here, ahead of the plain st.place below,
+			// because it also starts with "copy "/"move " — left to st.place it
+			// hits the "not a recognized place" fallback (an untainted empty
+			// constant), silently dropping any taint flowing through the cast.
+			st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_CONVERT, st.operands([]string{before}), pos)
+			if pcs, ok := st.piecesByLocal[placeOf(before)]; ok {
+				st.piecesByLocal[dst] = pcs
+			}
+			return
+		}
 		st.env[dst] = st.place(placeOf(expr), pos)
 	case strings.HasPrefix(expr, "const "):
-		st.env[dst] = constFromLiteral(strings.TrimPrefix(expr, "const "))
+		lit := strings.TrimPrefix(expr, "const ")
+		st.env[dst] = constFromLiteral(lit)
+		// A promoted const's operand is a bare path (`f::promoted[0]`), never a
+		// quoted literal, so it always falls through constFromLiteral to an empty
+		// placeholder above; this side channel is what lets emitCall recover its
+		// actual literal pieces for the ONE place that needs them (see
+		// reconstructFormatTemplate). Everywhere else the empty/untainted value
+		// above is correct as-is: a promoted const is compile-time data.
+		if pcs, ok := st.promoted[strings.TrimSpace(lit)]; ok {
+			st.piecesByLocal[dst] = pcs
+		}
 	default:
 		st.assignOperator(dst, expr, pos)
 	}
@@ -448,6 +489,15 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 	}
 	if before, ok := cutCast(expr); ok { // `<operand> as T (Kind)`
 		st.env[dst] = st.emit(st.reg(), ir.OpCode_OP_CODE_CONVERT, st.operands([]string{before}), pos)
+		// An unsizing coercion (`&[T; N] as &[T]`) is exactly how MIR hands
+		// new_v1_formatted's pieces array to its slice-typed parameter (its
+		// signature takes unsized slices, unlike new_v1/new_const's fixed-size
+		// array params, which is why only this shape needs the cast at all), so
+		// the promoted-pieces side channel populated by the "const " case above
+		// must survive this hop too, or reconstructFormatTemplate never sees it.
+		if pcs, ok := st.piecesByLocal[placeOf(before)]; ok {
+			st.piecesByLocal[dst] = pcs
+		}
 		return
 	}
 	if brace := strings.IndexByte(expr, '{'); brace >= 0 { // struct literal Name { f: op, .. }
@@ -489,9 +539,10 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 		return
 	}
 	canonical := "rust:" + norm
+	argToks := splitTop(argStr, ',')
 	cc := &ir.CallCommon{
 		Callee: canonical,
-		Args:   st.operands(splitTop(argStr, ',')),
+		Args:   st.operands(argToks),
 		Value:  &ir.Value{Kind: &ir.Value_FuncName{FuncName: canonical}},
 	}
 	inst := &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_CALL, Call: cc, Pos: pos}
@@ -509,6 +560,14 @@ func (st *lowerState) emitCall(dst, expr string, pos *ir.Position) {
 	switch {
 	case rustFormatArgsNew(callee):
 		inst.Intrinsic = "builtin.format"
+		// The inherent-impl `new_v1`/`new_const`/`new_v1_formatted` shapes (unlike
+		// `Arguments::new`) never hand the template inline: fix Args[0] up from
+		// the promoted-const pieces recovered above. ok=false (a shape none of
+		// these recognize) leaves Args[0] as whatever st.operands already
+		// resolved it to — unchanged, still safe.
+		if tmpl, ok := st.reconstructFormatTemplate(callee, argToks); ok && len(cc.Args) > 0 {
+			cc.Args[0] = ssabuild.Str(tmpl)
+		}
 	case rustIdentityConv(callee, norm) || st.forwardsFormatResult(norm, cc.Args):
 		inst.Intrinsic = "builtin.identity"
 	}
@@ -556,16 +615,200 @@ var rustCommandStepCallees = func() map[string]bool {
 func rustCommandStep(norm string) bool { return rustCommandStepCallees[norm] }
 
 // rustFormatArgsNew reports whether a RAW MIR callee (generics still present)
-// is the fmt::Arguments constructor family `format!` lowers to, e.g.
-// `Arguments::<'_>::new::<15, 1>`. The raw text is matched — not the
-// normalized name — because the `::<'_>::` lifetime instantiation is exactly
-// what a plain user type named `Arguments` (printed `Arguments::new`, no
-// lifetime group) cannot produce.
+// is the fmt::Arguments constructor family `format!` lowers to. Current stable
+// rustc prints `Arguments::<'_>::new::<15, 1>`; an older rustc (observed:
+// 1.90.0) prints the inherent-impl form `rt::<impl Arguments<'_>>::new_v1::<1,
+// 1>` (args) / `rt::<impl Arguments<'_>>::new_const::<1>` (literal-only,
+// `format!("...")` with no `{}`). The raw text is matched — not the normalized
+// name — because in both shapes the `::<'_>` lifetime instantiation
+// (respectively inside an `<impl Arguments<'_>>` block) is exactly what a
+// plain user type named `Arguments` (printed `Arguments::new`, no lifetime
+// group) cannot produce.
 func rustFormatArgsNew(raw string) bool {
 	for _, p := range []string{"core::fmt::", "std::fmt::", "fmt::"} {
 		raw = strings.TrimPrefix(raw, p) // at most one applies
 	}
-	return strings.HasPrefix(raw, "Arguments::<'_>::new")
+	return strings.HasPrefix(raw, "Arguments::<'_>::new") ||
+		strings.HasPrefix(raw, "rt::<impl Arguments<'_>>::new")
+}
+
+// newV1GenericsRe / newConstGenericRe read the piece and argument counts
+// straight off the inherent-impl format! constructor's OWN const generics —
+// `new_v1::<P, A>` or `new_const::<P>` (no `A`: it is the no-dynamic-argument
+// form). Both counts are compiler output, not inferred, which is what makes
+// reconstructFormatTemplate exact rather than a heuristic.
+var (
+	newV1GenericsRe   = regexp.MustCompile(`new_v1::<(\d+),\s*(\d+)>`)
+	newConstGenericRe = regexp.MustCompile(`new_const::<(\d+)>`)
+)
+
+// formatArgsGenerics reports the (pieceCount, argCount) a RAW `new_v1`/
+// `new_const` callee's const generics declare. ok=false for anything else —
+// in particular `new_v1_formatted` (the width/precision-spec-bearing form,
+// e.g. any placeholder like `{:>10}`), which carries no such generics; that
+// shape is reconstructed separately, conservatively, in
+// reconstructFormatTemplate.
+func formatArgsGenerics(raw string) (pieces, args int, ok bool) {
+	if m := newV1GenericsRe.FindStringSubmatch(raw); m != nil {
+		return atoi(m[1]), atoi(m[2]), true
+	}
+	if m := newConstGenericRe.FindStringSubmatch(raw); m != nil {
+		return atoi(m[1]), 0, true
+	}
+	return 0, 0, false
+}
+
+// isNewV1Formatted reports whether a RAW MIR callee is the format-spec-bearing
+// inherent-impl constructor: `format!` lowers to this instead of `new_v1` the
+// moment ANY placeholder carries a width/precision/fill spec (`{:>10}`).
+// Unlike new_v1/new_const it takes no const generics, so its argument count is
+// not compiler-supplied — see reconstructFormatTemplate for how that is
+// handled without inferring one.
+func isNewV1Formatted(raw string) bool {
+	for _, p := range []string{"core::fmt::", "std::fmt::", "fmt::"} {
+		raw = strings.TrimPrefix(raw, p) // at most one applies
+	}
+	return strings.HasPrefix(raw, "rt::<impl Arguments<'_>>::new_v1_formatted")
+}
+
+// reconstructFormatTemplate rebuilds format!'s "{}"-placeholder template for
+// the inherent-impl lowering, whose first argument is a REFERENCE to a
+// promoted const holding the literal pieces array rather than the inline
+// byte-string constant decodeFmtTemplate expects (see the assign() hook that
+// fills piecesByLocal). ok=false leaves the caller's Args[0] exactly as
+// st.operands already resolved it — the existing, safe (empty/untainted)
+// behavior — for any shape this does not recognize.
+//
+// new_v1/new_const carry their own piece/argument counts as const generics
+// (read by formatArgsGenerics), so the reconstruction there is exact: rustc
+// omits a WOULD-BE-EMPTY TRAILING piece from the array (observed across every
+// literal-only, "prefix{}", "{}suffix", "{}" and multi-arg shape), so with P
+// pieces and A arguments, P is always A or A+1 — the P<=A case (equivalently
+// P==A, since P>=A always holds) is exactly that omission, and one more "{}"
+// is appended after the interleave to account for it.
+//
+// new_v1_formatted has no such generics, so its argument count cannot be read
+// off the callee at all. hostFixed() only needs the constant PREFIX, though,
+// not an exact template, so the pieces are joined and ONE trailing "{}" is
+// appended UNCONDITIONALLY — deliberately conservative: an extra placeholder
+// that may not exist can only make the template look like it has MORE dynamic
+// tail content than it really does, never less, while pieces[0] — the run
+// that actually proves a fixed host — is reproduced exactly either way.
+// Omitting the trailing "{}" instead would risk a genuinely dynamic tail
+// (whatever the spec-bearing argument itself contributes) reading as
+// constant, which is the unsafe direction.
+func (st *lowerState) reconstructFormatTemplate(callee string, argToks []string) (string, bool) {
+	if len(argToks) == 0 {
+		return "", false
+	}
+	pieces, havePieces := st.piecesByLocal[placeOf(argToks[0])]
+	if p, a, ok := formatArgsGenerics(callee); ok {
+		if !havePieces || len(pieces) != p {
+			return "", false
+		}
+		if len(pieces) == 0 { // format!("") — the const-generic pair is <0, 0>
+			return "", true
+		}
+		var sb strings.Builder
+		sb.WriteString(pieces[0])
+		for _, s := range pieces[1:] {
+			sb.WriteString("{}")
+			sb.WriteString(s)
+		}
+		if p <= a {
+			sb.WriteString("{}")
+		}
+		return sb.String(), true
+	}
+	if isNewV1Formatted(callee) {
+		if !havePieces {
+			return "", false
+		}
+		var sb strings.Builder
+		for i, s := range pieces {
+			if i > 0 {
+				sb.WriteString("{}")
+			}
+			sb.WriteString(s)
+		}
+		sb.WriteString("{}") // unconditional: see doc comment above
+		return sb.String(), true
+	}
+	return "", false
+}
+
+// promotedPieces scans a whole MIR dump for `format!`'s promoted-const literal
+// pieces arrays — a top-level item (not inside any `fn` body) of the shape
+// `const <path>: &[&str; N] = { .. _R = [const "a", const "b", ..]; .. }` —
+// and returns path ("f::promoted[0]") -> ordered literal pieces.
+//
+// Only that exact single-array-literal shape is recognized; anything else
+// inside the block (e.g. case f's `&[core::fmt::rt::Placeholder; N]` spec
+// array, whose elements are `move`s, not `const` string literals) yields no
+// entry for that path, which is the same "no template available" outcome as
+// not calling this function at all — a promoted const is always compile-time
+// data, so there is no taint-correctness reason to fail loudly here the way
+// the instruction-coverage check requires for a live function body.
+func promotedPieces(text string) map[string][]string {
+	out := map[string][]string{}
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !strings.HasPrefix(lines[i], "const ") {
+			continue
+		}
+		rest := strings.TrimPrefix(lines[i], "const ")
+		// Cut on ": " (colon-SPACE), not a bare ":": the path itself contains
+		// "::" (e.g. "f::promoted[0]") with no space, so a bare-colon cut would
+		// split inside it instead of at the path/type boundary.
+		path, _, ok := strings.Cut(rest, ": ")
+		if !ok {
+			continue
+		}
+		path = strings.TrimSpace(path)
+		var pieces []string
+		matched := false
+		depth := 0
+		start := i
+		for ; i < len(lines); i++ {
+			code, _ := splitCodeComment(lines[i])
+			depth += strings.Count(code, "{") - strings.Count(code, "}")
+			if m := promotedArrayRe.FindStringSubmatch(strings.TrimSpace(code)); m != nil {
+				matched = true
+				for _, tok := range splitTop(m[1], ',') {
+					if lit, ok := unquoteConstStr(tok); ok {
+						pieces = append(pieces, lit)
+					}
+				}
+			}
+			if depth <= 0 && i > start {
+				break
+			}
+		}
+		if matched {
+			out[path] = pieces
+		}
+	}
+	return out
+}
+
+var promotedArrayRe = regexp.MustCompile(`^_\d+\s*=\s*\[(.*)\];?$`)
+
+// unquoteConstStr extracts a plain (non-byte) string literal from a promoted
+// const array element (`const "text"`), mirroring constFromLiteral's own
+// string-literal branch (same raw-substring semantics, no escape decoding).
+// ok=false for anything else — `move _2` (a non-literal element, e.g. case f's
+// Placeholder array) — which is what keeps promotedPieces from treating a
+// non-string-literal array as a piece list at all.
+func unquoteConstStr(tok string) (string, bool) {
+	tok = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(tok), "const "))
+	if !strings.HasPrefix(tok, `"`) {
+		return "", false
+	}
+	end := strings.LastIndexByte(tok, '"')
+	if end <= 0 {
+		return "", false
+	}
+	return tok[1:end], true
 }
 
 // rustIdentityTraitMethods maps a std conversion/formatting trait to its

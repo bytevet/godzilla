@@ -94,7 +94,7 @@ Every function, method, and global carries a stable canonical FQN so rules match
 across languages:
 
 ```
-go:net/http.(*Request).FormValue
+go:(*net/http.Request).FormValue
 py:flask.request.args.get
 js:express.Request.query
 rust:std::process::Command.arg

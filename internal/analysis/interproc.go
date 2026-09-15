@@ -1398,6 +1398,78 @@ func (fa *funcAnalysis) markCallResult(inst *ir.Instruction, pos *ir.Position) {
 	markTainted(fa.tainted, fieldAnyKey(inst.Name), pos)
 }
 
+// fillOutParams taints each of dest's registers with origin pos, exactly as a
+// STORE of untrusted data through that pointer would (visitStore): the call
+// writes attacker-controlled data into memory the caller already owns rather
+// than returning it, the shape every Go binder has (c.ShouldBind(&params),
+// json.Unmarshal(body, &v)). taintContainer walks the address-derivation chain
+// so a struct-field out-param (&params.Nested) taints the enclosing struct too,
+// the same as an ordinary field STORE. Marking directly (not importTaint) keeps
+// the finding High confidence: this is an intra-procedural fill at the call
+// site, not a summary crossing a function boundary.
+func (fa *funcAnalysis) fillOutParams(dest []*ir.Value, pos *ir.Position) {
+	for _, a := range dest {
+		a = underlyingAddr(fa.defs, a)
+		reg := a.GetRegName()
+		if reg == "" {
+			continue
+		}
+		markTainted(fa.tainted, reg, pos)
+		taintContainer(fa.defs, fa.tainted, reg, pos)
+	}
+}
+
+// underlyingAddr unwraps a MAKE_INTERFACE box back to the pointer it boxed.
+// Every out-parameter binder in the wild — ShouldBind, json/yaml/xml's
+// Unmarshal — takes its destination as `any`, so the CALL's argument register
+// is the boxed interface value, not the pointer whatever gets written through
+// (the caller keeps using the UNBOXED pointer register for every later
+// read/write of the destination, boxing it only to satisfy the call). Marking
+// the box would taint a value nothing downstream ever consults.
+func underlyingAddr(defs map[string]*ir.Instruction, v *ir.Value) *ir.Value {
+	seen := map[string]bool{}
+	for {
+		reg := v.GetRegName()
+		if reg == "" || seen[reg] {
+			return v
+		}
+		seen[reg] = true
+		def := defs[reg]
+		if def == nil || def.Op != ir.OpCode_OP_CODE_MAKE_INTERFACE {
+			return v
+		}
+		ops := def.GetOperands()
+		if len(ops) == 0 {
+			return v
+		}
+		v = ops[0]
+	}
+}
+
+// excludeVals returns vals with any value sharing a register with one of skip
+// removed. Used to keep a propagator's out-parameter fill from counting its own
+// destination as the "other operand" that gates it — a re-Unmarshal into an
+// already-tainted struct must not self-trigger.
+func excludeVals(vals, skip []*ir.Value) []*ir.Value {
+	if len(skip) == 0 {
+		return vals
+	}
+	drop := make(map[string]bool, len(skip))
+	for _, v := range skip {
+		if r := v.GetRegName(); r != "" {
+			drop[r] = true
+		}
+	}
+	out := make([]*ir.Value, 0, len(vals))
+	for _, v := range vals {
+		if r := v.GetRegName(); r != "" && drop[r] {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // stringParamOrigins returns the STRING parameters of fn that a tainted value
 // with origin `pos` could have entered through, in ascending index order. It
 // attributes the value back to the seeds it arrived on (origins are preserved
@@ -2067,6 +2139,11 @@ func (fa *funcAnalysis) callFeedsParams(cc *ir.CallCommon, params []int32) bool 
 // revisit.
 type calleeClass struct {
 	sinkArgs []int32
+	// srcArgs/propArgs are the OUT-PARAMETER indices a source/propagator's "#"
+	// spec named (nil on a bare pattern, which taints the result instead — see
+	// argGlob). Populated alongside isSrc/isProp so handleCall never re-globs.
+	srcArgs  []int32
+	propArgs []int32
 	guard    *rules.Guard
 	isSink   bool
 	isSan    bool
@@ -2104,8 +2181,8 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		if !seen {
 			cls.sinkArgs, cls.guard, cls.isSink = fa.rule.MatchSink(callee)
 			cls.isSan = fa.rule.IsSanitizer(callee)
-			cls.isSrc = fa.rule.IsSource(callee)
-			cls.isProp = fa.rule.IsPropagator(callee)
+			cls.srcArgs, cls.isSrc = fa.rule.MatchSource(callee)
+			cls.propArgs, cls.isProp = fa.rule.MatchPropagator(callee)
 			fa.rs.classMemo[callee] = cls
 		}
 		// The Go `append` builtin propagates taint ONLY when its result is a
@@ -2148,7 +2225,17 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// result from its own return summary and defeat the sanitizer. Stop here.
 		return
 	case cls.isSrc:
-		fa.markCallResult(inst, inst.Pos)
+		if len(cls.srcArgs) > 0 {
+			// The untrusted value never appears as a return — it lands in an
+			// OUT-PARAMETER the call fills (c.ShouldBind(&params)) — so fill
+			// that argument's register INSTEAD OF the result. Unconditional:
+			// a source reads the request itself, so nothing upstream need be
+			// tainted first. This is also what keeps a tainted `error` result
+			// (ShouldBind's actual return) from ever entering taint at all.
+			fa.fillOutParams(injectableArgs(cls.srcArgs, inst.Call), inst.Pos)
+		} else {
+			fa.markCallResult(inst, inst.Pos)
+		}
 	case cls.isSink:
 		inj := injectableArgs(cls.sinkArgs, inst.Call)
 		if srcReg, pos, ok := firstTainted(fa.tainted, inj); ok && !fa.rs.reported[inst] {
@@ -2200,7 +2287,18 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		// (Call.Value, e.g. Java/JS `tainted.trim()`), not just the arguments.
 		// Type-gated like every other derived result (see markResult): a
 		// propagator that hands back a number hands back no payload.
-		if inst.Name != "" && carriesPayload(inst.GetType()) {
+		if len(cls.propArgs) > 0 {
+			// Same out-parameter shape as a source (json.Unmarshal(body, &v)),
+			// but CONDITIONAL: a decoder transforms what it is handed, so it
+			// must not fabricate taint parsing a constant config blob. Gated on
+			// some OTHER operand already being tainted, with the destination
+			// excluded from that check — otherwise re-Unmarshal into an
+			// already-tainted struct would self-trigger on its own out-param.
+			dest := injectableArgs(cls.propArgs, inst.Call)
+			if _, pos, ok := firstTainted(fa.tainted, excludeVals(propagatorOperands(inst), dest)); ok {
+				fa.fillOutParams(dest, pos)
+			}
+		} else if inst.Name != "" && carriesPayload(inst.GetType()) {
 			if _, pos, ok := firstTainted(fa.tainted, propagatorOperands(inst)); ok {
 				fa.markCallResult(inst, pos)
 			}

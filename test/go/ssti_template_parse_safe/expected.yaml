@@ -1,0 +1,4 @@
+# Safe control: the template source is a compile-time constant and the
+# request value is passed only as Execute context (the safe path) — the
+# go-ssti #0 pin on Parse must not fire. No findings — CLEAN.
+findings: []

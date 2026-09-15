@@ -3,7 +3,7 @@
 // A taint Rule says: untrusted data produced by any Source that reaches any
 // Sink, without first passing through a Sanitizer, is a vulnerability. Callees
 // are identified by canonical fully-qualified names (see the gIR CallCommon.callee
-// field), e.g. "go:net/http.(*Request).FormValue", and matched against rule
+// field), e.g. "go:(*net/http.Request).FormValue", and matched against rule
 // patterns as globs where '*' matches any run of characters (including '/' and
 // '.'). This lets one rule span languages, e.g. sinks ["go:*.Query", "py:*.execute"].
 package rules
@@ -164,7 +164,7 @@ type Rule struct {
 	// validate(), before the set-wide list is known, and Rule.Compile is
 	// idempotent — folding this into matchers would make it silently depend on
 	// that ordering. Kept on the Rule, it can be installed at any point.
-	defaultProps []*compiledGlob
+	defaultProps []argGlob
 
 	// matchers holds the pattern lists precompiled to shape-matchers. Not from
 	// YAML; nil until Compile, before which the matching methods compile lazily.
@@ -270,7 +270,7 @@ type RuleSet struct {
 	// defaultProps is DefaultPropagators compiled once (see Compile). Unexported;
 	// a RuleSet copied by value shares it, which is safe because it is read-only
 	// after construction.
-	defaultProps []*compiledGlob
+	defaultProps []argGlob
 }
 
 // WithRules returns a new RuleSet holding the given rules plus every set-wide
@@ -299,7 +299,7 @@ func (rs *RuleSet) Compile() error {
 	// because Compile runs on every scan (from both Scan and Engine.Analyze):
 	// re-classifying the ~100 set-wide globs each time dominates allocation.
 	if rs.defaultProps == nil && len(rs.DefaultPropagators) > 0 {
-		rs.defaultProps = classifyAll(rs.DefaultPropagators)
+		rs.defaultProps = classifyArgs(rs.DefaultPropagators)
 	}
 	defaults := rs.defaultProps
 	for i := range rs.Rules {
@@ -353,10 +353,10 @@ func (r *Rule) AppliesTo(language string) bool {
 // then the matching methods compile lazily via ensure, so matching semantics
 // are the same whether or not the caller compiled first.
 type ruleMatchers struct {
-	sources     []*compiledGlob
+	sources     []argGlob
 	sinks       []compiledSink
 	sanitizers  []*compiledGlob
-	propagators []*compiledGlob
+	propagators []argGlob
 	validators  []*compiledGlob
 	callees     []compiledCallee
 
@@ -375,6 +375,21 @@ type compiledSink struct {
 	guard *Guard
 }
 
+// argGlob pairs a pattern's shape-matcher with the LOGICAL (receiver-excluded)
+// argument indices its "#i[,j...]" suffix named, nil for a bare pattern.
+//
+// On a SOURCE or PROPAGATOR those indices name OUT-PARAMETERS the call fills:
+// arguments whose pointee receives the taint, rather than the result register.
+// That is the shape every Go binder has — c.ShouldBind(&x), json.Unmarshal(b, &x)
+// — where the untrusted value never appears as a return, so a bare source glob
+// taints nothing. Which list the entry sits in decides whether the fill is
+// unconditional: a source reads the request itself, a propagator only forwards
+// taint it was already given.
+type argGlob struct {
+	g    *compiledGlob
+	args []int32
+}
+
 // compiledCallee pairs a dangerous-call shape-matcher with an optional guard.
 type compiledCallee struct {
 	g     *compiledGlob
@@ -389,9 +404,9 @@ func (r *Rule) Compile() error {
 		return nil
 	}
 	m := &ruleMatchers{
-		sources:     classifyAll(r.Sources),
+		sources:     classifyArgs(r.Sources),
 		sanitizers:  classifyAll(r.Sanitizers),
-		propagators: classifyAll(r.Propagators),
+		propagators: classifyArgs(r.Propagators),
 		validators:  classifyAll(r.Validators),
 	}
 	var errs []error
@@ -467,8 +482,16 @@ func (r *Rule) MatchesRe() *regexp.Regexp {
 // equivalent of a Rule's own compiled pattern lists.
 type GlobSet struct{ gs []*compiledGlob }
 
-// NewGlobSet precompiles patterns into a GlobSet.
-func NewGlobSet(patterns []string) *GlobSet { return &GlobSet{gs: classifyAll(patterns)} }
+// NewGlobSet precompiles patterns into a GlobSet. A "#i,j" argument spec is
+// STRIPPED: a GlobSet answers "does this name match", and an out-parameter index
+// is a fact about a call's arguments, not about its identity.
+func NewGlobSet(patterns []string) *GlobSet {
+	stripped := make([]string, len(patterns))
+	for i, p := range patterns {
+		stripped[i], _ = parseSink(p)
+	}
+	return &GlobSet{gs: classifyAll(stripped)}
+}
 
 // Match reports whether s matches any pattern in the set. A nil or empty set
 // matches nothing.
@@ -477,6 +500,30 @@ func (g *GlobSet) Match(s string) bool {
 		return false
 	}
 	return matchAnyCompiled(g.gs, s)
+}
+
+// classifyArgs precompiles patterns that may carry a "#i[,j...]" argument spec.
+// A malformed spec parses to zero indices (the bare-pattern shape); the loader
+// rejects it up front via InvalidArgSpec, so this stays lenient.
+func classifyArgs(patterns []string) []argGlob {
+	out := make([]argGlob, len(patterns))
+	for i, p := range patterns {
+		pattern, args := parseSink(p)
+		out[i] = argGlob{g: classifyGlob(pattern), args: args}
+	}
+	return out
+}
+
+// matchAnyArgs returns the out-parameter indices of the first entry matching s.
+// ok reports the match; nil indices with ok==true is an ordinary pattern with no
+// "#" spec, which for a source or propagator means "taint the result register".
+func matchAnyArgs(gs []argGlob, s string) (args []int32, ok bool) {
+	for _, g := range gs {
+		if g.g.match(s) {
+			return g.args, true
+		}
+	}
+	return nil, false
 }
 
 func classifyAll(patterns []string) []*compiledGlob {
@@ -498,7 +545,15 @@ func matchAnyCompiled(gs []*compiledGlob, s string) bool {
 
 // IsSource reports whether callee matches any of the rule's source patterns.
 func (r *Rule) IsSource(callee string) bool {
-	return matchAnyCompiled(r.ensure().sources, callee)
+	_, ok := r.MatchSource(callee)
+	return ok
+}
+
+// MatchSource reports whether callee matches one of the rule's sources and, if
+// so, returns the LOGICAL argument indices it fills as OUT-PARAMETERS. nil
+// indices with ok==true is the ordinary case: the source taints its result.
+func (r *Rule) MatchSource(callee string) (outArgs []int32, ok bool) {
+	return matchAnyArgs(r.ensure().sources, callee)
 }
 
 // IsSink reports whether callee matches any of the rule's sink patterns.
@@ -520,31 +575,36 @@ func (r *Rule) MatchSink(callee string) (args []int32, guard *Guard, ok bool) {
 	return nil, nil, false
 }
 
-// InvalidSinkSpec reports whether a sink entry carries a "#" injection-point
-// spec that names no valid argument index — an empty spec ("...Query#") or one
-// whose tokens are not all non-negative integers ("...Query#x", "...Query#-1",
-// "...Query#0,"). Such an entry parses leniently to zero indices, which is
-// indistinguishable from a bare pattern and silently widens the sink to "every
-// argument is an injection point", reintroducing the parameterized-query false
-// positive. The loader rejects it so a typo fails loud at load time.
-func InvalidSinkSpec(entry string) bool {
+// InvalidArgSpec reports whether a sink, source or propagator entry carries a
+// "#" argument spec that names no valid argument index — an empty spec
+// ("...Query#") or one whose tokens are not all non-negative integers
+// ("...Query#x", "...Query#-1", "...Query#0,"). Such an entry parses leniently
+// to zero indices, which is indistinguishable from a bare pattern: on a sink
+// that silently widens it to "every argument is an injection point"
+// (reintroducing the parameterized-query false positive), and on a source or
+// propagator it silently falls back to "taint the result" instead of the
+// out-parameter the author meant. The loader rejects it so a typo fails loud
+// at load time.
+func InvalidArgSpec(entry string) bool {
 	_, _, valid := parseSinkSpec(entry)
 	return !valid
 }
 
-// parseSink splits a sink entry "pattern#i,j,..." into its glob pattern and the
-// injection-point indices. A bare pattern (no "#") yields nil indices (all args).
+// parseSink splits a sink/source/propagator entry "pattern#i,j,..." into its
+// glob pattern and the argument indices. A bare pattern (no "#") yields nil
+// indices — "all args" on a sink, "taint the result" on a source or propagator.
 func parseSink(entry string) (pattern string, args []int32) {
 	pattern, args, _ = parseSinkSpec(entry)
 	return pattern, args
 }
 
-// parseSinkSpec parses a sink entry "pattern#i,j,..." into its glob pattern and
-// injection-point indices, and reports whether the "#" spec is well-formed. valid
-// is true for a bare pattern (no "#"); for a "#" spec it is false when the spec is
-// empty/whitespace-only or any token is not a non-negative integer — such tokens
-// are leniently dropped from args, matching the runtime parser, but flip valid so
-// the loader can reject the typo (see InvalidSinkSpec).
+// parseSinkSpec parses a sink/source/propagator entry "pattern#i,j,..." into
+// its glob pattern and argument indices, and reports whether the "#" spec is
+// well-formed. valid is true for a bare pattern (no "#"); for a "#" spec it is
+// false when the spec is empty/whitespace-only or any token is not a
+// non-negative integer — such tokens are leniently dropped from args, matching
+// the runtime parser, but flip valid so the loader can reject the typo (see
+// InvalidArgSpec).
 func parseSinkSpec(entry string) (pattern string, args []int32, valid bool) {
 	pattern, spec, ok := strings.Cut(entry, "#")
 	if !ok {
@@ -569,8 +629,19 @@ func (r *Rule) IsSanitizer(callee string) bool {
 // IsPropagator reports whether callee matches one of the rule's propagator
 // patterns or one of the set-wide defaults (see RuleSet.DefaultPropagators).
 func (r *Rule) IsPropagator(callee string) bool {
-	return matchAnyCompiled(r.ensure().propagators, callee) ||
-		matchAnyCompiled(r.defaultProps, callee)
+	_, ok := r.MatchPropagator(callee)
+	return ok
+}
+
+// MatchPropagator reports whether callee matches one of the rule's propagators
+// or one of the set-wide defaults and, if so, returns the LOGICAL argument
+// indices it fills as OUT-PARAMETERS. nil indices with ok==true is the ordinary
+// case: the propagator taints its result.
+func (r *Rule) MatchPropagator(callee string) (outArgs []int32, ok bool) {
+	if args, ok := matchAnyArgs(r.ensure().propagators, callee); ok {
+		return args, true
+	}
+	return matchAnyArgs(r.defaultProps, callee)
 }
 
 // IsValidator reports whether callee matches any of the rule's validator (guard)

@@ -1,0 +1,8 @@
+# ShouldBind fills the caller's struct rather than returning it (it returns
+# only an error), so the source rule names the OUT-PARAMETER it fills
+# ("...ShouldBind#0"). Regenerate with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command

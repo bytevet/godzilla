@@ -75,7 +75,7 @@ func LoadFile(path string) (*Config, error) {
 	}
 	// A typo'd severity would otherwise be silently skipped at apply time —
 	// the silent-suppression failure mode the rules loader rejects loudly
-	// elsewhere (InvalidSinkSpec), so reject it here too.
+	// elsewhere (InvalidArgSpec), so reject it here too.
 	for id, sev := range c.Rules.SeverityOverrides {
 		if rules.Severity(sev).Rank() == 0 {
 			return nil, fmt.Errorf("config %s: severity-overrides[%q]: unknown severity %q", path, id, sev)

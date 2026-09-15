@@ -212,6 +212,77 @@ func TestLoadFileRejectsMalformedSinkSpec(t *testing.T) {
 	}
 }
 
+// TestLoadFileRejectsMalformedArgSpec extends TestLoadFileRejectsMalformedSinkSpec's
+// coverage to sources and propagators: a "#" out-parameter spec naming no valid
+// argument index must fail loud, not silently fall back to "taint the result".
+func TestLoadFileRejectsMalformedArgSpec(t *testing.T) {
+	dir := t.TempDir()
+	reject := map[string]string{
+		"src-empty.yaml":     "rules:\n  - id: r\n    severity: high\n    sources: [\"go:*Bind#\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"src-nonnum.yaml":    "rules:\n  - id: r\n    severity: high\n    sources: [\"go:*Bind#x\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"prop-negative.yaml": "rules:\n  - id: r\n    severity: high\n    propagators: [\"go:*Unmarshal#-1\"]\n    sinks: [\"go:*Sink*\"]\n",
+	}
+	for name, doc := range reject {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Errorf("LoadFile(%s): want error for malformed arg spec, got nil", name)
+		}
+	}
+
+	// A well-formed "#0"/"#1" source/propagator must still load cleanly, and a
+	// BARE source (no "#") must still mean "taint the result" rather than being
+	// rejected outright now that "#" carries meaning here.
+	ok := map[string]string{
+		"src-ok.yaml":  "rules:\n  - id: r\n    severity: high\n    sources: [\"go:*Bind#0\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"prop-ok.yaml": "rules:\n  - id: r\n    severity: high\n    propagators: [\"go:*Unmarshal#1\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"bare.yaml":    "rules:\n  - id: r\n    severity: high\n    sources: [\"go:*net/url*.Get\"]\n    sinks: [\"go:*Sink*\"]\n",
+	}
+	for name, doc := range ok {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		rs, err := LoadFile(path)
+		if err != nil {
+			t.Errorf("LoadFile(%s): unexpected error: %v", name, err)
+			continue
+		}
+		if name == "bare.yaml" {
+			if args, ok := rs.Rules[0].MatchSource("go:net/url.Get"); !ok || len(args) != 0 {
+				t.Errorf("bare source: got (%v,%v), want (nil,true)", args, ok)
+			}
+		}
+	}
+}
+
+// TestLoadFileRejectsArgSpecOutsideSourceSinkPropagator locks in that "#" is
+// rejected OUTRIGHT on the four pattern lists it has no meaning on: unlike a
+// malformed sink/source/propagator spec, even a well-formed "#0" is a silent
+// false-negative trap there (see internal/rules.InvalidArgSpec's doc), since
+// classifyGlob would just fold the literal "#0" text into the glob, a pattern
+// no real callee can ever match.
+func TestLoadFileRejectsArgSpecOutsideSourceSinkPropagator(t *testing.T) {
+	dir := t.TempDir()
+	reject := map[string]string{
+		"sanitizer.yaml": "rules:\n  - id: r\n    severity: high\n    sanitizers: [\"go:*Escape#0\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"validator.yaml": "rules:\n  - id: r\n    severity: high\n    validators: [\"go:*IsValid#0\"]\n    sinks: [\"go:*Sink*\"]\n",
+		"callee.yaml":    "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    callees: [\"go:*Bad#0\"]\n",
+		"reqobj.yaml":    "rules:\n  - id: r\n    severity: high\n    request_object_sources: [\"go:*Request#0\"]\n    sinks: [\"go:*Sink*\"]\n",
+	}
+	for name, doc := range reject {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		if _, err := LoadFile(path); err == nil {
+			t.Errorf("LoadFile(%s): want error for '#' outside source/sink/propagator, got nil", name)
+		}
+	}
+}
+
 // TestExtendMergesFragment verifies that `extend: $_fragment.yaml` merges the
 // fragment's pattern-list fields into the rule: the fragment's entries come
 // first, then the rule's own additions, with duplicates removed.

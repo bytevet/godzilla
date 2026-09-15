@@ -1,0 +1,36 @@
+# Server-side template injection (Go, CWE-1336): untrusted input used as the
+# TEMPLATE SOURCE of text/template, html/template, or raymond (a Handlebars
+# port) is compiled and executed server-side. Unlike an engine that only
+# substitutes fields, Go's text/template invokes EXPORTED METHODS on whatever
+# data it is executed against, so a user-controlled template is arbitrary
+# method invocation on the bound value, not merely field disclosure (a real
+# case: a *Ticket with 33 exported methods, two of which reached a raw
+# cross-tenant SQL UPDATE). The danger is building the template FROM user
+# input; passing user data as template CONTEXT (the normal, safe path, via
+# Execute/ExecuteTemplate) is not a finding, so only the template-source
+# argument (#0) is the injection point.
+rules:
+  - id: go-ssti
+    languages: [go]
+    severity: critical
+    cwe: CWE-1336
+    message: >-
+      Untrusted input is used as a template string (text/template or
+      html/template Parse, or raymond.Parse/MustParse), which the engine
+      compiles and executes server-side — server-side template injection.
+      Because Go templates can invoke exported methods on the bound data,
+      this is a path to arbitrary method invocation, not just field
+      disclosure. Never build a template from user input; parse a fixed
+      template and pass the user data as Execute context instead.
+    extend: $_go-common.yaml
+    sinks:
+      # The template SOURCE argument (#0) only — a tainted Execute/
+      # ExecuteTemplate CONTEXT value is the safe, intended path and must not
+      # fire.
+      - "go:*text/template.Template*.Parse#0"
+      - "go:*html/template.Template*.Parse#0"
+      - "go:*aymerick/raymond.Parse#0"
+      - "go:*aymerick/raymond.MustParse#0"
+    # No sanitizer neutralizes tainted input used as a template source; the
+    # fix is a fixed template with user data passed as context, not escaping.
+    sanitizers: []

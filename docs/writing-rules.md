@@ -15,7 +15,7 @@ godzilla scan --rules myrules.yaml ./project   # built-ins + yours
 A pattern is a glob over canonical names; `*` matches across `/` and `.`:
 
 ```
-go:net/http.(*Request).FormValue     # exact
+go:(*net/http.Request).FormValue     # exact
 go:*net/http*.Request*.FormValue     # glob
 py:flask.request.args.get
 js:express.Request.query
@@ -55,9 +55,41 @@ rules:
       - "go:fmt.Sprintf"              # taint flows arg -> result
 ```
 
-- **Sink pinning** `#<index>` fires only when taint reaches that logical
-  (receiver-excluded) argument; a bare pattern treats every argument as an
-  injection point. This keeps parameterized queries clean.
+- **Argument pinning** `#<index>` names *the argument that matters*. Its meaning
+  follows the list it appears in, but the index convention is always the same:
+  logical (receiver-excluded) position.
+  - On a **sink** it SELECTS the injection point: the rule fires only when taint
+    reaches that argument, and a bare pattern treats every argument as one. This
+    keeps parameterized queries clean.
+  - On a **source** or **propagator** it names an OUT-PARAMETER the call FILLS —
+    taint lands in the memory that argument points at, instead of in the result.
+    That is the shape every binder and decoder has, where the untrusted value
+    never appears as a return value at all:
+
+    ```yaml
+    sources:
+      # gin returns only an error; the request data lands in arg 0's pointee.
+      - "go:*gin-gonic/gin.Context*.ShouldBind#0"
+    propagators:
+      - "go:encoding/json.Unmarshal#1"
+    ```
+
+    **Which list you put it in decides whether the fill is conditional**, and
+    that is the whole precision question. A *source* reads the request itself,
+    so it fills unconditionally. A *propagator* only forwards taint it was
+    handed, so it fills only when some other argument is already tainted — which
+    is what stops `json.Unmarshal` of a constant config blob from fabricating
+    taint. Pick wrong in that direction and every config parse in the program
+    becomes attacker-controlled.
+
+    A pinned entry REPLACES the bare one rather than accompanying it: the call's
+    own result is then never marked. That is deliberate — the data went into the
+    argument, and marking `ShouldBind`'s returned `error` as untrusted is a known
+    false-positive chain.
+  - `#<index>` is meaningless on `sanitizers`, `validators`, `callees` and
+    `request_object_sources`, and is rejected at load time. It used to be
+    accepted and silently folded into the glob text, producing a pattern no
+    canonical name can ever match — a rule that quietly detects nothing.
   - Ruby is the exception to "receiver-excluded": its frontend sets no
     `MethodName`, so a dot-call's receiver stays at index 0 and its first real
     argument is `#1`, while a bare call's is `#0` (`ruby:open#0` next to
@@ -304,12 +336,52 @@ in your rules dir overrides one. Extending an unknown fragment is a load error.
 | `severity` | all | `info`/`low`/`medium`/`high`/`critical` (drives the exit-code gate). |
 | `confidence` | dangerous-call, secret | `low`/`medium`/`high`; omit for the default `high`. `medium` makes the finding LLM-reviewable. Ignored by taint rules, whose confidence comes from the flow (intra-procedural high, cross-function medium). |
 | `cwe`, `message` | all | Reported metadata. |
-| `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs; a sink may pin an arg with `#<index>`. |
+| `sources`/`sinks`/`sanitizers`/`propagators`/`validators` | taint | Canonical-name globs. `#<index>` pins the logical argument that matters: the injection point on a sink, the out-parameter FILLED on a source (unconditionally) or propagator (only when another argument is tainted). Rejected on the other three lists. |
 | `when` | both | Rule-level default dynamic guard, inherited by every sink/callee that declares none of its own (fragment-merged entries included). An entry's own `when` wins; `when: 'true'` opts out. |
 | `request_object_sources` | taint | Sources whose value is an HTTP request *object* (e.g. `go:@net/http.Request`; also list in `sources`). Tags the flavor so the engine grants request-object provenance without a hardcoded name. |
 | `callees` | dangerous-call | Globs whose call site is itself the finding. |
 | `const_arg` | dangerous-call | Optional `{index, matches}` constant-argument condition. |
 | `matches` | secret | The detector regexp, run over IR string constants and config-file lines. |
+
+## Model your project's own wrappers
+
+The built-in packs can only know the standard library and widely-used
+dependencies. A project that wraps a dangerous operation in its own helper is
+invisible to them, and that wrapper is usually where the interesting argument
+is — so a `-rules` file naming it is not an edge case, it is the normal way to
+finish the job on a real codebase.
+
+Two shapes come up constantly:
+
+- **An execution wrapper.** `go-command-injection` models `os/exec`. A service
+  that runs code through its own sandbox — `codesandbox.Manager.RunCode(ctx,
+  "python3", src)` — has the interpreter name at `#0` and the *script source*,
+  the argument that actually matters, at `#1`.
+- **An evaluation wrapper.** A project-local `jsengine.Eval(js, args...)` around
+  an embedded interpreter, where the built-in pack names the interpreter's own
+  API but not the wrapper the whole codebase calls.
+
+```yaml
+# myrules/local-wrappers.yaml
+rules:
+  - id: local-code-execution
+    languages: [go]
+    severity: critical
+    cwe: CWE-94
+    message: >-
+      Untrusted input reaches this project's code-execution wrapper, which runs
+      it as source. Pass data to the script rather than building the script.
+    extend: $_go-common.yaml
+    sinks:
+      - "go:*mycorp/codesandbox.Manager*.RunCode#1"   # the SCRIPT, not the interpreter
+      - "go:*mycorp/jsengine.Eval#0"
+    sanitizers: []
+```
+
+Run it with `godzilla scan -rules ./myrules <path>`. Get the glob right by
+reading the name back rather than guessing it — see *Canonical names and globs*
+above; a wrong `#index` fails **silently**, selecting a real but uninteresting
+argument.
 
 ## Testing a rule
 

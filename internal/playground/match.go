@@ -51,7 +51,7 @@ func (idx *Index) Match(fileID, pattern string) matchResult {
 	case pat == "":
 		res.Error = "enter a canonical-name pattern, e.g. go:*database/sql*.Query#0"
 		return res
-	case rules.InvalidSinkSpec(pat):
+	case rules.InvalidArgSpec(pat):
 		res.Error = `bad injection point: "#" must be followed by non-negative logical argument indices, e.g. "#0" or "#0,1"`
 		return res
 	}

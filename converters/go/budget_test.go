@@ -263,3 +263,95 @@ func Do(s string) string {
 		t.Error("the dropped dependency was still lowered")
 	}
 }
+
+// TestConvertFile_TypeCheckFailureDegrades proves a package that fails to
+// type-check does not read as a clean scan: ConvertFile still succeeds
+// (partial/vulnerable code converts, per loadAndBuildSSA's doc), but
+// Degraded() now carries a note naming the failure instead of it going to
+// stderr alone — the gap that let a broken toolchain skip a package's
+// type-check and come back LangCoverage "ok" with zero findings.
+func TestConvertFile_TypeCheckFailureDegrades(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("go.mod", "module tmpmod\n\ngo 1.21\n")
+	writeFile("main.go", `package main
+
+func handler() string {
+	var x int = "type error"
+	_ = x
+	return "ok"
+}
+
+func main() {}
+`)
+
+	conv := NewConverter()
+	prog, err := conv.ConvertFile(dir)
+	if err != nil {
+		t.Fatalf("ConvertFile failed on a type-check error; it must convert whatever built: %v", err)
+	}
+	if prog == nil {
+		t.Fatal("ConvertFile returned a nil program")
+	}
+	deg, note := conv.Degraded()
+	if !deg || note == "" {
+		t.Fatalf("Degraded() = %v, %q; want true and a note naming the type-check failure", deg, note)
+	}
+	if !strings.Contains(note, "failed to load cleanly") {
+		t.Errorf("note %q does not name the load failure", note)
+	}
+}
+
+// TestConvertFile_TypeCheckFailureAndBudgetDegradeTogether proves the two
+// degradation causes join rather than clobber: the dependency-budget note is
+// set in ConvertFile BEFORE loadAndBuildSSA runs, so a scan hit by both must
+// carry both facts, not just whichever was written last.
+func TestConvertFile_TypeCheckFailureAndBudgetDegradeTogether(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("go.mod", "module tmpmod\n\ngo 1.21\n\nrequire example.com/dep v0.0.0\n\nreplace example.com/dep => ./dep\n")
+	writeFile("main.go", `package main
+
+import "example.com/dep"
+
+func handler() string {
+	var x int = "type error"
+	_ = x
+	return dep.Do("")
+}
+
+func main() {}
+`)
+	writeFile("dep/go.mod", "module example.com/dep\n\ngo 1.21\n")
+	writeFile("dep/dep.go", "package dep\n\nfunc Do(s string) string { return s }\n")
+
+	conv := NewConverter().SetDepBudget(0) // drops the dependency entirely
+	if _, err := conv.ConvertFile(dir); err != nil {
+		t.Fatalf("ConvertFile failed: %v", err)
+	}
+	deg, note := conv.Degraded()
+	if !deg {
+		t.Fatal("Degraded() = false; want true (both a dropped dependency and a type-check failure)")
+	}
+	if !strings.Contains(note, "dependency budget") || !strings.Contains(note, "failed to load cleanly") {
+		t.Errorf("note %q does not carry both degradation facts", note)
+	}
+}

@@ -1,0 +1,9 @@
+# encoding/json.Unmarshal fills its out-parameter rather than returning the
+# decoded value, so the propagator rule names the OUT-PARAMETER it fills
+# ("...Unmarshal#1"), gated on the decoded bytes being tainted. Regenerate
+# with:
+#   GODZILLA_REGEN=1 go test ./test/corpus/ -run RegenerateManifests
+findings:
+    - rule: go-command-injection
+      min: 1
+      sink: Command
