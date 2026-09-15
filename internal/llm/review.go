@@ -290,23 +290,37 @@ func buildAgenticPrompt(f analysis.Finding, codeContext string) string {
 	return b.String()
 }
 
-// parseVerdict extracts the JSON verdict from a model response. It tolerates
-// surrounding prose by scanning for the outermost JSON object. When the verdict
-// can't be determined it defaults to NOT a false positive (keep the finding).
+// parseVerdict extracts the JSON verdict from a model response. An agentic
+// reviewer narrates its investigation before answering — quoting source code,
+// a format example, or a fenced block — so the response can contain several
+// brace-delimited spans besides the real verdict. balancedJSONObjects finds
+// every top-level one; parseVerdict walks them from the END (the prompt asks
+// for the verdict object last) and takes the first that parses AND carries a
+// non-empty "verdict" field, which is what skips a quoted format example
+// (verdictJSONFormat itself isn't even valid JSON — a literal `"a" | "b"` —
+// but a paraphrase of it could parse with an empty or placeholder field).
+// Nothing matching is the existing fail-open contract: Filter keeps the finding.
 func parseVerdict(text string) (Verdict, error) {
-	start := strings.IndexByte(text, '{')
-	end := strings.LastIndexByte(text, '}')
-	if start < 0 || end <= start {
-		return Verdict{}, fmt.Errorf("no JSON object in reviewer response")
+	objs := balancedJSONObjects(text)
+	for i := len(objs) - 1; i >= 0; i-- {
+		if v, ok := parseVerdictObject(objs[i]); ok {
+			return v, nil
+		}
 	}
+	return Verdict{}, fmt.Errorf("no JSON verdict object in reviewer response")
+}
+
+// parseVerdictObject parses one candidate span and reports whether it is
+// usable as a verdict: valid JSON with a non-empty "verdict" field.
+func parseVerdictObject(s string) (Verdict, bool) {
 	var raw struct {
 		Verdict        string  `json:"verdict"`
 		Reason         string  `json:"reason"`
 		Confidence     float64 `json:"confidence"`
 		Exploitability string  `json:"exploitability"`
 	}
-	if err := json.Unmarshal([]byte(text[start:end+1]), &raw); err != nil {
-		return Verdict{}, fmt.Errorf("parsing reviewer response: %w", err)
+	if err := json.Unmarshal([]byte(s), &raw); err != nil || strings.TrimSpace(raw.Verdict) == "" {
+		return Verdict{}, false
 	}
 	v := Verdict{Reason: raw.Reason, Confidence: raw.Confidence, Exploitability: raw.Exploitability}
 	// Leniency is allowed only in the KEEP direction. Dropping a finding is the
@@ -317,7 +331,57 @@ func parseVerdict(text string) (Verdict, error) {
 	case "false_positive", "false-positive":
 		v.FalsePositive = true
 	}
-	return v, nil
+	return v, true
+}
+
+// balancedJSONObjects returns every top-level {...} span in text, in order of
+// appearance, tracking JSON string/escape state so a brace inside a string
+// value — quoted source code, a nested struct literal — never perturbs the
+// depth count. Quotes are tracked only once a span is open (depth > 0):
+// surrounding prose routinely carries an unpaired literal quote (5'6", a
+// "scare quote" with its own nesting) that would desync string state before
+// the real object is even reached if tracked globally. An object left open
+// at end of text (a truncated response) yields no span rather than a partial
+// one, so a cut-off reply fails closed into the existing no-match error.
+func balancedJSONObjects(text string) []string {
+	var spans []string
+	depth := 0
+	start := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if depth == 0 {
+			if c == '{' {
+				start = i
+				depth = 1
+			}
+			continue
+		}
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				spans = append(spans, text[start:i+1])
+			}
+		}
+	}
+	return spans
 }
 
 // dependencyNote marks a hop the developer cannot edit, so the reviewer weighs a

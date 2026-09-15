@@ -293,6 +293,17 @@ coverage: go=DEGRADED
 detected language went un-analyzed. The HTML report's scan-diagnostics panel names
 how much of the closure was dropped.
 
+> **Changed for macOS.** `auto` derives its cap from detected memory, and until
+> recently that detection was Linux-only — so on macOS `auto` silently meant `off`
+> and the whole closure was loaded. It now computes a real cap there, which makes
+> a default scan faster and lighter but also means it may report `DEGRADED` where
+> it previously did not. **The finding set can differ between a bounded and an
+> unbounded run** — bounding changes which dependency bodies carry taint, and a
+> finding's attributed source can move with it. If you keep a triage baseline,
+> re-baseline once after upgrading; a moved source changes the fingerprint, so
+> otherwise a previously-suppressed finding reappears. Pass `-dep-budget off` to
+> restore the old behaviour exactly.
+
 ### Playground
 
 A rule matches a **canonical name** and pins its injection point by **logical

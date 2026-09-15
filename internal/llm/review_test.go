@@ -192,6 +192,31 @@ func TestParseVerdict(t *testing.T) {
 		{"bare false keeps", `{"verdict": "false", "reason": "x"}`, false, false},
 		{"fp alias keeps", `{"verdict": "fp", "reason": "x"}`, false, false},
 		{"no json", "I cannot answer.", false, true},
+		// The production failure: an agentic reviewer narrates with quoted Go
+		// source (its own braces) before the verdict object.
+		{"prose with go code before verdict", "Let me examine the code.\n\n```go\n" +
+			"func handler(w http.ResponseWriter, r *http.Request) {\n" +
+			"\tq := r.URL.Query().Get(\"id\")\n" +
+			"\tdb.Query(\"SELECT * FROM t WHERE id = \" + q)\n" +
+			"}\n```\n\n" +
+			"The query is built via string concatenation of unsanitized input.\n\n" +
+			`{"verdict": "true_positive", "confidence": 0.9, "exploitability": "SQL injection via concatenation", "reason": "no sanitizer on the path"}`,
+			false, false},
+		{"verdict in json fence", "Based on my review:\n\n```json\n" +
+			`{"verdict": "false_positive", "confidence": 0.95, "exploitability": "not reachable", "reason": "input is escaped before use"}` +
+			"\n```", true, false},
+		// A quoted format example appears first; the real verdict (last) must win.
+		{"quoted example before real verdict",
+			`Example of the expected shape: {"verdict": "false_positive", "reason": "example only, ignore"}` + "\n\n" +
+				"My actual verdict:\n" +
+				`{"verdict": "true_positive", "confidence": 0.8, "reason": "reachable, no sanitizer present"}`,
+			false, false},
+		{"escaped quotes and braces inside string value",
+			`{"verdict": "false_positive", "reason": "config[\"key\"] is checked; see cleanup() { return true; }"}`,
+			true, false},
+		// Truncated mid-response (e.g. a cut-off stream): the trailing object
+		// never closes, so it must fail closed rather than half-parse or panic.
+		{"truncated trailing object", `{"verdict": "true_positive", "reason": "incomplete`, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,4 +294,21 @@ func TestPromptIncludesRuleVocabulary(t *testing.T) {
 			t.Errorf("prompt missing the keep-direction calibration; got:\n%s", p)
 		}
 	}
+}
+
+// FuzzParseVerdict fuzzes the string-aware brace scanner behind parseVerdict.
+// An agentic reviewer's response is untrusted-shaped free text (unbalanced
+// braces, dangling quotes, mid-escape truncation); the parser must fail with
+// an error, never panic — a panic here would be a denial of service.
+func FuzzParseVerdict(f *testing.F) {
+	f.Add("")
+	f.Add(`{"verdict": "false_positive", "reason": "x"}`)
+	f.Add("prose {code} more { \"verdict\": \"true_positive\" }")
+	f.Add(`{"verdict": "false_positive", "reason": "has \"escaped\" quotes and { braces } inside"}`)
+	f.Add(`{"verdict": "true_positive", "reason": "incomplete`)
+	f.Add(`{{{{"verdict"`)
+	f.Add("}}}}")
+	f.Fuzz(func(t *testing.T, text string) {
+		_, _ = parseVerdict(text) // must not panic
+	})
 }
