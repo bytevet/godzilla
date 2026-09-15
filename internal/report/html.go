@@ -85,20 +85,36 @@ func WriteHTML(w io.Writer, findings []analysis.Finding, opts ...HTMLOption) err
 	// shows "models/group.go:322" rather than an absolute scan path.
 	root := commonRoot(sorted)
 
-	total := len(sorted)
-	counts, files := summarize(sorted)
+	// The masthead, severity strip, "files hit" and "by rule" table all summarize
+	// LIVE findings only: a suppressed finding is hidden from the list by
+	// default (see the .Suppressed doc below), and a headline "3 high" the
+	// reader cannot see without an extra click is the exact false alarm
+	// suppression exists to prevent. .Findings keeps every finding, suppressed
+	// or not, so the count discrepancy is explained by the suppressed toggle's
+	// own label rather than silently vanishing.
+	live := make([]analysis.Finding, 0, len(sorted))
+	for _, f := range sorted {
+		if !f.Suppressed {
+			live = append(live, f)
+		}
+	}
+	suppressedCount := len(sorted) - len(live)
+
+	total := len(live)
+	counts, files := summarize(live)
 	data := reportData{
-		Generated:      time.Now().Format(time.RFC1123),
-		Target:         displayTarget(cfg.info.Target, root),
-		Nonce:          newNonce(),
-		Root:           relativeRoot(root),
-		Total:          total,
-		SeverityCells:  severityCells(counts, total),
-		Critical:       counts[string(rules.SeverityCritical)],
-		High:           counts[string(rules.SeverityHigh)],
-		FilesAffected:  files,
-		SeverityFilter: severityFilters(),
-		Rules:          ruleRows(sorted, total),
+		Generated:       time.Now().Format(time.RFC1123),
+		Target:          displayTarget(cfg.info.Target, root),
+		Nonce:           newNonce(),
+		Root:            relativeRoot(root),
+		Total:           total,
+		SeverityCells:   severityCells(counts, total),
+		Critical:        counts[string(rules.SeverityCritical)],
+		High:            counts[string(rules.SeverityHigh)],
+		FilesAffected:   files,
+		SeverityFilter:  severityFilters(),
+		Rules:           ruleRows(live, total),
+		SuppressedCount: suppressedCount,
 	}
 	data.Findings = make([]findingView, 0, len(sorted))
 	for _, f := range sorted {
@@ -142,15 +158,16 @@ type reportData struct {
 	Nonce     string
 	Root      string // the anchor locations are relative to, itself shown relative to cwd
 
-	Total          int
-	Critical, High int // the masthead verdict
+	Total          int // live (non-suppressed) findings — what the list shows by default
+	Critical, High int // the masthead verdict, also live-only
 	FilesAffected  int
 
-	SeverityCells  []sevCell // the severity strip's cells, worst first
-	SeverityFilter []severityFilter
-	Rules          []ruleRow
-	Findings       []findingView
-	Diag           *diagView // nil when no scan telemetry was supplied
+	SeverityCells   []sevCell // the severity strip's cells, worst first, live-only
+	SeverityFilter  []severityFilter
+	Rules           []ruleRow
+	Findings        []findingView // every finding, including suppressed ones
+	SuppressedCount int           // 0 omits the suppressed-findings toggle entirely
+	Diag            *diagView     // nil when no scan telemetry was supplied
 }
 
 // sevCell is one cell of the summary strip: a severity, its count, and that

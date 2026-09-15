@@ -110,6 +110,51 @@ func TestHTML_MarksSuppressedRow(t *testing.T) {
 	}
 }
 
+// TestHTML_SuppressedHiddenByDefault: a suppressed finding is kept, not
+// dropped, but must not swell the headline severity counts the reader sees
+// unfolded, and the list must render it already hidden — not only dimmed —
+// so the default view shows live findings only.
+func TestHTML_SuppressedHiddenByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHTML(&buf, []analysis.Finding{suppressedFinding()}); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `data-suppressed="1"`) {
+		t.Error("suppressed row missing its data-suppressed marker")
+	}
+	if !strings.Contains(out, ` hidden`) {
+		t.Error("a suppressed row must render hidden by default, not merely dimmed")
+	}
+	if !strings.Contains(out, "suppressed (1)") {
+		t.Error("the reveal control must state how many findings it hides")
+	}
+	// The masthead verdict is a suppressed finding's whole severity: reporting
+	// "1 high" here would repeat the exact false alarm suppression exists to
+	// stop, right next to a list the reader is told is empty.
+	if !strings.Contains(out, `<span class="verdict pass">`) {
+		t.Error("a report with only a suppressed finding must read as a clean scan")
+	}
+}
+
+// TestHTML_NoSuppressedControlWhenNoneSuppressed: the reveal toggle is only
+// meaningful when something is hidden behind it.
+func TestHTML_NoSuppressedControlWhenNoneSuppressed(t *testing.T) {
+	var buf bytes.Buffer
+	f := suppressedFinding()
+	f.Suppressed, f.SuppressedBy, f.SuppressionReason = false, "", ""
+	if err := WriteHTML(&buf, []analysis.Finding{f}); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, `id="f-sup"`) {
+		t.Error("the suppressed-findings toggle rendered with nothing suppressed")
+	}
+	if strings.Contains(out, `<span class="verdict pass">`) {
+		t.Error("a live high-severity finding must not read as a clean scan")
+	}
+}
+
 func TestSARIF_EmitsCodeFlowFromSteps(t *testing.T) {
 	f := analysis.Finding{
 		RuleID:   "GO-SQLI",

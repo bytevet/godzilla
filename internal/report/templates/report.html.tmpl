@@ -561,6 +561,12 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
       {{range .SeverityFilter}}
       <label class="s-{{.Key}}"><input type="checkbox" data-sev="{{.Key}}" checked><span>{{.Label}}</span></label>
       {{end}}
+      {{if .SuppressedCount}}
+      {{/* Off by default: a suppressed finding is kept, not dropped, but the
+           reader must ask to see it (see .tag.sup above). Same checkbox +
+           .off idiom as the severity chips, just inverted default state. */}}
+      <label class="off" title="Dismissed by triage, a godzilla:ignore comment, or LLM review"><input type="checkbox" id="f-sup"><span>suppressed ({{.SuppressedCount}})</span></label>
+      {{end}}
     </div>
     <select id="f-rule" aria-label="Filter by rule">
       <option value="">All rules</option>
@@ -581,13 +587,15 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
     </select>
     <input id="f-search" type="search" placeholder="Search file, message, callee&hellip;  ( / )" aria-label="Search findings">
     <button id="f-clear" class="clear-btn" type="button" hidden title="Clear all filters" aria-label="Clear all filters"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/></svg></button>
-    <span class="count" id="f-count">{{.Total}} of {{.Total}}</span>
+    <span class="count" id="f-count">{{.Total}} of {{len .Findings}}</span>
   </div>
 
   <div class="list">
     {{range .Findings}}
-    <div class="finding s-{{.Severity}}{{if .Suppressed}} suppressed{{end}}" id="f-{{.ID}}"
-         data-severity="{{.Severity}}" data-rule="{{.Rule}}" data-conf="{{.Confidence}}" data-loc="{{.SortKey}}">
+    {{/* hidden is the no-JS default: a suppressed row starts hidden even before
+         the script's own filter pass (apply(), which agrees) ever runs. */}}
+    <div class="finding s-{{.Severity}}{{if .Suppressed}} suppressed{{end}}" id="f-{{.ID}}"{{if .Suppressed}} hidden{{end}}
+         data-severity="{{.Severity}}" data-rule="{{.Rule}}" data-conf="{{.Confidence}}" data-loc="{{.SortKey}}" data-suppressed="{{if .Suppressed}}1{{else}}0{{end}}">
       <button class="row" type="button" aria-expanded="false">
         <span class="head">
           <span class="sev s-{{.Severity}}">{{.SeverityLabel}}</span>
@@ -726,6 +734,7 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
   if (!findings.length) return;
 
   var sevBoxes = $$("[data-sev]");
+  var supBox = $("#f-sup");
   var confRadios = $$('input[name="conf"]');
   var confDD = $("#f-conf");
   var ruleSel = $("#f-rule");
@@ -821,21 +830,33 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
     if (ruleSel && ruleSel.value) return true;
     if (search && search.value.trim()) return true;
     if (confValue()) return true;
+    if (supBox && supBox.checked) return true;
     return sevBoxes.some(function (b) { return !b.checked; });
   }
+  // Every filter chip shows its own state by striking its label through, so the
+  // lookup lives in one place: a chip that is absent (the suppressed one, when
+  // nothing was suppressed) is simply a no-op.
+  function paintOff(box) {
+    if (!box) return;
+    var label = box.closest("label");
+    if (label) label.classList.toggle("off", !box.checked);
+  }
+
   function apply() {
     var sev = {};
     sevBoxes.forEach(function (b) {
       sev[attr(b, "data-sev")] = b.checked;
-      var label = b.closest("label");
-      if (label) label.classList.toggle("off", !b.checked);
+      paintOff(b);
     });
+    var showSup = !!(supBox && supBox.checked);
+    paintOff(supBox);
     var minConf = confValue();
     var rule = ruleSel ? ruleSel.value : "";
     var q = search ? search.value.trim().toLowerCase() : "";
     var shown = 0;
     findings.forEach(function (f) {
       var ok = sev[attr(f, "data-severity")] !== false;
+      if (ok && attr(f, "data-suppressed") === "1" && !showSup) ok = false;
       if (ok && minConf) ok = CONF[attr(f, "data-conf")] <= CONF[minConf];
       if (ok && rule) ok = attr(f, "data-rule") === rule;
       if (ok && q) ok = f.textContent.toLowerCase().indexOf(q) !== -1;
@@ -866,6 +887,7 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
     if (confRadios.length) confRadios[0].checked = true;
     if (ruleSel) ruleSel.value = "";
     if (search) search.value = "";
+    if (supBox) supBox.checked = false;
     paintConf();
     apply();
   }
@@ -876,6 +898,7 @@ footer { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line);
     if (row) row.addEventListener("click", function () { isWide() ? setActive(f, true) : openInline(f); });
   });
   sevBoxes.forEach(function (b) { b.addEventListener("change", apply); });
+  if (supBox) supBox.addEventListener("change", apply);
   confRadios.forEach(function (r) {
     r.addEventListener("change", function () {
       paintConf();
