@@ -38,10 +38,17 @@ var asciiStatus = map[string]string{
 // costs one cell; the ASCII rung falls back to a rotating bar inside [*],
 // because braille is not safe on a legacy console.
 var (
-	spinFrames  = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
-	spinASCII   = []rune{'|', '/', '-', '\\'}
-	barFill     = '█'
-	barTrack    = '░'
+	spinFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	spinASCII  = []rune{'|', '/', '-', '\\'}
+	barFill    = '█'
+	// MEDIUM shade, not light (U+2591). A shade glyph is a stipple: the eye sees
+	// the glyph colour blended with the background in proportion to its ink
+	// coverage, so at 25% coverage the track is imperceptible no matter how it is
+	// coloured — even raising it to dimHex reaches only ~1.24:1 against a typical
+	// dark background, under the ~1.3:1 a band needs to read as a band. 50%
+	// coverage is what lets trackHex actually show. Still visibly emptier than
+	// barFill, and the colorNone rung draws [====----] instead either way.
+	barTrack    = '▒'
 	legendBlock = "▪"
 )
 
