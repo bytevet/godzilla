@@ -25,7 +25,7 @@ const softFraction = 0.8
 // process, and returns the limit in bytes (0 if it left the runtime default in
 // place). It is a no-op when GOMEMLIMIT is already set in the environment (Go
 // reads that automatically, so an operator's deliberate choice is respected) or
-// when available memory cannot be detected (e.g. a non-Linux host).
+// when available memory cannot be detected (see hostMemTotal for which hosts can).
 func Configure() int64 {
 	if _, ok := os.LookupEnv("GOMEMLIMIT"); ok {
 		return 0 // operator-controlled; do not clobber
@@ -41,8 +41,9 @@ func Configure() int64 {
 
 // Available returns the memory this process may use in bytes: the tightest of
 // the host's physical memory and any cgroup limit applying to it. A 0 return
-// means nothing could be detected (a non-Linux host, or an unreadable /proc),
-// which a caller must read as "unknown", not "none".
+// means nothing could be detected (a host with neither /proc/meminfo nor a
+// platform reader, or an unreadable /proc), which a caller must read as
+// "unknown", not "none".
 func Available() int64 { return detectAvailable() }
 
 // detectAvailable returns the tightest positive memory bound that applies to
@@ -56,6 +57,9 @@ func detectAvailable() int64 {
 		}
 	}
 	memTotal := readMemTotal()
+	if memTotal == 0 {
+		memTotal = hostMemTotal() // non-Linux: no /proc/meminfo (see memtotal_*.go)
+	}
 	consider(memTotal)
 	consider(readCgroupLimit("/sys/fs/cgroup/memory.max", memTotal))                   // cgroup v2
 	consider(readCgroupLimit("/sys/fs/cgroup/memory/memory.limit_in_bytes", memTotal)) // cgroup v1
