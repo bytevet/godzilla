@@ -12,6 +12,7 @@
 package report
 
 import (
+	"cmp"
 	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
@@ -20,7 +21,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -303,14 +303,14 @@ func ruleRows(findings []analysis.Finding, total int) []ruleRow {
 			sevRank:     a.bestSev.Rank(),
 		})
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].sevRank != rows[j].sevRank {
-			return rows[i].sevRank > rows[j].sevRank
+	slices.SortStableFunc(rows, func(a, b ruleRow) int {
+		if c := cmp.Compare(b.sevRank, a.sevRank); c != 0 {
+			return c
 		}
-		if rows[i].Count != rows[j].Count {
-			return rows[i].Count > rows[j].Count
+		if c := cmp.Compare(b.Count, a.Count); c != 0 {
+			return c
 		}
-		return rows[i].Name < rows[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return rows
 }
@@ -686,10 +686,7 @@ func caretFor(line string, col int32) string {
 	if col <= 0 {
 		return ""
 	}
-	n := int(col) - 1
-	if n > len(line) {
-		n = len(line)
-	}
+	n := min(int(col)-1, len(line))
 	var b strings.Builder
 	consumed := 0
 	for _, r := range line {

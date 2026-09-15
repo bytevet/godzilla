@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -235,7 +236,7 @@ func reachableFuncs(allFns map[*ssa.Function]bool, reportable map[string]bool) m
 	// method name -> concrete methods exposing it, for interface-call resolution.
 	methodsByName := map[string][]*ssa.Function{}
 	for fn := range allFns {
-		if fn.Signature != nil && fn.Signature.Recv() != nil {
+		if isMethod(fn.Signature) {
 			methodsByName[fn.Name()] = append(methodsByName[fn.Name()], fn)
 		}
 	}
@@ -589,15 +590,13 @@ func (c *Converter) lowerModules(funcsByPkg map[*ssa.Package][]*ssa.Function, sk
 	jobCh := make(chan fnJob)
 	var wg sync.WaitGroup
 	for range nWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			w := c.worker()
 			for j := range jobCh {
 				j.mod.Functions[j.idx] = w.convertFunction(j.fn)
 				lowerStage.Advance(1)
 			}
-		}()
+		})
 	}
 	for _, j := range jobs {
 		jobCh <- j
@@ -659,7 +658,7 @@ func (c *Converter) convertFunction(f *ssa.Function) *ir.Function {
 	}
 	// Tag a method with its bare name so the engine indexes it for CHA dynamic
 	// dispatch without parsing the canonical name.
-	if f.Signature != nil && f.Signature.Recv() != nil {
+	if isMethod(f.Signature) {
 		irFunc.MethodName = f.Name()
 	}
 
@@ -807,14 +806,7 @@ func (c *Converter) addHTTPRequestSource(f *ssa.Function, irFunc *ir.Function) {
 		}
 		// Fast path: most blocks read no inbound *http.Request, so the rebuilt slice
 		// would be value-identical. Skip the allocation for them.
-		hasReq := false
-		for _, sinst := range sb.Instrs {
-			if inboundRequestValue(sinst) {
-				hasReq = true
-				break
-			}
-		}
-		if !hasReq {
+		if !slices.ContainsFunc(sb.Instrs, inboundRequestValue) {
 			continue
 		}
 		out := make([]*ir.Instruction, 0, len(irBlock.Instrs)+1)
@@ -874,6 +866,12 @@ func isNamedType(t types.Type, pkgPath, name string) bool {
 	}
 	obj := named.Obj()
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == pkgPath && obj.Name() == name
+}
+
+// isMethod reports whether sig is a method's signature (has a receiver). A
+// signature-less ssa.Function (e.g. some synthetic wrappers) is never one.
+func isMethod(sig *types.Signature) bool {
+	return sig != nil && sig.Recv() != nil
 }
 
 // templateTrustedTypes are the html/template string types whose conversion marks
@@ -1430,7 +1428,7 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		// A statically resolved method call passes its receiver as Args[0]. Record
 		// the method name so the engine strips the receiver from the logical
 		// argument list without parsing the callee-name shape.
-		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		if isMethod(fn.Signature) {
 			cc.MethodName = fn.Name()
 		}
 	} else if b, ok := call.Value.(*ssa.Builtin); ok {
@@ -1441,7 +1439,7 @@ func (c *Converter) convertCall(call ssa.CallCommon) *ir.CallCommon {
 		// frontend's convention throughout -- callees are semantic FQNs from SSA,
 		// never the syntax at the call site. See collectFuncAliases.
 		cc.Callee = c.canonicalFunc(fn)
-		if sig := fn.Signature; sig != nil && sig.Recv() != nil {
+		if isMethod(fn.Signature) {
 			cc.MethodName = fn.Name()
 		}
 	}
@@ -1482,8 +1480,7 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		irType.ElemType = c.convertType(typ.Elem())
 	case *types.Struct:
 		irType.Kind = ir.TypeKind_TYPE_KIND_STRUCT
-		for i := range typ.NumFields() {
-			f := typ.Field(i)
+		for f := range typ.Fields() {
 			irType.Fields = append(irType.Fields, &ir.Field{
 				Name: f.Name(),
 				Type: c.convertType(f.Type()),
@@ -1505,8 +1502,7 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		irType.ElemType = c.convertType(typ.Elem())
 	case *types.Interface:
 		irType.Kind = ir.TypeKind_TYPE_KIND_INTERFACE
-		for i := range typ.NumMethods() {
-			m := typ.Method(i)
+		for m := range typ.Methods() {
 			irType.Methods = append(irType.Methods, &ir.Method{
 				Name:      m.Name(),
 				Signature: c.convertType(m.Type()),
@@ -1514,9 +1510,9 @@ func (c *Converter) convertType(t types.Type) *ir.Type {
 		}
 	case *types.Tuple:
 		irType.Kind = ir.TypeKind_TYPE_KIND_TUPLE
-		for i := range typ.Len() {
+		for v := range typ.Variables() {
 			irType.Fields = append(irType.Fields, &ir.Field{
-				Type: c.convertType(typ.At(i).Type()),
+				Type: c.convertType(v.Type()),
 			})
 		}
 	case *types.Named:
@@ -1546,13 +1542,11 @@ func (c *Converter) convertSignature(sig *types.Signature) *ir.Signature {
 	if sig.Recv() != nil {
 		irSig.Recv = c.convertType(sig.Recv().Type())
 	}
-	params := sig.Params()
-	for i := range params.Len() {
-		irSig.Params = append(irSig.Params, c.convertType(params.At(i).Type()))
+	for v := range sig.Params().Variables() {
+		irSig.Params = append(irSig.Params, c.convertType(v.Type()))
 	}
-	results := sig.Results()
-	for i := range results.Len() {
-		irSig.Results = append(irSig.Results, c.convertType(results.At(i).Type()))
+	for v := range sig.Results().Variables() {
+		irSig.Results = append(irSig.Results, c.convertType(v.Type()))
 	}
 	return irSig
 }

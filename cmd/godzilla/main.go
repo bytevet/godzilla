@@ -177,7 +177,7 @@ func readFileList(src string) ([]string, error) {
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if p := strings.TrimSpace(line); p != "" {
 			paths = append(paths, p)
 		}
@@ -216,6 +216,26 @@ func parseDepBudget(s string) (int64, error) {
 		return 0, errors.New(`want a non-negative byte count; use "off" for no cap`)
 	}
 	return v * mult, nil
+}
+
+// loadScanConfig resolves the .godzilla.yaml: an explicit -config wins;
+// otherwise it auto-loads from the scan root. Exits the process (exitError) on
+// a load failure, naming whichever path was actually tried.
+func loadScanConfig(explicit, root string) *config.Config {
+	if explicit != "" {
+		cfg, err := config.LoadFile(explicit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", explicit, err)
+			os.Exit(exitError)
+		}
+		return cfg
+	}
+	cfg, path, err := config.Load(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", path, err)
+		os.Exit(exitError)
+	}
+	return cfg
 }
 
 func runScan(args []string) {
@@ -280,22 +300,7 @@ func runScan(args []string) {
 	// Per-project config (.godzilla.yaml): gate threshold, path filters, and
 	// per-rule disable/severity overrides. An explicit -config wins; otherwise it
 	// auto-loads from the scan root. CLI flags override file values (CI-5).
-	var cfg *config.Config
-	if *configPath != "" {
-		c, err := config.LoadFile(*configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", *configPath, err)
-			os.Exit(exitError)
-		}
-		cfg = c
-	} else {
-		c, p, err := config.Load(configRoot)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: loading config %s: %v\n", p, err)
-			os.Exit(exitError)
-		}
-		cfg = c
-	}
+	cfg := loadScanConfig(*configPath, configRoot)
 
 	// The config's fail-on applies only when the CLI did not set -fail-on.
 	failOnSet := false

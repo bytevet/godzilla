@@ -93,58 +93,6 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 		}
 	}
 
-	// canProduceFinding decides whether a rule is worth a goroutine and a seeded
-	// worklist at all: a pass costs an O(functions × instructions) walk, so a rule
-	// that CANNOT yield a finding must not get one. Three independent reasons a
-	// rule is a guaranteed no-op:
-	//
-	//   - NO SINKS. Both places a dataflow finding is emitted sit behind a sink
-	//     match (the isSink branch, and recordSinkParam, which only ever writes
-	//     from inside it), and MatchSink over an empty sink list is always false.
-	//     This is what excludes `kind: secret` and `kind: dangerous-call` rules —
-	//     ScanSecrets and ScanDangerousCalls evaluate those. Tested on the CONCRETE
-	//     property (no sinks) rather than on the kind, because that is the reason.
-	//
-	//   - NO LANGUAGE IN COMMON with the program. enqueue rejects every function
-	//     whose module language fails AppliesTo, so the worklist would stay empty.
-	//     A rule declaring no languages applies everywhere and is never skipped.
-	//
-	//   - NO SINK CALLEE PRESENT: every sink glob matches nothing this program
-	//     calls. The distinct-callee set is a BY-PRODUCT of buildCallGraph
-	//     (cg.Callees), not its own walk — collecting it separately cost more than
-	//     the skipping saved.
-	//
-	//     Gated on SINKS ONLY, never sources. Taint also enters through seeding
-	//     that is not a callee-glob match at all — addHTTPRequestSource,
-	//     buildReqSourceHosts, request-object provenance — so a source-side
-	//     prefilter could drop real findings. A sink is always a call.
-	hasSinkCallee := func(r *rules.Rule) bool {
-		for callee := range cg.Callees {
-			if _, _, ok := r.MatchSink(callee); ok {
-				return true
-			}
-		}
-		return false
-	}
-	canProduceFinding := func(r *rules.Rule) bool {
-		if len(r.Sinks) == 0 {
-			return false
-		}
-		if len(r.Languages) > 0 {
-			any := false
-			for lang := range progLangs {
-				if r.AppliesTo(lang) {
-					any = true
-					break
-				}
-			}
-			if !any {
-				return false
-			}
-		}
-		return hasSinkCallee(r)
-	}
-
 	// Phase 1: decide which rules can produce a finding at all. An inert rule must
 	// cost one boolean and NEVER a goroutine — with a mostly-inert pack the
 	// spawn/semaphore overhead dominates the skip it buys, so this must not move
@@ -156,7 +104,7 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	if len(e.rs.Rules)*len(cg.Callees) >= 1<<15 {
 		var pre sync.WaitGroup
 		var next atomic.Int64
-		for w := 0; w < min(runtime.GOMAXPROCS(0), len(e.rs.Rules)); w++ {
+		for range min(runtime.GOMAXPROCS(0), len(e.rs.Rules)) {
 			pre.Add(1)
 			go func() {
 				defer pre.Done()
@@ -165,14 +113,14 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 					if i >= len(e.rs.Rules) {
 						return
 					}
-					live[i] = canProduceFinding(&e.rs.Rules[i])
+					live[i] = canProduceFinding(&e.rs.Rules[i], cg, progLangs)
 				}
 			}()
 		}
 		pre.Wait()
 	} else {
 		for i := range e.rs.Rules {
-			live[i] = canProduceFinding(&e.rs.Rules[i])
+			live[i] = canProduceFinding(&e.rs.Rules[i], cg, progLangs)
 		}
 	}
 	for _, ok := range live {
@@ -245,6 +193,62 @@ func (e *Engine) analyze(prog *ir.Program, countSites bool) ([]Finding, Stats) {
 	stats.Taint = time.Since(phaseStart)
 	taintStage.Done(nil)
 	return findings, stats
+}
+
+// canProduceFinding decides whether a rule is worth a goroutine and a seeded
+// worklist at all: a pass costs an O(functions × instructions) walk, so a rule
+// that CANNOT yield a finding must not get one. Three independent reasons a
+// rule is a guaranteed no-op:
+//
+//   - NO SINKS. Both places a dataflow finding is emitted sit behind a sink
+//     match (the isSink branch, and recordSinkParam, which only ever writes
+//     from inside it), and MatchSink over an empty sink list is always false.
+//     This is what excludes `kind: secret` and `kind: dangerous-call` rules —
+//     ScanSecrets and ScanDangerousCalls evaluate those. Tested on the CONCRETE
+//     property (no sinks) rather than on the kind, because that is the reason.
+//
+//   - NO LANGUAGE IN COMMON with the program (progLangs). enqueue rejects every
+//     function whose module language fails AppliesTo, so the worklist would
+//     stay empty. A rule declaring no languages applies everywhere and is
+//     never skipped.
+//
+//   - NO SINK CALLEE PRESENT: every sink glob matches nothing this program
+//     calls. The distinct-callee set is a BY-PRODUCT of buildCallGraph
+//     (cg.Callees), not its own walk — collecting it separately cost more than
+//     the skipping saved.
+//
+//     Gated on SINKS ONLY, never sources. Taint also enters through seeding
+//     that is not a callee-glob match at all — addHTTPRequestSource,
+//     buildReqSourceHosts, request-object provenance — so a source-side
+//     prefilter could drop real findings. A sink is always a call.
+func canProduceFinding(r *rules.Rule, cg *CallGraph, progLangs map[string]bool) bool {
+	if len(r.Sinks) == 0 {
+		return false
+	}
+	if len(r.Languages) > 0 {
+		any := false
+		for lang := range progLangs {
+			if r.AppliesTo(lang) {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return false
+		}
+	}
+	return hasSinkCallee(r, cg)
+}
+
+// hasSinkCallee reports whether some callee this program actually calls
+// matches one of r's sink globs. See canProduceFinding.
+func hasSinkCallee(r *rules.Rule, cg *CallGraph) bool {
+	for callee := range cg.Callees {
+		if _, _, ok := r.MatchSink(callee); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // callEffect records that a tainted argument at a call site flows into the
@@ -1743,7 +1747,7 @@ func (fa *funcAnalysis) run() funcResult {
 	// The block-out states ascend monotonically over a finite lattice, so this
 	// terminates; maxPasses is a defensive backstop against a pathological CFG.
 	const maxPasses = 100000
-	for pass := 0; pass < maxPasses; pass++ {
+	for range maxPasses {
 		changed := false
 		for _, idx := range cfg.rpo {
 			blk := cfg.idxToBlock[idx]
@@ -2151,6 +2155,41 @@ type calleeClass struct {
 	isProp   bool
 }
 
+// classifyCallee returns callee's rule classification, memoized per PASS (not
+// per call site): the result depends only on the (rule, callee) pair, both
+// fixed for the whole analyzeInterproc pass, and the globs are the engine's
+// hottest per-(call × rule) work. The memo is goroutine-local, so no locking;
+// the stored guard is the same *rules.Guard MatchSink returns, preserving
+// pointer identity. Classification is by GLOB only — never by rule.CWE. See
+// doc.go for why a CWE branch here silently denies a fact to custom rules.
+//
+// Returns the zero calleeClass for an indirect call (callee == ""), which a
+// glob cannot match.
+func (fa *funcAnalysis) classifyCallee(callee string, inst *ir.Instruction) calleeClass {
+	if callee == "" {
+		return calleeClass{}
+	}
+	cls, seen := fa.rs.classMemo[callee]
+	if !seen {
+		cls.sinkArgs, cls.guard, cls.isSink = fa.rule.MatchSink(callee)
+		cls.isSan = fa.rule.IsSanitizer(callee)
+		cls.srcArgs, cls.isSrc = fa.rule.MatchSource(callee)
+		cls.propArgs, cls.isProp = fa.rule.MatchPropagator(callee)
+		fa.rs.classMemo[callee] = cls
+	}
+	// The Go `append` builtin propagates taint ONLY when its result is a
+	// byte/rune slice — character-level string reconstruction (the
+	// make([]byte); append(data, s[i]); string(data) idiom). It is NOT a blanket
+	// propagator: append is called on every slice in a program, so tainting
+	// through slices of structs/pointers explodes the taint set in framework
+	// code. Depends on the INSTRUCTION's result type, so it adjusts the local
+	// copy and stays out of the per-callee memo.
+	if !cls.isProp && callee == "builtin.append" && isByteOrRuneSlice(inst.GetType()) {
+		cls.isProp = true
+	}
+	return cls
+}
+
 // handleCall applies the taint transfer for any call-carrying instruction:
 // direct CALL, dynamic INVOKE, and the call-carrying intrinsics go.defer /
 // go.goroutine (whose sink/source/propagator and cross-function effects would
@@ -2162,40 +2201,12 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 	callee := inst.Call.GetCallee()
 	args := inst.Call.GetArgs()
 	// An indirect call names no callee (Callee == ""); its callee is a function
-	// VALUE in Call.Value, resolved below. Skip source/sink/sanitizer/propagator
-	// classification entirely for it — a glob has no callee string to match, and
-	// this also neutralizes a latent coupling where an empty pattern would match
-	// the empty name. Purely structural; no language check.
+	// VALUE in Call.Value, resolved below. classifyCallee returns the zero
+	// calleeClass for it — a glob has no callee string to match, and this also
+	// neutralizes a latent coupling where an empty pattern would match the empty
+	// name. Purely structural; no language check.
 	indirect := callee == ""
-	var cls calleeClass
-	if !indirect {
-		// Classify the callee once per PASS, not once per call site: the result
-		// depends only on the (rule, callee) pair, both fixed for the whole
-		// analyzeInterproc pass, and the globs are the engine's hottest per-(call ×
-		// rule) work. The memo is goroutine-local, so no locking; the stored guard
-		// is the same *rules.Guard MatchSink returns, preserving pointer identity.
-		// Classification is by GLOB only — never by rule.CWE. See doc.go for why
-		// a CWE branch here silently denies a fact to custom rules.
-		var seen bool
-		cls, seen = fa.rs.classMemo[callee]
-		if !seen {
-			cls.sinkArgs, cls.guard, cls.isSink = fa.rule.MatchSink(callee)
-			cls.isSan = fa.rule.IsSanitizer(callee)
-			cls.srcArgs, cls.isSrc = fa.rule.MatchSource(callee)
-			cls.propArgs, cls.isProp = fa.rule.MatchPropagator(callee)
-			fa.rs.classMemo[callee] = cls
-		}
-		// The Go `append` builtin propagates taint ONLY when its result is a
-		// byte/rune slice — character-level string reconstruction (the
-		// make([]byte); append(data, s[i]); string(data) idiom). It is NOT a blanket
-		// propagator: append is called on every slice in a program, so tainting
-		// through slices of structs/pointers explodes the taint set in framework
-		// code. Depends on the INSTRUCTION's result type, so it adjusts the local
-		// copy and stays out of the per-callee memo.
-		if !cls.isProp && callee == "builtin.append" && isByteOrRuneSlice(inst.GetType()) {
-			cls.isProp = true
-		}
-	}
+	cls := fa.classifyCallee(callee, inst)
 
 	// Record a validator application (ENG-9, linear case): mark the checked
 	// registers so a later RET of one of them in this same straight-line block
@@ -2321,148 +2332,173 @@ func (fa *funcAnalysis) handleCall(inst *ir.Instruction) {
 		}
 	}
 
-	// Inter-procedural, direct call: if the callee is a function we lowered,
-	// pass tainted arguments into its parameters and pull back its return taint.
-	if fa.idx.byKey[callee] != nil {
-		if inst.Call.GetIsInvoke() {
-			// A concrete instance-method call (e.g. Java) whose method we lowered:
-			// the receiver lives in Call.Value and maps to param 0, and the real
-			// arguments EXCLUDE it, so they map to the callee's params shifted by
-			// one. Mapping args[j]->param j would seed the receiver slot and drop
-			// the last argument — an off-by-one that silently loses every
-			// cross-function instance flow. (Go interface INVOKEs name an abstract
-			// method absent from byKey, so the CHA block below handles them.)
-			fa.seedInvokeArgs(inst, callee, false)
-		} else {
-			// Static/free function or Go method call: args already align with
-			// params (Args[0]==Params[0]==receiver for a Go method). isTaintedArg
-			// also seeds when an argument is a struct carrying a tainted field,
-			// so a field-tainted struct passed by value/pointer still flows into
-			// the callee (see fieldAnyKey / ENG-3).
-			for j, a := range args {
-				if p, ok := isTaintedArg(fa.tainted, a); ok {
-					fa.addEffect(callee, j, p, a, inst)
-				}
-				fa.recordFuncArg(callee, j, a)
-			}
-		}
-		fa.pullReturnTaint(inst, callee)
-		// The callee fills tainted data into one of its out-parameters: taint
-		// the argument passed at that position (ENG-6b).
-		if pm := fa.rs.paramMemTaint[callee]; len(pm) > 0 {
-			eachArgParam(inst.Call, func(paramIdx int, a *ir.Value) {
-				if o, ok := pm[paramIdx]; ok {
-					fa.taintCallerArg(a, o, inst)
-				}
-			})
-		}
-	}
+	fa.applyDirectCallEffects(inst, callee, args)
+	fa.applySinkWrapperSummary(inst, callee)
+	fa.applyIndirectCallEffects(inst, args, indirect)
+	fa.applyInvokeDispatch(inst)
+}
 
-	// Dependency sink-wrapper summary (taintsParamSink): the callee routes one of
-	// its string parameters into a sink internally, and that sink's own finding was
-	// scoped out. If we pass tainted data at that position, the vulnerability is
-	// HERE. In user code, report it at this call site; in another dependency,
-	// propagate it up so the finding ultimately lands on user code.
-	if psk := fa.rs.paramSinkTaint[callee]; len(psk) > 0 {
-		consumeSink := func(paramIdx int, a *ir.Value) {
-			wrapper, summarized := psk[paramIdx]
-			if !summarized {
-				return
-			}
-			sinkPos := wrapper.origin
-			pos, ok := isTaintedArg(fa.tainted, a)
-			if !ok {
-				return
-			}
-			// A validator dominating this flow's source suppresses it, exactly as at
-			// a direct sink (ENG-9).
-			if fa.guards.guarded(fa.curBlock, pos, fa.tainted) {
-				return
-			}
-			if fa.funcReportable {
-				if fa.rs.reported[inst] {
-					return
-				}
-				fa.rs.reported[inst] = true
-				// The path runs on past this call site into the wrapper's own hops, so
-				// the reader is shown the library line that is actually dangerous —
-				// SinkPos stays the user call, which is where the fix belongs.
-				steps := fa.trailTo(a.GetRegName(), pos).push(fa.step(inst.Pos, StepCall)).pushAll(wrapper.trail.steps()).steps()
-				fa.res.findings = append(fa.res.findings, newTaintFinding(fa.rule, fa.mod, fa.fn, pos, inst.Pos, callee, steps, ConfidenceMedium)) // SinkPos = user call into the wrapper; Medium: sink across a call boundary
-			} else {
-				// Still inside a dependency: propagate the summary up if the tainted
-				// arg forwards a string parameter, keeping the deeper wrapper's hops.
-				forwarded := fa.localTrail(a.GetRegName(), pos).push(fa.step(inst.Pos, StepCall)).pushAll(wrapper.trail.steps())
-				fa.recordSinkParam(pos, sinkPos, forwarded)
-			}
-		}
-		eachArgParam(inst.Call, consumeSink)
+// applyDirectCallEffects handles a direct call to a function we lowered: it
+// passes tainted arguments into the callee's parameters, pulls back its
+// return taint, and — if the callee fills tainted data into one of its
+// out-parameters (ENG-6b) — taints the caller's matching argument. A no-op
+// when callee names no lowered function.
+func (fa *funcAnalysis) applyDirectCallEffects(inst *ir.Instruction, callee string, args []*ir.Value) {
+	if fa.idx.byKey[callee] == nil {
+		return
 	}
-
-	// Inter-procedural, INDIRECT call through a function value: the target is a
-	// function VALUE in Call.Value. This is the unifying primitive for higher-order
-	// callbacks (`fn(x)` where fn is a callback parameter, resolved via funcVal)
-	// and frontend-synthesized deferral/thread dispatch (a FuncName known at the
-	// site). Args flow into the target's FRONT params (no receiver shift).
-	//
-	// Binds ONLY when the resolved points-to set is a singleton AND complete — the
-	// same unambiguous-only discipline untyped_dispatch uses. A generic helper
-	// called with several distinct callbacks accumulates a union in funcVal, and an
-	// opaque contribution means even a lone target is not provably the only callee;
-	// binding either would pair one site's callback with another site's taint.
-	if indirect && !inst.Call.GetIsInvoke() {
-		v := inst.Call.GetValue()
-		if targets := fa.targetsOf(v); len(targets) == 1 && !fa.indirectOpaque(v) {
-			target := targets[0]
-			for j, a := range args {
-				if p, ok := isTaintedArg(fa.tainted, a); ok {
-					fa.addEffect(target, j, p, a, inst)
-				}
-				fa.recordFuncArg(target, j, a)
-			}
-			fa.pullReturnTaint(inst, target)
-		}
-	}
-
-	// Inter-procedural, interface dynamic dispatch: an INVOKE call's callee is
-	// the abstract interface method, so resolve to concrete implementations by
-	// method name (CHA) and flow taint into each. INVOKE args exclude the
-	// receiver (it lives in Call.Value), so they map to a concrete method's
-	// params shifted by one — param 0 is the receiver.
 	if inst.Call.GetIsInvoke() {
-		// The dispatch discipline comes from IR the converter supplies, not from
-		// any language check in the engine. When the frontend resolved the call by
-		// bare method NAME with no static receiver type (untyped_dispatch), apply it
-		// ONLY when the name is unambiguous: otherwise a polymorphic name like
-		// `execute` would seed taint into every same-named method across unrelated
-		// classes, a cross-object fan-out that floods real code with false
-		// positives. A type-resolved invoke fans out to every implementer, the
-		// standard CHA over-approximation — bounded first by what the call site's
-		// own signature rules out (see signatureAllows), since methodImpls is
-		// keyed on the bare name and `Query` alone spans a repository, an ORM and
-		// a request accessor.
-		impls := fa.signatureImpls(inst.Call, fa.idx.methodImpls[inst.Call.GetMethodName()])
-		impls = fa.interfaceImpls(inst.Call, impls)
-		if inst.Call.GetUntypedDispatch() {
-			// An ambiguous name is not always an unknown receiver: `h = C()` then
-			// `h.load(x)` names the class right there (see receiverImpls).
-			if len(impls) > 1 {
-				impls = fa.receiverImpls(inst.Call, impls)
+		// A concrete instance-method call (e.g. Java) whose method we lowered:
+		// the receiver lives in Call.Value and maps to param 0, and the real
+		// arguments EXCLUDE it, so they map to the callee's params shifted by
+		// one. Mapping args[j]->param j would seed the receiver slot and drop
+		// the last argument — an off-by-one that silently loses every
+		// cross-function instance flow. (Go interface INVOKEs name an abstract
+		// method absent from byKey, so the CHA block below handles them.)
+		fa.seedInvokeArgs(inst, callee, false)
+	} else {
+		// Static/free function or Go method call: args already align with
+		// params (Args[0]==Params[0]==receiver for a Go method). isTaintedArg
+		// also seeds when an argument is a struct carrying a tainted field,
+		// so a field-tainted struct passed by value/pointer still flows into
+		// the callee (see fieldAnyKey / ENG-3).
+		for j, a := range args {
+			if p, ok := isTaintedArg(fa.tainted, a); ok {
+				fa.addEffect(callee, j, p, a, inst)
 			}
-			if len(impls) == 1 {
-				fa.seedInvokeArgs(inst, impls[0], false)
-				fa.pullReturnTaint(inst, impls[0])
-			}
-		} else {
-			// Ambiguity is counted AFTER the signature and interface bounds have
-			// narrowed the candidate set, so a call that resolves to one
-			// implementation still seeds its receiver normally.
-			ambiguous := len(impls) > 1
-			for _, impl := range impls {
-				fa.seedInvokeArgs(inst, impl, ambiguous)
-				fa.pullReturnTaint(inst, impl)
-			}
+			fa.recordFuncArg(callee, j, a)
 		}
+	}
+	fa.pullReturnTaint(inst, callee)
+	// The callee fills tainted data into one of its out-parameters: taint
+	// the argument passed at that position (ENG-6b).
+	if pm := fa.rs.paramMemTaint[callee]; len(pm) > 0 {
+		eachArgParam(inst.Call, func(paramIdx int, a *ir.Value) {
+			if o, ok := pm[paramIdx]; ok {
+				fa.taintCallerArg(a, o, inst)
+			}
+		})
+	}
+}
+
+// applySinkWrapperSummary consumes callee's dependency sink-wrapper summary
+// (taintsParamSink), if it has one: the callee routes one of its string
+// parameters into a sink internally, and that sink's own finding was scoped
+// out. If we pass tainted data at that position, the vulnerability is HERE.
+// In user code, report it at this call site; in another dependency,
+// propagate it up so the finding ultimately lands on user code.
+func (fa *funcAnalysis) applySinkWrapperSummary(inst *ir.Instruction, callee string) {
+	psk := fa.rs.paramSinkTaint[callee]
+	if len(psk) == 0 {
+		return
+	}
+	consumeSink := func(paramIdx int, a *ir.Value) {
+		wrapper, summarized := psk[paramIdx]
+		if !summarized {
+			return
+		}
+		sinkPos := wrapper.origin
+		pos, ok := isTaintedArg(fa.tainted, a)
+		if !ok {
+			return
+		}
+		// A validator dominating this flow's source suppresses it, exactly as at
+		// a direct sink (ENG-9).
+		if fa.guards.guarded(fa.curBlock, pos, fa.tainted) {
+			return
+		}
+		if fa.funcReportable {
+			if fa.rs.reported[inst] {
+				return
+			}
+			fa.rs.reported[inst] = true
+			// The path runs on past this call site into the wrapper's own hops, so
+			// the reader is shown the library line that is actually dangerous —
+			// SinkPos stays the user call, which is where the fix belongs.
+			steps := fa.trailTo(a.GetRegName(), pos).push(fa.step(inst.Pos, StepCall)).pushAll(wrapper.trail.steps()).steps()
+			fa.res.findings = append(fa.res.findings, newTaintFinding(fa.rule, fa.mod, fa.fn, pos, inst.Pos, callee, steps, ConfidenceMedium)) // SinkPos = user call into the wrapper; Medium: sink across a call boundary
+		} else {
+			// Still inside a dependency: propagate the summary up if the tainted
+			// arg forwards a string parameter, keeping the deeper wrapper's hops.
+			forwarded := fa.localTrail(a.GetRegName(), pos).push(fa.step(inst.Pos, StepCall)).pushAll(wrapper.trail.steps())
+			fa.recordSinkParam(pos, sinkPos, forwarded)
+		}
+	}
+	eachArgParam(inst.Call, consumeSink)
+}
+
+// applyIndirectCallEffects handles an INDIRECT call through a function value:
+// the target is a function VALUE in Call.Value. This is the unifying
+// primitive for higher-order callbacks (`fn(x)` where fn is a callback
+// parameter, resolved via funcVal) and frontend-synthesized deferral/thread
+// dispatch (a FuncName known at the site). Args flow into the target's FRONT
+// params (no receiver shift).
+//
+// Binds ONLY when the resolved points-to set is a singleton AND complete — the
+// same unambiguous-only discipline untyped_dispatch uses. A generic helper
+// called with several distinct callbacks accumulates a union in funcVal, and an
+// opaque contribution means even a lone target is not provably the only callee;
+// binding either would pair one site's callback with another site's taint.
+func (fa *funcAnalysis) applyIndirectCallEffects(inst *ir.Instruction, args []*ir.Value, indirect bool) {
+	if !indirect || inst.Call.GetIsInvoke() {
+		return
+	}
+	v := inst.Call.GetValue()
+	targets := fa.targetsOf(v)
+	if len(targets) != 1 || fa.indirectOpaque(v) {
+		return
+	}
+	target := targets[0]
+	for j, a := range args {
+		if p, ok := isTaintedArg(fa.tainted, a); ok {
+			fa.addEffect(target, j, p, a, inst)
+		}
+		fa.recordFuncArg(target, j, a)
+	}
+	fa.pullReturnTaint(inst, target)
+}
+
+// applyInvokeDispatch handles interface dynamic dispatch: an INVOKE call's
+// callee is the abstract interface method, so resolve to concrete
+// implementations by method name (CHA) and flow taint into each. INVOKE args
+// exclude the receiver (it lives in Call.Value), so they map to a concrete
+// method's params shifted by one — param 0 is the receiver.
+func (fa *funcAnalysis) applyInvokeDispatch(inst *ir.Instruction) {
+	if !inst.Call.GetIsInvoke() {
+		return
+	}
+	// The dispatch discipline comes from IR the converter supplies, not from
+	// any language check in the engine. When the frontend resolved the call by
+	// bare method NAME with no static receiver type (untyped_dispatch), apply it
+	// ONLY when the name is unambiguous: otherwise a polymorphic name like
+	// `execute` would seed taint into every same-named method across unrelated
+	// classes, a cross-object fan-out that floods real code with false
+	// positives. A type-resolved invoke fans out to every implementer, the
+	// standard CHA over-approximation — bounded first by what the call site's
+	// own signature rules out (see signatureAllows), since methodImpls is
+	// keyed on the bare name and `Query` alone spans a repository, an ORM and
+	// a request accessor.
+	impls := fa.signatureImpls(inst.Call, fa.idx.methodImpls[inst.Call.GetMethodName()])
+	impls = fa.interfaceImpls(inst.Call, impls)
+	if inst.Call.GetUntypedDispatch() {
+		// An ambiguous name is not always an unknown receiver: `h = C()` then
+		// `h.load(x)` names the class right there (see receiverImpls).
+		if len(impls) > 1 {
+			impls = fa.receiverImpls(inst.Call, impls)
+		}
+		if len(impls) == 1 {
+			fa.seedInvokeArgs(inst, impls[0], false)
+			fa.pullReturnTaint(inst, impls[0])
+		}
+		return
+	}
+	// Ambiguity is counted AFTER the signature and interface bounds have
+	// narrowed the candidate set, so a call that resolves to one
+	// implementation still seeds its receiver normally.
+	ambiguous := len(impls) > 1
+	for _, impl := range impls {
+		fa.seedInvokeArgs(inst, impl, ambiguous)
+		fa.pullReturnTaint(inst, impl)
 	}
 }
 

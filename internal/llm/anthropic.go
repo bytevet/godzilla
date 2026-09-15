@@ -81,7 +81,7 @@ func (a *AnthropicReviewer) reviewAgentic(ctx context.Context, f analysis.Findin
 	msgs := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(buildAgenticPrompt(f, codeContext))),
 	}
-	for round := 0; round < maxToolRounds; round++ {
+	for range maxToolRounds {
 		resp, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 			Model:     a.model,
 			MaxTokens: 1024,
@@ -109,7 +109,7 @@ func (a *AnthropicReviewer) reviewAgentic(ctx context.Context, f analysis.Findin
 		results := make([]anthropic.ContentBlockParamUnion, 0, len(toolUses))
 		for _, tu := range toolUses {
 			out := dispatchTool(a.tools, tu.Name, tu.Input)
-			results = append(results, anthropic.NewToolResultBlock(tu.ID, out, strings.HasPrefix(out, "error: ")))
+			results = append(results, anthropic.NewToolResultBlock(tu.ID, out, strings.HasPrefix(out, toolErrorPrefix)))
 		}
 		msgs = append(msgs, anthropic.NewUserMessage(results...))
 	}

@@ -1,7 +1,6 @@
 package loader
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -79,14 +78,8 @@ func TestDefaultPropagatorsFragment(t *testing.T) {
 // wrappers differ.
 func TestDefaultPropagatorsUserOverride(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("_default-propagators.yaml", "propagators:\n  - \"go:*mycorp.Normalize\"\n")
-	write("r.yaml", "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Sink\"]\n")
+	writeRule(t, dir, "_default-propagators.yaml", "propagators:\n  - \"go:*mycorp.Normalize\"\n")
+	writeRule(t, dir, "r.yaml", "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Sink\"]\n")
 
 	rs, err := LoadFile(filepath.Join(dir, "r.yaml"))
 	if err != nil {

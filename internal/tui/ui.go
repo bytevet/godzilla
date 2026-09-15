@@ -126,9 +126,7 @@ func Start(opts Options) *UI {
 		tick = 100 * time.Millisecond
 	}
 	u.ticker = time.NewTicker(tick)
-	u.ticked.Add(1)
-	go func() {
-		defer u.ticked.Done()
+	u.ticked.Go(func() {
 		for {
 			select {
 			case <-u.ticker.C:
@@ -138,7 +136,7 @@ func Start(opts Options) *UI {
 				return
 			}
 		}
-	}()
+	})
 	return u
 }
 

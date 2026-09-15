@@ -396,16 +396,15 @@ func javaMajor(javaExe string) (int, bool) {
 // `openjdk version "24.0.1" 2025-...` -> 24, or the legacy `java version
 // "1.8.0_401"` -> 8. Returns false when no version token is found.
 func parseJavaMajor(out string) (int, bool) {
-	i := strings.Index(out, "version \"")
-	if i < 0 {
+	_, rest, ok := strings.Cut(out, "version \"")
+	if !ok {
 		return 0, false
 	}
-	rest := out[i+len("version \""):]
-	j := strings.IndexByte(rest, '"')
-	if j < 0 {
+	verStr, _, ok := strings.Cut(rest, `"`)
+	if !ok {
 		return 0, false
 	}
-	parts := strings.FieldsFunc(rest[:j], func(r rune) bool { return r == '.' || r == '_' || r == '-' })
+	parts := strings.FieldsFunc(verStr, func(r rune) bool { return r == '.' || r == '_' || r == '-' })
 	if len(parts) == 0 {
 		return 0, false
 	}
@@ -435,7 +434,7 @@ func javaMajorFromReleaseFile(javaExe string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		val, ok := strings.CutPrefix(strings.TrimSpace(line), `JAVA_VERSION="`)
 		if !ok {
 			continue
@@ -572,7 +571,7 @@ func classOutputDirs(root, suffix string) []string {
 	// that make up the expected suffix lets the walk descend into them while still
 	// skipping unrelated ignored trees.
 	suffixParts := map[string]bool{}
-	for _, part := range strings.Split(suffix, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(suffix, string(filepath.Separator)) {
 		suffixParts[part] = true
 	}
 	var dirs []string

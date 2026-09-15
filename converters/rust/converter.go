@@ -297,7 +297,6 @@ func parseCargoTargets(data []byte) []cargoTarget {
 				SrcPath string   `json:"src_path"`
 			} `json:"targets"`
 		} `json:"packages"`
-		WorkspaceMembers []string `json:"workspace_members"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil

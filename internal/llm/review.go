@@ -135,9 +135,7 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	for k := range jobs {
-		wg.Add(1)
-		go func(k int) {
-			defer wg.Done()
+		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			rctx := ctx
@@ -148,7 +146,7 @@ func FilterWithConfig(ctx context.Context, r Reviewer, findings []analysis.Findi
 			}
 			verdicts[k], errs[k] = r.Review(rctx, out[jobs[k].idx], jobs[k].cc)
 			stage.Advance(1)
-		}(k)
+		})
 	}
 	wg.Wait()
 

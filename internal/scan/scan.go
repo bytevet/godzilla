@@ -47,10 +47,10 @@ type LangCoverage struct {
 	// not a guarantee.
 	Files   int
 	Skipped int
-	// Degraded marks a frontend that ran to completion but at reduced depth: a Go
-	// dependency closure trimmed to fit the source-byte budget, whose excluded
-	// packages get bodyless SSA instead of lowered bodies. DegradedNote names the
-	// counts.
+	// Degraded marks a frontend that ran to completion but at reduced depth: for
+	// Go, a dependency closure trimmed to fit the source-byte budget (excluded
+	// packages get bodyless SSA instead of lowered bodies), a package that failed
+	// to load/type-check cleanly, or both. DegradedNote names the reason(s).
 	//
 	// Deliberately NOT Converted=false. Converted=false means "never analyzed",
 	// which puts the entry in Failed() and fails -strict; a degraded scan RAN and
@@ -85,9 +85,9 @@ func CoverageSummary(coverage []LangCoverage) string {
 		case !c.Converted:
 			status = "FAILED"
 		case c.Degraded:
-			// The frontend ran and its findings hold; the dependency closure behind
-			// them was trimmed to fit the memory budget. Distinct from FAILED, which
-			// alone fails -strict.
+			// The frontend ran and its findings hold, but at reduced depth (e.g. the Go
+			// dependency closure was trimmed to fit the memory budget, or a package
+			// failed to load cleanly). Distinct from FAILED, which alone fails -strict.
 			status = "DEGRADED"
 		case c.Skipped > 0:
 			// The frontend ran, so the language is not "failed", yet some of its
@@ -315,36 +315,32 @@ func runAnalyses(prog *ir.Program, rs *rules.RuleSet, srcFiles []string, filePat
 		lines                               int
 		wg                                  sync.WaitGroup
 	)
-	wg.Add(4)
 	// ScopeSeed makes dependency functions analyzed demand-driven (only when taint
 	// reaches them) when deps were lowered; a nil/empty set seeds every function.
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		e := analysis.NewEngine(rs).ScopeSeed(seedScope(prog, targetPkgs))
 		if cfg.diagnostics {
 			taint, stats = e.AnalyzeWithStats(prog)
 		} else {
 			taint = e.Analyze(prog)
 		}
-	}()
-	go func() { defer wg.Done(); danger = analysis.ScanDangerousCalls(prog, rs) }()
-	go func() { defer wg.Done(); secrets = analysis.ScanSecrets(prog, rs) }()
+	})
+	wg.Go(func() { danger = analysis.ScanDangerousCalls(prog, rs) })
+	wg.Go(func() { secrets = analysis.ScanSecrets(prog, rs) })
 	// Line counting joins the same WaitGroup: re-reading the source the frontends
 	// already read is far cheaper than the taint engine, so alongside it it costs
 	// no measurable wall time. srcFiles is empty unless diagnostics were asked for.
-	go func() { defer wg.Done(); lines = countLines(srcFiles) }()
+	wg.Go(func() { lines = countLines(srcFiles) })
 	if filePath != "" {
 		// Raw config files (.env, compose, Dockerfile, CI YAML, ...) that no
 		// language frontend parses — the dominant hardcoded-secret vector.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if inv != nil {
 				fileSecrets = analysis.ScanSecretsInPaths(inv.Files(), rs, isSourcePath)
 			} else {
 				fileSecrets = analysis.ScanSecretsInFiles(filePath, rs, isSourcePath)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -540,9 +536,7 @@ func convert(path string, cfg config) (*ir.Program, []LangCoverage, map[string]b
 		if present[fe.name] == 0 {
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cov := LangCoverage{Language: fe.name, Detected: true, Files: present[fe.name]}
 			r, err := fe.convert(path, inv, cfg)
 			cov.Skipped = r.skipped
@@ -555,7 +549,7 @@ func convert(path string, cfg config) (*ir.Program, []LangCoverage, map[string]b
 			cov.Converted = true
 			cov.Degraded, cov.DegradedNote = r.degraded, r.degradedNote
 			results[i] = &feResult{prog: r.prog, cov: cov, targetPkgs: r.targetPkgs}
-		}()
+		})
 	}
 	wg.Wait()
 	targetPkgs := map[string]bool{}

@@ -253,6 +253,14 @@ func ReviewToolSpecs() []ToolSpec {
 	}
 }
 
+// toolErrorPrefix marks a dispatchTool result as a failure rather than a
+// result the model should read as evidence. anthropic.go tests for it to set
+// the tool_result block's is_error flag.
+const toolErrorPrefix = "error: "
+
+// errString formats err as a dispatchTool failure string.
+func errString(err error) string { return toolErrorPrefix + err.Error() }
+
 // dispatchTool executes a named reviewer tool with the model-supplied JSON input
 // against tb and returns the tool result text. An unknown tool or malformed
 // input yields an error string the model can read and recover from (the loop
@@ -266,11 +274,11 @@ func dispatchTool(tb ToolBox, name string, input json.RawMessage) string {
 			End   int    `json:"end"`
 		}
 		if err := json.Unmarshal(input, &in); err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		out, err := tb.ReadFileRange(in.Path, in.Start, in.End)
 		if err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		return out
 	case "find_function":
@@ -278,11 +286,11 @@ func dispatchTool(tb ToolBox, name string, input json.RawMessage) string {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(input, &in); err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		out, err := tb.FindFunction(in.Name)
 		if err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		return out
 	case "grep":
@@ -291,14 +299,14 @@ func dispatchTool(tb ToolBox, name string, input json.RawMessage) string {
 			MaxHits int    `json:"max_hits"`
 		}
 		if err := json.Unmarshal(input, &in); err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		out, err := tb.Grep(in.Pattern, in.MaxHits)
 		if err != nil {
-			return "error: " + err.Error()
+			return errString(err)
 		}
 		return out
 	default:
-		return "error: unknown tool " + name
+		return toolErrorPrefix + "unknown tool " + name
 	}
 }

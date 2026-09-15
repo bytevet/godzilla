@@ -374,21 +374,27 @@ func validate(rs *rules.RuleSet) error {
 		// a copy-pasted "#0" becomes part of the literal glob text (classifyGlob
 		// has no notion of "#"), which can never match any real callee — a typo
 		// that silently drops the rule's coverage instead of failing to load.
-		for _, s := range r.Sanitizers {
-			if strings.Contains(s, "#") {
-				problems = append(problems, fmt.Sprintf("rule %q has sanitizer %q: '#' has no meaning on sanitizers", r.ID, s))
+		calleePatterns := make([]string, len(r.Callees))
+		for ci, c := range r.Callees {
+			calleePatterns[ci] = c.Pattern
+		}
+		for _, f := range []struct {
+			label    string // also the plural, via label+"s"
+			patterns []string
+		}{
+			{"sanitizer", r.Sanitizers},
+			{"validator", r.Validators},
+			{"callee", calleePatterns},
+		} {
+			for _, s := range f.patterns {
+				if strings.Contains(s, "#") {
+					problems = append(problems, fmt.Sprintf("rule %q has %s %q: '#' has no meaning on %ss", r.ID, f.label, s, f.label))
+				}
 			}
 		}
-		for _, s := range r.Validators {
-			if strings.Contains(s, "#") {
-				problems = append(problems, fmt.Sprintf("rule %q has validator %q: '#' has no meaning on validators", r.ID, s))
-			}
-		}
-		for _, c := range r.Callees {
-			if strings.Contains(c.Pattern, "#") {
-				problems = append(problems, fmt.Sprintf("rule %q has callee %q: '#' has no meaning on callees", r.ID, c.Pattern))
-			}
-		}
+		// request_object_sources reads "has no meaning there" rather than "on
+		// request_object_sources": too long a plural to fold into the table
+		// above, so it keeps its own loop.
 		for _, s := range r.RequestObjectSources {
 			if strings.Contains(s, "#") {
 				problems = append(problems, fmt.Sprintf("rule %q has request_object_source %q: '#' has no meaning there", r.ID, s))

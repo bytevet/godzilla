@@ -10,18 +10,18 @@ import (
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
 )
 
-// A Ripper sexp node is a JSON value: a list (`[]interface{}` whose head is a
+// A Ripper sexp node is a JSON value: a list (`[]any` whose head is a
 // string tag) or a scalar (string / json.Number / nil). These helpers navigate
 // it without panicking on unexpected shapes.
 
-func asList(n interface{}) ([]interface{}, bool) {
-	l, ok := n.([]interface{})
+func asList(n any) ([]any, bool) {
+	l, ok := n.([]any)
 	return l, ok
 }
 
 // tag returns a node's head tag ("def", "call", "@ident", …), or "" if the node
 // is not a tagged list.
-func tag(n interface{}) string {
+func tag(n any) string {
 	if l, ok := asList(n); ok && len(l) > 0 {
 		if s, ok := l[0].(string); ok {
 			return s
@@ -31,7 +31,7 @@ func tag(n interface{}) string {
 }
 
 // at returns the i-th element of a list node, or nil.
-func at(n interface{}, i int) interface{} {
+func at(n any, i int) any {
 	if l, ok := asList(n); ok && i >= 0 && i < len(l) {
 		return l[i]
 	}
@@ -40,7 +40,7 @@ func at(n interface{}, i int) interface{} {
 
 // identName returns the token text of an `@ident`/`@const`/`@kw`/`@label`
 // leaf (`["@ident","name",[line,col]]`), or "".
-func identName(n interface{}) string {
+func identName(n any) string {
 	if l, ok := asList(n); ok && len(l) >= 2 {
 		if s, ok := l[1].(string); ok {
 			return s
@@ -51,7 +51,7 @@ func identName(n interface{}) string {
 
 // firstPos finds the first `[line,col]` position pair in n (depth-first), which
 // tokens carry as their trailing element.
-func firstPos(n interface{}) (line, col int, ok bool) {
+func firstPos(n any) (line, col int, ok bool) {
 	l, isList := asList(n)
 	if !isList {
 		return 0, 0, false
@@ -78,7 +78,7 @@ func firstPos(n interface{}) (line, col int, ok bool) {
 // becomes a function, and the remaining top-level statements are collected into a
 // synthetic "<module>" function so script- and Sinatra-style handler code is
 // still analyzed.
-func convertModule(root interface{}, filename, moduleName string) *ir.Module {
+func convertModule(root any, filename, moduleName string) *ir.Module {
 	mod := &ir.Module{Name: moduleName, Language: "ruby"}
 
 	stmts := programStmts(root)
@@ -88,7 +88,7 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	// `ruby:<module>.`). See localCallee for what each resolves.
 	localFuncs := map[string]bool{}
 	qualifiedFuncs := map[string]bool{}
-	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+	walkDefs(root, defScope{}, func(d any, sc defScope) {
 		// A singleton def is NOT recorded: its function is named `ruby:<Class>.m`,
 		// so resolving a bare self-call to `ruby:<module>.<prefix>m` here would
 		// point the callee at a function that does not exist.
@@ -100,7 +100,7 @@ func convertModule(root interface{}, filename, moduleName string) *ir.Module {
 	})
 
 	var functions []*ir.Function
-	walkDefs(root, defScope{}, func(d interface{}, sc defScope) {
+	walkDefs(root, defScope{}, func(d any, sc defScope) {
 		switch {
 		case tag(d) == "defs":
 			functions = append(functions, lowerDefs(d, filename, moduleName, sc.className, sc.qualPrefix, localFuncs, qualifiedFuncs))
@@ -134,7 +134,7 @@ type defScope struct {
 // reached. That generality is the point: lowerStmt recurses into all of those,
 // and a def the collectors miss is lowered by NOBODY — it leaves no intrinsic
 // and fails no test, it simply is not analyzed.
-func walkDefs(n interface{}, sc defScope, visit func(def interface{}, sc defScope)) {
+func walkDefs(n any, sc defScope, visit func(def any, sc defScope)) {
 	switch tag(n) {
 	case "def", "defs":
 		visit(n, sc)
@@ -160,7 +160,7 @@ func walkDefs(n interface{}, sc defScope, visit func(def interface{}, sc defScop
 // makes it a class method, so it is named and shaped like `def self.m`: a
 // class-qualified canonical name a call on the class resolves to from another
 // file, and a receiver in parameter slot 0 to line the arguments up.
-func lowerSingletonDef(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+func lowerSingletonDef(defNode any, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	fn := lowerDef(defNode, filename, moduleName, qualPrefix, localFuncs, qualifiedFuncs)
 	fn.Name = fn.ObjectName
 	if className != "" {
@@ -171,7 +171,7 @@ func lowerSingletonDef(defNode interface{}, filename, moduleName, className, qua
 }
 
 // programStmts returns the top-level statement list of a `["program",[stmts]]`.
-func programStmts(root interface{}) []interface{} {
+func programStmts(root any) []any {
 	if tag(root) != "program" {
 		return nil
 	}
@@ -183,7 +183,7 @@ func programStmts(root interface{}) []interface{} {
 // lays these out differently: `["class", const, superclass_or_null, bodystmt]`
 // (body at index 3) but `["module", const, bodystmt]` (body at index 2). A fixed
 // index 3 for both silently drops every nested module's contents.
-func classModuleBody(s interface{}) interface{} {
+func classModuleBody(s any) any {
 	if tag(s) == "module" {
 		return at(s, 2)
 	}
@@ -191,7 +191,7 @@ func classModuleBody(s interface{}) interface{} {
 }
 
 // bodyStmts returns the statement list inside a `["bodystmt",[stmts],…]`.
-func bodyStmts(n interface{}) []interface{} {
+func bodyStmts(n any) []any {
 	if tag(n) != "bodystmt" {
 		return nil
 	}
@@ -201,8 +201,8 @@ func bodyStmts(n interface{}) []interface{} {
 
 // lowerModuleInit lowers the top-level non-def/class statements into a
 // synthetic "<module>" function, or returns nil if there are none.
-func lowerModuleInit(stmts []interface{}, filename, moduleName string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
-	var top []interface{}
+func lowerModuleInit(stmts []any, filename, moduleName string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+	var top []any
 	for _, s := range stmts {
 		switch tag(s) {
 		case "def", "defs", "class", "module", "void_stmt":
@@ -239,7 +239,7 @@ func instrCount(blocks []*ir.BasicBlock) int {
 }
 
 // lowerDef lowers one `def` into a function.
-func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+func lowerDef(defNode any, filename, moduleName, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	name := identName(at(defNode, 1))
 	qualname := qualPrefix + name
 	fn := &ir.Function{
@@ -272,7 +272,7 @@ func lowerDef(defNode interface{}, filename, moduleName, qualPrefix string, loca
 // here from ANOTHER file. A synthetic receiver parameter occupies slot 0,
 // mirroring the receiver a `recv.m(args)` call site prepends, so the arg->param
 // mapping lines the first real argument up with the first declared parameter.
-func lowerDefs(defNode interface{}, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
+func lowerDefs(defNode any, filename, moduleName, className, qualPrefix string, localFuncs, qualifiedFuncs map[string]bool) *ir.Function {
 	name := identName(at(defNode, 3))
 	canonical := "ruby:" + className + "." + name
 	if className == "" {
@@ -318,7 +318,7 @@ const kwargSlotParam = "@kwargs"
 // declared positional: the caller's placeholder sits after the positionals
 // PASSED, this one after those declared. `*rest` and post-required params are
 // omitted because they shift the same alignment.
-func paramNames(n interface{}) []string {
+func paramNames(n any) []string {
 	// def may wrap params in `paren`: ["paren", ["params", …]].
 	if tag(n) == "paren" {
 		n = at(n, 1)
@@ -344,7 +344,7 @@ func paramNames(n interface{}) []string {
 
 // keywordParamNames returns a def's keyword parameters (index 5) followed by its
 // `**rest` (index 6), in declaration order.
-func keywordParamNames(n interface{}) []string {
+func keywordParamNames(n any) []string {
 	out := pairParamNames(at(n, 5))
 	// `**rest` arrives wrapped: [kwrest_param, [@ident, "rest"]]. An anonymous
 	// `**` has nil inside and yields no name.
@@ -358,7 +358,7 @@ func keywordParamNames(n interface{}) []string {
 // spells both the optional (index 2) and keyword (index 5) parameter lists. A
 // keyword's ident is an `@label` carrying its trailing colon; a positional name
 // can never end in one, so the trim is unconditional.
-func pairParamNames(list interface{}) []string {
+func pairParamNames(list any) []string {
 	items, _ := asList(list)
 	var out []string
 	for _, it := range items {
@@ -442,7 +442,7 @@ func (fs *funcState) read(name string) *ir.Value {
 	return fs.b.ReadVariable(name, fs.cur)
 }
 
-func (fs *funcState) newValueInst(n interface{}) *ir.Instruction {
+func (fs *funcState) newValueInst(n any) *ir.Instruction {
 	return &ir.Instruction{Name: fs.newReg(), Pos: posFrom(fs.filename, n)}
 }
 
@@ -463,18 +463,18 @@ func (fs *funcState) ivarGlobal(ivarName string) string {
 // assocPairs returns the `assoc_new` pairs of a hash node. Ripper spells the two
 // hash forms differently -- `bare_assoc_hash` holds the pair list directly, while
 // a braced `hash` wraps it in `assoclist_from_args` (and is nil when empty).
-func assocPairs(n interface{}) []interface{} {
+func assocPairs(n any) []any {
 	return assocNodes(n, "assoc_new")
 }
 
 // assocSplats returns the `assoc_splat` entries of a hash node -- the `**rest` in
 // `t(key, **params, scope: s)`. Emitted after assocPairs and never interleaved:
 // markers bind to parameters by position, and paramNames puts `**rest` last.
-func assocSplats(n interface{}) []interface{} {
+func assocSplats(n any) []any {
 	return assocNodes(n, "assoc_splat")
 }
 
-func assocNodes(n interface{}, want string) []interface{} {
+func assocNodes(n any, want string) []any {
 	list := at(n, 1)
 	if tag(list) == "assoclist_from_args" {
 		list = at(list, 1)
@@ -483,7 +483,7 @@ func assocNodes(n interface{}, want string) []interface{} {
 	if !ok {
 		return nil
 	}
-	var out []interface{}
+	var out []any
 	for _, p := range pairs {
 		if tag(p) == want {
 			out = append(out, p)
@@ -499,7 +499,7 @@ func assocNodes(n interface{}, want string) []interface{} {
 // A nameless key still gets a marker: the name is only rule metadata, while the
 // operand is the taint channel, and a computed key loses the former without
 // losing the latter.
-func assocKeyName(pair interface{}) string {
+func assocKeyName(pair any) string {
 	k := at(pair, 1)
 	switch tag(k) {
 	case "@label":
@@ -521,25 +521,25 @@ func assocKeyName(pair interface{}) string {
 // symbolText returns a `symbol_literal`'s bare name. Ripper wraps it twice --
 // [symbol_literal, [symbol, [@ident, "html"]]] -- and reading it at one level
 // yields a list, not a name. A `dyna_symbol` (`:"#{x}"`) names nothing.
-func symbolText(n interface{}) string { return identName(at(at(n, 1), 1)) }
+func symbolText(n any) string { return identName(at(at(n, 1), 1)) }
 
 // labelName returns a keyword key's name. Ripper's `@label` text carries the
 // trailing colon (`html:`), and every consumer wants it gone.
-func labelName(n interface{}) string { return strings.TrimSuffix(scalarText(n), ":") }
+func labelName(n any) string { return strings.TrimSuffix(scalarText(n), ":") }
 
 // posFrom converts a Ripper node's position to a gIR one. Ripper counts columns
 // from 0 and every other frontend — and every editor a reported column is read
 // in — counts from 1, so the column is shifted here. A node with no position at
 // all keeps Line 0, which the report layer already reads as "unknown"; a
 // Column 1 alongside it would claim a precision that does not exist.
-func posFrom(filename string, n interface{}) *ir.Position {
+func posFrom(filename string, n any) *ir.Position {
 	if line, col, ok := firstPos(n); ok {
 		return &ir.Position{Filename: filename, Line: int32(line), Column: int32(col + 1)}
 	}
 	return &ir.Position{Filename: filename}
 }
 
-func (fs *funcState) lowerBody(stmts []interface{}) {
+func (fs *funcState) lowerBody(stmts []any) {
 	for _, s := range stmts {
 		fs.lowerStmt(s)
 	}
@@ -549,9 +549,9 @@ func (fs *funcState) lowerBody(stmts []interface{}) {
 // expression's value — Ruby's implicit return — so the engine can summarize a
 // helper that returns request data as taint-returning. An explicit `return x`
 // emits its own RET (see lowerStmt); this covers the fall-through value.
-func (fs *funcState) lowerDefBody(stmts []interface{}) {
+func (fs *funcState) lowerDefBody(stmts []any) {
 	var last *ir.Value
-	var lastNode interface{}
+	var lastNode any
 	for _, s := range stmts {
 		last = fs.lowerStmt(s)
 		lastNode = s
@@ -566,7 +566,7 @@ func (fs *funcState) lowerDefBody(stmts []interface{}) {
 
 // lowerSeqLast lowers a sequence of expressions and returns the last value (or
 // the empty string for an empty sequence) — the value of a `(...)` or `#{...}`.
-func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
+func (fs *funcState) lowerSeqLast(exprs []any) *ir.Value {
 	var last *ir.Value
 	for _, e := range exprs {
 		last = fs.lowerExpr(e)
@@ -580,7 +580,7 @@ func (fs *funcState) lowerSeqLast(exprs []interface{}) *ir.Value {
 // assignTarget binds val to an assignment target. An instance variable rebinds
 // the local value (intra-method precision) AND stores into the per-(class,
 // @ivar) synthetic global for cross-method flow (see ivarGlobal).
-func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
+func (fs *funcState) assignTarget(target any, val *ir.Value) {
 	leaf := at(target, 1)
 	name := identName(leaf)
 	if name != "" {
@@ -599,7 +599,7 @@ func (fs *funcState) assignTarget(target interface{}, val *ir.Value) {
 
 // lowerStmt lowers one statement and returns its Ruby value (the value an
 // implicit return would yield); callers that don't need the value discard it.
-func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
+func (fs *funcState) lowerStmt(s any) *ir.Value {
 	switch tag(s) {
 	case "void_stmt", "":
 		return nil
@@ -640,7 +640,7 @@ func (fs *funcState) lowerStmt(s interface{}) *ir.Value {
 // a side effect. Unhandled nodes become a ruby.unsupported intrinsic so an
 // unmodeled construct never silently claims to carry no taint AND is visible to
 // the converter's coverage check.
-func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
+func (fs *funcState) lowerExpr(n any) *ir.Value {
 	switch tag(n) {
 	case "":
 		return ssabuild.Str("")
@@ -705,7 +705,7 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 	case "paren":
 		inner := at(n, 1)
 		if l, ok := asList(inner); ok && len(l) > 0 {
-			if _, isStmtList := l[0].([]interface{}); isStmtList {
+			if _, isStmtList := l[0].([]any); isStmtList {
 				return fs.lowerSeqLast(l)
 			}
 		}
@@ -774,11 +774,11 @@ func (fs *funcState) lowerExpr(n interface{}) *ir.Value {
 
 // lowerStringLiteral lowers `"...#{x}..."`, folding the parts with BIN_OP_ADD so
 // taint from an embedded expression flows to the string.
-func (fs *funcState) lowerStringLiteral(n interface{}) *ir.Value {
+func (fs *funcState) lowerStringLiteral(n any) *ir.Value {
 	return fs.lowerStringContent(at(n, 1))
 }
 
-func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
+func (fs *funcState) lowerStringContent(content any) *ir.Value {
 	l, ok := asList(content)
 	if !ok || len(l) < 2 {
 		return ssabuild.Str("")
@@ -798,7 +798,7 @@ func (fs *funcState) lowerStringContent(content interface{}) *ir.Value {
 // lowerCase lowers `case cond; when …; else …; end`. The condition and EVERY
 // branch body are lowered inline into the current block, so taint reaching any
 // branch — a raw SQL string built only in the `else` arm — is still analyzed.
-func (fs *funcState) lowerCase(n interface{}) *ir.Value {
+func (fs *funcState) lowerCase(n any) *ir.Value {
 	fs.lowerExpr(at(n, 1)) // subject expression (for any embedded source/sink)
 	var last *ir.Value
 	node := at(n, 2)
@@ -834,7 +834,7 @@ func (fs *funcState) lowerCase(n interface{}) *ir.Value {
 // statement's value. Unlike lowerSeqLast (expressions), it dispatches through
 // lowerStmt, so an `assign`/`opassign`/`return` inside a branch or loop body
 // rebinds instead of falling through to a `ruby.unsupported` intrinsic.
-func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
+func (fs *funcState) lowerStmtSeqLast(stmts []any) *ir.Value {
 	var last *ir.Value
 	for _, s := range stmts {
 		last = fs.lowerStmt(s)
@@ -848,7 +848,7 @@ func (fs *funcState) lowerStmtSeqLast(stmts []interface{}) *ir.Value {
 // layout (`[tag, cond, [body], tail]`, tail = elsif/else/nil); `unless`'s
 // polarity is immaterial to taint since both arms are reachable. A nested `elsif`
 // recurses into the else-block, so a chain becomes nested diamonds.
-func (fs *funcState) lowerIf(n interface{}) *ir.Value {
+func (fs *funcState) lowerIf(n any) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
 	var lastBody, lastElse *ir.Value
 	thenEnd, elseEnd, merge := fs.b.IfDiamond(&fs.cur, &fs.terminated, cond,
@@ -883,7 +883,7 @@ func (fs *funcState) branchResult(a, b *ir.Value, thenEnd, elseEnd, merge ssabui
 
 // lowerElseTail lowers the tail of an if/unless chain in the current (else)
 // block: an `elsif` (recursively — its own diamond), an `else` body, or nil.
-func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
+func (fs *funcState) lowerElseTail(node any) *ir.Value {
 	switch tag(node) {
 	case "elsif":
 		return fs.lowerIf(node)
@@ -900,7 +900,7 @@ func (fs *funcState) lowerElseTail(node interface{}) *ir.Value {
 // the header/body/exit blocks and the seal order (the header PHI over
 // [pre-loop, back-edge] is what carries loop-carried taint — see the
 // scaffold's doc). cond is a Ruby AST node, lowered in the (unsealed) header.
-func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value {
+func (fs *funcState) lowerLoopCFG(cond any, lowerBody func()) *ir.Value {
 	fs.b.HeaderLoop(&fs.cur, &fs.terminated,
 		func() *ir.Value { return fs.lowerExpr(cond) },
 		lowerBody)
@@ -909,7 +909,7 @@ func (fs *funcState) lowerLoopCFG(cond interface{}, lowerBody func()) *ir.Value 
 
 // lowerWhile lowers `while`/`until cond; body; end` into the shared loop CFG.
 // `until` differs only in condition polarity, immaterial to taint.
-func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
+func (fs *funcState) lowerWhile(n any) *ir.Value {
 	return fs.lowerLoopCFG(at(n, 1), func() {
 		if bstmts, ok := asList(at(n, 2)); ok {
 			fs.lowerStmtSeqLast(bstmts)
@@ -923,7 +923,7 @@ func (fs *funcState) lowerWhile(n interface{}) *ir.Value {
 // the pre-modifier value, so a binding rebound in the guarded statement
 // reconciles against it via the merge PHI and `x = safe unless c` keeps the
 // original value live on the not-taken path.
-func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
+func (fs *funcState) lowerCondMod(n any) *ir.Value {
 	cond := fs.lowerExpr(at(n, 1)) // condition (also lowers any embedded source/sink)
 	thenB := fs.b.NewBlock()
 	merge := fs.b.NewBlock()
@@ -948,7 +948,7 @@ func (fs *funcState) lowerCondMod(n interface{}) *ir.Value {
 // CFG as lowerWhile, so loop-carried taint through the guarded statement is
 // modeled (a pre-test loop; `stmt until cond` on a non-begin statement is
 // pre-test in Ruby, and treating it so is conservative for taint).
-func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
+func (fs *funcState) lowerLoopMod(n any) *ir.Value {
 	return fs.lowerLoopCFG(at(n, 1), func() {
 		fs.lowerStmt(at(n, 2)) // loop body statement
 	})
@@ -957,7 +957,7 @@ func (fs *funcState) lowerLoopMod(n interface{}) *ir.Value {
 // lowerBacktick lowers a backtick command literal (and %x{}) — which executes a
 // shell command — to a synthetic CALL "ruby:%x" whose args are the literal's
 // parts, so a tainted interpolation reaches the sink.
-func (fs *funcState) lowerBacktick(n interface{}) *ir.Value {
+func (fs *funcState) lowerBacktick(n any) *ir.Value {
 	parts, _ := asList(at(n, 1))
 	var args []*ir.Value
 	for _, p := range parts {
@@ -974,7 +974,7 @@ func (fs *funcState) lowerBacktick(n interface{}) *ir.Value {
 // propagator AND the kind ssrf.go's constant-prefix reconstruction walks, so a
 // comparison lowered as one would make `user == "admin"` carry taint and read as
 // string building.
-func (fs *funcState) lowerBinary(n interface{}) *ir.Value {
+func (fs *funcState) lowerBinary(n any) *ir.Value {
 	left := fs.lowerExpr(at(n, 1))
 	right := fs.lowerExpr(at(n, 3))
 	op := scalarText(at(n, 2))
@@ -1037,7 +1037,7 @@ func binOpKind(op string) ir.BinOpKind {
 	return ir.BinOpKind_BIN_OP_ADD // unknown operator: propagate conservatively
 }
 
-func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n interface{}) *ir.Value {
+func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n any) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_BIN_OP
 	inst.BinOp = kind
@@ -1056,7 +1056,7 @@ func (fs *funcState) emitBinOp(kind ir.BinOpKind, left, right *ir.Value, n inter
 // constant as opaque, so a local happening to be named `params`, or a class like
 // `User`, is not mistaken for a request. Which opaque-base accessors actually
 // seed taint is decided by the rulepack source globs, not here.
-func (fs *funcState) isOpaqueBase(recv interface{}) (name string, ok bool) {
+func (fs *funcState) isOpaqueBase(recv any) (name string, ok bool) {
 	switch tag(recv) {
 	case "vcall":
 		if inner := at(recv, 1); tag(inner) == "@ident" {
@@ -1191,7 +1191,7 @@ func resolveCellTemplateCalls(prog *ir.Program) {
 // lowerAref lowers `base[index]`. When the base is an opaque request hash
 // (`params[:x]`, `cookies['x']`), it becomes a synthetic source CALL so the
 // engine seeds taint; otherwise it is an INDEX whose taint flows from the base.
-func (fs *funcState) lowerAref(n interface{}) *ir.Value {
+func (fs *funcState) lowerAref(n any) *ir.Value {
 	base := at(n, 1)
 	if name, ok := fs.isOpaqueBase(base); ok {
 		if requestIndexBases[name] {
@@ -1212,7 +1212,7 @@ func (fs *funcState) lowerAref(n interface{}) *ir.Value {
 // lowerDotCall lowers `recv.method(args?)`; args is nil for the no-arg `call`
 // form. An accessor off an opaque request base becomes a source CALL (see
 // requestDotBases).
-func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
+func (fs *funcState) lowerDotCall(n any, args []any) *ir.Value {
 	recv := at(n, 1)
 	method := identName(at(n, 3))
 	if name, ok := fs.isOpaqueBase(recv); ok && requestDotBases[name] {
@@ -1239,7 +1239,7 @@ func (fs *funcState) lowerDotCall(n interface{}, args []interface{}) *ir.Value {
 // receiver is a constant (a class/module: User.where, Open3.capture3), else the
 // bare `ruby:<method>` (Ruby is dynamically dispatched, so method-name rules are
 // the pragmatic join).
-func (fs *funcState) calleeFor(recv interface{}, method string) string {
+func (fs *funcState) calleeFor(recv any, method string) string {
 	if (tag(recv) == "var_ref" || tag(recv) == "vcall") && tag(at(recv, 1)) == "@const" {
 		return "ruby:" + identName(at(recv, 1)) + "." + method
 	}
@@ -1256,8 +1256,8 @@ func (fs *funcState) calleeFor(recv interface{}, method string) string {
 // receiver method chain is rooted at, or "" if it does not root at a constant.
 // It unwraps call / method_add_arg / method_add_block nodes down to the chain's
 // head receiver: `Foo::Bar.a(x).b` roots at `Foo::Bar`, base `Bar`.
-func chainRootConstBase(n interface{}) string {
-	for i := 0; i < 64; i++ {
+func chainRootConstBase(n any) string {
+	for range 64 {
 		switch tag(n) {
 		case "var_ref", "vcall":
 			if tag(at(n, 1)) == "@const" {
@@ -1281,7 +1281,7 @@ func chainRootConstBase(n interface{}) string {
 
 // constPathName flattens a namespaced-constant node (`Net::HTTP`, `A::B::C`,
 // `::Foo`) into its `::`-joined source text (`Net::HTTP`).
-func constPathName(n interface{}) string {
+func constPathName(n any) string {
 	switch tag(n) {
 	case "const_path_ref":
 		return constPathName(at(n, 1)) + "::" + identName(at(n, 2))
@@ -1317,7 +1317,7 @@ func (fs *funcState) localCallee(name string) string {
 	return "ruby:" + name
 }
 
-func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
+func (fs *funcState) lowerMethodAddArg(n any) *ir.Value {
 	head := at(n, 1)
 	args := extractArgs(at(n, 2))
 	switch tag(head) {
@@ -1329,11 +1329,11 @@ func (fs *funcState) lowerMethodAddArg(n interface{}) *ir.Value {
 	return ssabuild.Str("")
 }
 
-func (fs *funcState) lowerCommand(n interface{}) *ir.Value {
+func (fs *funcState) lowerCommand(n any) *ir.Value {
 	return fs.lowerCallExpr(fs.localCallee(identName(at(n, 1))), extractArgs(at(n, 2)), n)
 }
 
-func (fs *funcState) lowerCommandCall(n interface{}) *ir.Value {
+func (fs *funcState) lowerCommandCall(n any) *ir.Value {
 	// ["command_call", recv, ".", methodIdent, args] — same recv/method layout
 	// as a `call` node, so lowerDotCall handles it once the args are unwrapped.
 	return fs.lowerDotCall(n, extractArgs(at(n, 4)))
@@ -1342,7 +1342,7 @@ func (fs *funcState) lowerCommandCall(n interface{}) *ir.Value {
 // lowerMethodAddBlock lowers `call do |x| … end` / `call { … }` (Sinatra routes,
 // blocks). The block body is lowered inline in the current function, so handler
 // code inside the block is analyzed.
-func (fs *funcState) lowerMethodAddBlock(n interface{}) *ir.Value {
+func (fs *funcState) lowerMethodAddBlock(n any) *ir.Value {
 	v := fs.lowerExpr(at(n, 1))
 	block := at(n, 2)
 	switch tag(block) {
@@ -1358,7 +1358,7 @@ func (fs *funcState) lowerMethodAddBlock(n interface{}) *ir.Value {
 
 // extractArgs unwraps an argument node (`arg_paren` / `args_add_block`) into the
 // list of argument expressions, dropping any trailing block argument.
-func extractArgs(n interface{}) []interface{} {
+func extractArgs(n any) []any {
 	switch tag(n) {
 	case "arg_paren":
 		return extractArgs(at(n, 1))
@@ -1369,7 +1369,7 @@ func extractArgs(n interface{}) []interface{} {
 	return nil
 }
 
-func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n interface{}) *ir.Value {
+func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n any) *ir.Value {
 	inst := fs.newValueInst(n)
 	ssabuild.SetKwargMarker(inst, name, v)
 	fs.emit(inst)
@@ -1390,7 +1390,7 @@ func (fs *funcState) emitKwargMarker(name string, v *ir.Value, n interface{}) *i
 // Values are lowered ONCE. Routing a pair through lowerExpr and then re-lowering
 // it for the marker would emit a second copy of any synthetic source call inside
 // it, and duplicate a finding.
-func (fs *funcState) appendArgList(dst []*ir.Value, args []interface{}) []*ir.Value {
+func (fs *funcState) appendArgList(dst []*ir.Value, args []any) []*ir.Value {
 	var markers []*ir.Value
 	for _, a := range args {
 		if t := tag(a); t != "bare_assoc_hash" && t != "hash" {
@@ -1417,11 +1417,11 @@ func (fs *funcState) appendArgList(dst []*ir.Value, args []interface{}) []*ir.Va
 	return append(dst, markers...)
 }
 
-func (fs *funcState) lowerCallExpr(callee string, args []interface{}, n interface{}) *ir.Value {
+func (fs *funcState) lowerCallExpr(callee string, args []any, n any) *ir.Value {
 	return fs.lowerCallExprVals(callee, fs.appendArgList(nil, args), n)
 }
 
-func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n interface{}) *ir.Value {
+func (fs *funcState) lowerCallExprVals(callee string, args []*ir.Value, n any) *ir.Value {
 	inst := fs.newValueInst(n)
 	inst.Op = ir.OpCode_OP_CODE_CALL
 	inst.Call = &ir.CallCommon{
@@ -1440,7 +1440,7 @@ func (fs *funcState) lookup(name string) *ir.Value {
 	return ssabuild.Str(name)
 }
 
-func scalarText(n interface{}) string {
+func scalarText(n any) string {
 	switch v := n.(type) {
 	case string:
 		return v

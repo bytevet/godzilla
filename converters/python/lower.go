@@ -344,6 +344,19 @@ func simpleName(s string) (string, bool) {
 	return s, false
 }
 
+// filterNames returns params with every name in excluded removed, preserving
+// order -- the exclusion filter shared by decoratedRouteParams and
+// positionalAfterSelf.
+func filterNames(params []string, excluded map[string]bool) []string {
+	var out []string
+	for _, p := range params {
+		if !excluded[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // decoratedRouteParams filters a decorated route function's params down to the
 // untrusted ones: everything except self/cls, request/websocket, and
 // Depends()/Security() dependency-injected params.
@@ -352,13 +365,7 @@ func decoratedRouteParams(node astNode, params []string) []string {
 	for _, d := range node.strList("depends_params") {
 		excluded[d] = true
 	}
-	var out []string
-	for _, p := range params {
-		if !excluded[p] {
-			out = append(out, p)
-		}
-	}
-	return out
+	return filterNames(params, excluded)
 }
 
 // positionalAfterSelf returns the untrusted params of a handler-class verb
@@ -371,13 +378,7 @@ func positionalAfterSelf(params []string) []string {
 	if hasSelfReceiver(params) {
 		params = params[1:]
 	}
-	out := make([]string, 0, len(params))
-	for _, p := range params {
-		if !requestObjectParams[p] {
-			out = append(out, p)
-		}
-	}
-	return out
+	return filterNames(params, requestObjectParams)
 }
 
 // hasSelfReceiver reports whether params begins with a conventional method

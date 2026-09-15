@@ -248,11 +248,10 @@ func splitMIRBlocks(lines []string) (preamble []string, blocks []mirBlock) {
 // has no `return:` label, so every listed block is a real successor. Non-
 // terminator lines have no `->` and yield nothing.
 func parseSuccs(line string) []string {
-	i := strings.Index(line, "->")
-	if i < 0 {
+	_, rest, ok := strings.Cut(line, "->")
+	if !ok {
 		return nil
 	}
-	rest := line[i+2:]
 	if c := strings.Index(rest, "//"); c >= 0 {
 		rest = rest[:c]
 	}
@@ -343,8 +342,8 @@ func parseHeader(h string) (name string, params []mirParam) {
 // Returns ok=false for any non-extractor type.
 func axumExtractorSource(typ string) (string, bool) {
 	typ = strings.TrimSpace(typ)
-	if lt := strings.IndexByte(typ, '<'); lt >= 0 { // the extractor's own generic opener
-		head := strings.TrimSpace(typ[:lt])
+	if before, _, ok := strings.Cut(typ, "<"); ok { // the extractor's own generic opener
+		head := strings.TrimSpace(before)
 		if i := strings.LastIndex(head, "::"); i >= 0 {
 			head = head[i+2:]
 		}
@@ -426,13 +425,13 @@ func (st *lowerState) assign(dst, expr string, pos *ir.Position, isCall bool) {
 	case fieldRe.MatchString(expr), derefRe.MatchString(expr), indexRe.MatchString(expr):
 		st.env[dst] = st.place(expr, pos)
 	case strings.HasPrefix(expr, "("): // tuple aggregate: (a, b,) — unit () is empty
-		st.setAgg(dst, splitTop(insideDelims(expr, '(', ')'), ','), "builtin.aggregate", pos)
+		st.setAgg(dst, splitTop(insideDelims(expr, '(', ')'), ','), pos)
 	case strings.HasPrefix(expr, "["): // array aggregate: [a, b] or [a; N]
 		body := insideDelims(expr, '[', ']')
 		if semi := indexAtDepth0(body, ';'); semi >= 0 {
 			body = body[:semi]
 		}
-		st.setAgg(dst, splitTop(body, ','), "builtin.aggregate", pos)
+		st.setAgg(dst, splitTop(body, ','), pos)
 	case strings.HasPrefix(expr, "move "), strings.HasPrefix(expr, "copy "), localRe.MatchString(expr):
 		if before, ok := cutCast(expr); ok {
 			// `copy X as T (Kind)` / `move X as T (Kind)`: an operand-PREFIXED
@@ -483,7 +482,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 			st.env[dst] = ssabuild.Str("")
 			return
 		default: // enum-variant / tuple-struct constructor: taint if any field is
-			st.setAgg(dst, args, "builtin.aggregate", pos)
+			st.setAgg(dst, args, pos)
 			return
 		}
 	}
@@ -501,7 +500,7 @@ func (st *lowerState) assignOperator(dst, expr string, pos *ir.Position) {
 		return
 	}
 	if brace := strings.IndexByte(expr, '{'); brace >= 0 { // struct literal Name { f: op, .. }
-		st.setAgg(dst, structFields(expr[brace:]), "builtin.aggregate", pos)
+		st.setAgg(dst, structFields(expr[brace:]), pos)
 		return
 	}
 	// Unmodelled rvalue. It must NOT become a constant: a constant is clean data,
@@ -933,10 +932,10 @@ func traitCall(raw string) (trait, method string, ok bool) {
 // intrinsic (so a whole-aggregate use propagates taint from any element) and
 // remembers the element values so a later field read `(_dst.i)` folds directly
 // to element i (precise field-sensitive flow through tuples/arrays/structs).
-func (st *lowerState) setAgg(dst string, operandToks []string, intrinsic string, pos *ir.Position) {
+func (st *lowerState) setAgg(dst string, operandToks []string, pos *ir.Position) {
 	vals := st.operands(operandToks)
 	name := st.reg()
-	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC, Intrinsic: intrinsic, Operands: vals, Pos: pos})
+	st.instrs = append(st.instrs, &ir.Instruction{Name: name, Op: ir.OpCode_OP_CODE_INTRINSIC, Intrinsic: "builtin.aggregate", Operands: vals, Pos: pos})
 	st.env[dst] = ssabuild.Reg(name)
 	st.agg[dst] = vals
 }
@@ -988,8 +987,8 @@ func (st *lowerState) operands(toks []string) []*ir.Value {
 // `const ..` / `_x`) to a gIR value.
 func (st *lowerState) operand(tok string) *ir.Value {
 	tok = strings.TrimSpace(tok)
-	if strings.HasPrefix(tok, "const ") {
-		return constFromLiteral(strings.TrimPrefix(tok, "const "))
+	if lit, ok := strings.CutPrefix(tok, "const "); ok {
+		return constFromLiteral(lit)
 	}
 	return st.place(placeOf(tok), nil)
 }

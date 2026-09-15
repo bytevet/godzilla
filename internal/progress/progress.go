@@ -182,13 +182,6 @@ func Warn(lang, message, location string) {
 	warnings = append(warnings, Warning{Lang: lang, Message: message, Location: location})
 }
 
-// Warnings returns every recorded diagnostic, in the order they were reported.
-func Warnings() []Warning {
-	mu.Lock()
-	defer mu.Unlock()
-	return slices.Clone(warnings)
-}
-
 // WarnTail returns the total recorded and the last n, which is what a display
 // showing a capped tail actually needs. Cloning the whole log every frame is the
 // one cost here that grows with the length of the scan.

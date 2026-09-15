@@ -266,7 +266,6 @@ func TestGuardArgStructure(t *testing.T) {
 // into. Were the field inverted, an Arg built without setting it would read as
 // "taint is localized" and let a rule clear a finding silently.
 func TestGuardTaintInChildren(t *testing.T) {
-	el := func(s string) Arg { return Arg{String: s, Complete: true, Type: "string"} }
 	tainted := Arg{String: DynMarker, Tainted: true}
 
 	visible := Arg{Type: "aggregate", Tainted: true, TaintInChildren: true,

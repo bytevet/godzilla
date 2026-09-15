@@ -9,6 +9,18 @@ import (
 	"github.com/bytevet/godzilla/internal/rules"
 )
 
+// writeRule writes content to name under dir and returns its path, failing
+// the test immediately on a write error. Shared by every test below that
+// stages a YAML fixture before loading it.
+func writeRule(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", name, err)
+	}
+	return path
+}
+
 func TestBuiltin(t *testing.T) {
 	rs, err := Builtin()
 	if err != nil {
@@ -48,8 +60,6 @@ func TestBuiltin(t *testing.T) {
 
 func TestLoadFileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "custom.yaml")
-
 	const doc = `
 rules:
   - id: custom-test-rule
@@ -66,9 +76,7 @@ rules:
     propagators:
       - "go:fmt.Sprintf"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing temp rule file: %v", err)
-	}
+	path := writeRule(t, dir, "custom.yaml", doc)
 
 	rs, err := LoadFile(path)
 	if err != nil {
@@ -110,17 +118,13 @@ rules:
 
 func TestLoadFileInvalidRule(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "invalid.yaml")
-
 	const doc = `
 rules:
   - id: ""
     sinks:
       - "go:*Sink*"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing temp rule file: %v", err)
-	}
+	path := writeRule(t, dir, "invalid.yaml", doc)
 
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("LoadFile() with empty rule ID: want error, got nil")
@@ -136,10 +140,7 @@ func TestLoadFileRejectsBadSeverity(t *testing.T) {
 		"missing.yaml": "rules:\n  - id: r\n    sinks: [\"go:*Sink*\"]\n",
 		"typo.yaml":    "rules:\n  - id: r\n    severity: hgih\n    sinks: [\"go:*Sink*\"]\n",
 	} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s): want error for bad severity, got nil", name)
 		}
@@ -157,10 +158,7 @@ func TestLoadFileRejectsBadConfidence(t *testing.T) {
 		"typo.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: mdeium\n    callees: [\"go:*Bad*\"]\n",
 		"rank.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: critical\n    callees: [\"go:*Bad*\"]\n",
 	} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s): want error for bad confidence, got nil", name)
 		}
@@ -171,10 +169,7 @@ func TestLoadFileRejectsBadConfidence(t *testing.T) {
 		"omitted.yaml": "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    callees: [\"go:*Bad*\"]\n",
 		"medium.yaml":  "rules:\n  - id: r\n    severity: high\n    kind: dangerous-call\n    confidence: medium\n    callees: [\"go:*Bad*\"]\n",
 	} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err != nil {
 			t.Errorf("LoadFile(%s): want no error, got %v", name, err)
 		}
@@ -193,20 +188,14 @@ func TestLoadFileRejectsMalformedSinkSpec(t *testing.T) {
 		"negative.yaml": "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#-1\"]\n",
 	}
 	for name, doc := range reject {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s): want error for malformed sink spec, got nil", name)
 		}
 	}
 
 	// A well-formed "#0" sink must still load cleanly.
-	ok := filepath.Join(dir, "ok.yaml")
-	if err := os.WriteFile(ok, []byte("rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#0\"]\n"), 0o644); err != nil {
-		t.Fatalf("writing ok.yaml: %v", err)
-	}
+	ok := writeRule(t, dir, "ok.yaml", "rules:\n  - id: r\n    severity: high\n    sinks: [\"go:*Query#0\"]\n")
 	if _, err := LoadFile(ok); err != nil {
 		t.Errorf("LoadFile(ok.yaml) with a valid #0 sink: unexpected error: %v", err)
 	}
@@ -223,10 +212,7 @@ func TestLoadFileRejectsMalformedArgSpec(t *testing.T) {
 		"prop-negative.yaml": "rules:\n  - id: r\n    severity: high\n    propagators: [\"go:*Unmarshal#-1\"]\n    sinks: [\"go:*Sink*\"]\n",
 	}
 	for name, doc := range reject {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s): want error for malformed arg spec, got nil", name)
 		}
@@ -241,10 +227,7 @@ func TestLoadFileRejectsMalformedArgSpec(t *testing.T) {
 		"bare.yaml":    "rules:\n  - id: r\n    severity: high\n    sources: [\"go:*net/url*.Get\"]\n    sinks: [\"go:*Sink*\"]\n",
 	}
 	for name, doc := range ok {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		rs, err := LoadFile(path)
 		if err != nil {
 			t.Errorf("LoadFile(%s): unexpected error: %v", name, err)
@@ -273,10 +256,7 @@ func TestLoadFileRejectsArgSpecOutsideSourceSinkPropagator(t *testing.T) {
 		"reqobj.yaml":    "rules:\n  - id: r\n    severity: high\n    request_object_sources: [\"go:*Request#0\"]\n    sinks: [\"go:*Sink*\"]\n",
 	}
 	for name, doc := range reject {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name, doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s): want error for '#' outside source/sink/propagator, got nil", name)
 		}
@@ -290,10 +270,7 @@ func TestExtendMergesFragment(t *testing.T) {
 	dir := t.TempDir()
 	// A fragment is a partial rule (a mapping of pattern-list fields).
 	frag := "sources:\n  - \"go:*A\"\n  - \"go:*B\"\npropagators:\n  - \"go:*P\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "_custom.yaml"), []byte(frag), 0o644); err != nil {
-		t.Fatalf("writing fragment: %v", err)
-	}
-	path := filepath.Join(dir, "rules.yaml")
+	writeRule(t, dir, "_custom.yaml", frag)
 	const doc = `
 rules:
   - id: frag-rule
@@ -304,9 +281,7 @@ rules:
     sinks:
       - "go:*Sink*"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing rule file: %v", err)
-	}
+	path := writeRule(t, dir, "rules.yaml", doc)
 	rs, err := LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile() error: %v", err)
@@ -327,7 +302,6 @@ rules:
 // shipped in the binary (e.g. $_go-common.yaml).
 func TestExtendUsesBuiltinFragment(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
 	const doc = `
 rules:
   - id: uses-builtin-frag
@@ -336,9 +310,7 @@ rules:
     sinks:
       - "go:*Sink*"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing rule file: %v", err)
-	}
+	path := writeRule(t, dir, "rules.yaml", doc)
 	rs, err := LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile() error: %v", err)
@@ -352,7 +324,6 @@ rules:
 // exist is a load error (a typo would otherwise silently drop the shared base).
 func TestExtendUnknownFragment(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
 	const doc = `
 rules:
   - id: bad-frag-rule
@@ -361,9 +332,7 @@ rules:
     sinks:
       - "go:*Sink*"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing rule file: %v", err)
-	}
+	path := writeRule(t, dir, "rules.yaml", doc)
 	if _, err := LoadFile(path); err == nil {
 		t.Fatal("LoadFile() extending an unknown fragment: want error, got nil")
 	}
@@ -376,9 +345,7 @@ func TestLoadDirRejectsDuplicateIDs(t *testing.T) {
 	dir := t.TempDir()
 	doc := "rules:\n  - id: dup\n    severity: high\n    sinks: [\"go:*Sink*\"]\n"
 	for _, name := range []string{"a.yaml", "b.yaml"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		writeRule(t, dir, name, doc)
 	}
 	if _, err := LoadDir(dir); err == nil {
 		t.Fatal("LoadDir() with duplicate rule ids: want error, got nil")
@@ -396,21 +363,15 @@ func TestLoadFileRejectsBadGuard(t *testing.T) {
 		"non-bool":   "arg[0].String",
 		"bad-regex":  "arg[0].String matches '('",
 	} {
-		path := filepath.Join(dir, name+".yaml")
 		doc := "rules:\n  - id: r\n    severity: high\n    sinks:\n      - sink: \"go:*Sink\"\n        when: \"" + when + "\"\n"
-		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
+		path := writeRule(t, dir, name+".yaml", doc)
 		if _, err := LoadFile(path); err == nil {
 			t.Errorf("LoadFile(%s, when=%q): want error, got nil", name, when)
 		}
 	}
 	// A well-formed guard must still load cleanly.
-	ok := filepath.Join(dir, "ok.yaml")
 	doc := "rules:\n  - id: r\n    severity: high\n    sinks:\n      - sink: \"go:*Sink\"\n        when: \"arg[0].String startsWith 'cmd:'\"\n"
-	if err := os.WriteFile(ok, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing ok.yaml: %v", err)
-	}
+	ok := writeRule(t, dir, "ok.yaml", doc)
 	if _, err := LoadFile(ok); err != nil {
 		t.Errorf("LoadFile(ok.yaml) with a valid guard: unexpected error: %v", err)
 	}
@@ -418,7 +379,6 @@ func TestLoadFileRejectsBadGuard(t *testing.T) {
 
 func TestLoadDefault(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "extra.yaml")
 	const doc = `
 rules:
   - id: extra-rule
@@ -426,9 +386,7 @@ rules:
     sinks:
       - "go:*Sink*"
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing temp rule file: %v", err)
-	}
+	path := writeRule(t, dir, "extra.yaml", doc)
 
 	rs, err := LoadDefault(path)
 	if err != nil {
@@ -454,10 +412,7 @@ rules:
 func TestExtendInheritsWhen(t *testing.T) {
 	dir := t.TempDir()
 	frag := "when: 'arg[0].Complete'\nsources:\n  - \"go:*A\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "_guard.yaml"), []byte(frag), 0o644); err != nil {
-		t.Fatalf("writing fragment: %v", err)
-	}
-	path := filepath.Join(dir, "rules.yaml")
+	writeRule(t, dir, "_guard.yaml", frag)
 	const doc = `
 rules:
   - id: inherits
@@ -470,9 +425,7 @@ rules:
     when: 'arg[0].String == "own"'
     sinks: ["go:*Sink*"]
 `
-	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
-		t.Fatalf("writing rule file: %v", err)
-	}
+	path := writeRule(t, dir, "rules.yaml", doc)
 	rs, err := LoadFile(path)
 	if err != nil {
 		t.Fatalf("LoadFile() error: %v", err)
@@ -490,14 +443,12 @@ rules:
 // the built-ins exactly like a single file would be.
 func TestLoadDefault_Directory(t *testing.T) {
 	dir := t.TempDir()
-	rule := []byte(`rules:
+	const rule = `rules:
   - id: user-dir-rule
     severity: high
     sinks: ["go:pkg.Sink"]
-`)
-	if err := os.WriteFile(filepath.Join(dir, "user.yaml"), rule, 0o644); err != nil {
-		t.Fatal(err)
-	}
+`
+	writeRule(t, dir, "user.yaml", rule)
 	rs, err := LoadDefault(dir)
 	if err != nil {
 		t.Fatalf("LoadDefault(dir): %v", err)

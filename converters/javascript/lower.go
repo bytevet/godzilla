@@ -189,6 +189,17 @@ func (fs *funcState) emitCall(callee string, args []jsast.Expr, loc jsast.Loc) *
 	return ssabuild.Reg(fs.emitCallRecvInst(callee, nil, args, loc).Name)
 }
 
+// emitCallInstr builds a CALL instruction from cc at loc, emits it into the
+// current block, and returns it -- the tail shared by every CALL-emitting
+// helper in this file.
+func (fs *funcState) emitCallInstr(cc *ir.CallCommon, loc jsast.Loc) *ir.Instruction {
+	inst := fs.newValueInst(loc)
+	inst.Op = ir.OpCode_OP_CODE_CALL
+	inst.Call = cc
+	fs.emit(inst)
+	return inst
+}
+
 // emitCallRecvInst is emitCall returning the instruction, so a caller that needs
 // the LOWERED argument values (rather than re-lowering the expressions, which
 // would duplicate their side effects) can read them off Call.Args.
@@ -200,11 +211,7 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 	for _, a := range args {
 		cc.Args = append(cc.Args, fs.lowerExpr(a))
 	}
-	inst := fs.newValueInst(loc)
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Call = cc
-	fs.emit(inst)
-	return inst
+	return fs.emitCallInstr(cc, loc)
 }
 
 // emitCallValues is emitCall over ALREADY-LOWERED arguments, for a synthetic call
@@ -213,10 +220,7 @@ func (fs *funcState) emitCallRecvInst(callee string, receiver *ir.Value, args []
 func (fs *funcState) emitCallValues(callee string, args []*ir.Value, loc jsast.Loc) {
 	cc := calleeCommon(callee)
 	cc.Args = args
-	inst := fs.newValueInst(loc)
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Call = cc
-	fs.emit(inst)
+	fs.emitCallInstr(cc, loc)
 }
 
 // emitPromiseContinuation models `p.then(cb)` by emitting the call it actually
@@ -245,10 +249,7 @@ func (fs *funcState) emitPromiseContinuation(callee string, receiver *ir.Value, 
 	cc := calleeCommon("") // empty callee == indirect; the engine resolves Call.Value
 	cc.Value = args[0]
 	cc.Args = []*ir.Value{receiver}
-	inst := fs.newValueInst(loc)
-	inst.Op = ir.OpCode_OP_CODE_CALL
-	inst.Call = cc
-	fs.emit(inst)
+	fs.emitCallInstr(cc, loc)
 }
 
 // emitStore emits an OP_CODE_STORE of val into the address computed from
@@ -674,7 +675,7 @@ func (fs *funcState) lowerSwitch(v *jsast.SSwitch) {
 	// Every case block gains its decision predecessor here; the no-match path
 	// (all decisions false) reaches exit, so code after the switch stays reachable.
 	dec := fs.cur
-	for i := 0; i < n; i++ {
+	for i := range n {
 		falseTarget := exit
 		if i < n-1 {
 			falseTarget = fs.b.NewBlock()
@@ -688,7 +689,7 @@ func (fs *funcState) lowerSwitch(v *jsast.SSwitch) {
 
 	// A case block's predecessors — its decision edge and the prior case's
 	// fall-through — are both wired before it is lowered, so it can be sealed here.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		fs.b.Seal(caseBlocks[i])
 		fs.cur = caseBlocks[i]
 		fs.terminated = false
@@ -754,16 +755,10 @@ func (fs *funcState) lowerTry(v *jsast.STry) {
 }
 
 // lowerForInit lowers a `for(...)` loop's initializer clause, which is either a
-// declaration or a bare expression statement.
+// declaration or a bare expression statement -- both leaf shapes lowerStmt
+// already handles, so this is just a documented, narrower entry point for it.
 func (fs *funcState) lowerForInit(init jsast.Stmt) {
-	switch v := init.Data.(type) {
-	case *jsast.SLocal:
-		for _, d := range v.Decls {
-			fs.lowerBinding(d)
-		}
-	case *jsast.SExpr:
-		fs.lowerExpr(v.Value)
-	}
+	fs.lowerStmt(init)
 }
 
 // lowerStmt lowers one leaf statement (i.e. not a control-flow compound;
@@ -908,10 +903,6 @@ func objectPatternRest(f *jsast.File, op *jsast.BObject) string {
 	return ""
 }
 
-// reactHTMLSink is the synthetic callee react-xss.yaml matches. Spelled with the
-// `js:` prefix because emitCall writes the callee verbatim -- sfc.go's Vue
-// equivalent gets the prefix for free by injecting source text that is then
-// lowered as an ordinary call.
 // isComponentName reports whether a function with this leaf name can be used as a
 // React component, which is what makes its first parameter a props object.
 //
@@ -926,6 +917,10 @@ func isComponentName(leaf string) bool {
 	return leaf != "" && leaf[0] >= 'A' && leaf[0] <= 'Z'
 }
 
+// reactHTMLSink is the synthetic callee react-xss.yaml matches. Spelled with the
+// `js:` prefix because emitCall writes the callee verbatim -- sfc.go's Vue
+// equivalent gets the prefix for free by injecting source text that is then
+// lowered as an ordinary call.
 const reactHTMLSink = "js:__godzilla_react_html"
 
 // jsURLSink is the canonical callee for a value that becomes the browser's next

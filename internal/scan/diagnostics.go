@@ -83,9 +83,7 @@ func countLines(paths []string) int {
 	var wg sync.WaitGroup
 	var next, total atomic.Int64
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			buf := make([]byte, 64*1024)
 			n := 0
 			for {
@@ -96,7 +94,7 @@ func countLines(paths []string) int {
 				n += linesIn(paths[i], buf)
 			}
 			total.Add(int64(n))
-		}()
+		})
 	}
 	wg.Wait()
 	return int(total.Load())

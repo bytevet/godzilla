@@ -32,19 +32,27 @@ func (n astNode) node(key string) astNode {
 	return astNode(m)
 }
 
+// arr returns the raw JSON array at key, and whether one was present -- the
+// decoding step list and strList share before going their separate ways on
+// what to do with each element.
+func (n astNode) arr(key string) ([]any, bool) {
+	v, ok := n[key]
+	if !ok || v == nil {
+		return nil, false
+	}
+	arr, ok := v.([]any)
+	return arr, ok
+}
+
 // list returns the child value at key as a slice of astNode, keeping a nil
 // placeholder for non-object entries (e.g. a stray null) so indices align.
 func (n astNode) list(key string) []astNode {
-	v, ok := n[key]
-	if !ok || v == nil {
-		return nil
-	}
-	arr, ok := v.([]any)
+	items, ok := n.arr(key)
 	if !ok {
 		return nil
 	}
-	out := make([]astNode, 0, len(arr))
-	for _, item := range arr {
+	out := make([]astNode, 0, len(items))
+	for _, item := range items {
 		if m, ok := item.(map[string]any); ok {
 			out = append(out, astNode(m))
 		} else {
@@ -57,16 +65,12 @@ func (n astNode) list(key string) []astNode {
 // strList returns the child value at key as a slice of strings (used for
 // FunctionDef.params).
 func (n astNode) strList(key string) []string {
-	v, ok := n[key]
-	if !ok || v == nil {
-		return nil
-	}
-	arr, ok := v.([]any)
+	items, ok := n.arr(key)
 	if !ok {
 		return nil
 	}
-	out := make([]string, 0, len(arr))
-	for _, item := range arr {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
 		if s, ok := item.(string); ok {
 			out = append(out, s)
 		}
