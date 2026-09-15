@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/bytevet/godzilla/internal/rules"
 	"github.com/bytevet/godzilla/internal/scan"
@@ -133,10 +134,29 @@ func (s styler) callee(text string) string { return s.sgr("33", text) }
 // The exit code is spelled out because the CLI has four and a CI condition that
 // treats any non-zero alike cannot tell a working gate from a broken scanner —
 // 3 is "findings at or above -fail-on", 1 is "the scanner failed".
+// llmSummary is the closing report of an `-llm-review` pass. Plain fields, not
+// llm.ReviewStats: the summary renderer should not have to import the reviewer
+// to lay out one row, and the piped path needs the same numbers without it.
+type llmSummary struct {
+	provider   string // which backend adjudicated: "anthropic", "claude", ...
+	reviewed   int
+	suppressed int
+	errors     int
+	dur        time.Duration
+}
+
+// line renders the row's value half. Kept beside the struct rather than inline
+// in write, because the piped path prints the same sentence without any styling.
+func (l llmSummary) line() string {
+	return fmt.Sprintf("%s · %d reviewed, %d suppressed, %d error(s) · %s",
+		l.provider, l.reviewed, l.suppressed, l.errors, l.dur.Round(time.Millisecond/10))
+}
+
 type summary struct {
 	st       styler
 	counts   map[rules.Severity]int
 	total    int
+	llm      *llmSummary // nil unless -llm-review ran
 	reports  []string
 	coverage []scan.LangCoverage
 	failed   []scan.LangCoverage // scan's own verdict, not a second reading of it
@@ -168,6 +188,12 @@ func (s summary) write(w io.Writer) {
 		}
 		fmt.Fprintf(w, "  %s%s\n",
 			s.st.bad(fmt.Sprintf("%-13s", fmt.Sprintf("%d findings", s.total))), strings.Join(parts, "  "))
+	}
+	// Above the reports, directly under the counts it just changed: a suppressed
+	// finding is absent from the strip above, so the reader needs to know an
+	// adjudicator touched it before they trust the number.
+	if s.llm != nil {
+		fmt.Fprintf(w, "  %s%s\n", label("llm review"), s.st.dim(s.llm.line()))
 	}
 	for _, r := range s.reports {
 		fmt.Fprintf(w, "  %s%s\n", label("report"), s.st.loc(r))

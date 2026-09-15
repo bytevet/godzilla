@@ -122,8 +122,11 @@ a read-only Docker mount looks like.
   scan-diagnostics panel), **JSON** and **SARIF 2.1.0** (for GitHub code
   scanning), and a severity-gated **exit code**.
 - **Optional LLM review.** A pluggable, off-by-default stage sends findings at or
-  below **medium** confidence to Claude to trim false positives; High-confidence
-  findings are never reviewed, and the stage fails open.
+  below **medium** confidence to a model to trim false positives; High-confidence
+  findings are never reviewed, and the stage fails open. It uses an API key when
+  one is set and otherwise drives a **local agent CLI you are already signed in
+  to** — and a provider is a line of config, not a rebuild
+  ([how](#choosing-an-llm-backend)).
 - **Single self-contained binary.** Go/JS parsing is pure Go; Python, Ruby, Java,
   and Rust shell out to a toolchain on `PATH` and degrade gracefully when absent.
 
@@ -336,15 +339,71 @@ carries operator concerns:
 | `GODZILLA_ALLOW_BUILD=1` | Same opt-in as `-allow-build`: lets a scan run the project's build tool (Maven/Gradle/Cargo). |
 | `GODZILLA_RUSTC`, `GODZILLA_CARGO` | Paths to the Rust toolchain binaries (default: `rustc`, `cargo` on `PATH`). |
 | `GODZILLA_CC`, `GODZILLA_CXX` | C/C++ compilers for the opt-in LLVM backend (default: `clang`, `clang++`). |
-| `GODZILLA_LLM_MODEL` | Override the `-llm-review` model (default: `claude-haiku-4-5` for Anthropic, `gpt-4o-mini` for OpenAI). |
-| `GODZILLA_LLM_PROVIDER=openai`, `GODZILLA_LLM_BASE_URL` | Select an OpenAI-compatible endpoint for `-llm-review` (e.g. a local model). |
+| `GODZILLA_LLM_PROVIDER` | Pin the `-llm-review` backend: `anthropic`, `openai`, a provider name, or `auto` (default). Skips the selection ladder. |
+| `GODZILLA_LLM_CMD` | Drive any CLI as the reviewer, e.g. `gemini -p {prompt}`. Wins over everything else. See [Choosing an LLM backend](#choosing-an-llm-backend). |
+| `GODZILLA_LLM_MODEL` | Override the model. Empty (default) inherits whatever the chosen backend is already configured to use. |
+| `GODZILLA_LLM_BASE_URL` | An OpenAI-compatible endpoint for `-llm-review` (e.g. Ollama, vLLM, LM Studio). |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Credentials for `-llm-review` (Anthropic also honors an `ant auth` profile). |
-| `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. |
+| `GOMEMLIMIT` | Respected as-is: setting it disables Godzilla's automatic soft memory limit. Godzilla sizes that limit, and `-dep-budget auto`, from host RAM (or the cgroup limit under a container) on Linux and macOS; where neither can be read both fall back to no limit. |
 | `GODZILLA_PROGRESS` | Force the scan's progress display on (`1`) or off (`0`). By default it runs only when stderr is a terminal and `CI` is unset. |
 
 Subprocess deadlines are flags, not environment: `-parse-timeout` (default
 `2m0s`, each per-file parse/dump) and `-build-timeout` (default `10m0s`, a
 whole-project build under `-allow-build`).
+
+### Choosing an LLM backend
+
+`-llm-review` picks a backend by walking a ladder, and says which one it used in
+the closing summary:
+
+```
+  llm review  claude · 12 reviewed, 3 suppressed, 0 error(s) · 41.2s
+```
+
+1. **An explicit choice** — `GODZILLA_LLM_CMD`, or `GODZILLA_LLM_PROVIDER` /
+   `llm.provider` naming a backend. Nothing is guessed.
+2. **An API key** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, an `ant auth` profile,
+   or `GODZILLA_LLM_BASE_URL` pointing at a local OpenAI-compatible server.
+3. **A local agent CLI you are already signed in to** — `claude`, then `codex`.
+   Each is probed with a command that invokes no model (`claude auth status`,
+   `codex login status`), so this costs nothing when it does not apply. The model
+   is whatever that CLI is already configured to use, unless `GODZILLA_LLM_MODEL`
+   says otherwise.
+4. **Nothing** — findings are reported unreviewed, with a warning naming every
+   backend that was tried and why each was unavailable. A review that did not
+   happen is never silent.
+
+**Adding a provider takes no rebuild.** The built-in CLIs are table data, not
+code paths, and your own entries extend the same table. For one run:
+
+```bash
+GODZILLA_LLM_CMD='gemini -p {prompt}' godzilla scan --llm-review ./project
+```
+
+Or persistently, in `.godzilla.yaml`:
+
+```yaml
+llm:
+  providers:
+    - name: gemini
+      command: ["gemini", "-p", "{prompt}"]
+      # stdin: true                                       # if a flag is variadic
+      probe:   ["gemini", "auth", "print-access-token"]   # exit 0 == usable
+```
+
+`{prompt}` is substituted into the argv. Some CLIs cannot take the prompt that
+way — if any flag is variadic it swallows a trailing prompt as another value —
+so set `stdin: true` instead and the prompt is written to the process's standard
+input. The built-in `claude` entry does exactly that, because `--allowedTools`
+is variadic. `probe` is optional; without one the provider is used whenever its
+binary is on `PATH`.
+
+Two things worth knowing before you turn this on. A CLI backend costs **seconds
+per finding**, so a scan with many medium-confidence findings can take minutes —
+it runs 4-way concurrent with a 3-minute per-review deadline, against 8-way and
+30s for HTTP. And the built-in CLI entries are pinned to a **read-only** posture
+(`--allowedTools Read,Grep,Glob`, `--sandbox read-only`) so the reviewer can read
+the code it is judging but not change it; overriding `command` overrides that too.
 
 ## Run with Docker
 

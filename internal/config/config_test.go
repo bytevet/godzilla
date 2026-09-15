@@ -157,6 +157,64 @@ func TestApplyRules_KeepsDefaultPropagators(t *testing.T) {
 	}
 }
 
+// TestLoad_LLMBlock pins the `llm:` yaml tags against internal/llm.Options and
+// internal/llm.Provider, which this package deliberately does not import (see
+// LLM's doc comment) — a renamed tag here would silently stop a user's
+// .godzilla.yaml `llm:` block from reaching the reviewer, with no compiler to
+// catch the mismatch on either side.
+func TestLoad_LLMBlock(t *testing.T) {
+	root := t.TempDir()
+	body := "llm:\n" +
+		"  provider: cmd\n" +
+		"  model: my-model\n" +
+		"  providers:\n" +
+		"    - name: gemini\n" +
+		"      command: [\"gemini\", \"-p\", \"{prompt}\"]\n" +
+		"      probe: [\"gemini\", \"auth\", \"status\"]\n" +
+		"      probe-contains: \"ok\"\n" +
+		"      model-flag: \"--llm-model\"\n"
+	if err := os.WriteFile(filepath.Join(root, ".godzilla.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LLM.Provider != "cmd" || c.LLM.Model != "my-model" {
+		t.Fatalf("llm.provider/model not parsed: %+v", c.LLM)
+	}
+	if len(c.LLM.Providers) != 1 {
+		t.Fatalf("llm.providers not parsed: %+v", c.LLM.Providers)
+	}
+	p := c.LLM.Providers[0]
+	if p.Name != "gemini" || p.ProbeContains != "ok" || p.ModelFlag != "--llm-model" {
+		t.Errorf("llm.providers[0] scalar fields not parsed: %+v", p)
+	}
+	if len(p.Command) != 3 || len(p.Probe) != 3 {
+		t.Errorf("llm.providers[0] command/probe not parsed: %+v", p)
+	}
+}
+
+// TestLoad_LLMConcurrencyAndMaxReviews pins the `llm.concurrency` /
+// `llm.max-reviews` yaml tags against internal/llm.Options field names, for the
+// same reason TestLoad_LLMBlock does: this package must not import internal/llm
+// to validate the match, so a renamed tag on either side would silently stop
+// the knob from reaching the reviewer.
+func TestLoad_LLMConcurrencyAndMaxReviews(t *testing.T) {
+	root := t.TempDir()
+	body := "llm:\n  concurrency: 16\n  max-reviews: 50\n"
+	if err := os.WriteFile(filepath.Join(root, ".godzilla.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LLM.Concurrency != 16 || c.LLM.MaxReviews != 50 {
+		t.Errorf("llm.concurrency/max-reviews not parsed: %+v", c.LLM)
+	}
+}
+
 // TestLoadFile_RejectsBadSeverityOverride: a typo'd severity in
 // severity-overrides must fail the load, not be silently skipped at apply time.
 func TestLoadFile_RejectsBadSeverityOverride(t *testing.T) {

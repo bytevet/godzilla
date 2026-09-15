@@ -112,7 +112,9 @@ Docker 挂载正是这种情况。
   路径片段、语法高亮与扫描诊断面板）、**JSON**、**SARIF 2.1.0**（对接 GitHub code
   scanning），以及按严重级别决定的**退出码**。
 - **可选的 LLM 复核。** 一个可插拔、默认关闭的阶段，把置信度在 **medium** 及以下的检出项
-  交给 Claude 复核以削减误报；High 置信度的检出项不送审，该阶段出错时一律放行。
+  交给模型复核以削减误报；High 置信度的检出项不送审，该阶段出错时一律放行。有 API key 时
+  用 key，没有则驱动**你本机已登录的 agent CLI**；新增一个后端只需一行配置，无需重新编译
+  （[做法](#选择-llm-后端)）。
 - **单一自包含可执行文件。** Go 与 JS 的解析是纯 Go 实现；Python、Ruby、Java、Rust 会调用
   `PATH` 上的工具链；缺失时会跳过该语言，并在覆盖率中标出。
 
@@ -303,15 +305,64 @@ go run ./cmd/godzilla-playground <path>          # 或者：godzilla-playground 
 | `GODZILLA_ALLOW_BUILD=1` | 与 `-allow-build` 等价的显式开关：允许扫描过程运行被扫描项目的构建工具（Maven/Gradle/Cargo）。 |
 | `GODZILLA_RUSTC`、`GODZILLA_CARGO` | Rust 工具链的可执行文件路径（默认使用 `PATH` 上的 `rustc`、`cargo`）。 |
 | `GODZILLA_CC`、`GODZILLA_CXX` | 可选 LLVM 后端使用的 C/C++ 编译器（默认 `clang`、`clang++`）。 |
-| `GODZILLA_LLM_MODEL` | 覆盖 `-llm-review` 使用的模型（Anthropic 默认 `claude-haiku-4-5`，OpenAI 默认 `gpt-4o-mini`）。 |
-| `GODZILLA_LLM_PROVIDER=openai`、`GODZILLA_LLM_BASE_URL` | 为 `-llm-review` 指定兼容 OpenAI 的接口（例如本地模型）。 |
+| `GODZILLA_LLM_PROVIDER` | 固定 `-llm-review` 的后端：`anthropic`、`openai`、某个 provider 名称，或 `auto`（默认）。指定后不再走选择阶梯。 |
+| `GODZILLA_LLM_CMD` | 把任意 CLI 作为复核后端，例如 `gemini -p {prompt}`，优先级高于其他所有设置。参见[选择 LLM 后端](#选择-llm-后端)。 |
+| `GODZILLA_LLM_MODEL` | 覆盖模型。留空（默认）表示沿用所选后端自身已配置的模型。 |
+| `GODZILLA_LLM_BASE_URL` | 为 `-llm-review` 指定兼容 OpenAI 的接口（例如 Ollama、vLLM、LM Studio）。 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `-llm-review` 的凭据（Anthropic 也支持 `ant auth` 配置）。 |
-| `GOMEMLIMIT` | 原样尊重：一旦设置，Godzilla 就不再自动设定软内存上限。 |
+| `GOMEMLIMIT` | 原样尊重：一旦设置，Godzilla 就不再自动设定软内存上限。该上限与 `-dep-budget auto` 都依据宿主机内存（容器下则取 cgroup 限额）推算，Linux 与 macOS 均支持；两者都读不到时退回为不设上限。 |
 | `GODZILLA_PROGRESS` | 强制开启（`1`）或关闭（`0`）扫描进度显示。默认只在 stderr 是终端、且未设置 `CI` 时才启用。 |
 
 子进程超时由命令行参数控制，而非环境变量：`-parse-timeout`（默认 `2m0s`，作用于单个文件
 的解析/导出子进程）与 `-build-timeout`（默认 `10m0s`，作用于 `-allow-build` 下的整项目
 构建）。
+
+### 选择 LLM 后端
+
+`-llm-review` 会按一个阶梯挑选后端，并在结尾的汇总里写明用了哪一个：
+
+```
+  llm review  claude · 12 reviewed, 3 suppressed, 0 error(s) · 41.2s
+```
+
+1. **显式指定** —— `GODZILLA_LLM_CMD`，或由 `GODZILLA_LLM_PROVIDER` / `llm.provider`
+   点名某个后端。此时不做任何猜测。
+2. **API key** —— `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`ant auth` 配置，或指向本地
+   兼容 OpenAI 服务的 `GODZILLA_LLM_BASE_URL`。
+3. **本机已登录的 agent CLI** —— 先 `claude`，再 `codex`。探测用的命令（`claude auth
+   status`、`codex login status`）**不会调用模型**，因此在用不上的时候不产生任何开销。
+   模型沿用该 CLI 自身已配置的那个，除非 `GODZILLA_LLM_MODEL` 另行指定。
+4. **都没有** —— 检出项照常报出但不经复核，并给出一条警告，逐一列出尝试过哪些后端、
+   各自为什么不可用。**复核没有发生这件事，绝不会悄无声息。**
+
+**新增后端不需要重新编译。** 内置的几个 CLI 只是表里的数据，不是代码分支；你自己的条目
+扩展的是同一张表。临时用一次：
+
+```bash
+GODZILLA_LLM_CMD='gemini -p {prompt}' godzilla scan --llm-review ./project
+```
+
+或者写进 `.godzilla.yaml` 长期生效：
+
+```yaml
+llm:
+  providers:
+    - name: gemini
+      command: ["gemini", "-p", "{prompt}"]
+      # stdin: true                                       # 该 CLI 有可变长参数时
+      probe:   ["gemini", "auth", "print-access-token"]   # 退出码 0 即视为可用
+```
+
+`{prompt}` 会被替换进 argv。有些 CLI 不能这样传 —— 只要它有可变长参数，末尾的提示词就会
+被当成该参数的又一个取值吞掉 —— 这时改写 `stdin: true`，提示词就会从进程的标准输入送入。
+内置的 `claude` 条目正是如此，因为它的 `--allowedTools` 是可变长参数。`probe` 可以省略，
+省略时只要二进制在 `PATH` 上就会被使用。
+
+开启前有两点值得知道。CLI 后端**每条检出要花数秒**，因此 medium 置信度检出较多的扫描
+可能耗时数分钟 —— 它以 4 路并发、单条 3 分钟上限运行，而 HTTP 后端是 8 路并发、30 秒上限。
+另外内置 CLI 条目固定了**只读**姿态（`--allowedTools Read,Grep,Glob`、`--sandbox
+read-only`），复核方能读它正在判断的代码，但不能修改；一旦自己覆盖 `command`，这层限制
+也一并由你负责。
 
 ## 用 Docker 运行
 

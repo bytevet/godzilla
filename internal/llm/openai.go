@@ -45,6 +45,16 @@ func NewOpenAIReviewer() *OpenAIReviewer {
 	}
 }
 
+// WithModel overrides the model; empty leaves NewOpenAIReviewer's default
+// (which already applies GODZILLA_LLM_MODEL) untouched. Chainable, like
+// AnthropicReviewer.WithModel — see its doc comment for why this exists.
+func (o *OpenAIReviewer) WithModel(model string) *OpenAIReviewer {
+	if model != "" {
+		o.model = model
+	}
+	return o
+}
+
 // Review adjudicates one finding via a single chat-completion request.
 func (o *OpenAIReviewer) Review(ctx context.Context, f analysis.Finding, codeContext string) (Verdict, error) {
 	reqBody, err := json.Marshal(map[string]any{
@@ -94,16 +104,4 @@ func (o *OpenAIReviewer) Review(ctx context.Context, f analysis.Finding, codeCon
 		return Verdict{}, fmt.Errorf("chat-completions response had no choices")
 	}
 	return parseVerdict(out.Choices[0].Message.Content)
-}
-
-// NewReviewer selects the reviewer backend from GODZILLA_LLM_PROVIDER (LLM-9):
-// "openai" uses an OpenAI-compatible endpoint (one-shot; covers local/offline
-// servers), anything else (the default) uses the Anthropic reviewer with agentic
-// tools over the analyzed program. The Anthropic path also honors
-// ANTHROPIC_BASE_URL for an Anthropic-compatible proxy.
-func NewReviewer(tb ToolBox) Reviewer {
-	if strings.EqualFold(os.Getenv("GODZILLA_LLM_PROVIDER"), "openai") {
-		return NewOpenAIReviewer()
-	}
-	return NewAnthropicReviewer().WithTools(tb)
 }

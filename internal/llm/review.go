@@ -6,7 +6,8 @@
 //
 // This file is deliberately dependency-free (no Anthropic SDK import) so the
 // filtering/prompt/parse logic is unit-testable on its own. The concrete
-// Anthropic-backed Reviewer lives in anthropic.go.
+// backends live in anthropic.go, openai.go, and command.go (any local,
+// already-authenticated agent CLI); reviewer.go's Select picks among them.
 package llm
 
 import (

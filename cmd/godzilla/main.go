@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/bytevet/godzilla/internal/analysis"
@@ -69,9 +70,14 @@ flags:
   -html <file>      write an HTML report to <file>
   -json <file>      write a JSON report to <file>
   -sarif <file>     write a SARIF 2.1.0 report to <file>
-  -llm-review       triage lower-confidence findings with an LLM (needs ANTHROPIC_API_KEY;
-                    set GODZILLA_LLM_PROVIDER=openai + GODZILLA_LLM_BASE_URL for a local/
-                    OpenAI-compatible server, e.g. Ollama/vLLM)
+  -llm-review       triage lower-confidence findings with an LLM. Uses an API key if one is
+                    set; otherwise drives a local agent CLI you are already signed in to
+                    (claude, codex). Add any other provider with GODZILLA_LLM_CMD or a
+                    .godzilla.yaml llm.providers entry -- no rebuild. A CLI backend costs
+                    seconds per finding and reviews 4 at a time by default (8 for an API
+                    backend); GODZILLA_LLM_CONCURRENCY or llm.concurrency raises that on a
+                    machine that can spare it -- each CLI review is its own subprocess (a
+                    Node process for claude/codex), so this trades memory for wall time.
   -strict           fail (exit 1) if a detected language's frontend could not analyze its source
   -dep-budget <n>   cap on the third-party Go source promoted to full analysis: a byte count
                     (suffixes K/M/G), "off" for no cap, or "auto" (default) to size it from
@@ -436,26 +442,57 @@ func runScan(args []string) {
 		exitWith(exitClean)
 	}
 
+	// Reported at the very end, beside the findings count it changed — see the
+	// summary block. Nothing is printed here: an adjudication that silently
+	// removes findings must be stated next to the number it removed them from.
+	var review *llmSummary
 	if *llmReview {
-		var stats llm.ReviewStats
-		// Select the reviewer backend (LLM-9: GODZILLA_LLM_PROVIDER=openai uses an
-		// OpenAI-compatible/local endpoint; default is Anthropic with read-only
-		// agency over the scanned project — LLM-4).
-		reviewer := llm.NewReviewer(llm.NewFileToolBox(res.Program, path))
-		findings, stats = llm.Filter(context.Background(), reviewer, findings, analysis.ConfidenceMedium)
-		ui.Stop()
-		fmt.Fprintf(os.Stdout, "LLM review: %d reviewed, %d suppressed, %d kept (no code context), %d error(s).\n",
-			stats.Reviewed, stats.Suppressed, stats.LowContext, stats.Errors)
-		if stats.Skipped > 0 {
-			fmt.Fprintf(os.Stdout, "note: %d finding(s) past the review cap were kept unreviewed.\n", stats.Skipped)
+		// The backend is DATA, not a branch: .godzilla.yaml supplies providers,
+		// the environment overrides, and Select walks the ladder (explicit choice,
+		// then HTTP credentials, then an installed and authenticated local CLI).
+		// cfg is nil when the scan root has no .godzilla.yaml, which is the common
+		// case — the environment and the built-in provider table carry it alone.
+		base := llm.Options{Root: path}
+		if cfg != nil {
+			base.Provider, base.Model = cfg.LLM.Provider, cfg.LLM.Model
+			base.Concurrency, base.MaxReviews = cfg.LLM.Concurrency, cfg.LLM.MaxReviews
+			for _, p := range cfg.LLM.Providers {
+				base.Providers = append(base.Providers, llm.Provider{
+					Name: p.Name, Command: p.Command, Stdin: p.Stdin, Probe: p.Probe,
+					ProbeContains: p.ProbeContains, ModelFlag: p.ModelFlag,
+				})
+			}
 		}
-		if stats.Errors > 0 {
-			fmt.Fprintf(os.Stdout, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
+		sel := llm.Select(llm.OptionsFromEnv(base), func() llm.ToolBox {
+			return llm.NewFileToolBox(res.Program, path)
+		})
+		if sel.Reviewer == nil {
+			// Never silent: a review that did not happen is not a review that found
+			// nothing, and the user asked for one.
+			fmt.Fprintf(os.Stderr, "warning: -llm-review found no usable backend (tried: %s); findings are unreviewed\n",
+				strings.Join(sel.Tried, ", "))
+		} else {
+			// FilterWithConfig, not Filter: a subprocess backend needs its own
+			// timeout and concurrency, which Selected.Config supplies.
+			start := time.Now()
+			var stats llm.ReviewStats
+			findings, stats = llm.FilterWithConfig(context.Background(), sel.Reviewer,
+				findings, analysis.ConfidenceMedium, sel.Config())
+			review = &llmSummary{
+				provider: sel.Provider, reviewed: stats.Reviewed,
+				suppressed: stats.Suppressed, errors: stats.Errors, dur: time.Since(start),
+			}
+			// Stderr, not stdout: stdout carries the machine-readable output.
+			if stats.Skipped > 0 {
+				fmt.Fprintf(os.Stderr, "note: %d finding(s) past the review cap were kept unreviewed\n", stats.Skipped)
+			}
+			if stats.Errors > 0 {
+				fmt.Fprintf(os.Stderr, "warning: %d finding(s) could not be reviewed and were kept unreviewed: %v\n", stats.Errors, stats.FirstErr)
+			}
+			if stats.Reviewed > 0 && stats.Errors == stats.Reviewed {
+				fmt.Fprintf(os.Stderr, "warning: -llm-review adjudicated 0 findings; every review through %q failed\n", sel.Provider)
+			}
 		}
-		if stats.Reviewed > 0 && stats.Errors == stats.Reviewed {
-			fmt.Fprintln(os.Stdout, "warning: --llm-review adjudicated 0 findings (the reviewer was a no-op; check ANTHROPIC_API_KEY).")
-		}
-		fmt.Fprintln(os.Stdout)
 	}
 
 	ui.Stop()
@@ -519,11 +556,16 @@ func runScan(args []string) {
 		}
 		fmt.Fprintln(os.Stdout)
 		summary{
-			st: st, counts: counts, total: len(active), reports: written,
+			st: st, counts: counts, total: len(active), llm: review, reports: written,
 			coverage: res.Coverage, failed: res.Failed(),
 			rules: len(ruleSet.Rules), langs: len(res.Coverage),
 			code: code, reason: reason,
 		}.write(os.Stdout)
+	} else if review != nil && !*quiet {
+		// The closing block is a terminal-only layout, so the piped path states the
+		// same fact plainly. Without this a CI log cannot tell an unreviewed scan
+		// from one a local CLI adjudicated.
+		fmt.Fprintf(os.Stdout, "llm review: %s\n", review.line())
 	}
 	os.Exit(code)
 }

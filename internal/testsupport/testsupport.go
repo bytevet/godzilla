@@ -11,6 +11,8 @@ package testsupport
 import (
 	"github.com/bytevet/godzilla/internal/irwalk"
 	ir "github.com/bytevet/godzilla/pkg/ir/v1"
+	"io"
+	"os"
 	"os/exec"
 	"testing"
 
@@ -103,4 +105,34 @@ func RequireNoFallbackIntrinsic(t testing.TB, prog *ir.Program, intrinsic, what 
 			}
 		}
 	}
+}
+
+// CaptureStderr returns everything fn writes to os.Stderr.
+//
+// Godzilla's convention is that warnings go to stderr and machine-readable
+// output to stdout, so "did this warn?" is a property several packages need to
+// assert. Restoring via t.Cleanup rather than after the call is the point: a
+// t.Fatal or panic inside fn would otherwise leave os.Stderr pointing at a
+// closed pipe for every later test in the package.
+func CaptureStderr(t testing.TB, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = saved })
+
+	fn()
+
+	os.Stderr = saved
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing the capture pipe: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+	return string(out)
 }

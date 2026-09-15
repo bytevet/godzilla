@@ -1,7 +1,7 @@
 package scan
 
 import (
-	"io"
+	"github.com/bytevet/godzilla/internal/testsupport"
 	"os"
 	"path/filepath"
 	"slices"
@@ -105,17 +105,10 @@ func TestScanDegradedEndToEnd(t *testing.T) {
 // TestWarnDegraded pins the stream: the degraded warning goes to stderr, never
 // stdout, which carries the machine-readable output.
 func TestWarnDegraded(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := os.Stderr
-	os.Stderr = w
-	warnDegraded(LangCoverage{Language: "go", Degraded: true, DegradedNote: "trimmed"}, "/repo")
-	warnDegraded(LangCoverage{Language: "python"}, "/repo")
-	os.Stderr = saved
-	_ = w.Close()
-	out, _ := io.ReadAll(r)
+	out := []byte(testsupport.CaptureStderr(t, func() {
+		warnDegraded(LangCoverage{Language: "go", Degraded: true, DegradedNote: "trimmed"}, "/repo")
+		warnDegraded(LangCoverage{Language: "python"}, "/repo")
+	}))
 
 	got := string(out)
 	if !strings.Contains(got, "go frontend degraded under /repo: trimmed") {

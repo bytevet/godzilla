@@ -31,6 +31,39 @@ type Config struct {
 	Exclude []string `yaml:"exclude"`
 	Include []string `yaml:"include"`
 	Rules   Rules    `yaml:"rules"`
+	// LLM configures the -llm-review backend. It is pure data — see llm.Select,
+	// which internal/llm/reviewer.go documents and this package does not import
+	// (kept a leaf so internal/llm need not import internal/config).
+	LLM LLM `yaml:"llm"`
+}
+
+// LLM is the .godzilla.yaml `llm:` block: which -llm-review backend to use and
+// what command providers exist, laid out one-to-one with internal/llm's
+// Options/Provider so the CLI layer can copy it across without translating
+// field names. No logic lives here — resolving a Provider's argv, probing it,
+// deciding auth-present all belong to internal/llm, which this package must
+// not import (drag it in and the LLM SDKs would ride along with every
+// consumer of internal/config, including the frontends that read this file).
+type LLM struct {
+	Provider  string        `yaml:"provider"` // "", "auto", "anthropic", "openai", "cmd", or a provider name
+	Model     string        `yaml:"model"`
+	Providers []LLMProvider `yaml:"providers"` // extends/overrides the builtin command providers, matched by Name
+	// Concurrency and MaxReviews override internal/llm's per-backend worker-pool
+	// width and per-scan review cap (0 = leave the backend's own default alone;
+	// internal/llm.Select rejects a negative value with a warning — this
+	// package carries the number only, per LLM's doc comment).
+	Concurrency int `yaml:"concurrency"`
+	MaxReviews  int `yaml:"max-reviews"`
+}
+
+// LLMProvider mirrors internal/llm.Provider field-for-field.
+type LLMProvider struct {
+	Name          string   `yaml:"name"`
+	Command       []string `yaml:"command"`
+	Stdin         bool     `yaml:"stdin"`
+	Probe         []string `yaml:"probe"`
+	ProbeContains string   `yaml:"probe-contains"`
+	ModelFlag     string   `yaml:"model-flag"`
 }
 
 // Rules holds per-rule policy.

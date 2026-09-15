@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytevet/godzilla/internal/analysis"
 	"github.com/bytevet/godzilla/internal/rules"
@@ -121,5 +122,59 @@ func TestLayoutDoesNotDependOnColour(t *testing.T) {
 	}
 	if strings.Contains(got, "sink:   ") {
 		t.Errorf("the piped layout was used on a terminal: %q", got)
+	}
+}
+
+// The llm-review row must line up with report/coverage/exit, which all pad their
+// label to 12 columns. The findings line above deliberately pads to 13, so eyeing
+// the block is not enough to catch a drifted label — pin the column instead.
+func TestSummaryLLMRowAlignsWithTheLabelledRows(t *testing.T) {
+	var plain styler // colour off: the identity, so the text is the layout
+	var b strings.Builder
+	summary{
+		st:     plain,
+		counts: map[rules.Severity]int{rules.SeverityHigh: 1},
+		total:  1,
+		llm:    &llmSummary{provider: "claude", reviewed: 12, suppressed: 3, dur: 41200 * time.Millisecond},
+		code:   3, reason: "findings at or above -fail-on=medium",
+	}.write(&b)
+
+	labelled := map[string]bool{"llm review": true, "coverage": true, "exit 3": true}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+		for k := range labelled {
+			if !strings.HasPrefix(line, "  "+k) {
+				continue
+			}
+			seen[k] = true
+			// Two-space indent, then a label padded to exactly 12 columns, so every
+			// value starts at column 14. Assert on the field itself rather than
+			// searching for the value: a substring search finds column 14 whether or
+			// not the padding is right, and would pass vacuously.
+			if len(line) < 14 {
+				t.Errorf("%q: row is shorter than the label field: %q", k, line)
+				continue
+			}
+			if field := line[2:14]; strings.TrimRight(field, " ") != k || field[len(field)-1] != ' ' {
+				t.Errorf("%q: label field is %q, want %q padded to 12 columns", k, field, k)
+			}
+		}
+	}
+	for k := range labelled {
+		if !seen[k] {
+			t.Errorf("summary did not render the %q row", k)
+		}
+	}
+}
+
+// The row states the provider, because "3 suppressed" means something different
+// coming from a local CLI than from a frontier model over HTTP.
+func TestSummaryLLMRowNamesTheProvider(t *testing.T) {
+	got := llmSummary{provider: "claude", reviewed: 12, suppressed: 3, errors: 1,
+		dur: 41200 * time.Millisecond}.line()
+	for _, want := range []string{"claude", "12 reviewed", "3 suppressed", "1 error(s)", "41.2s"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("llm row %q is missing %q", got, want)
+		}
 	}
 }

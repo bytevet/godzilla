@@ -56,6 +56,17 @@ func (a *AnthropicReviewer) WithTools(tb ToolBox) *AnthropicReviewer {
 	return a
 }
 
+// WithModel overrides the model; empty leaves NewAnthropicReviewer's default
+// (which already applies GODZILLA_LLM_MODEL) untouched. Chainable, like
+// WithTools — this is how reviewer.go's Select threads Options.Model to this
+// backend when it came from a .godzilla.yaml `llm.model`, not the environment.
+func (a *AnthropicReviewer) WithModel(model string) *AnthropicReviewer {
+	if model != "" {
+		a.model = anthropic.Model(model)
+	}
+	return a
+}
+
 // Review adjudicates a single finding. With a ToolBox attached it runs the
 // agentic tool-use loop; otherwise it makes the one-shot call.
 func (a *AnthropicReviewer) Review(ctx context.Context, f analysis.Finding, codeContext string) (Verdict, error) {
